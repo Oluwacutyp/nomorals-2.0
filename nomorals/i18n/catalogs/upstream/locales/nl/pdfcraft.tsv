@@ -1,0 +1,2600 @@
+# Nederlands (nl) interface catalog for PdfCraft.
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   @plural  English `one|other`; the translation lists this language's plural forms, `|`-separated.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary. No other product's localisation, string table or translated UI was
+# consulted or copied; add entries the same way.
+
+	  · not fixable here	  · hier niet te herstellen
+	 (page {p})	 (pagina {p})
+	 (searching… {s} of {p} pages)	 (zoeken… {s} van {p} pagina's)
+	 ({n} at {dpi} dpi, the largest size they can be drawn at)	 ({n} bij {dpi} dpi, de grootste maat waarop ze getekend kunnen worden)
+	 ({s} not exported: {first})	 ({s} niet geëxporteerd: {first})
+	 on page {label}	 op pagina {label}
+	 on page {p}	 op pagina {p}
+	 · password-protected	 · met wachtwoord beveiligd
+	(none)	(geen)
+	+Bin	+Bin
+	+LOC	+LOC
+	, Expires: 	, Verloopt: 
+	1 difference found	1 verschil gevonden
+	1 file	1 bestand
+	1 file done	1 bestand klaar
+	1 file needs attention	1 bestand heeft aandacht nodig
+	1 instance	1 instantie
+	1 issue	1 probleem
+	1 mark	1 markering
+	1 page	1 pagina
+	1 page selected	1 pagina geselecteerd
+	1 page selected.	1 pagina geselecteerd.
+	180 degrees	180 graden
+	4 x 6 in label (101.6 x 152.4 mm)	Label 4 x 6 inch (101.6 x 152.4 mm)
+	9 digit, A letter, O letter or digit, X any character	9 cijfer, A letter, O letter of cijfer, X elk teken
+	; 1 page already had text	; 1 pagina had al tekst
+	; failed: {list}	; mislukt: {list}
+	; {n} pages already had text	; {n} pagina's hadden al tekst
+	? of {n}	? van {n}
+	@{login}: {prs} PRs, {commits} commits, +{added} / −{deleted} lines (Δ {delta}), +{bin_added} / −{bin_deleted} binary assets, {first} – {last}	@{login}: {prs} PR's, {commits} commits, +{added} / −{deleted} regels (Δ {delta}), +{bin_added} / −{bin_deleted} binaire bestanden, {first} – {last}
+	`{command}` {when}	`{command}` {when}
+	a bookmark cannot be moved inside itself	een bladwijzer kan niet in zichzelf worden verplaatst
+	A button	Een knop
+	A clean-room, open-source PDF application written in Rust. MIT OR Apache-2.0.	Een clean-room, open-source PDF-toepassing, geschreven in Rust. MIT OR Apache-2.0.
+	a column is too narrow: make the area wider, give the column more of it, or use fewer columns or less column spacing	een kolom is te smal: maak het gebied breder, geef de kolom meer ervan, of gebruik minder kolommen of minder kolomafstand
+	A diagonal CONFIDENTIAL watermark on every page.	Een diagonaal watermerk VERTROUWELIJK op elke pagina.
+	a document must keep at least one page	een document moet minstens één pagina houden
+	A document needs at least one page: copy instead	Een document heeft minstens één pagina nodig: kopieer in plaats daarvan
+	a field named {name} already exists	er bestaat al een veld met de naam {name}
+	A font isn't embedded	Een lettertype is niet ingesloten
+	A form field has additional actions	Een formulierveld heeft extra acties
+	A link	Een koppeling
+	A picture covers page {pages} (a scan?), so the background won't show there.	Een afbeelding bedekt pagina {pages} (een scan?), dus de achtergrond is daar niet zichtbaar.
+	A script	Een script
+	A selected field has no widget on any page, so the fields can't be edited together.	Een geselecteerd veld heeft op geen enkele pagina een widget, dus de velden kunnen niet samen worden bewerkt.
+	A stream refers to an external file	Een stroom verwijst naar een extern bestand
+	A stream uses LZW compression	Een stroom gebruikt LZW-compressie
+	A summary describes the table's purpose and layout. Add a Summary attribute to each table.	Een overzicht beschrijft het doel en de indeling van de tabel. Voeg aan elke tabel een Summary-attribuut toe.
+	a table has 1 to {max} columns	een tabel heeft 1 tot {max} kolommen
+	a table has 1 to {max} rows	een tabel heeft 1 tot {max} rijen
+	A {} action isn't allowed	Een {}-actie is niet toegestaan
+	A {} annotation has additional actions	Een {}-annotatie heeft extra acties
+	A {} annotation has no appearance stream	Een {}-annotatie heeft geen weergavestroom
+	A {} annotation isn't set to print, or is hidden	Een {}-annotatie staat niet op afdrukken, of is verborgen
+	About PdfCraft	Over PdfCraft
+	Accepted	Geaccepteerd
+	Accessibility	Toegankelijkheid
+	Accessibility Checker	Toegankelijkheidscontrole
+	Accessibility Checker Options	Opties voor de toegankelijkheidscontrole
+	Accessibility permission flag	Vlag voor toegankelijkheidsmachtiging
+	Accessibility permission flag is set	Vlag voor toegankelijkheidsmachtiging staat aan
+	Accessibility Report	Toegankelijkheidsrapport
+	Acrobat 3.0 and later (40-bit RC4)	Acrobat 3.0 en later (40-bits RC4)
+	Acrobat 5.0 and later (128-bit RC4)	Acrobat 5.0 en later (128-bits RC4)
+	Acrobat 7.0 and later (128-bit AES)	Acrobat 7.0 en later (128-bits AES)
+	Acrobat X and later (256-bit AES)	Acrobat X en later (256-bits AES)
+	Action name:	Naam van de actie:
+	Action Wizard	Actieassistent
+	Action Wizard…	Actieassistent…
+	Actions list	Actielijst
+	Actual size	Werkelijke grootte
+	Actual text	Werkelijke tekst
+	Add a button	Een knop toevoegen
+	Add a callout	Een bijschrift toevoegen
+	Add a checkbox	Een selectievakje toevoegen
+	Add a comment	Een opmerking toevoegen
+	Add a date field	Een datumveld toevoegen
+	Add a digital signature field	Een veld voor een digitale handtekening toevoegen
+	Add a drop-down list	Een keuzelijst toevoegen
+	Add a list box	Een lijstvak toevoegen
+	Add a radio button	Een keuzerondje toevoegen
+	Add a reply	Een antwoord toevoegen
+	Add a stamp	Een stempel toevoegen
+	Add a sticky note	Een notitie toevoegen
+	Add a sticky note here	Hier een notitie plaatsen
+	Add a text box	Een tekstvak toevoegen
+	Add a text field	Een tekstveld toevoegen
+	Add alternate text	Alternatieve tekst toevoegen
+	Add alternate text…	Alternatieve tekst toevoegen…
+	Add an Action	Een actie toevoegen
+	Add an image field	Een afbeeldingsveld toevoegen
+	Add arrow	Pijl toevoegen
+	Add at least two files	Voeg minstens twee bestanden toe
+	Add background	Achtergrond toevoegen
+	Add background…	Achtergrond toevoegen…
+	Add Bates numbering…	Bates-nummering toevoegen…
+	Add bookmark	Bladwijzer toevoegen
+	Add callout	Bijschrift toevoegen
+	Add checkmark	Vinkje toevoegen
+	Add cloud	Wolk toevoegen
+	Add comment	Opmerking toevoegen
+	Add comments	Opmerkingen toevoegen
+	Add connected lines	Verbonden lijnen toevoegen
+	Add content	Inhoud toevoegen
+	Add cross	Kruis toevoegen
+	Add dot	Stip toevoegen
+	Add drawing	Tekening toevoegen
+	Add field	Veld toevoegen
+	Add fields	Velden toevoegen
+	Add file attachment	Bestandsbijlage toevoegen
+	Add files to combine	Bestanden toevoegen om te combineren
+	Add files…	Bestanden toevoegen…
+	Add folder	Map toevoegen
+	Add folder and subfolders	Map en submappen toevoegen
+	Add folder and subfolders…	Map en submappen toevoegen…
+	Add folder…	Map toevoegen…
+	Add footer	Voettekst toevoegen
+	Add form components	Formulieronderdelen toevoegen
+	Add header	Koptekst toevoegen
+	Add header & footer	Kop- en voettekst toevoegen
+	Add header & footer…	Kop- en voettekst toevoegen…
+	Add highlight	Markering toevoegen
+	Add image	Afbeelding toevoegen
+	Add image…	Afbeelding toevoegen…
+	Add inserted text	Ingevoegde tekst toevoegen
+	Add line	Lijn toevoegen
+	Add link	Koppeling toevoegen
+	Add open documents	Open documenten toevoegen
+	Add or edit links	Koppelingen toevoegen of bewerken
+	Add oval	Ovaal toevoegen
+	Add Page Numbers	Paginanummers toevoegen
+	Add polygon	Veelhoek toevoegen
+	Add printer marks	Drukkersmarkeringen toevoegen
+	Add rectangle	Rechthoek toevoegen
+	Add redaction mark	Zwartmaakmarkering toevoegen
+	Add search index	Zoekindex toevoegen
+	Add signature	Handtekening toevoegen
+	Add squiggly underline	Golvende onderstreping toevoegen
+	Add stamp	Stempel toevoegen
+	Add Step	Stap toevoegen
+	Add sticky note	Plaknotitie toevoegen
+	Add strikethrough	Doorhaling toevoegen
+	Add text	Tekst toevoegen
+	Add text box	Tekstvak toevoegen
+	Add text field table	Tabel met tekstvelden toevoegen
+	Add the choices people pick from.	Voeg de keuzes toe waaruit mensen kiezen.
+	Add the files to combine	Voeg de te combineren bestanden toe
+	Add the PDFs to combine	Voeg de te combineren PDF's toe
+	Add the steps this action runs, in order.	Voeg de stappen toe die deze actie uitvoert, in volgorde.
+	Add to Trusted Certificates	Toevoegen aan vertrouwde certificaten
+	Add to trusted certificates	Toevoegen aan vertrouwde certificaten
+	Add underline	Onderstreping toevoegen
+	Add watermark	Watermerk toevoegen
+	Add watermark…	Watermerk toevoegen…
+	Add {what}	{what} toevoegen
+	Added 1 comment	1 opmerking toegevoegd
+	Added more than once	Meer dan eens toegevoegd
+	Added text	Toegevoegde tekst
+	Added the first {n} files in {folder}	De eerste {n} bestanden in {folder} toegevoegd
+	Added the first {n} PDFs in {folder}	De eerste {n} PDF's in {folder} toegevoegd
+	Added {n} comments	{n} opmerkingen toegevoegd
+	Adding images arrives on the web with file pickers for images	Afbeeldingen toevoegen verschijnt op het web met bestandskiezers voor afbeeldingen
+	Adds invisible text over each word; the page image is not changed	Zet onzichtbare tekst over elk woord; de pagina-afbeelding verandert niet
+	Advanced optimization	Geavanceerd optimaliseren
+	Advanced options	Geavanceerde opties
+	Advanced Options {chevron}	Geavanceerde opties {chevron}
+	Advanced search…	Geavanceerd zoeken…
+	AI assistant	AI-assistent
+	Algorithm	Algoritme
+	Align fields	Velden uitlijnen
+	All annotations are tagged	Alle annotaties zijn getagd
+	All document contents	Alle inhoud van het document
+	All document contents except metadata	Alle inhoud van het document, behalve metagegevens
+	All form fields are tagged	Alle formuliervelden zijn getagd
+	All form fields have description	Alle formuliervelden hebben een beschrijving
+	All multimedia objects are tagged	Alle multimediaobjecten zijn getagd
+	All open documents	Alle open documenten
+	All page content is tagged	Alle pagina-inhoud is getagd
+	All pages	Alle pagina's
+	All pages in document	Alle pagina's in het document
+	All pages in range	Alle pagina's in het bereik
+	All tools	Alle gereedschappen
+	Allow	Toestaan
+	Allow Rich Text Formatting	Rijke tekstopmaak toestaan
+	Allow user to enter custom text	De gebruiker eigen tekst laten invoeren
+	Allowed	Toegestaan
+	already a PDF	al een PDF
+	Also recognize pages that already have text	Ook pagina's herkennen die al tekst hebben
+	Alternate Text	Alternatieve tekst
+	Alternate text	Alternatieve tekst
+	alternate text hides an annotation inside it	alternatieve tekst verbergt een annotatie erin
+	Alternate text inside an element that already has alternate text is never read. Remove the inner alternate text.	Alternatieve tekst in een element dat al alternatieve tekst heeft, wordt nooit voorgelezen. Verwijder de binnenste alternatieve tekst.
+	Alternate text must be associated with some content	Alternatieve tekst moet aan inhoud gekoppeld zijn
+	Alternate text on an element that contains a link or field hides that annotation from assistive technology. Move the alternate text.	Alternatieve tekst op een element met een koppeling of veld verbergt die annotatie voor hulptechnologie. Verplaats de alternatieve tekst.
+	alternate text on an element with no page content	alternatieve tekst op een element zonder pagina-inhoud
+	Alternate text on an element without page content is never reached. Remove it or attach the element to content.	Alternatieve tekst op een element zonder pagina-inhoud wordt nooit bereikt. Verwijder hem of koppel het element aan inhoud.
+	Alternate text should not hide annotation	Alternatieve tekst mag een annotatie niet verbergen
+	Alternate text that will never be read	Alternatieve tekst die nooit wordt voorgelezen
+	Always use my default zoom and page layout	Altijd mijn standaardzoom en pagina-indeling gebruiken
+	An action is already running	Er wordt al een actie uitgevoerd
+	An action with this name already exists.	Er bestaat al een actie met deze naam.
+	An embedded file has no AFRelationship	Een ingesloten bestand heeft geen AFRelationship
+	An image asks to be interpolated	Een afbeelding vraagt om interpolatie
+	An image has alternates or OPI information	Een afbeelding heeft alternatieven of OPI-informatie
+	An open-source PDF workbench — local, private, and scriptable.	Een open-source PDF-werkbank — lokaal, privé en via scripts te bedienen.
+	and {n} more	en nog {n}
+	Animation effects	Animatie-effecten
+	Animation that flashes can cause seizures. Check scripts and media for flicker.	Animatie die flitst kan insulten veroorzaken. Controleer scripts en media op flikkering.
+	Annotations, form fill-in, and digital signatures	Annotaties, formulieren invullen en digitale handtekeningen
+	Another file dialog is still open. Finish with it first.	Er staat nog een bestandsdialoog open. Rond die eerst af.
+	Any	Alles
+	Any except extracting pages	Alles behalve pagina's extraheren
+	Anyone opening the document will need this password. It's applied when you save.	Iedereen die het document opent, heeft dit wachtwoord nodig. Het wordt toegepast als je opslaat.
+	Appear behind page	Achter de pagina weergeven
+	Appear on top of page	Boven op de pagina weergeven
+theme	Appearance	Weergave
+	Appearance mode	Weergavemodus
+	Appearance settings…	Weergave-instellingen…
+	Application	Toepassing
+	Applied 1 redaction mark. Save to remove the content from the file.	1 zwartmaakmarkering toegepast. Sla op om de inhoud uit het bestand te verwijderen.
+	Applied {n} redaction marks. Save to remove the content from the file.	{n} zwartmaakmarkeringen toegepast. Sla op om de inhoud uit het bestand te verwijderen.
+	Applies to 1 page	Geldt voor 1 pagina
+	Applies to {n} pages	Geldt voor {n} pagina's
+	Apply PDF standards	PDF-standaarden toepassen
+	Apply redactions	Zwartmakingen toepassen
+	Apply redactions…	Zwartmakingen toepassen…
+	Apply scale	Schaal toepassen
+	Applying a scale switches units to m / mm.	Een schaal toepassen zet de eenheden om naar m / mm.
+	Appropriate nesting	Juiste nesting
+	April	april
+calendar date	April	april
+	Arbitrary Mask	Willekeurig masker
+	Archive documents	Documenten archiveren
+	Arrange image	Afbeelding schikken
+	ArtCraft website	ArtCraft-website
+	Ask about this document	Vraag iets over dit document
+	Asks GitHub for the latest release. Nothing is downloaded or installed automatically.	Vraagt GitHub om de nieuwste release. Er wordt niets automatisch gedownload of geïnstalleerd.
+	Associated with content	Gekoppeld aan inhoud
+	At least one signature has problems.	Minstens één handtekening heeft problemen.
+	At least one signature is invalid.	Minstens één handtekening is ongeldig.
+	At most	Hoogstens
+	Attach a file	Een bestand bijvoegen
+	Attach a file…	Een bestand bijvoegen…
+	Attach file	Bestand bijvoegen
+	Attach {name}	{name} bijvoegen
+	Attaching files is not available on the web yet	Bestanden bijvoegen is op het web nog niet beschikbaar
+	Attachment	Bijlage
+	Attachments	Bijlagen
+	Attachments Panel and Page	Deelvenster Bijlagen en pagina
+	Audit space usage	Ruimtegebruik controleren
+	Audit space usage…	Ruimtegebruik controleren…
+	August	augustus
+calendar date	August	augustus
+	Auto ({percent}%)	Automatisch ({percent}%)
+	Auto follows the system's text size. Pages always render at the display's full resolution.	Automatisch volgt de tekstgrootte van het systeem. Pagina's worden altijd op de volledige resolutie van het scherm getekend.
+	Auto portrait/landscape	Automatisch staand/liggend
+	Auto-rotate pages	Pagina's automatisch draaien
+	Auto-size text to fit redaction region	Tekst automatisch passend maken in het zwartmaakgebied
+	Automatically tag PDF	PDF automatisch taggen
+	Available	Beschikbaar
+	average	gemiddelde
+	Back	Terug
+	Back side only	Alleen achterzijde
+	Back to all tools	Terug naar alle gereedschappen
+	Back to Prepare a form	Terug naar Een formulier voorbereiden
+	Back to the document	Terug naar het document
+	background	achtergrond
+	Basic constraints	Basisbeperkingen
+certificate	Basic constraints	Basisbeperkingen
+	Bates numbering	Bates-nummering
+	Before each selected page (select pages in Organize)	Vóór elke geselecteerde pagina (selecteer pagina's in Ordenen)
+	Before the number	Vóór het getal
+	Beveled	Afgeschuind
+	Bicubic downsampling to	Bicubisch verkleinen naar
+	Binary assets added	Binaire bestanden toegevoegd
+	Binary assets removed	Binaire bestanden verwijderd
+	Binding	Inbinding
+	Binding:	Inbinding:
+	Black and white	Zwart-wit
+	Black on white	Zwart op wit
+	Blank page	Lege pagina
+	Booklet	Boekje
+	Booklet subset:	Boekjesdeel:
+	Bookmark options	Bladwijzeropties
+	Bookmarks	Bladwijzers
+	Bookmarks are present in large documents	Grote documenten hebben bladwijzers
+	Bookmarks Panel and Page	Deelvenster Bladwijzers en pagina
+	Border Color:	Randkleur:
+	Borders and Colors	Randen en kleuren
+	Box	Vak
+	Bring forward	Naar voren
+	Bring to front	Op de voorgrond
+	Bring your own model (off by default)	Eigen model meenemen (standaard uit)
+	Browser's print dialog	Afdrukvenster van de browser
+	Bulleted list	Lijst met opsommingstekens
+	Butt	Stomp
+	Button	Knop
+	Button is checked by default	Knop is standaard geselecteerd
+	Button Properties	Knopeigenschappen
+	Button Style:	Knopstijl:
+	Buttons with the same name and value are selected in unison	Knoppen met dezelfde naam en waarde worden samen geselecteerd
+	Bytes	Bytes
+	Calculate	Berekenen
+	Calculation order	Berekeningsvolgorde
+	Calibrate from two points	Kalibreren vanaf twee punten
+	Callout	Bijschrift
+	Can't be read: {e}	Kan niet worden gelezen: {e}
+	Cancelled	Geannuleerd
+	Cancelling…	Annuleren…
+	Case-sensitive	Hoofdlettergevoelig
+	Category:	Categorie:
+	CCITT Group 4	CCITT Group 4
+	Center Footer Text	Middelste voettekst
+	Center Header Text	Middelste koptekst
+	Center horizontally	Horizontaal centreren
+	Center vertically	Verticaal centreren
+	Center window on screen	Venster centreren op het scherm
+	Centre	Midden
+	Certificate authority	Certificaatautoriteit
+	Certificate Signing	Certificaten ondertekenen
+	Certificate Viewer	Certificaatweergave
+	Certificates	Certificaten
+	Certified by {by}	Gecertificeerd door {by}
+	Certify	Certificeren
+	Certify (invisible signature)	Certificeren (onzichtbare handtekening)
+	Certify (visible signature)	Certificeren (zichtbare handtekening)
+	Change Author	Auteur wijzigen
+	Change comment properties	Eigenschappen van de opmerking wijzigen
+	Change document properties	Documenteigenschappen wijzigen
+	Change field properties	Veldeigenschappen wijzigen
+	Change initial view	Beginweergave wijzigen
+	Change initials	Paraaf wijzigen
+	Change Keywords	Trefwoorden wijzigen
+	Change link properties	Koppelingseigenschappen wijzigen
+	Change reading options	Leesopties wijzigen
+	Change reading options…	Leesopties wijzigen…
+	Change settings…	Instellingen wijzigen…
+	Change signature	Handtekening wijzigen
+	Change Subject	Onderwerp wijzigen
+	Change tag properties	Tageigenschappen wijzigen
+	Change the colour of line art as well as text	Verander ook de kleur van lijnwerk, niet alleen van tekst
+	Change Title	Titel wijzigen
+	Change {key}	{key} wijzigen
+	Change {what}	{what} wijzigen
+	Changes allowed	Toegestane wijzigingen
+	Changing the document	Het document wijzigen
+	Character encoding	Tekencodering
+	Character limit 0 means no limit. A comb of characters needs a limit.	Tekenlimiet 0 betekent geen limiet. Een kam van tekens heeft een limiet nodig.
+	Character limit:	Tekenlimiet:
+	Character spacing	Tekenafstand
+	Characters	Tekens
+	characters	tekens
+	Characters without spaces	Tekens zonder spaties
+	Check	Vinkje
+	Check Again	Opnieuw controleren
+	Check again	Opnieuw controleren
+	Check box is checked by default	Selectievakje is standaard ingeschakeld
+	Check Box Properties	Eigenschappen van het selectievakje
+	Check Box Style:	Stijl van het selectievakje:
+	Check for accessibility	Toegankelijkheid controleren
+	Check for accessibility…	Toegankelijkheid controleren…
+	Check for updates	Controleren op updates
+	Check for updates…	Controleren op updates…
+	Check spelling	Spelling controleren
+	Check that the tags read in the order a sighted reader would. Use the Reading Order tool or the Tags panel to correct it.	Controleer of de tags in de volgorde staan die een ziende lezer volgt. Gebruik het gereedschap Leesvolgorde of het deelvenster Tags om het te corrigeren.
+	Check the pages	Controleer de pagina's
+	Check the pages of {name}: {why}	Controleer de pagina's van {name}: {why}
+	CheckBox	Selectievakje
+	Checkbox	Selectievakje
+	Checked	Aangevinkt
+	Checking for a newer version…	Er wordt gecontroleerd op een nieuwere versie…
+	Checking Options ({on} of 32 in all categories)	Controleopties ({on} van 32 in alle categorieën)
+	Checking pages…	Pagina's controleren…
+	Checkmark	Vinkje
+	Choose a digital ID.	Kies een digitale id.
+	Choose a file…	Kies een bestand…
+	Choose a folder for the exported files	Kies een map voor de geëxporteerde bestanden
+	Choose a folder for the extracted pages	Kies een map voor de geëxtraheerde pagina's
+	Choose a folder for the results	Kies een map voor de resultaten
+	Choose a folder for the searchable files	Kies een map voor de doorzoekbare bestanden
+	Choose a folder for the split files	Kies een map voor de gesplitste bestanden
+	Choose a folder on this computer to pin	Kies een map op deze computer om vast te maken
+	Choose a folder…	Kies een map…
+	Choose a layout:	Kies een indeling:
+	Choose a PNG or JPEG image (up to 4 MiB). Transparency is preserved.	Kies een PNG- of JPEG-afbeelding (maximaal 4 MiB). Transparantie blijft behouden.
+	Choose a stamp, then click on the page to place it.	Kies een stempel en klik daarna op de pagina om hem te plaatsen.
+	Choose an image	Kies een afbeelding
+	Choose images	Kies afbeeldingen
+	Choose image…	Afbeelding kiezen…
+	Choose photo…	Foto kiezen…
+	Choose the digital ID that you want to use for signing:	Kies de digitale id waarmee je wilt ondertekenen:
+	Choose…	Kiezen…
+	Clean Up	Opruimen
+	Clean-up	Opruimen
+	Clear all	Alles wissen
+	Clear form	Formulier wissen
+	Clear redaction marks	Zwartmaakmarkeringen wissen
+	Clear search	Zoekopdracht wissen
+	Clear selection / close find	Selectie wissen / zoeken sluiten
+	Click on the page to add a {tool}, or drag to set its size	Klik op de pagina om een {tool} toe te voegen, of sleep om de grootte in te stellen
+	Click on the page to add text; each click starts a new box, and ✓ finishes. Drag items to move them, drag a corner to resize, double-click text to edit it.	Klik op de pagina om tekst toe te voegen; elke klik begint een nieuw vak, en ✓ maakt af. Sleep items om ze te verplaatsen, sleep een hoek om de grootte te wijzigen en dubbelklik op tekst om die te bewerken.
+	Click text or an image to edit it	Klik op tekst of een afbeelding om die te bewerken
+	Click the first point to begin.	Klik op het eerste punt om te beginnen.
+	Click to sort, drag to move the column. Drag its edge to resize it.	Klik om te sorteren, sleep om de kolom te verplaatsen. Sleep de rand om de breedte te wijzigen.
+	Click vertices. Enter or double-click finishes a perimeter or area. Click the first point to close an area.	Klik op de hoekpunten. Enter of dubbelklikken maakt een omtrek of oppervlakte af. Klik op het eerste punt om een oppervlakte te sluiten.
+	Clockwise 90 degrees	90 graden rechtsom
+	Close (Esc)	Sluiten (Esc)
+	Close all	Alles sluiten
+	Close file	Bestand sluiten
+	Close panel	Deelvenster sluiten
+	Close Tab	Tabblad sluiten
+	Closed arrow	Gesloten pijl
+	Cloud	Wolk
+	Collapse all	Alles samenvouwen
+	Collapse all bookmarks	Alle bladwijzers samenvouwen
+	Collapse all pages	Alle pagina's samenvouwen
+	Collapse all tools	Alle gereedschappen samenvouwen
+	Collapse tag	Tag samenvouwen
+	Color contrast	Kleurcontrast
+	Color Images	Kleurenafbeeldingen
+	Color Spaces	Kleurruimten
+	Colour	Kleur
+	Colours are remapped while rendering; the document itself never changes.	Kleuren worden tijdens het tekenen omgezet; het document zelf verandert nooit.
+	Column select	Kolom selecteren
+	Column spacing	Kolomafstand
+	Column widths	Kolombreedten
+	Column {n}	Kolom {n}
+	Comb of	Kam van
+	Comb of characters	Tekenkam
+	Combine	Combineren
+	Combine files	Bestanden combineren
+	Combine files…	Bestanden combineren…
+	Combine the rest	De rest combineren
+	Combined {n} files	{n} bestanden gecombineerd
+	Combo	Combinatievak
+	Coming in milestone	Komt in mijlpaal
+	Coming in milestone {m}. Items marked Ready work today.	Komt in mijlpaal {m}. Onderdelen die als Gereed zijn gemarkeerd, werken vandaag.
+	Comment	Opmerking
+	Comment and form data	Opmerkingen en formuliergegevens
+	Comment and review	Opmerkingen en revisie
+	Comment list	Opmerkingenlijst
+	Commenting	Opmerkingen plaatsen
+	Commenting, filling in form fields, and signing existing signature fields	Opmerkingen plaatsen, formuliervelden invullen en bestaande handtekeningvelden ondertekenen
+	Comments	Opmerkingen
+	comments	opmerkingen
+	Comments & Forms	Opmerkingen en formulieren
+	Comments and markups	Opmerkingen en markeringen
+	Comments only	Alleen opmerkingen
+	Comments panel	Opmerkingenpaneel
+	Comments, links and fields must be in the tag tree to be announced. Tag the annotations.	Opmerkingen, koppelingen en velden moeten in de tagstructuur staan om te worden voorgelezen. Voorzie de annotaties van een tag.
+	Commit selected value immediately	Geselecteerde waarde direct vastleggen
+	Common Properties	Algemene eigenschappen
+	Common scales	Gangbare schalen
+	Compare Files	Bestanden vergelijken
+	Compare files	Bestanden vergelijken
+	Compare files…	Bestanden vergelijken…
+	Compare this file with an older version: Compare files… in All tools.	Vergelijk dit bestand met een oudere versie: Bestanden vergelijken… bij Alle gereedschappen.
+	Completed	Voltooid
+	Compress a PDF	Een PDF comprimeren
+	Compress document structure (object streams)	Documentstructuur comprimeren (objectstromen)
+	Configure a Digital ID for Signing	Een digitale id instellen om te ondertekenen
+	Configure New Digital ID	Nieuwe digitale id configureren
+	Confirm Password	Wachtwoord bevestigen
+	Conformance level:	Conformiteitsniveau:
+	Connected lines	Verbonden lijnen
+	Console	Console
+	Content copying	Inhoud kopiëren
+	Content copying for accessibility	Inhoud kopiëren voor toegankelijkheid
+	Content Streams	Inhoudsstromen
+	Continuous scrolling	Doorlopend schuiven
+	Convert colors	Kleuren omzetten
+	Copied to clipboard	Gekopieerd naar het klembord
+	Copied {what}	{what} gekopieerd
+	Copies, two-sided printing and colour are chosen in the browser's print dialog.	Exemplaren, dubbelzijdig afdrukken en kleur kies je in het afdrukvenster van de browser.
+	Copies:	Exemplaren:
+	Copy Image	Afbeelding kopiëren
+	Copy Image in Original Format	Afbeelding kopiëren in de oorspronkelijke indeling
+	Copy or cut pages first	Kopieer of knip eerst pagina's
+	Copy pages	Pagina's kopiëren
+	Copy selected text	Geselecteerde tekst kopiëren
+	Copy text	Tekst kopiëren
+	Copy to clipboard	Kopiëren naar het klembord
+	Correct recognized text	Herkende tekst corrigeren
+	Could not save: {e}	Kon niet opslaan: {e}
+	Couldn't add {name}: {e}	Kon {name} niet toevoegen: {e}
+	Couldn't check for updates: {e}	Kan niet controleren op updates: {e}
+	Couldn't combine files: {e}	Kon de bestanden niet combineren: {e}
+	Couldn't copy the image: {e}	De afbeelding kon niet worden gekopieerd: {e}
+	Couldn't create a PDF: {e}	Kon geen PDF maken: {e}
+	Couldn't download {name}: {e}	Kon {name} niet downloaden: {e}
+	Couldn't extract pages: {e}	Kon de pagina's niet extraheren: {e}
+	Couldn't fit the visible content: {e}	Kon de zichtbare inhoud niet passend maken: {e}
+	Couldn't follow linked PDF: {reason}	Kon de gekoppelde PDF niet volgen: {reason}
+	Couldn't import the signature image: {e}	Kon de handtekeningafbeelding niet importeren: {e}
+	Couldn't open revision {n}: {e}	Kon revisie {n} niet openen: {e}
+	Couldn't open the printer's preferences: {e}	De voorkeuren van de printer konden niet worden geopend: {e}
+	Couldn't open the result: {e}	Kon het resultaat niet openen: {e}
+	Couldn't open the signed version: {e}	Kon de ondertekende versie niet openen: {e}
+	Couldn't open {name}: {e}	Kon {name} niet openen: {e}
+	Couldn't optimize the file	Kon het bestand niet optimaliseren
+	Couldn't optimize the file: {e}	Kon het bestand niet optimaliseren: {e}
+	Couldn't print from the browser ({e}); downloaded {name} to print instead	Kon niet afdrukken vanuit de browser ({e}); {name} gedownload om in plaats daarvan af te drukken
+	Couldn't read {name}: {e}	Kon {name} niet lezen: {e}
+	Couldn't recover {name}: {e}	Kon {name} niet herstellen: {e}
+	Couldn't reload {name}: {e}	Kon {name} niet opnieuw laden: {e}
+	Couldn't save the image: {e}	Kon de afbeelding niet opslaan: {e}
+	Couldn't save {name}: {e}	Kon {name} niet opslaan: {e}
+	Couldn't save: {e}	Kon niet opslaan: {e}
+	Couldn't show the file picker. Please try again.	Kon de bestandskiezer niet tonen. Probeer het opnieuw.
+	Couldn't split: {e}	Kon niet splitsen: {e}
+	Couldn't summarize comments: {e}	Kon de opmerkingen niet samenvatten: {e}
+	Couldn't take the snapshot: {e}	Kon de momentopname niet maken: {e}
+	Couldn't unlock {name}: {e}	Kon {name} niet ontgrendelen: {e}
+	Couldn't use the photo: {e}	Kon de foto niet gebruiken: {e}
+	Couldn't use {name}: {e}	Kon {name} niet gebruiken: {e}
+	Couldn't write {name}: {e}	Kon {name} niet schrijven: {e}
+	Couldn't write {path}: {e}	Kon {path} niet schrijven: {e}
+	Counterclockwise 90 degrees	90 graden linksom
+	Counting words… {n} pages read	Woorden tellen… {n} pagina's gelezen
+	Country/Region	Land/regio
+	Create & Edit	Maken en bewerken
+	Create a new Digital ID (self-signed, saved to a password-protected file)	Een nieuwe digitale id maken (zelfondertekend, opgeslagen in een met een wachtwoord beveiligd bestand)
+	Create a PDF	Een PDF maken
+	Create accessibility report	Toegankelijkheidsrapport maken
+	Create Custom Stamp	Eigen stempel maken
+	Create custom stamp…	Eigen stempel maken…
+	Create folder	Map maken
+	Create from	Maken van
+	Create Link	Koppeling maken
+	Create link	Koppeling maken
+	Create links	Koppelingen maken
+	Create links from URLs	Koppelingen maken van URL's
+	Create Link…	Koppeling maken…
+	Create PDF Comment Summary	PDF-overzicht van opmerkingen maken
+	Create PDF comment summary…	PDF-overzicht van opmerkingen maken…
+	Create PDF from clipboard	PDF maken van het klembord
+	Create PDF from file…	PDF maken van bestand…
+	Create PDF from images	PDF maken van afbeeldingen
+	Create PDF from images…	PDF maken van afbeeldingen…
+	Create PDF from multiple files…	PDF maken van meerdere bestanden…
+	Create separate PDFs…	Aparte PDF's maken…
+	Create {what}	{what} maken
+	Created 1 link	1 koppeling gemaakt
+	Created a comment summary	Een opmerkingensamenvatting gemaakt
+	Created a PDF from the first {n} files	Een PDF gemaakt van de eerste {n} bestanden
+	Created a PDF from {n} files	Een PDF gemaakt van {n} bestanden
+	Created a PDF from {n} files; left out: {names}	Een PDF gemaakt van {n} bestanden; overgeslagen: {names}
+	Created {n} links	{n} koppelingen gemaakt
+	Creates 1 file from {n} pages.	Maakt 1 bestand van {n} pagina's.
+	Creates {f} files from {n} pages.	Maakt {f} bestanden van {n} pagina's.
+	Creator	Maker
+	Credit Cards	Creditcards
+	CRL Signing	CRL ondertekenen
+	Crop (% trimmed from each side)	Bijsnijden (% aan elke zijde weggesneden)
+	Crop Image	Afbeelding bijsnijden
+	Crop image	Afbeelding bijsnijden
+	Crop page	Pagina bijsnijden
+	Crop pages	Pagina's bijsnijden
+key	Ctrl	Ctrl
+	Currency symbol:	Valutasymbool:
+	Current page	Huidige pagina
+	Current page ({n})	Huidige pagina ({n})
+	Current page only	Alleen de huidige pagina
+	Current page — type a page number or label (such as iv) and press Enter	Huidige pagina — typ een paginanummer of label (zoals iv) en druk op Enter
+	Custom font	Aangepast lettertype
+	Custom scale:	Aangepaste schaal:
+	Custom stamps arrive on the web with file pickers for images	Eigen stempels verschijnen op het web met bestandskiezers voor afbeeldingen
+	Custom text:	Aangepaste tekst:
+	Custom:	Aangepast:
+	Customize & Automate	Aanpassen en automatiseren
+	Cut and stack	Snijden en stapelen
+	Cut and stack needs Two-sided: Off. Print single-sided sheets.	Snijden en stapelen vereist Dubbelzijdig: Uit. Druk enkelzijdige bladen af.
+	Cut Image	Afbeelding knippen
+	Cut marks	Snijtekens
+	Cut pages	Pagina's knippen
+	Cut {what}	{what} geknipt
+	Cuts each page to its printed area, turns it upright and fits it to the sheet without stretching. One label per sheet.	Snijdt elke pagina bij tot het bedrukte gebied, zet die rechtop en past die op het vel zonder uit te rekken. Eén label per vel.
+	Dark gray theme	Donkergrijs thema
+	Dark theme	Donker thema
+	Data Encipherment	Gegevens versleutelen
+	Date field	Datumveld
+	Date format	Datumnotatie
+	Date: 	Datum: 
+	December	december
+calendar date	December	december
+	Decimal places:	Decimalen:
+	Decimals	Decimalen
+	Decipher Only	Alleen ontsleutelen
+	Declared conformance: {shown}	Aangegeven conformiteit: {shown}
+	Decorative figure	Decoratieve figuur
+	Default page display	Standaard paginaweergave
+	Default Value:	Standaardwaarde:
+	Default workspace mode	Standaardmodus van de werkruimte
+	Default zoom	Standaardzoom
+	Default:	Standaard:
+key	Delete	Delete
+	Delete attachment	Bijlage verwijderen
+	Delete attachment {key}	Bijlage {key} verwijderen
+	Delete bookmark	Bladwijzer verwijderen
+	Delete comment	Opmerking verwijderen
+	Delete content	Inhoud verwijderen
+	Delete document JavaScript	JavaScript van het document verwijderen
+	Delete field	Veld verwijderen
+	Delete image	Afbeelding verwijderen
+	Delete link	Koppeling verwijderen
+	Delete page	Pagina verwijderen
+	Delete page {label}	Pagina {label} verwijderen
+	Delete pages	Pagina's verwijderen
+	Delete pages (Delete)	Pagina's verwijderen (Delete)
+	Delete pages after extracting	Pagina's verwijderen na het extraheren
+	Delete selected fields	Geselecteerde velden verwijderen
+	Delete selected pages (Organize)	Geselecteerde pagina's verwijderen (Ordenen)
+	Delete stamp	Stempel verwijderen
+	Delete the selected pages	De geselecteerde pagina's verwijderen
+@plural	Delete {n} field|Delete {n} fields	{n} veld verwijderen|{n} velden verwijderen
+	Delete {o}	{o} verwijderen
+	Deleted	Verwijderd
+	Describe the figure	Beschrijf de figuur
+	Detailed Report	Gedetailleerd rapport
+	Detect form fields	Formuliervelden detecteren
+	Detected 1 form field	1 formulierveld gevonden
+	Detected {n} form fields	{n} formuliervelden gevonden
+	Device colour is used, but there is no PDF/A output intent	Er wordt een apparaatkleur gebruikt, maar er is geen PDF/A-uitvoerintentie
+	DeviceCMYK is used, but the PDF/A output intent isn't a CMYK profile	DeviceCMYK wordt gebruikt, maar de PDF/A-uitvoerintentie is geen CMYK-profiel
+	DeviceCMYK is used: it needs a CMYK output intent (not added automatically)	DeviceCMYK wordt gebruikt: daarvoor is een CMYK-uitvoerintentie nodig (wordt niet automatisch toegevoegd)
+	DeviceRGB is used, but the PDF/A output intent isn't an RGB profile	DeviceRGB wordt gebruikt, maar de PDF/A-uitvoerintentie is geen RGB-profiel
+	Diagnostic details	Diagnostische details
+	Digital ID	Digitale id
+	Digital ID password	Wachtwoord van de digitale id
+	Digital Signature	Digitale handtekening
+	Digital signature	Digitale handtekening
+	Digital Signature Properties	Eigenschappen van de digitale handtekening
+	Digitally sign	Digitaal ondertekenen
+	Digitally signed by	Digitaal ondertekend door
+	Disabled	Uitgeschakeld
+	Discard	Verwerpen
+	Discard all comments, forms and multimedia	Alle opmerkingen, formulieren en multimedia verwijderen
+	Discard all links, actions and JavaScript	Alle koppelingen, acties en JavaScript verwijderen
+	Discard all object data (file attachments)	Alle objectgegevens verwijderen (bestandsbijlagen)
+	Discard alternate images	Alternatieve afbeeldingen verwijderen
+	Discard bookmarks	Bladwijzers verwijderen
+	Discard document information and metadata	Documentinformatie en metagegevens verwijderen
+	Discard document tags	Documenttags verwijderen
+	Discard embedded page thumbnails	Ingesloten paginaminiaturen verwijderen
+	Discard embedded print settings	Ingesloten afdrukinstellingen verwijderen
+	Discard hidden layer content	Verborgen laaginhoud verwijderen
+	Discard hidden text	Verborgen tekst verwijderen
+	Discard Objects	Objecten verwijderen
+	Discard private data of other applications	Privégegevens van andere toepassingen verwijderen
+	Discard this text (Esc)	Deze tekst weggooien (Esc)
+	Discard User Data	Gebruikersgegevens verwijderen
+	Dismiss	Negeren
+	Display theme	Weergavethema
+	Distinguished name	Onderscheiden naam
+	Distribute evenly	Gelijk verdelen
+	Distribute fields	Velden verdelen
+	DN: 	DN: 
+	Document actions	Documentacties
+	Document and markups	Document en markeringen
+	Document and stamps	Document en stempels
+	Document assembly	Document samenstellen
+	Document has appropriate color contrast	Het document heeft voldoende kleurcontrast
+	Document is not image-only PDF	Het document is geen PDF met alleen afbeeldingen
+	Document is tagged PDF	Het document is een getagde PDF
+	Document JavaScripts	Document-JavaScripts
+	Document JavaScripts…	Document-JavaScripts…
+	Document language	Documenttaal
+	Document Overhead	Documentoverhead
+	Document Properties	Documenteigenschappen
+	Document properties ({key})	Documenteigenschappen ({key})
+	Document properties (⌘D)	Documenteigenschappen (⌘D)
+	Document properties…	Documenteigenschappen…
+	Document sanitized. Save to finish: saving rewrites the whole file.	Document opgeschoond. Sla op om af te ronden: opslaan herschrijft het hele bestand.
+	document security store	beveiligingsarchief van het document
+	document structure	documentstructuur
+	Document structure provides a logical reading order	De documentstructuur geeft een logische leesvolgorde
+	Document Title	Documenttitel
+	Document title is showing in title bar	De documenttitel staat in de titelbalk
+	Documents and view	Documenten en weergave
+	Documents of more than 20 pages need bookmarks for navigation. Add bookmarks for the main sections.	Documenten van meer dan 20 pagina's hebben bladwijzers nodig om te navigeren. Voeg bladwijzers toe voor de hoofdonderdelen.
+	Don't save	Niet opslaan
+	Don't show again	Niet meer tonen
+	Done adding text	Klaar met tekst toevoegen
+	Dot	Stip
+	Double-click	Dubbelklikken
+	Downloaded {name}	{name} gedownload
+@plural	Downloaded {n} PDF|Downloaded {n} PDFs	{n} PDF gedownload|{n} PDF's gedownload
+	Downloading attachments on the web arrives with M3.10 ({n} bytes ready)	Bijlagen downloaden verschijnt op het web met M3.10 ({n} bytes gereed)
+	Downsample to	Verkleinen naar
+	DPI sets the printed page size without resampling the image.	DPI bepaalt het afgedrukte paginaformaat zonder de afbeelding opnieuw te bemonsteren.
+	Drag a field to move it, or select it and press {up} or {down}.	Sleep een veld om het te verplaatsen, of selecteer het en druk op {up} of {down}.
+	Drag a rectangle around the area to copy	Sleep een rechthoek om het gebied dat je wilt kopiëren
+	Drag a rectangle on a page to crop it; double-click a page for Set Page Boxes	Sleep een rechthoek op een pagina om die bij te snijden; dubbelklik een pagina voor Paginavakken instellen
+	Drag a rectangle to create a link; double-click a link to edit it	Sleep een rechthoek om een koppeling te maken; dubbelklik een koppeling om die te bewerken
+	Drag the corners onto the document's edges, then choose Enhance page.	Sleep de hoeken naar de randen van het document en kies daarna Pagina verbeteren.
+	Drag the selection to move it. Esc clears the selection.	Sleep de selectie om hem te verplaatsen. Esc maakt de selectie leeg.
+	Drag to draw the area where the signature should appear.	Sleep om het gebied te tekenen waar de handtekening moet komen.
+	Drag to reorder	Sleep om de volgorde te wijzigen
+	Draw a cloud	Een wolk tekenen
+	Draw a line	Een lijn tekenen
+	Draw a polygon	Een veelhoek tekenen
+	Draw a rectangle	Een rechthoek tekenen
+	Draw an arrow	Een pijl tekenen
+	Draw an oval	Een ovaal tekenen
+	Draw connected lines	Verbonden lijnen tekenen
+	Draw freehand	Vrije hand tekenen
+	Draw your {what} below.	Teken je {what} hieronder.
+	Drawing	Tekening
+	Drawing scale	Tekenschaal
+	Drawing scale changes. Use Actual size for full-scale plans.	De tekenschaal verandert. Gebruik Werkelijke grootte voor tekeningen op schaal 1:1.
+	Drop PDFs or folders here, or choose them.	Zet hier PDF's of mappen neer, of kies ze.
+	Drop PDFs, images, text files or folders here, or choose them.	Zet hier PDF's, afbeeldingen, tekstbestanden of mappen neer, of kies ze.
+	Drop-down list	Keuzelijst
+	Dropdown Properties	Eigenschappen van de keuzelijst
+	Duplicate "{name}" onto:	"{name}" dupliceren naar:
+	Duplicate Field	Veld dupliceren
+	Duplicate field	Veld dupliceren
+	Duplicate page	Pagina dupliceren
+	Duplicate pages	Pagina's dupliceren
+	Dynamic	Dynamisch
+	Dynamic XFA form laid out from its template: {pages}, {fields}.	Dynamisch XFA-formulier, opgebouwd uit het sjabloon: {pages}, {fields}.
+	E-Sign	Elektronisch ondertekenen
+	e.g. en-US	bijvoorbeeld en-US
+	e.g. My stamps	bijvoorbeeld Mijn stempels
+	Each field needs a tooltip that says what to enter. Add one in Field Properties > General > Tooltip.	Elk veld heeft een toelichting nodig die zegt wat je moet invullen. Voeg er een toe via Veldeigenschappen > Algemeen > Toelichting.
+	Each file holds as many of the {n} pages as fit.	Elk bestand bevat zoveel van de {n} pagina's als erin passen.
+	Each image is measured where pages draw it; an image is replaced only if the result is smaller.	Elke afbeelding wordt gemeten waar pagina's hem tekenen; een afbeelding wordt alleen vervangen als het resultaat kleiner is.
+	Each image once, named after the document and page. JPEG images are saved unchanged; others as PNG.	Elke afbeelding één keer, genoemd naar het document en de pagina. JPEG-afbeeldingen blijven ongewijzigd; de andere worden PNG.
+	Earlier in calculation order	Eerder in de berekeningsvolgorde
+	Earlier in tab order	Eerder in de tabvolgorde
+comment menu	Edit	Bewerken
+	Edit a PDF	Een PDF bewerken
+	Edit Action	Actie bewerken
+	Edit comment	Opmerking bewerken
+	Edit content	Inhoud bewerken
+	Edit document JavaScript	JavaScript van het document bewerken
+	Edit fields	Velden bewerken
+	Edit image	Afbeelding bewerken
+	Edit script of {name}	Script van {name} bewerken
+	Edit text	Tekst bewerken
+	Edit text & images	Tekst en afbeeldingen bewerken
+	Edit text…	Tekst bewerken…
+	Edit this PDF	Deze PDF bewerken
+	Edit {field}'s formula	Formule van {field} bewerken
+	Editing	Bewerken
+	Email Address	E-mailadres
+	Email Addresses	E-mailadressen
+	Embedded Files	Ingesloten bestanden
+	Embedded files must be PDF/A files themselves (use PDF/A-3 for others)	Ingesloten bestanden moeten zelf PDF/A-bestanden zijn (gebruik PDF/A-3 voor andere)
+	Enable Acrobat JavaScript	Acrobat JavaScript inschakelen
+	Enable copying of text, images, and other content	Kopiëren van tekst, afbeeldingen en andere inhoud toestaan
+	Enable text access for screen reader devices for the visually impaired	Teksttoegang voor schermlezers voor slechtzienden toestaan
+	Enabled	Ingeschakeld
+	Encipher Only	Alleen versleutelen
+	Encrypt	Versleutelen
+	Encrypt with certificate	Versleutelen met certificaat
+	Encryption	Versleuteling
+key	End	End
+	End entity	Eindentiteit
+	Endpoint	Eindpunt
+	Endpoints	Eindpunten
+	English	Engels
+	Enhance camera image	Camerabeeld verbeteren
+	Enhance page	Pagina verbeteren
+	Enhance scanned file	Gescand bestand verbeteren
+	Enter a name.	Voer een naam in.
+	Enter a page number	Voer een paginanummer in
+	Enter a scale such as 1:50.	Voer een schaal in, zoals 1:50.
+	Enter a URL	Voer een URL in
+	Enter permissions password…	Machtigingswachtwoord invoeren…
+	Enter the field names	Voer de veldnamen in
+	Enter the password that opens it	Voer het wachtwoord in waarmee het opent
+	Enter the permissions password to allow combining	Voer het machtigingswachtwoord in om combineren toe te staan
+	Entire page	Hele pagina
+	Erase	Wissen
+	Erase drawings	Tekeningen wissen
+	Eraser	Gum
+key	Esc	Esc
+	Even and Odd Pages	Even en oneven pagina's
+	Even pages	Even pagina's
+	Even Pages Only	Alleen even pagina's
+	Even pages only	Alleen even pagina's
+	Every field calculates after the fields it reads.	Elk veld rekent na de velden die het leest.
+	Every field outside a loop calculates after the fields it reads.	Elk veld buiten een lus rekent na de velden die het leest.
+	Every PDF in the folder	Elke PDF in de map
+	Every PDF in the folder and the folders inside it	Elke PDF in de map en de mappen daarin
+	Every PDF, image and text file in the folder	Elk PDF-, afbeeldings- en tekstbestand in de map
+	Every PDF, image and text file in the folder and the folders inside it	Elk PDF-, afbeeldings- en tekstbestand in de map en de mappen daarin
+	Everything on a page must be tagged or marked as an artifact (decoration, headers, footers). Tag the untagged content.	Alles op een pagina moet een tag hebben of als artefact zijn gemarkeerd (versiering, kopteksten, voetteksten). Voorzie de inhoud zonder tag van een tag.
+	Example: {sample}	Voorbeeld: {sample}
+	Exclude image/OCR text	Afbeeldings- en OCR-tekst uitsluiten
+	Exclude images smaller than	Afbeeldingen kleiner dan dit overslaan
+	Exclude tagged code blocks	Getagde codeblokken uitsluiten
+	Exclude tagged tables	Getagde tabellen uitsluiten
+	Exclusions use PDF tags. Untagged tables and code remain included. Image exclusion also removes invisible text.	Uitsluitingen gebruiken PDF-tags. Tabellen en code zonder tag blijven meegeteld. Het uitsluiten van afbeeldingen verwijdert ook onzichtbare tekst.
+	Execute a menu item	Een menu-item uitvoeren
+	Expand	Uitvouwen
+	Expand all	Alles uitvouwen
+	Expand all bookmarks	Alle bladwijzers uitvouwen
+	Expand all pages	Alle pagina's uitvouwen
+	Expand all tools	Alle gereedschappen uitvouwen
+	Expand tag	Tag uitvouwen
+	Expand top-level bookmarks	Bladwijzers op het hoogste niveau uitvouwen
+	Explain	Uitleggen
+	Export a PDF	Een PDF exporteren
+	Export all comments to data file…	Alle opmerkingen exporteren naar een gegevensbestand…
+	Export All Images	Alle afbeeldingen exporteren
+	Export all images	Alle afbeeldingen exporteren
+	Export all images…	Alle afbeeldingen exporteren…
+	Export all to data file…	Alles exporteren naar een gegevensbestand…
+	Export certificate	Certificaat exporteren
+	Export certificate…	Certificaat exporteren…
+	Export comments	Opmerkingen exporteren
+	Export data	Gegevens exporteren
+	Export form data	Formuliergegevens exporteren
+	Export form data…	Formuliergegevens exporteren…
+	Export measurements	Metingen exporteren
+	Export measurements as CSV	Metingen exporteren als CSV
+	Export stopped: {e}	Exporteren gestopt: {e}
+	Export this PDF	Deze PDF exporteren
+	Export to HTML…	Exporteren naar HTML…
+	Export to Image	Exporteren naar afbeelding
+	Export to image…	Exporteren naar afbeelding…
+	Export to PowerPoint…	Exporteren naar PowerPoint…
+	Export to RTF…	Exporteren naar RTF…
+	Export to Text	Exporteren naar tekst
+	Export to text…	Exporteren naar tekst…
+	Export to Word…	Exporteren naar Word…
+	Export value	Exportwaarde
+	Export Value: {on}	Exportwaarde: {on}
+	Exported 1 image	1 afbeelding geëxporteerd
+	Exported the text of 1 page	De tekst van 1 pagina geëxporteerd
+	Exported the text of {n} pages	De tekst van {n} pagina's geëxporteerd
+	Exported to {path}	Geëxporteerd naar {path}
+	Exported {n} images	{n} afbeeldingen geëxporteerd
+	Exporting… {d} of {t}	Exporteren… {d} van {t}
+	Extended Graphics States	Uitgebreide grafische statussen
+	Extract	Extraheren
+	Extract pages	Pagina's extraheren
+	Extract pages as separate files	Pagina's extraheren als aparte bestanden
+	Extract pages to a new document	Pagina's extraheren naar een nieuw document
+	Extract pages…	Pagina's extraheren…
+	Extract the selected pages…	De geselecteerde pagina's extraheren…
+	Extracted 1 page	1 pagina geëxtraheerd
+	Extracted {n} pages	{n} pagina's geëxtraheerd
+	Failed	Mislukt
+scroll speed	Fast	Snel
+	February	februari
+calendar date	February	februari
+	Field	Veld
+	Field "{}" on page {p} has no description (tooltip)	Veld "{}" op pagina {p} heeft geen beschrijving (toelichting)
+	Field descriptions	Veldbeschrijvingen
+	Field is used for file selection	Veld wordt gebruikt om een bestand te kiezen
+	Field list	Veldlijst
+	Field names	Veldnamen
+	Field names (comma-separated)	Veldnamen (gescheiden door komma's)
+	field names can't contain a period: {name}	veldnamen mogen geen punt bevatten: {name}
+	Field names with + - * / and parentheses; put \\ before spaces in names.	Veldnamen met + - * / en haakjes; zet \\ voor spaties in namen.
+	Field properties	Veldeigenschappen
+	Field properties…	Veldeigenschappen…
+	Field value is in range:	Veldwaarde ligt in het bereik:
+	Field value is not validated	Veldwaarde wordt niet gevalideerd
+	Field: {field} on page {p}	Veld: {field} op pagina {p}
+	Fields	Velden
+	Fields to reset (comma-separated; empty: all)	Velden om te wissen (gescheiden door komma's; leeg: alles)
+	Figure {i} of {n}{page}	Figuur {i} van {n}{page}
+	Figures alternate text	Alternatieve tekst van figuren
+	Figures require alternate text	Figuren hebben alternatieve tekst nodig
+	File (.p12, .pfx)	Bestand (.p12, .pfx)
+	File attachments	Bestandsbijlagen
+	File name	Bestandsnaam
+	File size	Bestandsgrootte
+@id	file.word_count	Woorden tellen…
+	Filename	Bestandsnaam
+	Files are combined from top to bottom. Leave Pages empty to take every page.	Bestanden worden van boven naar beneden gecombineerd. Laat Pagina's leeg om elke pagina te nemen.
+	Files are combined in the order shown. Drag them to change it.	Bestanden worden gecombineerd in de getoonde volgorde. Sleep ze om die te wijzigen.
+	Files are combined in this order. Leave Pages empty to take every page.	Bestanden worden in deze volgorde gecombineerd. Laat Pagina's leeg om elke pagina te nemen.
+	Files for {name}	Bestanden voor {name}
+	Files you open in PdfCraft appear here. Drop a PDF anywhere to open it.	Bestanden die je in PdfCraft opent, verschijnen hier. Zet ergens een PDF neer om hem te openen.
+	Fill	Opvulling
+	Fill & Sign	Invullen en ondertekenen
+	Fill & Sign dates	Datums voor Invullen en ondertekenen
+	Fill & Sign signature	Handtekening voor Invullen en ondertekenen
+	Fill & Sign: add text	Invullen en ondertekenen: tekst toevoegen
+	Fill & Sign: change initials	Invullen en ondertekenen: paraaf wijzigen
+	Fill & Sign: change signature	Invullen en ondertekenen: handtekening wijzigen
+	Fill & Sign: checkmark	Invullen en ondertekenen: vinkje
+	Fill & Sign: cross	Invullen en ondertekenen: kruis
+	Fill & Sign: date	Invullen en ondertekenen: datum
+	Fill & Sign: dot	Invullen en ondertekenen: stip
+	Fill & Sign: initials	Invullen en ondertekenen: paraaf
+	Fill & Sign: line	Invullen en ondertekenen: lijn
+	Fill & Sign: remove saved initials	Invullen en ondertekenen: opgeslagen paraaf verwijderen
+	Fill & Sign: remove saved signature	Invullen en ondertekenen: opgeslagen handtekening verwijderen
+	Fill & Sign: sign	Invullen en ondertekenen: ondertekenen
+	Fill Color:	Opvulkleur:
+	Fill colour	Opvulkleur
+	Fill colour:	Opvulkleur:
+	Fill colour: none	Opvulkleur: geen
+	Fill in {name}	{name} invullen
+	Filling in form fields and signing existing signature fields	Formuliervelden invullen en bestaande handtekeningvelden ondertekenen
+	Filling of form fields	Formuliervelden invullen
+	Filter comments	Opmerkingen filteren
+	Find a tag	Een tag zoeken
+	Find options	Zoekopties
+	Find text	Tekst zoeken
+	Find text and redact	Tekst zoeken en zwartmaken
+	Find text and redact…	Tekst zoeken en zwartmaken…
+	Find text or tools	Tekst of gereedschappen zoeken
+	Find tools and commands	Gereedschappen en opdrachten zoeken
+	Find tools and commands…	Gereedschappen en opdrachten zoeken…
+	Find untagged content	Inhoud zonder tag zoeken
+	Finding document fonts…	Lettertypen van het document zoeken…
+	Find…	Zoeken…
+	Finish or discard the text being edited before selecting several objects.	Maak de tekst die je bewerkt af of verwerp hem voordat je meerdere objecten selecteert.
+	First / last page	Eerste / laatste pagina
+	First row number	Nummer van de eerste rij
+	Fit	Passend
+	Fit Height	Passend in de hoogte
+	Fit one full page	Eén volledige pagina passend
+	Fit Page	Hele pagina
+	Fit to height	Passend in de hoogte
+	Fit to page	Passend op de pagina
+	Fit to width	Passend in de breedte
+	Fit to width scrolling	Passend in de breedte, schuivend
+	Fit Visible	Passend zichtbaar
+	Fit visible	Passend zichtbaar
+	Fit Width	Passend in de breedte
+	Fix	Herstellen
+	Fix hairlines	Haarlijnen herstellen
+	Fix order	Volgorde herstellen
+	Fix reading order	Leesvolgorde herstellen
+	Fixed what could be fixed; 1 problem remains	Hersteld wat hersteld kon worden; 1 probleem blijft over
+	Fixed what could be fixed; {n} problems remain	Hersteld wat hersteld kon worden; {n} problemen blijven over
+	Flatten	Afvlakken
+	Flatten comments	Opmerkingen afvlakken
+	Flatten Fill & Sign	Invullen en ondertekenen afvlakken
+	Flatten Fill & Sign when saving	Invullen en ondertekenen afvlakken bij het opslaan
+	Flatten form fields	Formuliervelden afvlakken
+	Flip horizontal	Horizontaal spiegelen
+	Flip image	Afbeelding spiegelen
+	Flip on long edge	Spiegelen over de lange zijde
+	Flip on short edge	Spiegelen over de korte zijde
+	Flip vertical	Verticaal spiegelen
+	Float panel	Deelvenster laten zweven
+	Folders	Mappen
+	Font (unnamed) on page {p} doesn't map its characters to Unicode	Lettertype (naamloos) op pagina {p} koppelt zijn tekens niet aan Unicode
+	Font colour:	Letterkleur:
+	Font size 0 uses automatic sizing.	Lettergrootte 0 gebruikt automatische grootte.
+	Font size:	Lettergrootte:
+	Font {} on page {p} doesn't map its characters to Unicode	Lettertype {} op pagina {p} koppelt zijn tekens niet aan Unicode
+	Font: Helvetica	Lettertype: Helvetica
+	Fonts must map their characters to Unicode so text can be read and copied. Fix the fonts or recreate the PDF.	Lettertypen moeten hun tekens aan Unicode koppelen, zodat tekst gelezen en gekopieerd kan worden. Herstel de lettertypen of maak de PDF opnieuw.
+	for images above	voor afbeeldingen erboven
+	For page sizes and margins.	Voor paginaformaten en marges.
+	Form data and PDF forms	Formuliergegevens en PDF-formulieren
+	Form field on page {p} isn't tagged	Formulierveld op pagina {p} is niet getagd
+	Form fields	Formuliervelden
+	Form fields are flattened: their values stay visible. Saving rewrites the whole file.	Formuliervelden worden afgevlakt: hun waarden blijven zichtbaar. Opslaan herschrijft het hele bestand.
+	Form fields must be in the tag tree (Form tags) to be announced. Tag the form fields.	Formuliervelden moeten in de tagstructuur staan (Form-tags) om te worden voorgelezen. Voorzie de formuliervelden van een tag.
+	Form fields only	Alleen formuliervelden
+	Form fields panel	Deelvenster Formuliervelden
+	form fill	formulier invullen
+	Form fill-in and digital signatures	Formulieren invullen en digitale handtekeningen
+	Format	Opmaak
+	Format text	Tekst opmaken
+	Format:	Opmaak:
+	Forms	Formulieren
+	Forms & Signatures	Formulieren en handtekeningen
+	Formulas and similar non-text elements need alternate text. Add alternate text to them.	Formules en vergelijkbare elementen zonder tekst hebben alternatieve tekst nodig. Voeg er alternatieve tekst aan toe.
+	Found {n} untagged content problems.	{n} problemen met inhoud zonder tag gevonden.
+calendar weekday	Fr	Vr
+	From a PDF page or an image	Van een PDF-pagina of een afbeelding
+	From colour	Van kleur
+	From {file}	Van {file}
+	From:	Van:
+	Front side only	Alleen voorzijde
+	Full screen mode	Modus volledig scherm
+	Geospatial location	Geografische locatie
+	Get help, share feedback and follow development on Discord.	Krijg hulp, deel feedback en volg de ontwikkeling op Discord.
+	Go to a page view	Ga naar een paginaweergave
+	Go to page {p}	Ga naar pagina {p}
+	Go to page…	Ga naar pagina…
+	Go to the page	Ga naar de pagina
+	Go to this result	Ga naar dit resultaat
+	Grab bag	Kaarten
+	Graphic	Grafisch
+	Grayscale Images	Grijswaardenafbeeldingen
+	Green on black	Groen op zwart
+	Greyscale	Grijswaarden
+	Grid view	Rasterweergave
+	H / Space (hold)	H / Spatiebalk (ingedrukt houden)
+	Hand (H)	Handje (H)
+	Hand Tool	Handje
+	Has JavaScript actions (run in M6)	Heeft JavaScript-acties (uitgevoerd in M6)
+	Header and footer	Kop- en voettekst
+	Header cells (TH) tell listeners what each column or row holds. Mark the header cells.	Kopcellen (TH) vertellen luisteraars wat elke kolom of rij bevat. Markeer de kopcellen.
+	header or footer	kop- of voettekst
+	Headers	Kopteksten
+	Heading levels shouldn't skip (an H1 followed by an H3). Retag the headings.	Kopniveaus mogen niet overslaan (een H1 gevolgd door een H3). Geef de koppen opnieuw een tag.
+	Headings	Koppen
+	Help…	Help…
+	Hidden layers	Verborgen lagen
+	Hidden text	Verborgen tekst
+	Hide a field	Een veld verbergen
+	Hide all comments	Alle opmerkingen verbergen
+	Hide field highlights	Veldmarkeringen verbergen
+	Hide gaps to join page edges. Margins inside the PDF remain unchanged.	Verberg de tussenruimte zodat de paginaranden aansluiten. Marges in de PDF blijven ongewijzigd.
+	Hide hover previews for highlights without comment text	Voorbeelden bij aanwijzen verbergen voor markeringen zonder opmerkingstekst
+	Hide layer	Laag verbergen
+	Hide menu bar	Menubalk verbergen
+	Hide password	Wachtwoord verbergen
+	Hide toolbars	Werkbalken verbergen
+	Hide window controls	Vensterknoppen verbergen
+	Hides annotation	Verbergt de annotatie
+	Highlight	Markeren
+	Highlight fields	Velden markeren
+	Highlight Style:	Markeringsstijl:
+	Highlight text	Tekst markeren
+	Home	Start
+key	Home	Home
+	Home / End	Home / End
+	Horizontal reversed	Horizontaal omgekeerd
+	HTML web page	HTML-webpagina
+	H{n} follows an H{d}; headings should not skip levels	H{n} volgt op een H{d}; koppen mogen geen niveaus overslaan
+	Icon	Pictogram
+	Identity	Identiteit
+	Image (PNG)	Afbeelding (PNG)
+	Image field	Afbeeldingsveld
+	Image pasted	Afbeelding geplakt
+	Image-only PDF	PDF met alleen afbeeldingen
+	Images and text	Afbeeldingen en tekst
+	Images and text (converted to PDF)	Afbeeldingen en tekst (omgezet naar PDF)
+	Import comments…	Opmerkingen importeren…
+	Import data	Gegevens importeren
+	Import form data…	Formuliergegevens importeren…
+	Import list…	Lijst importeren…
+	Import {name}	{name} importeren
+	Importing data arrives on the web with file pickers for data files	Gegevens importeren verschijnt op het web met bestandskiezers voor gegevensbestanden
+	In multiple files	In meerdere bestanden
+	In streams that use LZW encoding, use Flate instead	Gebruik Flate in plaats van LZW in stromen die LZW gebruiken
+	In this file	In dit bestand
+	Includes unsaved changes	Bevat niet-opgeslagen wijzigingen
+	Incorrect password. Try again.	Onjuist wachtwoord. Probeer het opnieuw.
+	Indent	Inspringen
+	Index	Index
+	Information	Informatie
+	Initial View	Beginweergave
+	Initials	Paraaf
+	initials	paraaf
+	Ink sensitivity	Inktgevoeligheid
+	Insert a blank page after the selection	Een lege pagina invoegen na de selectie
+	Insert a file at the end	Een bestand aan het eind invoegen
+	Insert a file before page {label}	Een bestand invoegen vóór pagina {label}
+	Insert blank page	Lege pagina invoegen
+	Insert Date	Datum invoegen
+	Insert Page Number	Paginanummer invoegen
+	Insert pages	Pagina's invoegen
+	Insert pages from a file after the selection…	Pagina's uit een bestand invoegen na de selectie…
+	Insert pages from a file…	Pagina's uit een bestand invoegen…
+	Insert pages from file…	Pagina's uit bestand invoegen…
+	Insert pages from {name}	Pagina's invoegen uit {name}
+	Insert pages from {name} — 1 field renamed	Pagina's invoegen uit {name} — 1 veld hernoemd
+	Insert pages from {name} — fields renamed	Pagina's invoegen uit {name} — velden hernoemd
+	Insert text	Tekst invoegen
+	Inserted	Ingevoegd
+	Inserted text	Ingevoegde tekst
+	Inserting, deleting, and rotating pages	Pagina's invoegen, verwijderen en draaien
+	Inset	Verzonken
+	Inspector	Infovenster
+	Installed fonts…	Geïnstalleerde lettertypen…
+	Intended usage	Bedoeld gebruik
+certificate	Intended usage	Bedoeld gebruik
+	Interface language	Interfacetaal
+	Interface size	Interfacegrootte
+	Intersection	Snijpunt
+	Intersections	Snijpunten
+	Invisible Rectangle	Onzichtbare rechthoek
+	Irregular tables confuse cell navigation. Give every row the same number of cells (counting spans).	Onregelmatige tabellen maken celnavigatie verwarrend. Geef elke rij hetzelfde aantal cellen (inclusief overspanningen).
+	is available	is beschikbaar
+	is not available yet	is nog niet beschikbaar
+	Issued by	Verleend door
+certificate	Issued by	Verleend door
+	Issued by: 	Verleend door: 
+	Issued to	Verleend aan
+certificate	Issued to	Verleend aan
+	Issuer	Uitgever
+certificate	Issuer	Uitgever
+	Item List	Itemlijst
+	Item:	Item:
+	Items marked Ready work today.	Onderdelen die als Gereed zijn gemarkeerd, werken vandaag.
+	its alternate text is inside another element's and will never be read	de alternatieve tekst staat in die van een ander element en wordt nooit voorgelezen
+	Its script also reads fields whose names it builds as it runs, so those reads can't be checked.	Het script leest ook velden waarvan het de namen tijdens het uitvoeren opbouwt, dus die leesacties kunnen niet worden gecontroleerd.
+	Its security settings don't allow copying pages	De beveiligingsinstellingen staan het kopiëren van pagina's niet toe
+	January	januari
+calendar date	January	januari
+	JavaScript	JavaScript
+	JavaScript Console	JavaScript-console
+	JavaScript console…	JavaScript-console…
+	JavaScript is turned off (Preferences ▸ JavaScript).	JavaScript staat uit (Voorkeuren > JavaScript).
+	JavaScript, e.g. getField("total").value	JavaScript, bijvoorbeeld getField("total").value
+	JBIG2 (lossless)	JBIG2 (verliesvrij)
+	Join our Discord	Kom naar onze Discord
+	Join the ArtCraft community	Word lid van de ArtCraft-gemeenschap
+	Join the ArtCraft Discord	Naar de ArtCraft-Discord
+	July	juli
+calendar date	July	juli
+	June	juni
+calendar date	June	juni
+	just now	zojuist
+	Keep source fonts	Bronlettertypen behouden
+	Keep tool selected	Gereedschap geselecteerd houden
+	Keep tool selected: on	Gereedschap geselecteerd houden: aan
+	Key Agreement	Sleutelovereenkomst
+	Key Algorithm	Sleutelalgoritme
+	Key Encipherment	Sleutel versleutelen
+	Key usage	Sleutelgebruik
+certificate	Key usage	Sleutelgebruik
+	Keyboard shortcuts	Sneltoetsen
+	Keychain  ·  	Sleutelhanger  ·  
+	Labels: {preview}. Later pages keep their labels.	Labels: {preview}. Latere pagina's houden hun labels.
+	Landscape and Portrait Pages	Liggende en staande pagina's
+	Landscape Pages	Liggende pagina's
+	Landscape pages	Liggende pagina's
+	Larger pages	Grotere pagina's
+	Larger thumbnails	Grotere miniaturen
+	Later	Later
+	Later in calculation order	Later in de berekeningsvolgorde
+	Later in tab order	Later in de tabvolgorde
+	Layer options	Laagopties
+	Layers Panel and Page	Deelvenster Lagen en pagina
+	Layout and Magnification	Indeling en vergroting
+	Lbl and LBody	Lbl en LBody
+	Lbl and LBody must be children of LI	Lbl en LBody moeten kinderen van LI zijn
+	Leave out files that can't be read?	Bestanden die niet gelezen kunnen worden weglaten?
+	Left Edge	Linkerrand
+	Left Footer Text	Linker voettekst
+	Left Header Text	Linker koptekst
+	Left out: {names}	Weggelaten: {names}
+	LI must be a child of L	LI moet een kind van L zijn
+	Light blue	Lichtblauw
+	Light theme	Licht thema
+	Limit of	Limiet van
+	Line ending	Lijnuiteinde
+	Line spacing	Regelafstand
+	Line Style:	Lijnstijl:
+	Line thickness	Lijndikte
+	Line Thickness:	Lijndikte:
+	Lines added	Regels toegevoegd
+	Lines deleted	Regels verwijderd
+	Link Action	Koppelingsactie
+	Link Appearance	Uiterlijk van de koppeling
+	Link Properties	Eigenschappen van de koppeling
+	Link Type:	Type koppeling:
+	Link URL	URL van de koppeling
+	links	koppelingen
+	Links on page	Koppelingen op de pagina
+	Links, actions and JavaScripts	Koppelingen, acties en JavaScripts
+	List box	Lijstvak
+	List Box Properties	Eigenschappen van het lijstvak
+	List items	Lijstitems
+	List items belong in a list. Fix the list's tags.	Lijstitems horen in een lijst. Herstel de tags van de lijst.
+	List labels and bodies belong in a list item. Fix the list's tags.	Lijstlabels en lijstinhoud horen in een lijstitem. Herstel de tags van de lijst.
+	List view	Lijstweergave
+	Lists	Lijsten
+	Load document font	Documentlettertype laden
+	Load font…	Lettertype laden…
+	Loading…	Laden…
+	Local cross-PDF links require the desktop app	Lokale koppelingen naar een andere PDF vereisen de desktopapp
+	Location: 	Locatie: 
+	Lock comment	Opmerking vergrendelen
+	Logical Reading Order	Logische leesvolgorde
+	Looking for PDFs…	PDF's zoeken…
+	Looking for printers…	Printers zoeken…
+	Loop	Lus
+	Low resolution	Lage resolutie
+	Low Resolution (150 dpi)	Lage resolutie (150 dpi)
+	Lowering this forgets the oldest files. At 0 there is no list.	Als je dit verlaagt, worden de oudste bestanden vergeten. Bij 0 is er geen lijst.
+	Magnification	Vergroting
+	Make accessible	Toegankelijk maken
+	Make Current Properties Default	Huidige eigenschappen als standaard instellen
+	Make Properties Default	Eigenschappen als standaard instellen
+	Make properties default	Eigenschappen als standaard instellen
+	Make scans searchable, then make them smaller.	Maak scans doorzoekbaar en daarna kleiner.
+	Manage embedded index	Ingesloten index beheren
+	March	maart
+calendar date	March	maart
+	Margins	Marges
+	Margins (in)	Marges (inch)
+	Mark all	Alles markeren
+	Mark as artifact	Als artefact markeren
+	Mark as comments	Markeren als opmerkingen
+	Mark as Confidential	Als vertrouwelijk markeren
+	Mark content as artifact	Inhoud als artefact markeren
+	Mark differences	Verschillen markeren
+	Mark figure as decorative	Figuur als decoratief markeren
+	Mark for redaction	Voor zwartmaking markeren
+	Mark Page Range	Paginabereik markeren
+	Mark pages for redaction	Pagina's markeren voor zwartmaking
+	Mark with checkmark	Markeren met een vinkje
+	Marked	Gemarkeerd
+	Markup	Markering
+	Marquee Zoom	Kaderzoom
+	Marquee zoom	Zoomkader
+	Mask:	Masker:
+	Match field sizes	Veldgroottes gelijk maken
+	Match page at 100%	Overeenkomen met de pagina op 100%
+	maximum	het maximum
+	May	mei
+calendar date	May	mei
+	Measure area	Oppervlakte meten
+	Measure distance	Afstand meten
+	Measure objects	Objecten meten
+	Measure perimeter	Omtrek meten
+	Measurement information	Meetgegevens
+	Measurement snapping	Vastklikken bij meten
+	Measuring tool	Meetgereedschap
+	Menu	Menu
+	Merge data files into spreadsheet…	Gegevensbestanden samenvoegen in een rekenblad…
+	Merge image fragments	Afbeeldingsfragmenten samenvoegen
+	Merged 1 file into {path}	1 bestand samengevoegd in {path}
+	Merged {n} files into {path}	{n} bestanden samengevoegd in {path}
+	Merging data files needs the desktop app	Gegevensbestanden samenvoegen vereist de desktopapp
+	metadata	metagegevens
+	Microsoft Word (.docx)	Microsoft Word (.docx)
+	Midpoints	Middenpunten
+	minimum	het minimum
+	Missing field	Ontbrekend veld
+	Missing from the calculation order saved in the PDF: other PDF viewers may not calculate it.	Ontbreekt in de berekeningsvolgorde die in de PDF is opgeslagen: andere PDF-viewers berekenen het mogelijk niet.
+	Mixed	Gemengd
+calendar weekday	Mo	Ma
+	Modify page	Pagina wijzigen
+	Monochrome Images	Monochrome afbeeldingen
+	More options	Meer opties
+	More options:	Meer opties:
+	More ways to add files	Meer manieren om bestanden toe te voegen
+	Mouse Down	Muisknop indrukken
+	Mouse Enter	Muis binnenkomen
+	Mouse Exit	Muis verlaten
+	Mouse Up	Muisknop loslaten
+	Mouse wheel scroll speed	Scrollsnelheid van het muiswiel
+	Move bookmark	Bladwijzer verplaatsen
+	Move comment	Opmerking verplaatsen
+	Move down	Omlaag verplaatsen
+	Move earlier	Naar voren verplaatsen
+	Move image	Afbeelding verplaatsen
+	Move later	Naar achteren verplaatsen
+	Move object	Object verplaatsen
+	Move objects	Objecten verplaatsen
+	Move only what must move, so every field calculates after the fields it reads.	Verplaats alleen wat moet, zodat elk veld rekent na de velden die het leest.
+	Move page	Pagina verplaatsen
+	Move pages	Pagina's verplaatsen
+	Move tag earlier	Tag naar voren verplaatsen
+	Move tag later	Tag naar achteren verplaatsen
+	Move to group	Naar groep verplaatsen
+	Move up	Omhoog verplaatsen
+	Moves only what must move	Verplaatst alleen wat moet
+	Multi-line	Meerdere regels
+	Multiple	Meerdere
+	Multiple files	Meerdere bestanden
+	Multiple selection	Meervoudige selectie
+	Multiple words or phrases	Meerdere woorden of zinnen
+	N or {row} is the row number, {col} the column number, {seq} the cell number. With none of them, the row number goes last.	N of {row} is het rijnummer, {col} het kolomnummer, {seq} het celnummer. Zonder een van die tekens komt het rijnummer achteraan.
+	Name on new comments	Naam bij nieuwe opmerkingen
+	Named Destinations	Benoemde bestemmingen
+	Navigation links	Navigatiekoppelingen
+	Navigation links are not repetitive	Navigatiekoppelingen herhalen zich niet
+	Navigation tab	Navigatietabblad
+	needs an AI provider (off by default)	heeft een AI-provider nodig (standaard uit)
+	Needs manual check	Moet handmatig worden gecontroleerd
+	Negative number style:	Stijl voor negatieve getallen:
+	Nested alternate text	Geneste alternatieve tekst
+	New Action	Nieuwe actie
+	New Action…	Nieuwe actie…
+	New blank PDF	Nieuwe lege PDF
+	New bookmark	Nieuwe bladwijzer
+	New bookmark ({key})	Nieuwe bladwijzer ({key})
+	New bookmark (⌘B)	Nieuwe bladwijzer (⌘B)
+	New bookmarks from structure	Nieuwe bladwijzers uit de structuur
+	New file only	Alleen het nieuwe bestand
+	New file:	Nieuw bestand:
+	New file: {name}	Nieuw bestand: {name}
+	New {tool} comments will look like this one	Nieuwe {tool}-opmerkingen zien er zo uit
+	Next ({key})	Volgende ({key})
+	Next (⌘G)	Volgende (⌘G)
+	Next / previous match	Volgende / vorige treffer
+	Next figure	Volgende figuur
+	Next month	Volgende maand
+	Next sheet	Volgend blad
+	Next tab	Volgend tabblad
+	Next view	Volgende weergave
+	No actions	Geen acties
+	no alternate text	geen alternatieve tekst
+	No changes allowed	Geen wijzigingen toegestaan
+	No changes to save	Geen wijzigingen om op te slaan
+	No check has run yet.	Er is nog geen controle uitgevoerd.
+	No color	Geen kleur
+	No colour	Geen kleur
+	No comments match.	Geen opmerkingen komen overeen.
+	No comments yet.	Nog geen opmerkingen.
+	No contributor data was built into this copy.	In deze versie zijn geen gegevens over bijdragers opgenomen.
+	No differences in the text.	Geen verschillen in de tekst.
+	No digital IDs yet.	Nog geen digitale id's.
+	No document language is set	Er is geen documenttaal ingesteld
+	No documents are open	Er zijn geen documenten open
+	No field in this form calculates its value yet. Give a field a calculation on the Calculate tab of its properties, and it shows here.	Nog geen veld in dit formulier berekent zijn waarde. Geef een veld een berekening op het tabblad Berekenen van zijn eigenschappen, dan verschijnt het hier.
+	No field reads it	Geen veld leest het
+	No file chosen	Geen bestand gekozen
+	No fill	Geen opvulling
+	No fonts are referenced by the pages.	De pagina's verwijzen naar geen enkel lettertype.
+	No form fields were detected	Er zijn geen formuliervelden gevonden
+	no header cells (TH)	geen kopcellen (TH)
+	No image on clipboard to paste	Geen afbeelding op het klembord om te plakken
+	No inaccessible scripts	Geen ontoegankelijke scripts
+	No issues found	Geen problemen gevonden
+	No limit	Geen limiet
+	No links to remove	Geen koppelingen om te verwijderen
+	No matches	Geen treffers
+	No matches.	Geen treffers.
+	No matching tools	Geen overeenkomende gereedschappen
+	No model credits were built into this copy.	In deze versie zijn geen naamsvermeldingen van modellen opgenomen.
+	No openly licensed document fonts found. Load a font file.	Geen open gelicentieerde documentlettertypen gevonden. Laad een lettertypebestand.
+	No order can fix a loop. Change one of the formulas.	Geen volgorde kan een lus herstellen. Wijzig een van de formules.
+	no output folder was chosen	er is geen uitvoermap gekozen
+	No page has text: the document appears to be images of pages	Geen pagina heeft tekst: het document lijkt uit pagina-afbeeldingen te bestaan
+	No pages match those choices	Geen pagina's komen overeen met die keuzes
+	No pages selected	Geen pagina's geselecteerd
+	No PDFs found in {folder}	Geen PDF's gevonden in {folder}
+	No PDFs in this folder yet	Nog geen PDF's in deze map
+	No PDFs, images or text files found in {folder}	Geen PDF's, afbeeldingen of tekstbestanden gevonden in {folder}
+	No photo chosen	Geen foto gekozen
+	No preview	Geen voorbeeld
+	No printers were found. Check that the printer is installed and the print spooler is running, then open Print again.	Geen printers gevonden. Controleer of de printer is geïnstalleerd en de afdrukwachtrij draait, en open Afdrukken daarna opnieuw.
+	No problems found: the document conforms to {level}.	Geen problemen gevonden: het document voldoet aan {level}.
+	No security	Geen beveiliging
+	No sheets	Geen bladen
+	No signature was found in the frame. Move the frame over the signature or raise the ink sensitivity.	Geen handtekening gevonden in het kader. Zet het kader over de handtekening of verhoog de inktgevoeligheid.
+	No status has been set.	Er is nog geen status ingesteld.
+	no such document	dat document bestaat niet
+	no summary	geen overzicht
+	No tools match your search.	Geen gereedschappen komen overeen met je zoekopdracht.
+	No unlinked web addresses were found in the text	Er zijn geen niet-gekoppelde webadressen in de tekst gevonden
+	No untagged content was found.	Er is geen inhoud zonder tag gevonden.
+	no unused output name	geen ongebruikte uitvoernaam
+	Non-Repudiation	Onweerlegbaarheid
+	none	geen
+	None (prefix only)	Geen (alleen voorvoegsel)
+	None found	Niets gevonden
+	None of those files can be made into a PDF; use PDFs, images or .txt files	Geen van die bestanden kan een PDF worden; gebruik PDF's, afbeeldingen of .txt-bestanden
+	None — everything is allowed	Geen — alles is toegestaan
+scroll speed	Normal	Normaal
+	Not allowed	Niet toegestaan
+	not in a Table, THead, TBody or TFoot	niet in een Table, THead, TBody of TFoot
+	not in a TR	niet in een TR
+	not in an L (list)	niet in een L (lijst)
+	not in an LI (list item)	niet in een LI (lijstitem)
+	Not in order	Niet in de volgorde
+	Not now	Niet nu
+	Not present	Niet aanwezig
+	Note	Notitie
+	nothing in the file matches this document	niets in het bestand komt overeen met dit document
+	Nothing to redo	Niets om opnieuw uit te voeren
+	nothing to redo	niets om opnieuw uit te voeren
+	Nothing to undo	Niets om ongedaan te maken
+	nothing to undo	niets om ongedaan te maken
+	November	november
+calendar date	November	november
+	Number	Getal
+	Number every page in the footer.	Nummer elke pagina in de voettekst.
+	Number of pages	Aantal pagina's
+	Number pages	Pagina's nummeren
+	Number pages…	Pagina's nummeren…
+	Numbered list	Genummerde lijst
+	October	oktober
+calendar date	October	oktober
+	Odd pages	Oneven pagina's
+	Odd Pages Only	Alleen oneven pagina's
+	Odd pages only	Alleen oneven pagina's
+	of	van
+	of the following fields:	van de volgende velden:
+	of {name}	van {name}
+	of {pages}	van {pages}
+animation effects	Off	Uit
+	Offset from centre	Verschuiving vanaf het midden
+	Old file:	Oud bestand:
+	Old file: {name}	Oud bestand: {name}
+animation effects	On	Aan
+	On Blur	Bij verlaten
+	On Focus	Bij focus
+	on page {label}	op pagina {label}
+	On the web, open or drop an image to convert it	Open of zet op het web een afbeelding neer om die om te zetten
+	One word or phrase per line	Eén woord of zin per regel
+	One {f} file per page, named after the document.	Eén {f}-bestand per pagina, genoemd naar het document.
+	Only allow this if you trust the source document.	Sta dit alleen toe als je het brondocument vertrouwt.
+	Only change the colour of black text or line art	Verander alleen de kleur van zwarte tekst of zwart lijnwerk
+	Only checked properties will change. Mixed means the selected fields have different values.	Alleen aangevinkte eigenschappen veranderen. Gemengd betekent dat de geselecteerde velden verschillende waarden hebben.
+	Only continue if you trust this document. An address can carry information from the document, such as what you typed into its form.	Ga alleen verder als je dit document vertrouwt. Een adres kan informatie uit het document bevatten, zoals wat je in het formulier hebt getypt.
+	Only the document's owner can change its security (open it with the permissions password)	Alleen de eigenaar van het document kan de beveiliging wijzigen (open het met het machtigingswachtwoord)
+	Only the page content changes: links, comments, form fields and bookmarks on the original pages stay.	Alleen de pagina-inhoud verandert: koppelingen, opmerkingen, formuliervelden en bladwijzers op de oorspronkelijke pagina's blijven.
+	Open a document first	Open eerst een document
+	Open a PDF ({key})	Een PDF openen ({key})
+	Open a PDF (⌘O)	Een PDF openen (⌘O)
+	Open a PDF to measure it.	Open een PDF om hem te meten.
+	Open a web link	Een webkoppeling openen
+	Open a web page	Een webpagina openen
+	Open accessibility report	Toegankelijkheidsrapport openen
+	Open arrow	Open pijl
+	Open email app	E-mailapp openen
+	Open file	Bestand openen
+	Open folder	Map openen
+	Open in a new tab	Openen in een nieuw tabblad
+	Open in Full Screen mode	Openen in de modus volledig scherm
+	Open in Full Screen mode?	Openen in volledig scherm?
+	Open link	Koppeling openen
+	Open Recent	Recente bestanden openen
+	Open the file as it was saved then	Het bestand openen zoals het toen was opgeslagen
+	Open the older version first	Open eerst de oudere versie
+	Open this local PDF?	Deze lokale PDF openen?
+	Open this web page?	Deze webpagina openen?
+	Open to page	Openen op pagina
+	open to see what it will include	open om te zien wat erin komt
+	Opened with	Geopend met
+	Opened, but its security settings don't allow combining. Enter the permissions password.	Geopend, maar de beveiligingsinstellingen staan combineren niet toe. Voer het machtigingswachtwoord in.
+	Opening the browser's print dialog…	Afdrukdialoog van de browser openen…
+	Opens the printer driver's preferences. They are saved for every print from this computer; the copies, two-sided, grayscale and paper chosen here still apply.	Opent de voorkeuren van het printerstuurprogramma. Die worden bewaard voor elke afdruk van deze computer; de exemplaren, dubbelzijdig, grijswaarden en het papier die je hier kiest, gelden nog steeds.
+	Optimization cancelled	Optimalisatie geannuleerd
+	Optimization is already running	Optimalisatie is al bezig
+	Optimize	Optimaliseren
+	Optimize PDF…	PDF optimaliseren…
+	Optimize Scanned Documents	Gescande documenten optimaliseren
+	Optimize scanned documents	Gescande documenten optimaliseren
+	Optimize scanned documents…	Gescande documenten optimaliseren…
+	Optimizing… cleaning up	Optimaliseren… opruimen
+	Optimizing… image {d} of {t}	Optimaliseren… afbeelding {d} van {t}
+	Optimizing… merging identical objects	Optimaliseren… identieke objecten samenvoegen
+	Optimizing… merging image fragments	Optimaliseren… afbeeldingsfragmenten samenvoegen
+	Optimizing… removing user data	Optimaliseren… gebruikersgegevens verwijderen
+	Optimizing… writing the copy	Optimaliseren… de kopie schrijven
+	Optional	Optioneel
+	Optional: needs an AI provider you configure	Optioneel: hiervoor configureer je zelf een AI-provider
+	Options for this reply	Opties voor dit antwoord
+	Order · top calculates first	Volgorde · bovenaan rekent eerst
+	Organization Name	Naam van de organisatie
+	Organizational Unit	Organisatieonderdeel
+	Organize	Ordenen
+	Organize pages	Pagina's ordenen
+	Orientation:	Afdrukstand:
+	Original: replace pages	Origineel: pagina's vervangen
+	other changes	andere wijzigingen
+	Other colour…	Andere kleur…
+	Other elements alternate text	Alternatieve tekst van andere elementen
+	Other elements that require alternate text	Andere elementen die alternatieve tekst nodig hebben
+	Other options	Andere opties
+	Outdent	Uitspringen
+	Outline	Contour
+	Outline colour:	Omtrekkleur:
+	Output appears here.	De uitvoer verschijnt hier.
+	Output intent: {list}	Uitvoerintentie: {list}
+	Output preview	Uitvoervoorbeeld
+	Owner password (no restrictions apply)	Wachtwoord van de eigenaar (geen beperkingen)
+	Page background	Pagina-achtergrond
+	Page Content	Pagina-inhoud
+	page content	pagina-inhoud
+	Page display	Paginaweergave
+	Page display: {layout}	Paginaweergave: {layout}
+	Page does not require timed responses	De pagina vereist geen reacties binnen een tijdslimiet
+	Page grid	Paginaraster
+	Page labels	Paginalabels
+	Page layout	Pagina-indeling
+	Page navigation	Paginanavigatie
+	Page number	Paginanummer
+	Page Only	Alleen pagina
+	Page options	Paginaopties
+	Page order:	Paginavolgorde:
+	Page properties	Pagina-eigenschappen
+	Page Range	Paginabereik
+	Page Range Options	Opties voor paginabereik
+	Page size	Paginagrootte
+	Page Sizing & Handling	Paginaformaat en verwerking
+	Page thumbnails	Paginaminiaturen
+	Page tools	Paginagereedschappen
+	Page transitions	Paginaovergangen
+	Page will not cause screen flicker	De pagina veroorzaakt geen schermflikkering
+	Page {label}	Pagina {label}
+	Page {n}	Pagina {n}
+	page {n} is out of range (1–{count})	pagina {n} valt buiten het bereik (1–{count})
+	Page {n} of {total}	Pagina {n} van {total}
+	Page {pages} changed after the background was added, so its own white backdrop stays off. It looks the same on white paper.	Pagina {pages} is gewijzigd nadat de achtergrond is toegevoegd, dus de eigen witte achtergrond blijft uit. Op wit papier ziet het er hetzelfde uit.
+	Page {pages} paints its own white backdrop, which would hide the background. Replace it	Pagina {pages} tekent een eigen witte achtergrond, die de achtergrond zou verbergen. Vervang hem
+	Page {p} doesn't tab in structure order	Pagina {p} tabt niet in structuurvolgorde
+	Page {p} of {n}	Pagina {p} van {n}
+	Page {p}: {n} untagged content item	Pagina {p}: {n} niet-getagd inhoudsitem
+	Page {p}: {n} untagged content items	Pagina {p}: {n} niet-getagde inhoudsitems
+	Page {} has additional actions	Pagina {} heeft extra acties
+	pages	pagina's
+	pages added or removed	pagina's toegevoegd of verwijderd
+	Pages counted	Getelde pagina's
+	Pages from	Pagina's van
+	Pages of {name} to combine, e.g. 1-3, 6	Pagina's van {name} om te combineren, bijvoorbeeld 1-3, 6
+	Pages Panel and Page	Deelvenster Pagina's en pagina
+	Pages per file	Pagina's per bestand
+	Pages per sheet:	Pagina's per blad:
+	Pages selected	Pagina's geselecteerd
+	Pages that are only pictures of text can't be read aloud or searched. Recognize text (OCR) to add a text layer.	Pagina's die alleen afbeeldingen van tekst zijn, kunnen niet worden voorgelezen of doorzocht. Herken tekst (OCR) om een tekstlaag toe te voegen.
+	Pages to Print	Af te drukken pagina's
+	Pages with links, comments or fields should tab in structure order. The fix sets each page's tab order to Use Document Structure.	Pagina's met koppelingen, opmerkingen of velden moeten in structuurvolgorde tabben. De oplossing zet de tabvolgorde van elke pagina op Documentstructuur gebruiken.
+	Pages {pages} changed after the background was added, so their own white backdrops stay off. They look the same on white paper.	Pagina's {pages} zijn gewijzigd nadat de achtergrond is toegevoegd, dus hun eigen witte achtergrond blijft uit. Op wit papier zien ze er hetzelfde uit.
+	Pages {pages} paint their own white backdrop, which would hide the background. Replace it	Pagina's {pages} tekenen een eigen witte achtergrond, die de achtergrond zou verbergen. Vervang hem
+	Pages:	Pagina's:
+	Pages: {k} of {n}	Pagina's: {k} van {n}
+	Panel layout could not be restored: {error}	De paneelindeling kon niet worden hersteld: {error}
+	Panel move was not applied: {error}	De paneelverplaatsing is niet toegepast: {error}
+	Panels	Deelvensters
+	Paper:	Papier:
+	Paragraph spacing	Alinea-afstand
+	Part of	Deel van
+	Passed	Geslaagd
+	Password protection will be applied when you save	Wachtwoordbeveiliging wordt toegepast als je opslaat
+	Password required	Wachtwoord vereist
+	Password security	Wachtwoordbeveiliging
+	Password-protected	Met wachtwoord beveiligd
+	Paste after	Plakken na
+	Paste pages	Pagina's plakken
+	Patterns	Patronen
+	Patterns (graphics objects)	Patronen (grafische objecten)
+	PDF Optimizer	PDF optimaliseren
+	PDF or image	PDF of afbeelding
+	PDF page: {size}	PDF-pagina: {size}
+	PDF producer	PDF-producent
+	PDF scale: {scale}%	PDF-schaal: {scale}%
+	PDF version	PDF-versie
+	PDF, images and text	PDF, afbeeldingen en tekst
+	PDF/A…	PDF/A…
+	PdfCraft can't check this signature yet: {}.	PdfCraft kan deze handtekening nog niet controleren: {}.
+	PdfCraft didn't shut down normally. These documents had changes that were autosaved:	PdfCraft is niet normaal afgesloten. Deze documenten hadden wijzigingen die automatisch zijn opgeslagen:
+	PdfCraft is drawing without a graphics processor, so it may be slow. Updating the graphics driver may help.	PdfCraft tekent zonder grafische processor en kan daardoor traag zijn. Het bijwerken van het grafische stuurprogramma kan helpen.
+	PdfCraft on GitHub	PdfCraft op GitHub
+	PdfCraft web page	PdfCraft-webpagina
+	PdfCraft works offline. No telemetry, no account, and no cloud processing unless you add a provider.	PdfCraft werkt offline. Geen telemetrie, geen account en geen verwerking in de cloud, tenzij je zelf een provider toevoegt.
+	PdfCraft {c} is up to date.	PdfCraft {c} is actueel.
+	PdfCraft {v} is available.	PdfCraft {v} is beschikbaar.
+	People may need more time to respond. Check that nothing has a time limit.	Mensen hebben soms meer tijd nodig om te reageren. Controleer of niets een tijdslimiet heeft.
+	Permissions password	Machtigingswachtwoord
+	Permitted actions after certifying	Toegestane acties na het certificeren
+	Phone Number	Telefoonnummer
+	Phone Numbers	Telefoonnummers
+	Pick a tool in the quick bar, or type above.	Kies een gereedschap in de snelkoppelingsbalk, of typ hierboven.
+	Pictures cover pages {pages} (scans?), so the background won't show there.	Afbeeldingen bedekken pagina's {pages} (scans?), dus de achtergrond is daar niet zichtbaar.
+	Pictures need alternate text that describes them, or must be marked decorative. Add alternate text to each figure.	Afbeeldingen hebben alternatieve tekst nodig die ze beschrijft, of moeten als decoratief zijn gemarkeerd. Voeg alternatieve tekst toe aan elke figuur.
+	Pictures on those pages are recognized too; words already in the page's text are not added again	Afbeeldingen op die pagina's worden ook herkend; woorden die al in de tekst van de pagina staan, worden niet nog eens toegevoegd
+	Pin	Vastmaken
+	Pin a folder to Home	Een map vastmaken aan Start
+	Pin a folder to list its newest PDFs here, such as where your scanner or a synced cloud drive saves them.	Maak een map vast om hier de nieuwste PDF's te tonen, bijvoorbeeld waar je scanner of een gesynchroniseerde cloudschijf ze opslaat.
+	Pin a folder…	Map vastmaken…
+	Pin a tool…	Een gereedschap vastmaken…
+	Pin folder to Home…	Map vastmaken aan Start…
+	Pin to Home	Vastmaken aan Start
+	Pin tools to Home	Gereedschappen vastmaken aan Start
+	Pin your favorite tools here for quick access.	Maak je favoriete gereedschappen hier vast voor snelle toegang.
+	Pinned	Vastgemaakt
+	Pinned folders need the desktop app	Vastgemaakte mappen vereisen de desktopapp
+	Pinned Tools	Vastgemaakte gereedschappen
+	Pinned {folder} to Home	{folder} vastgemaakt aan Start
+	Pinned {tool} to Home	{tool} vastgemaakt aan Start
+	Place saved {what}	Opgeslagen {what} plaatsen
+	Plain text in reading order; pages are separated by form feeds.	Platte tekst in leesvolgorde; pagina's worden gescheiden door pagina-einden.
+	Planned	Gepland
+	Planned for milestone	Gepland voor mijlpaal
+	Planned for milestone {m} — open to see what it will include	Gepland voor mijlpaal {m} — open om te zien wat erin komt
+	Planned · {m}	Gepland · {m}
+	Points from the page's bottom-left corner.	Punten vanaf de linkeronderhoek van de pagina.
+	Polygon	Veelhoek
+	Polyline	Polylijn
+	Portable mode is off: {folder} can't be written ({error}). Settings are kept in your user folder instead.	Draagbare modus staat uit: {folder} kan niet worden beschreven ({error}). Instellingen blijven in je gebruikersmap.
+	Portrait Pages	Staande pagina's
+	Portrait pages	Staande pagina's
+	Post	Plaatsen
+	PostScript / EPS	PostScript / EPS
+	PostScript XObjects aren't allowed	PostScript-XObjects zijn niet toegestaan
+	Prefix	Voorvoegsel
+	Preflight	Preflight
+	Prepare a form	Een formulier voorbereiden
+	Prepare for accessibility	Voorbereiden op toegankelijkheid
+	Prepare for Distribution	Voorbereiden op verspreiding
+	Prepare for distribution	Voorbereiden op verspreiding
+	Prepare for distribution…	Voorbereiden op verspreiding…
+	Preparing sheet {done} of {total} for printing…	Vel {done} van {total} voorbereiden voor afdrukken…
+	Preparing {n} sheets for printing…	{n} vellen voorbereiden voor afdrukken…
+	Presentation (.pptx)	Presentatie (.pptx)
+	Preview unavailable: {e}	Geen voorbeeld beschikbaar: {e}
+	Preview: page {p} of {n}	Voorbeeld: pagina {p} van {n}
+	Previous ({key})	Vorige ({key})
+	Previous (⇧⌘G)	Vorige (⇧⌘G)
+	Previous / next page	Vorige / volgende pagina
+	Previous figure	Vorige figuur
+	Previous month	Vorige maand
+	Previous sheet	Vorig blad
+	Previous tab	Vorig tabblad
+	Previous view	Vorige weergave
+	Primary language	Primaire taal
+	Print ({key})	Afdrukken ({key})
+	Print (⌘P)	Afdrukken (⌘P)
+	Print as image	Als afbeelding afdrukken
+	Print in grayscale	Afdrukken in grijswaarden
+	Print page border	Paginarand afdrukken
+	Print production	Drukwerkvoorbereiding
+	Print single-sided. Keep the sheets in order, cut at the marks, then stack the piles left to right, top to bottom.	Druk enkelzijdig af. Houd de vellen op volgorde, knip bij de markeringen en stapel de stapels daarna van links naar rechts, van boven naar beneden.
+	Print, NextPage, PrevPage, FirstPage or LastPage	Print, NextPage, PrevPage, FirstPage of LastPage
+	Printer default	Standaard van de printer
+	Printer paper and scaling may differ. Check driver settings.	Het papier en de schaal van de printer kunnen afwijken. Controleer de stuurprogramma-instellingen.
+	Printer properties	Printereigenschappen
+	Printing	Afdrukken
+	Printing allowed	Afdrukken toegestaan
+	Privacy	Privacy
+	Private data of other applications	Privégegevens van andere toepassingen
+	Producer	Vervaardiger
+	product (x)	het product (x)
+	Properties…	Eigenschappen…
+	Protect	Beveiligen
+	Protect & Standardize	Beveiligen en standaardiseren
+	Protect a PDF	Een PDF beveiligen
+	Protect Using Password	Beveiligen met wachtwoord
+	Protect using password…	Beveiligen met wachtwoord…
+	Protect with password	Beveiligen met wachtwoord
+	Protected: the combined file won't keep its security settings	Beveiligd: het gecombineerde bestand behoudt de beveiligingsinstellingen niet
+	Public key	Openbare sleutel
+certificate	Public key	Openbare sleutel
+	PushButton	Drukknop
+	Radio	Keuzerondje
+	Radio button	Keuzerondje
+	Radio Button Properties	Eigenschappen van het keuzerondje
+	Re-type Password	Wachtwoord opnieuw typen
+	Read	Lezen
+	Read mode	Leesmodus
+	Read Only	Alleen-lezen
+	Reading colours	Leeskleuren
+	Reading the printer's settings…	Instellingen van de printer lezen…
+	Reads {names}, which read it back. No order can fix a loop: change one of the formulas.	Leest {names}, die het weer teruglezen. Geen volgorde kan een lus herstellen: wijzig een van de formules.
+	Reads {name}, which calculates later, so it shows an old value.	Leest {name}, dat later rekent, dus het toont een oude waarde.
+	Reads {name}, which the form doesn't have, so it gets no value there.	Leest {name}, dat het formulier niet heeft, dus daar krijgt het geen waarde.
+	Ready	Gereed
+	Reason	Reden
+	Reason: 	Reden: 
+	Recent colours	Recente kleuren
+	Recent files to keep	Recente bestanden om te bewaren
+	Recognize Text	Tekst herkennen
+	Recognize text	Tekst herkennen
+	Recognize text in multiple files…	Tekst herkennen in meerdere bestanden…
+	Recognize Text…	Tekst herkennen…
+	Recognize text…	Tekst herkennen…
+	Recognized 1 word	1 woord herkend
+	Recognized {n} words	{n} woorden herkend
+	Recognized {w} words in 1 file	{w} woorden herkend in 1 bestand
+	Recognized {w} words in {n} files	{w} woorden herkend in {n} bestanden
+	Recognizing text… file {d} of {t}	Tekst herkennen… bestand {d} van {t}
+	Recognizing text… page {d} of {t}	Tekst herkennen… pagina {d} van {t}
+	Recommended tools	Aanbevolen gereedschappen
+	Recover	Herstellen
+	Recover unsaved documents?	Niet-opgeslagen documenten herstellen?
+	Redact	Zwartmaken
+	Redact a PDF	Een PDF zwartmaken
+	Redact all	Alles zwartmaken
+	Redact Image	Afbeelding zwartmaken
+	Redact pages	Pagina's zwartmaken
+	Redact pages…	Pagina's zwartmaken…
+	Redact text and images	Tekst en afbeeldingen zwartmaken
+	Redacted area fill colour:	Opvulkleur van het zwartgemaakte gebied:
+	Redaction code:	Zwartmaakcode:
+	Redaction mark appearance	Uiterlijk van de zwartmaakmarkering
+	Redaction properties…	Eigenschappen van zwartmaken…
+	Redaction Tool Properties	Eigenschappen van zwartmaken
+	Redid {label}	{label} opnieuw uitgevoerd
+	Redo {action}	{action} opnieuw uitvoeren
+	Reduce file size	Bestand verkleinen
+	Reduce file size…	Bestand verkleinen…
+	Regularity	Regelmaat
+	Rejected	Afgewezen
+	Reliable character encoding is provided	Er is een betrouwbare tekencodering
+	Reload	Opnieuw laden
+	Reload documents when their files change on disk	Documenten opnieuw laden als hun bestanden op schijf veranderen
+	Remove "{name}" from this list? The file itself is not deleted.	"{name}" uit deze lijst verwijderen? Het bestand zelf wordt niet verwijderd.
+	Remove all links	Alle koppelingen verwijderen
+	Remove background	Achtergrond verwijderen
+	Remove checkmark	Vinkje verwijderen
+	Remove Crop	Bijsnijden verwijderen
+	Remove crop	Bijsnijden verwijderen
+	Remove from Recent	Verwijderen uit recente bestanden
+	Remove header & footer	Kop- en voettekst verwijderen
+	Remove hidden information	Verborgen informatie verwijderen
+	Remove hidden information and flatten comments and form fields, so recipients see only the pages.	Verwijder verborgen informatie en vlak opmerkingen en formuliervelden af, zodat ontvangers alleen de pagina's zien.
+	Remove hidden information, metadata, scripts and embedded content, and rewrite the files.	Verwijder verborgen informatie, metagegevens, scripts en ingesloten inhoud, en herschrijf de bestanden.
+	Remove hidden information…	Verborgen informatie verwijderen…
+	Remove invalid links and bookmarks	Ongeldige koppelingen en bladwijzers verwijderen
+	Remove page	Pagina verwijderen
+	Remove redaction marks	Zwartmaakmarkeringen verwijderen
+	Remove saved {what}	Opgeslagen {what} verwijderen
+	Remove security	Beveiliging verwijderen
+	Remove this leaf tag from reading order and mark its direct content as an artifact	Verwijder deze eindtag uit de leesvolgorde en markeer de directe inhoud als een artefact
+	Remove unreferenced named destinations	Niet-gebruikte benoemde bestemmingen verwijderen
+	Remove unused objects and merge identical ones	Ongebruikte objecten verwijderen en identieke samenvoegen
+	Remove watermark	Watermerk verwijderen
+	Remove {name}	{name} verwijderen
+	Remove {name} from Recent	{name} verwijderen uit recente bestanden
+	Remove {n} files	{n} bestanden verwijderen
+	Remove {n} pages	{n} pagina's verwijderen
+	Remove {standard} identification	{standard}-identificatie verwijderen
+	Removed 1 hidden item. Save to remove them from the file.	1 verborgen item verwijderd. Sla op om het uit het bestand te verwijderen.
+	Removed 1 link	1 koppeling verwijderd
+	Removed {n} hidden items. Save to remove them from the file.	{n} verborgen items verwijderd. Sla op om ze uit het bestand te verwijderen.
+	Removed {n} links	{n} koppelingen verwijderd
+	Removing the background puts the page's own backdrop back.	Als je de achtergrond verwijdert, komt de eigen achtergrond van de pagina terug.
+	Rename	Naam wijzigen
+	Rename bookmark	Bladwijzer hernoemen
+	Rendering: hayro (bootstrap) · UI: egui · Icons: Lucide (ISC) · Fonts: Inter, JetBrains Mono, Dancing Script (OFL)	Renderen: hayro (bootstrap) · UI: egui · Pictogrammen: Lucide (ISC) · Lettertypen: Inter, JetBrains Mono, Dancing Script (OFL)
+	Rendering…	Tekenen…
+	Reopen Closed Tab	Gesloten tabblad opnieuw openen
+	Reopen the files that were open when PdfCraft last closed	De bestanden opnieuw openen die openstonden toen PdfCraft voor het laatst sloot
+	Repair log	Herstellog
+	Repairs	Reparaties
+	Repeat overlay text	Overlaytekst herhalen
+	Repeated navigation links should be skippable. Check links that appear on every page.	Herhaalde navigatiekoppelingen moeten overgeslagen kunnen worden. Controleer koppelingen die op elke pagina staan.
+	Replace document colours	Documentkleuren vervangen
+	Replace image	Afbeelding vervangen
+	Replace Image…	Afbeelding vervangen…
+	Replace page	Pagina vervangen
+	Replace Pages	Pagina's vervangen
+	Replace pages	Pagina's vervangen
+	Replace pages…	Pagina's vervangen…
+	Replace text	Tekst vervangen
+	Replaced	Vervangen
+	Replacement text	Vervangende tekst
+	Replacement: pages of {name}	Vervanging: pagina's van {name}
+	Replaces the existing one on those pages.	Vervangt de bestaande op die pagina's.
+	Replacing images arrives on the web with image file pickers	Afbeeldingen vervangen verschijnt op het web met bestandskiezers voor afbeeldingen
+	Replacing images on page {p} arrives on the web with image pickers ({i})	Afbeeldingen vervangen op pagina {p} verschijnt op het web met afbeeldingskiezers ({i})
+	Reply	Beantwoorden
+	Report	Rapport
+	Report created	Rapport gemaakt
+	Report Options	Rapportopties
+	Report…	Rapport…
+	Required	Verplicht
+	Requires user to enter a password for:	De gebruiker moet een wachtwoord invoeren voor:
+	Reset a form	Een formulier opnieuw instellen
+	Reset columns	Kolommen terugzetten
+	Reset page size	Paginagrootte terugzetten
+	Reset panel layout	Paneelindeling terugzetten
+	Reset to Initial Visibility	Terugzetten naar de beginzichtbaarheid
+	Reset to printer defaults	Terugzetten naar de printerstandaard
+	Reshape comment	Opmerking vervormen
+	Resize comment	Opmerking vergroten of verkleinen
+	Resize panel window	Deelvenstervenster vergroten of verkleinen
+	Resize panels	Deelvensters vergroten of verkleinen
+	Resize window to initial page	Venster aanpassen aan de beginpagina
+	Restore the last view (page, zoom and page display) when a document is opened again	De laatste weergave (pagina, zoom en paginaweergave) herstellen als een document opnieuw wordt geopend
+	Restrictions	Beperkingen
+	Restrictions lifted	Beperkingen opgeheven
+	Retain existing	Bestaande behouden
+	Rev. {rev}: Certified by an unknown signer	Rev. {rev}: gecertificeerd door een onbekende ondertekenaar
+	Rev. {rev}: Certified by {name}	Rev. {rev}: gecertificeerd door {name}
+	Rev. {rev}: Signed by an unknown signer	Rev. {rev}: ondertekend door een onbekende ondertekenaar
+	Rev. {rev}: Signed by {name}	Rev. {rev}: ondertekend door {name}
+	Reveal in File Explorer	Tonen in Verkenner
+	Reveal in Finder	Tonen in Finder
+	Reverse closed arrow	Omgekeerde gesloten pijl
+	Reverse open arrow	Omgekeerde open pijl
+	Reverse pages	Pagina's omdraaien
+	Reverse the order	De volgorde omdraaien
+	Revert changes	Wijzigingen terugdraaien
+	Revert to the previously saved version of “{name}”? Changes since then can't be undone afterwards.	Terugzetten naar de eerder opgeslagen versie van “{name}”? Wijzigingen daarna kunnen achteraf niet ongedaan worden gemaakt.
+	Reverted to the last saved version	Teruggezet naar de laatst opgeslagen versie
+	Review	Revisie
+	Review & Compare	Controleren en vergelijken
+	Review History	Revisiegeschiedenis
+	Revisions	Revisies
+	Rich Text Format (.rtf)	Rich Text Format (.rtf)
+	Right Edge	Rechterrand
+	Right Footer Text	Rechter voettekst
+	Right Header Text	Rechter koptekst
+	Rotate	Draaien
+	Rotate Clockwise	Rechtsom draaien
+	Rotate clockwise	Rechtsom draaien
+	Rotate Counterclockwise	Linksom draaien
+	Rotate counterclockwise	Linksom draaien
+	Rotate image	Afbeelding draaien
+	Rotate page	Pagina draaien
+	Rotate page {label} clockwise	Pagina {label} rechtsom draaien
+	Rotate page {label} counterclockwise	Pagina {label} linksom draaien
+	Rotate Pages	Pagina's draaien
+	Rotate pages	Pagina's draaien
+	Rotate pages clockwise	Pagina's rechtsom draaien
+	Rotate pages counterclockwise	Pagina's linksom draaien
+	Rotate pages…	Pagina's draaien…
+	Rotate the selected pages clockwise	De geselecteerde pagina's rechtsom draaien
+	Rotate the selected pages counterclockwise	De geselecteerde pagina's linksom draaien
+	Rotate view	Weergave draaien
+	Rotate view clockwise	Weergave rechtsom draaien
+	Rotate view clockwise ({key})	Weergave rechtsom draaien ({key})
+	Rotate view clockwise (⇧⌘+)	Weergave rechtsom draaien (⇧⌘+)
+	Rotate view counterclockwise	Weergave linksom draaien
+	Rotate:	Draaien:
+	Rotation	Draaiing
+	Rotation:	Draaiing:
+	Row spacing	Rijafstand
+	rows have between {min} and {max} columns	rijen hebben tussen {min} en {max} kolommen
+	Rule Name	Regelnaam
+	Run	Uitvoeren
+	Run a JavaScript	Een JavaScript uitvoeren
+	Run form script	Formulierscript uitvoeren
+	Run JavaScript	JavaScript uitvoeren
+	Running action… file {d} of {t}	Actie uitvoeren… bestand {d} van {t}
+calendar weekday	Sa	Za
+	Same as interface ({language})	Zelfde als de interface ({language})
+	Sanitize	Opschonen
+	Sanitize document	Document opschonen
+	Sanitize Documents	Documenten opschonen
+	Sanitize document…	Document opschonen…
+	Sanitizing removes hidden information from the document: metadata, file attachments, comments, form fields (flattened), hidden text and layers, bookmarks, links, actions and scripts, and private application data.	Opschonen verwijdert verborgen informatie uit het document: metagegevens, bestandsbijlagen, opmerkingen, formuliervelden (afgevlakt), verborgen tekst en lagen, bladwijzers, koppelingen, acties en scripts, en privégegevens van toepassingen.
+	Save & Close	Opslaan en sluiten
+	Save (M4)	Opslaan (M4)
+	Save ({key})	Opslaan ({key})
+	Save anyway	Toch opslaan
+	Save as PDF/A	Opslaan als PDF/A
+	Save as PDF/A-1b	Opslaan als PDF/A-1b
+	Save as PDF/A-2b	Opslaan als PDF/A-2b
+	Save as PDF/A-3b	Opslaan als PDF/A-3b
+	Save as PDF/UA	Opslaan als PDF/UA
+	Save as PDF/X	Opslaan als PDF/X
+	Save as {level}	Opslaan als {level}
+	Save as…	Opslaan als…
+	Save attachment…	Bijlage opslaan…
+	Save changes to “{name}” before closing?	Wijzigingen in “{name}” opslaan voordat je sluit?
+	Save changes?	Wijzigingen opslaan?
+	Save file	Bestand opslaan
+	Save image	Afbeelding opslaan
+	Save Image As…	Afbeelding opslaan als…
+	Save or revert changes before selecting another tag.	Sla wijzigingen op of maak ze ongedaan voordat je een andere tag kiest.
+	Save over the changed file?	Opslaan over het gewijzigde bestand?
+	Save pages	Pagina's opslaan
+	Save tag properties	Tageigenschappen opslaan
+	Save the accessibility report	Het toegankelijkheidsrapport opslaan
+	Save the document afterwards: saving rewrites the whole file so no trace of the removed content stays in it.	Sla het document daarna op: opslaan herschrijft het hele bestand, zodat er geen spoor van de verwijderde inhoud in achterblijft.
+	Save the document afterwards; saving rewrites the whole file so nothing removed stays in it.	Sla het document daarna op; opslaan herschrijft het hele bestand, zodat niets wat is verwijderd erin achterblijft.
+	Save the spreadsheet	Het rekenblad opslaan
+	Save these pages as one PDF	Deze pagina's opslaan als één PDF
+	Saved measurements	Opgeslagen metingen
+	Saved measurements.	Opgeslagen metingen.
+	Saved the print-ready PDF to {path}	De afdrukklare PDF opgeslagen in {path}
+	Saved {name}	{name} opgeslagen
+	Saved {place}: {before} → {after} (not smaller){detail}	{place} opgeslagen: {before} → {after} (niet kleiner){detail}
+	Saved {place}: {before} → {after} ({pct}% smaller){detail}	{place} opgeslagen: {before} → {after} ({pct}% kleiner){detail}
+	Saved, but reopening failed: {e}	Opgeslagen, maar opnieuw openen mislukte: {e}
+	Scale relative to target page	Schalen ten opzichte van de doelpagina
+	Scan	Scannen
+	Scan & OCR	Scannen en OCR
+	Screen flicker	Schermflikkering
+	Screen readers choose their voice from the document's language. Set it in Document Properties > Advanced > Language.	Schermlezers kiezen hun stem op basis van de taal van het document. Stel die in via Documenteigenschappen > Geavanceerd > Taal.
+	Script	Script
+	Script Name:	Scriptnaam:
+	Script:	Script:
+	Scripted content must be usable with a keyboard and assistive technology. Check the document's scripts.	Inhoud met scripts moet met een toetsenbord en hulptechnologie te gebruiken zijn. Controleer de scripts van het document.
+	Scripts run in a sandbox without file or network access. A script that asks to open a web page needs your permission first. With JavaScript off, Acrobat's standard format, validate and calculate functions still work.	Scripts draaien in een sandbox zonder toegang tot bestanden of het netwerk. Een script dat een webpagina wil openen, heeft eerst jouw toestemming nodig. Met JavaScript uit werken de standaardfuncties van Acrobat voor opmaak, validatie en berekening nog steeds.
+	Scripts run in a sandbox without file or network access. With JavaScript off, Acrobat's standard format, validate and calculate functions still work.	Scripts draaien in een sandbox zonder toegang tot bestanden of het netwerk. Met JavaScript uit werken de standaardfuncties van Acrobat voor opmaak, validatie en berekening nog wel.
+	Scroll long text	Lange tekst schuiven
+	Scroll speed (mouse wheel and arrow keys)	Scrollsnelheid (muiswiel en pijltoetsen)
+	Scroll tabs left	Tabbladen naar links schuiven
+	Scroll tabs right	Tabbladen naar rechts schuiven
+	Search comments	Opmerkingen doorzoeken
+	Search results	Zoekresultaten
+	Search tools and commands	Gereedschappen en opdrachten zoeken
+	Search tools and commands…	Gereedschappen en opdrachten zoeken…
+	Search tools…	Gereedschappen zoeken…
+	Searchable Image (Exact)	Doorzoekbare afbeelding (exact)
+	Searching… {s} of {p} pages	Zoeken… {s} van {p} pagina's
+	Searching… {s}/{p}	Zoeken… {s}/{p}
+	Search…	Zoeken…
+	Security method	Beveiligingsmethode
+	Security properties	Beveiligingseigenschappen
+	Security properties…	Beveiligingseigenschappen…
+	Security settings	Beveiligingsinstellingen
+	Security settings must allow assistive technology to read the content ("Enable text access for screen reader devices"). Change the document's security to allow it.	Beveiligingsinstellingen moeten hulptechnologie de inhoud laten lezen ("Teksttoegang voor schermlezers toestaan"). Wijzig de beveiliging van het document zodat dat mag.
+	Security will be removed when you save	De beveiliging wordt verwijderd als je opslaat
+	Select (V)	Selecteren (V)
+	Select a file first	Kies eerst een bestand
+	Select a file for the stamp	Kies een bestand voor de stempel
+	Select a password-protected file first	Kies eerst een met een wachtwoord beveiligd bestand
+	Select a word	Selecteer een woord
+	Select Action:	Actie kiezen:
+	Select all	Alles selecteren
+	Select all pages (Organize)	Alle pagina's selecteren (Ordenen)
+	Select at most 1000 objects at a time.	Selecteer hoogstens 1000 objecten tegelijk.
+	Select data files to merge	Kies gegevensbestanden om samen te voegen
+	Select files to compare	Bestanden kiezen om te vergelijken
+	Select format category:	Kies een opmaakcategorie:
+	Select Icon	Pictogram kiezen
+	Select page {label}	Pagina {label} selecteren
+	Select pages	Pagina's selecteren
+	Select the items to remove from this document.	Kies de items die je uit dit document wilt verwijderen.
+	Select Tool	Selectiegereedschap
+	Select tools to display on your Home page for quick access.	Kies gereedschappen om op je startpagina te tonen voor snelle toegang.
+	Select Trigger:	Trigger kiezen:
+	Selected image files: {count}	Geselecteerde afbeeldingsbestanden: {count}
+	Selected pages	Geselecteerde pagina's
+	Self-signed	Zelfondertekend
+certificate	Self-signed	Zelfondertekend
+	Send backward	Naar achteren
+	Send to back	Op de achtergrond
+	Sending sheet {s} of {n} to {printer}…	Blad {s} van {n} verzenden naar {printer}…
+	Sending to {printer}…	Verzenden naar {printer}…
+	Sent to {printer}: {msg}	Verzonden naar {printer}: {msg}
+	Separate PDFs	Aparte PDF's
+	Separator style:	Scheidingstekenstijl:
+	September	september
+calendar date	September	september
+	Serial number	Serienummer
+certificate	Serial number	Serienummer
+	Set Alternate Text	Alternatieve tekst instellen
+	Set alternate text	Alternatieve tekst instellen
+	Set bookmark destination	Bestemming van de bladwijzer instellen
+	Set calculation order	Berekeningsvolgorde instellen
+	Set document title	Documenttitel instellen
+	Set Fields to Same Size	Velden dezelfde grootte geven
+	Set layer visibility	Zichtbaarheid van de laag instellen
+	Set measurement scale	Meetschaal instellen
+	Set Page Boxes	Paginavakken instellen
+	Set page boxes	Paginavakken instellen
+	Set page boxes…	Paginavakken instellen…
+	Set page transitions	Paginaovergangen instellen
+	Set properties	Eigenschappen instellen
+	Set status	Status instellen
+	Set status Accepted	Status instellen op Geaccepteerd
+	Set status Cancelled	Status instellen op Geannuleerd
+	Set status Completed	Status instellen op Voltooid
+	Set status None	Status instellen op Geen
+	Set status Rejected	Status instellen op Afgewezen
+	Set status Unmarked	Status instellen op Ongemarkeerd
+	Set tab order	Tabvolgorde instellen
+	Set the image of {name}	De afbeelding van {name} instellen
+	Set to current page ({n})	Instellen op de huidige pagina ({n})
+	Set to zero	Op nul zetten
+	SHA-1 digest	SHA-1-hash
+certificate	SHA-1 digest	SHA-1-hash
+	SHA-256 digest	SHA-256-hash
+certificate	SHA-256 digest	SHA-256-hash
+	Shadings	Kleurverlopen
+	Shared Field Properties	Gedeelde veldeigenschappen
+	Sheet {s} of {n}	Blad {s} van {n}
+key	Shift	Shift
+	Shift constrains to 45 degrees. Backspace removes a vertex. Escape cancels.	Shift beperkt tot 45 graden. Backspace verwijdert een hoekpunt. Escape annuleert.
+	Shift- or Ctrl/Command-click to select several fields.	Shift- of Ctrl/Command-klik om meerdere velden te selecteren.
+	Shift-click to select several objects. Drag empty space to select an area.	Shift-klik om meerdere objecten te selecteren. Sleep over lege ruimte om een gebied te selecteren.
+	ships in milestone {m}	komt in mijlpaal {m}
+	Show a basic title bar for the window buttons instead of the tab strip. GNOME doesn't draw title bars for apps, so this one doesn't follow its theme.	Toon een eenvoudige titelbalk voor de vensterknoppen in plaats van de tabstrook. GNOME tekent geen titelbalken voor apps, dus deze volgt het thema niet.
+	Show a field	Een veld tonen
+	Show a notice when a document is secured	Een melding tonen als een document beveiligd is
+	Show all	Alles tonen
+	Show all comments	Alle opmerkingen tonen
+	Show certificate…	Certificaat tonen…
+	Show cover page in two-page view	Voorblad tonen in de weergave van twee pagina's
+	Show gaps between pages	Tussenruimte tussen pagina's tonen
+	Show layer	Laag tonen
+	Show less	Minder tonen
+	Show on the page which fields each field reads	Toon op de pagina welke velden elk veld leest
+	Show Page Edge Shadows	Paginarandschaduwen tonen
+	Show password	Wachtwoord tonen
+	Show Report	Rapport tonen
+	Show the accessibility report	Het toegankelijkheidsrapport tonen
+	Show this dialog when the Checker starts	Dit venster tonen als de controle start
+	Show {n} more	Nog {n} tonen
+	Show:	Tonen:
+	Shown while the pointer is over a mark.	Zichtbaar zolang de aanwijzer op een markering staat.
+	Shrink oversized pages	Te grote pagina's verkleinen
+	Shrink the page content to make room for the header and footer	De pagina-inhoud verkleinen om ruimte te maken voor de kop- en voettekst
+	Side by side	Naast elkaar
+	Side panels	Zijpanelen
+	Sign	Ondertekenen
+	Sign a sheet of white paper and take a photo of it in bright, even light (use the flash). Choose the photo or drop it here: PdfCraft finds the signature and removes the paper.	Onderteken een vel wit papier en maak er een foto van bij helder, gelijkmatig licht (gebruik de flitser). Kies de foto of zet die hier neer: PdfCraft vindt de handtekening en verwijdert het papier.
+	Sign Here	Hier tekenen
+	Sign this field…	Dit veld ondertekenen…
+	Sign with a Digital ID	Ondertekenen met een digitale id
+	Sign yourself	Zelf ondertekenen
+	Signature	Handtekening
+	signature	handtekening
+	Signature Details	Details van de handtekening
+	Signature is invalid	Handtekening is ongeldig
+	Signature is INVALID:	Handtekening is ONGELDIG:
+	Signature is valid	Handtekening is geldig
+	Signature is valid:	Handtekening is geldig:
+	Signature panel	Handtekeningenpaneel
+	Signature validity is unknown	Geldigheid van de handtekening is onbekend
+	Signature validity is UNKNOWN:	Geldigheid van de handtekening is ONBEKEND:
+	Signatures	Handtekeningen
+	Signatures panel	Handtekeningenpaneel
+	Signed and all signatures are valid.	Ondertekend en alle handtekeningen zijn geldig.
+	Signed and saved to {path}	Ondertekend en opgeslagen in {path}
+	Signer	Ondertekenaar
+	Signer's name	Naam van de ondertekenaar
+	Signing time	Tijdstip van ondertekening
+	Signing time is from the clock on the signer's computer.	Het ondertekenmoment komt van de klok op de computer van de ondertekenaar.
+	Simplified field notation:	Vereenvoudigde veldnotatie:
+	Single file	Eén bestand
+	Single Page	Eén pagina
+	Single page	Eén pagina
+	Single Page Continuous	Eén pagina, doorlopend
+	Single word or phrase	Eén woord of zin
+	Skip Rule	Regel overslaan
+	Skipped	Overgeslagen
+	Slash	Schuine streep
+scroll speed	Slow	Langzaam
+	Smaller pages	Kleinere pagina's
+	Smaller thumbnails	Kleinere miniaturen
+	Snap to drawing	Vastklikken op de tekening
+	Snapping	Vastklikken
+	Social Security Number	Socialezekerheidsnummer
+	Social Security Numbers	Socialezekerheidsnummers
+	Solid	Doorgetrokken
+	Some bookmarks are not shown here: the panel lists a limited number, nested a limited depth.	Sommige bladwijzers worden hier niet getoond: het paneel toont een beperkt aantal, tot een beperkte diepte genest.
+	Some content could not be classified safely and was kept in the count.	Sommige inhoud kon niet veilig worden ingedeeld en is meegeteld.
+	Some names are built as it runs	Sommige namen worden tijdens het uitvoeren opgebouwd
+	Some page content couldn't be read; snapping uses the rest.	Een deel van de pagina-inhoud kon niet worden gelezen; vastklikken gebruikt de rest.
+	Some pages contain no countable text. Scanned images need OCR first.	Sommige pagina's bevatten geen telbare tekst. Gescande afbeeldingen hebben eerst OCR nodig.
+	Sort by	Sorteren op
+	Sort comments by:	Opmerkingen sorteren op:
+	Sort items	Items sorteren
+	sorted ascending	oplopend gesorteerd
+	sorted descending	aflopend gesorteerd
+key	Space	Spatiebalk
+	Space Audit	Ruimtecontrole
+	Special	Speciaal
+	Split	Splitsen
+	Split document	Document splitsen
+	Split document…	Document splitsen…
+	Split into files…	Splitsen in bestanden…
+	Spreadsheet (.xlsx)	Rekenblad (.xlsx)
+	Squiggly	Golvend
+	Squiggly underline	Golvende onderstreping
+	Squiggly underline text	Tekst golvend onderstrepen
+	Stamp palette	Stempelpalet
+	Stamps	Stempels
+	Standard Business	Standaard zakelijk
+	Standards	Standaarden
+	Start	Starten
+action wizard	Start	Starten
+	Start Checking	Controle starten
+	Start page number	Eerste paginanummer
+	Steps	Stappen
+	Sticky note	Notitie
+	Still rendering — this page is unusually complex…	Nog aan het tekenen — deze pagina is ongewoon complex…
+	Strength: {s}	Sterkte: {s}
+	Strikethrough text	Tekst doorhalen
+	Strong	Sterk
+	Structure Info	Structuurinformatie
+calendar weekday	Su	Zo
+certificate	Subject	Houder
+	Submit a form	Een formulier verzenden
+	Subscript	Onderschrift
+	Subset	Deelverzameling
+	Success	Geslaagd
+	sum (+)	som (+)
+	Summarize	Samenvatten
+	Summarize comments	Opmerkingen samenvatten
+	Summarize Options	Opties voor het overzicht
+	Summary	Overzicht
+	Superscript	Bovenschrift
+	Switch light / dark theme	Wisselen tussen licht en donker thema
+	Switch to List view to change the pages it takes.	Schakel over naar de lijstweergave om de pagina's die het neemt te wijzigen.
+	Switch to two-page view first to show the cover page	Schakel eerst over naar de weergave van twee pagina's om het voorblad te tonen
+	Tab order	Tabvolgorde
+	Tab order by columns	Tabvolgorde per kolom
+	Tab order by rows	Tabvolgorde per rij
+	Tab order is consistent with structure order	De tabvolgorde komt overeen met de structuurvolgorde
+	Tab order: by columns	Tabvolgorde: per kolom
+	Tab order: by document structure	Tabvolgorde: volgens de documentstructuur
+	Tab order: by rows	Tabvolgorde: per rij
+	Tab order: move a field with its arrows.	Tabvolgorde: verplaats een veld met de pijlen.
+	Table cells belong in a row. Fix the table's tags.	Tabelcellen horen in een rij. Herstel de tags van de tabel.
+	Table rows belong directly in a table or its head, body or foot. Fix the table's tags.	Tabelrijen horen direct in een tabel of in de kop, de inhoud of de voet ervan. Herstel de tags van de tabel.
+	Tables	Tabellen
+	Tables must contain the same number of columns in each row and rows in each column	Tabellen moeten in elke rij evenveel kolommen hebben en in elke kolom evenveel rijen
+	Tables must have a summary	Tabellen moeten een samenvatting hebben
+	Tables should have headers	Tabellen horen koppen te hebben
+	Tag form fields	Formuliervelden taggen
+	Tag type	Tagtype
+	Tagged annotations	Getagde annotaties
+	Tagged content	Getagde inhoud
+	Tagged form fields	Getagde formuliervelden
+	Tagged multimedia	Getagde multimedia
+	Tagged PDF	Getagde PDF
+	Tags	Tags
+	Tags give the document a logical structure that assistive technology follows. Tag the document (Automatically tag PDF).	Tags geven het document een logische structuur die hulptechnologie volgt. Voorzie het document van tags (PDF automatisch taggen).
+	Tags panel	Deelvenster Tags
+	Take a snapshot	Een momentopname maken
+	Text (plain)	Tekst (plat)
+	Text alignment:	Tekstuitlijning:
+	Text box	Tekstvak
+	Text Color:	Tekstkleur:
+	Text editing line	Regel voor tekstbewerking
+	Text field	Tekstveld
+	Text Field Properties	Eigenschappen van het tekstveld
+	Text Field Table	Tabel met tekstvelden
+	Text field table	Tabel met tekstvelden
+	Text in images isn't found; recognise text (OCR) first.	Tekst in afbeeldingen wordt niet gevonden; herken de tekst eerst (OCR).
+	Text is compared word by word; the differences are shown on the new file.	Tekst wordt woord voor woord vergeleken; de verschillen staan in het nieuwe bestand.
+	Text language is specified	De taal van de tekst is opgegeven
+	Text must contrast enough with its background for people with low vision. Check the colours by eye or with a contrast tool.	Tekst moet genoeg contrast hebben met de achtergrond voor mensen die slecht zien. Controleer de kleuren op het oog of met een contrastgereedschap.
+	Text recognition is already running	Tekstherkenning is al bezig
+	Text recognition isn't installed: its model files are missing. Reinstall PdfCraft, or set PDFCRAFT_MODELS to the folder that holds them.	Tekstherkenning is niet geïnstalleerd: de modelbestanden ontbreken. Installeer PdfCraft opnieuw, of stel PDFCRAFT_MODELS in op de map waarin ze staan.
+	Text recognition isn't installed: its models are missing (run `cargo xtask models`, or set PDFCRAFT_MODELS).	Tekstherkenning is niet geïnstalleerd: de modellen ontbreken (voer `cargo xtask models` uit, of stel PDFCRAFT_MODELS in).
+	Text to find	Te zoeken tekst
+	Text to insert	In te voegen tekst
+	Text to place	Te plaatsen tekst
+	Text used as a clipping path cannot be moved with this selection.	Tekst die als uitknippad wordt gebruikt, kan met deze selectie niet worden verplaatst.
+	Text, marks and signatures become part of the page. Other comments stay editable.	Tekst, markeringen en handtekeningen worden deel van de pagina. Andere opmerkingen blijven bewerkbaar.
+calendar weekday	Th	Do
+	TH and TD	TH en TD
+	TH and TD must be children of TR	TH en TD moeten kinderen van TR zijn
+	Thai and Arabic use regular fallback fonts when available.	Thai en Arabisch gebruiken gewone reservetypes als die beschikbaar zijn.
+	That didn't work: an internal error stopped it ({m}).	Dat is niet gelukt: een interne fout heeft het gestopt ({m}).
+	That didn't work: an internal error stopped it ({m}). Your documents are unchanged.	Dat is niet gelukt: een interne fout heeft het gestopt ({m}). Je documenten zijn ongewijzigd.
+	the area, the spacing and the column widths must be numbers, the spacing 0 or more and each width more than 0	het gebied, de afstand en de kolombreedten moeten getallen zijn, de afstand 0 of meer en elke breedte meer dan 0
+@plural	The calculation order has {n} entry that calculates nothing. Fix order removes it.|The calculation order has {n} entries that calculate nothing. Fix order removes them.	De berekeningsvolgorde heeft {n} vermelding die niets berekent. Volgorde herstellen verwijdert die.|De berekeningsvolgorde heeft {n} vermeldingen die niets berekenen. Volgorde herstellen verwijdert ze.
+	The certificate of {} does not allow this many CA certificates below it (path length), so it is not used to vouch for {}.	Het certificaat van {} staat niet zoveel CA-certificaten eronder toe (padlengte), dus het wordt niet gebruikt om voor {} in te staan.
+	The certificate of {} has critical extensions PdfCraft does not recognize, so it is not used to vouch for {}.	Het certificaat van {} heeft kritieke extensies die PdfCraft niet herkent, dus het wordt niet gebruikt om voor {} in te staan.
+	The certificate of {} is not a CA certificate that may issue certificates, so it is not used to vouch for {}.	Het certificaat van {} is geen CA-certificaat dat certificaten mag uitgeven, dus het wordt niet gebruikt om voor {} in te staan.
+	The certificate of {} was not valid at the time of signing, so it is not used to vouch for {}.	Het certificaat van {} was op het moment van ondertekenen niet geldig, dus het wordt niet gebruikt om voor {} in te staan.
+	The checker found 1 problem which may prevent the document from being fully accessible.	De controle vond 1 probleem dat kan verhinderen dat het document volledig toegankelijk is.
+	The checker found no problems in this document.	De controle vond geen problemen in dit document.
+	The checker found problems which may prevent the document from being fully accessible.	De controle vond problemen die kunnen verhinderen dat het document volledig toegankelijk is.
+	The checker found {n} problems which may prevent the document from being fully accessible.	De controle vond {n} problemen die kunnen verhinderen dat het document volledig toegankelijk is.
+	The clipboard has no image or text	Het klembord bevat geen afbeelding of tekst
+	The document changed while you were choosing a file, so nothing was changed.	Het document is gewijzigd terwijl je een bestand koos, dus er is niets veranderd.
+	The document changed while you were editing field properties.	Het document is gewijzigd terwijl je de veldeigenschappen bewerkte.
+	The document has additional actions (/AA)	Het document heeft extra acties (/AA)
+	The document has been altered or corrupted since the signature was applied.	Het document is gewijzigd of beschadigd nadat de handtekening is geplaatst.
+	The document has been altered or corrupted since the timestamp was applied.	Het document is gewijzigd of beschadigd nadat het tijdstempel is geplaatst.
+	The document has been altered since this signature was applied in ways it does not permit ({}).	Het document is gewijzigd nadat deze handtekening is geplaatst, op manieren die hij niet toestaat ({}).
+	The document has been altered since this timestamp was applied in ways it does not permit ({}).	Het document is gewijzigd nadat dit tijdstempel is geplaatst, op manieren die het niet toestaat ({}).
+	The document has been modified since this signature was applied, but the changes are permitted ({}).	Het document is gewijzigd nadat deze handtekening is geplaatst, maar de wijzigingen zijn toegestaan ({}).
+	The document has been modified since this timestamp was applied, but the changes are permitted ({}).	Het document is gewijzigd nadat dit tijdstempel is geplaatst, maar de wijzigingen zijn toegestaan ({}).
+	The document has document-level JavaScript	Het document heeft JavaScript op documentniveau
+	the document has no form fields	het document heeft geen formuliervelden
+	the document has no page tree	het document heeft geen paginastructuur
+	the document has no tags	het document heeft geen tags
+	The document has no tags (structure tree)	Het document heeft geen tags (structuurboom)
+	The document has no title	Het document heeft geen titel
+	The document has no XMP metadata	Het document heeft geen XMP-metagegevens
+	The document is encrypted	Het document is versleuteld
+	The document is no longer open.	Het document is niet meer geopend.
+	the document is protected by a password	het document is beveiligd met een wachtwoord
+	The document isn't marked as tagged (MarkInfo Marked)	Het document is niet gemarkeerd als getagd (MarkInfo Marked)
+	The document isn't tagged, so none of its content is	Het document is niet getagd, dus geen van de inhoud is dat
+	The document now conforms to {level}; save it to keep the changes	Het document voldoet nu aan {level}; sla het op om de wijzigingen te bewaren
+	The document opens without a password; this password is needed to change the restrictions. It's applied when you save.	Het document opent zonder wachtwoord; dit wachtwoord is nodig om de beperkingen te wijzigen. Het wordt toegepast als je opslaat.
+	The document was closed before it could be saved.	Het document is gesloten voordat het kon worden opgeslagen.
+	The document's embedded revocation information shows that the signer's certificate has not been revoked.	De ingesloten intrekkingsgegevens van het document tonen dat het certificaat van de ondertekenaar niet is ingetrokken.
+	The document's security settings don't allow copying text and images	De beveiligingsinstellingen van het document staan het kopiëren van tekst en afbeeldingen niet toe
+	The document's security settings don't allow filling in form fields	De beveiligingsinstellingen van het document staan het invullen van formuliervelden niet toe
+	The document's security settings don't allow printing	De beveiligingsinstellingen van het document staan afdrukken niet toe
+	The document's security settings don't allow this change	De beveiligingsinstellingen van het document staan deze wijziging niet toe
+	The ECDSA signature is not in canonical DER (trailing bytes, padding or a missing sign byte); it was read anyway.	De ECDSA-handtekening staat niet in canonieke DER (nakomende bytes, opvulling of een ontbrekend tekenbyte); hij is toch gelezen.
+	The ECDSA signature is the raw r and s values instead of a DER sequence; it was read anyway.	De ECDSA-handtekening bevat de ruwe waarden r en s in plaats van een DER-reeks; hij is toch gelezen.
+	The embedded timestamp token is valid and its authority is trusted; trusted time is {}.	Het ingesloten tijdstempeltoken is geldig en de autoriteit is vertrouwd; de vertrouwde tijd is {}.
+	The existing action will be preserved.	De bestaande actie blijft behouden.
+	The field properties could not be changed.	De veldeigenschappen konden niet worden gewijzigd.
+	The field properties dialog is no longer open.	Het dialoogvenster voor veldeigenschappen is niet meer geopend.
+	The field {name} no longer exists.	Het veld {name} bestaat niet meer.
+	the first heading is an H{n}; headings should not skip levels	de eerste kop is een H{n}; koppen mogen geen niveaus overslaan
+	the first row number can be at most {max}	het nummer van de eerste rij kan hoogstens {max} zijn
+	The font {} isn't embedded	Het lettertype {} is niet ingesloten
+	The fonts PdfCraft writes with can't draw “{c}” ({code}), so it shows as ? in every PDF viewer. The text is saved.	De lettertypen waarmee PdfCraft schrijft, kunnen “{c}” ({code}) niet tekenen, dus het wordt een ? in elke PDF-viewer. De tekst wordt wel opgeslagen.
+	The form asks to be submitted to {u}; PdfCraft doesn't send form data. Save the document to keep your entries.	Het formulier wil worden verzonden naar {u}; PdfCraft verstuurt geen formuliergegevens. Sla het document op om je invoer te bewaren.
+	The form asks viewers to make appearances (NeedAppearances)	Het formulier vraagt viewers om weergaven te maken (NeedAppearances)
+	The image has been copied ({w} × {h} pixels)	De afbeelding is gekopieerd ({w} × {h} pixels)
+	The image has been copied as a {ext} file	De afbeelding is gekopieerd als een {ext}-bestand
+	the image is empty	de afbeelding is leeg
+	The key is in the macOS Keychain, which may ask to allow PdfCraft to use it.	De sleutel staat in de macOS-sleutelhanger, die kan vragen of PdfCraft hem mag gebruiken.
+	The key is in the Windows certificate store, which may ask to allow PdfCraft to use it.	De sleutel staat in het Windows-certificaatarchief, dat kan vragen of PdfCraft hem mag gebruiken.
+	The Keychain's digital IDs couldn't be listed: {e}	De digitale id's van de sleutelhanger konden niet worden opgevraagd: {e}
+	The labels are in English: the signature's font can't draw them in this language.	De labels staan in het Engels: het lettertype van de handtekening kan ze in deze taal niet tekenen.
+	The linked PDF opened, but its named destination was not applied.	De gekoppelde PDF is geopend, maar de benoemde bestemming is niet toegepast.
+	The linked PDF opened, but its page destination was out of range.	De gekoppelde PDF is geopend, maar de paginabestemming viel buiten het bereik.
+	The metadata doesn't identify the file as {}	De metagegevens identificeren het bestand niet als {}
+	the name is not a plain file name	de naam is geen gewone bestandsnaam
+	The newest {n} of {total} PDFs	De nieuwste {n} van {total} PDF's
+	The operation failed.	De bewerking is mislukt.
+	The order saved in the PDF needs tidying	De volgorde die in de PDF is opgeslagen, moet worden opgeschoond
+	The page has changed; select the image again	De pagina is gewijzigd; selecteer de afbeelding opnieuw
+	The pages were extracted but not deleted, because the document changed while you were choosing a folder.	De pagina's zijn geëxtraheerd maar niet verwijderd, omdat het document is gewijzigd terwijl je een map koos.
+	the password is incorrect	het wachtwoord is onjuist
+	The password is incorrect.	Het wachtwoord is onjuist.
+	The password is only used to read the file; it isn't saved.	Het wachtwoord wordt alleen gebruikt om het bestand te lezen; het wordt niet opgeslagen.
+	The password must have at least 6 characters.	Het wachtwoord moet minstens 6 tekens hebben.
+	The password must have at least 8 characters.	Het wachtwoord moet minstens 8 tekens hebben.
+	The passwords do not match.	De wachtwoorden komen niet overeen.
+	The passwords don't match.	De wachtwoorden komen niet overeen.
+	The PDF text fonts can't draw “{c}” ({code}). Choose supported text.	De PDF-tekstlettertypen kunnen “{c}” ({code}) niet tekenen. Kies tekst die ze wel kunnen.
+	The printer driver's own settings for this print: paper tray, paper type, finishing and more.	De eigen instellingen van het printerstuurprogramma voor deze afdruk: papierlade, papiersoort, afwerking en meer.
+	The replacement file doesn't have that many pages.	Het vervangende bestand heeft niet zoveel pagina's.
+	the rows are too short: make the area taller, or use fewer rows or less row spacing	de rijen zijn te kort: maak het gebied hoger, of gebruik minder rijen of minder rijafstand
+	The RSA signature value does not have the length of the key's modulus (leading zero bytes dropped or added); it was read anyway.	De RSA-handtekeningwaarde heeft niet de lengte van de modulus van de sleutel (voorloopnullen weggevallen of toegevoegd); hij is toch gelezen.
+	The RSA signature's DigestInfo has no NULL parameter (older signers write it so); it was read anyway.	De DigestInfo van de RSA-handtekening heeft geen NULL-parameter (oudere ondertekenaars schrijven hem zo); hij is toch gelezen.
+	The same password is tried on each file.	Hetzelfde wachtwoord wordt bij elk bestand geprobeerd.
+	The security settings don't allow screen readers to read the text	De beveiligingsinstellingen staan schermlezers niet toe de tekst te lezen
+	The selected area has been copied ({w} × {h} pixels)	Het geselecteerde gebied is gekopieerd ({w} × {h} pixels)
+	The selected fields could not be found. Select them again.	De geselecteerde velden zijn niet gevonden. Selecteer ze opnieuw.
+	The signature algorithm and the SignerInfo's digest algorithm name different hashes; the signature was made with the SignerInfo's.	Het handtekeningalgoritme en de digest-algoritmenaam van de SignerInfo noemen verschillende hashes; de handtekening is gemaakt met die van de SignerInfo.
+	The signature carries an unverified timestamp ({}): the timestamp authority is not in your list of trusted certificates, so the signing time claimed by the signer is used instead.	De handtekening bevat een niet-geverifieerd tijdstempel ({}): de tijdstempelautoriteit staat niet in je lijst met vertrouwde certificaten, dus het ondertekenmoment dat de ondertekenaar opgeeft, wordt gebruikt.
+	The signature contents are not hexadecimal.	De inhoud van de handtekening is niet hexadecimaal.
+	The signature could not be checked ({}).	De handtekening kon niet worden gecontroleerd ({}).
+	The signature could not be read ({}).	De handtekening kon niet worden gelezen ({}).
+	The signature could not be verified ({}).	De handtekening kon niet worden geverifieerd ({}).
+	The signature has no valid byte range.	De handtekening heeft geen geldig bytebereik.
+	The signature includes an embedded timestamp.	De handtekening bevat een ingesloten tijdstempel.
+	The signature is BER-encoded (indefinite lengths) rather than DER; it was read leniently.	De handtekening is BER-gecodeerd (onbepaalde lengtes) in plaats van DER; hij is soepel gelezen.
+	The signature uses the legacy adbe.x509.rsa_sha1 format.	De handtekening gebruikt de verouderde indeling adbe.x509.rsa_sha1.
+	The signature value does not match the signer's certificate: the signature is corrupt.	De handtekeningwaarde komt niet overeen met het certificaat van de ondertekenaar: de handtekening is beschadigd.
+	The signature will be invisible.	De handtekening wordt onzichtbaar.
+	The signature's byte range does not exclude exactly its contents.	Het bytebereik van de handtekening sluit niet precies de inhoud uit.
+	The signature's byte range does not match the file.	Het bytebereik van de handtekening komt niet overeen met het bestand.
+	The signature's signed attributes have no content type, which CMS requires; it was read anyway.	De ondertekende attributen van de handtekening hebben geen inhoudstype, wat CMS vereist; hij is toch gelezen.
+	The signature's signed attributes have no message digest, so the signature does not cover the document.	De ondertekende attributen van de handtekening hebben geen berichtsamenvatting, dus de handtekening dekt het document niet.
+	The signature's signed attributes name a content type other than data, so it is not a signature of the document.	De ondertekende attributen van de handtekening noemen een ander inhoudstype dan data, dus het is geen handtekening van het document.
+	The signature's timestamp token could not be verified ({}).	Het tijdstempeltoken van de handtekening kon niet worden geverifieerd ({}).
+	The signature's timestamp token does not cover the signature value.	Het tijdstempeltoken van de handtekening dekt de handtekeningwaarde niet.
+	The signed content is a constructed (segmented) OCTET STRING, as BER allows; it was read anyway.	De ondertekende inhoud is een samengestelde (gesegmenteerde) OCTET STRING, zoals BER toestaat; hij is toch gelezen.
+	the signed version could not be read	de ondertekende versie kon niet worden gelezen
+	The signer's certificate does not allow digital signatures (its key usage has neither digital signature nor non-repudiation).	Het certificaat van de ondertekenaar staat digitale handtekeningen niet toe (het sleutelgebruik heeft noch digitale handtekening noch onweerlegbaarheid).
+	The signer's certificate has been revoked ({}).	Het certificaat van de ondertekenaar is ingetrokken ({}).
+	The signer's certificate has critical extensions PdfCraft does not recognize ({}).	Het certificaat van de ondertekenaar heeft kritieke extensies die PdfCraft niet herkent ({}).
+	The signer's certificate is not in the signature.	Het certificaat van de ondertekenaar staat niet in de handtekening.
+	The signer's certificate is not issued for signing documents (its extended key usage has no document-signing purpose).	Het certificaat van de ondertekenaar is niet bedoeld om documenten te ondertekenen (het uitgebreide sleutelgebruik heeft geen doel voor documentondertekening).
+	The signer's certificate was not valid at the time of signing.	Het certificaat van de ondertekenaar was op het moment van ondertekenen niet geldig.
+	The signer's identity is unknown because it has not been included in your list of trusted certificates and none of its parent certificates are trusted certificates.	De identiteit van de ondertekenaar is onbekend omdat die niet in je lijst met vertrouwde certificaten staat en geen van de bovenliggende certificaten vertrouwd is.
+	The signer's identity is valid.	De identiteit van de ondertekenaar is geldig.
+	The standard fonts can't draw “{c}” ({code}). Only Western European characters can be added as text for now.	De standaardlettertypen kunnen “{c}” ({code}) niet tekenen. Voorlopig kunnen alleen West-Europese tekens als tekst worden toegevoegd.
+	The text is the same	De tekst is hetzelfde
+	the text recognition models are not installed (reinstall PdfCraft, or set PDFCRAFT_MODELS to the folder that holds them)	de tekstherkenningsmodellen zijn niet geïnstalleerd (installeer PdfCraft opnieuw, of stel PDFCRAFT_MODELS in op de map waarin ze staan)
+	The timestamp authority's certificate is not issued for time stamping.	Het certificaat van de tijdstempelautoriteit is niet bedoeld voor tijdstempels.
+	The timestamp authority's certificate was not valid at the time of timestamping.	Het certificaat van de tijdstempelautoriteit was op het moment van het tijdstempel niet geldig.
+	The timestamp contents are not hexadecimal.	De inhoud van het tijdstempel is niet hexadecimaal.
+	The timestamp has no valid byte range.	Het tijdstempel heeft geen geldig bytebereik.
+	The timestamp token could not be read ({}).	Het tijdstempeltoken kon niet worden gelezen ({}).
+	The timestamp token is valid and its authority is trusted.	Het tijdstempeltoken is geldig en de autoriteit is vertrouwd.
+	The timestamp token is valid, but the timestamp authority is not in your list of trusted certificates.	Het tijdstempeltoken is geldig, maar de tijdstempelautoriteit staat niet in je lijst met vertrouwde certificaten.
+	The timestamp's byte range does not exclude exactly its contents.	Het bytebereik van het tijdstempel sluit niet precies de inhoud uit.
+	The timestamp's byte range does not match the file.	Het bytebereik van het tijdstempel komt niet overeen met het bestand.
+	The title in the metadata and the document information differ	De titel in de metagegevens en de documentinformatie verschillen
+	the title must not be empty	de titel mag niet leeg zijn
+	The value is shown as typed.	De waarde wordt getoond zoals hij is getypt.
+	The window should show a meaningful title rather than the file name. Set a title and Initial View > Show: Document Title.	Het venster hoort een betekenisvolle titel te tonen in plaats van de bestandsnaam. Stel een titel in en Beginweergave > Tonen: Documenttitel.
+	The window shows the file name, not the title (Initial View > Show)	Het venster toont de bestandsnaam, niet de titel (Beginweergave > Tonen)
+	The Windows store's digital IDs couldn't be listed: {e}	De digitale id's van het Windows-archief konden niet worden opgevraagd: {e}
+	there are no pages to print	er zijn geen pagina's om af te drukken
+	There are no redaction marks (mark text, areas or pages first)	Er zijn geen zwartmaakmarkeringen (markeer eerst tekst, gebieden of pagina's)
+	There are no redaction marks to apply	Er zijn geen zwartmaakmarkeringen om toe te passen
+	there are no redaction marks to apply	er zijn geen zwartmaakmarkeringen om toe te passen
+	There is no folder to save the digital ID in.	Er is geen map om de digitale id in op te slaan.
+	These files can't be read, so they won't be in the combined PDF:	Deze bestanden kunnen niet worden gelezen, dus ze komen niet in de gecombineerde PDF:
+	These objects could not be moved. Select them again and try a smaller move.	Deze objecten konden niet worden verplaatst. Selecteer ze opnieuw en probeer een kleinere verplaatsing.
+	Thick	Dik
+	Thin	Dun
+	This area has too many overlapping paths; intersection snapping is limited.	Dit gebied heeft te veel overlappende paden; vastklikken op snijpunten is beperkt.
+	This certificate is in your list of trusted certificates.	Dit certificaat staat in je lijst met vertrouwde certificaten.
+	This certificate is not trusted. Signatures made with it show an unknown identity.	Dit certificaat is niet vertrouwd. Handtekeningen die ermee zijn gemaakt, tonen een onbekende identiteit.
+	This certificate is trusted through a certificate above it in the chain.	Dit certificaat is vertrouwd via een certificaat erboven in de keten.
+	This comment's appearance can't be changed yet.	Het uiterlijk van deze opmerking kan nog niet worden gewijzigd.
+	This compatibility level supports only plain ASCII passwords.	Dit compatibiliteitsniveau ondersteunt alleen gewone ASCII-wachtwoorden.
+	This dialog shows the details of a certificate and its chain.	Dit venster toont de details van een certificaat en zijn keten.
+	This document asks to open in Full Screen mode: the page fills the screen and nothing else shows. Press Esc at any time to leave it.	Dit document wil in volledig scherm openen: de pagina vult het scherm en verder is er niets te zien. Druk op elk moment op Esc om het te verlaten.
+	This document can't be checked: it couldn't be read for editing	Dit document kan niet worden gecontroleerd: het kon niet worden gelezen om te bewerken
+	This document contains {n} interactive form fields.	Dit document bevat {n} interactieve formuliervelden.
+	This document has no attachments.	Dit document heeft geen bijlagen.
+	This document has no bookmarks.	Dit document heeft geen bladwijzers.
+	This document has no comments to flatten	Dit document heeft geen opmerkingen om af te vlakken
+	This document has no document-level scripts.	Dit document heeft geen scripts op documentniveau.
+	This document has no editable structure tags.	Dit document heeft geen bewerkbare structuurtags.
+	This document has no form fields to flatten	Dit document heeft geen formuliervelden om af te vlakken
+	This document has no form fields you can fill in	Dit document heeft geen formuliervelden die je kunt invullen
+	This document has no form fields.	Dit document heeft geen formuliervelden.
+	This document has no layers.	Dit document heeft geen lagen.
+	This document has no pages.	Dit document heeft geen pagina's.
+	This document has no restrictions to lift	Dit document heeft geen beperkingen om op te heffen
+	This document has no signatures.	Dit document heeft geen handtekeningen.
+	This document has no tagged figures.	Dit document heeft geen getagde figuren.
+	This document has no {kind} to change	Dit document heeft geen {kind} om te wijzigen
+	This document has not been modified since this signature was applied.	Dit document is niet gewijzigd nadat deze handtekening is geplaatst.
+	This document has not been modified since this timestamp was applied.	Dit document is niet gewijzigd nadat dit tijdstempel is geplaatst.
+	This document hasn't been checked yet.	Dit document is nog niet gecontroleerd.
+	This document is secured. Some changes are restricted by its security settings.	Dit document is beveiligd. Sommige wijzigingen worden beperkt door de beveiligingsinstellingen.
+	this document is signed: rewriting it would invalidate its signatures (save it incrementally instead)	dit document is ondertekend: het herschrijven zou de handtekeningen ongeldig maken (sla het in plaats daarvan incrementeel op)
+	This document is trying to open a local file:	Dit document probeert een lokaal bestand te openen:
+	This document isn't password-protected	Dit document is niet met een wachtwoord beveiligd
+	This drawing exceeds the snapping limit; only the first paths are used.	Deze tekening overschrijdt de limiet voor vastklikken; alleen de eerste paden worden gebruikt.
+	This field is locked. Unlock it to change its properties.	Dit veld is vergrendeld. Ontgrendel het om de eigenschappen te wijzigen.
+	This field's font can't draw “{c}” ({code}), so PdfCraft shows ? in its place. The value is saved, and other PDF viewers redraw the field from it.	Het lettertype van dit veld kan “{c}” ({code}) niet tekenen, dus PdfCraft toont daar een ?. De waarde wordt opgeslagen en andere PDF-viewers tekenen het veld daaruit opnieuw.
+	This file changed on disk. Reload it to see the new version; your unsaved changes will be lost.	Dit bestand is op schijf gewijzigd. Laad het opnieuw om de nieuwe versie te zien; je niet-opgeslagen wijzigingen gaan verloren.
+	This file changed on disk. Reload shows the new version and drops your unsaved changes; Save replaces it with this version.	Dit bestand is op schijf gewijzigd. Opnieuw laden toont de nieuwe versie en laat je niet-opgeslagen wijzigingen vallen; Opslaan vervangt het door deze versie.
+	This file is already as small as it can be made ({size}). No copy was saved.	Dit bestand is al zo klein als het kan worden ({size}). Er is geen kopie opgeslagen.
+	this file isn't XFDF, FDF, XML or text form data	dit bestand is geen XFDF-, FDF-, XML- of tekstformuliergegevens
+	This file was damaged and has been repaired. Saving keeps the repaired version.	Dit bestand was beschadigd en is hersteld. Opslaan bewaart de herstelde versie.
+	This folder isn't available right now. It may have moved, or its drive or cloud sync is offline.	Deze map is nu niet beschikbaar. Hij is misschien verplaatst, of de schijf of cloudsynchronisatie is offline.
+	This form also contains XFA data, which PdfCraft doesn't read yet. You can fill its fields, but Acrobat may show the XFA values instead.	Dit formulier bevat ook XFA-gegevens, die PdfCraft nog niet leest. Je kunt de velden invullen, maar Acrobat kan in plaats daarvan de XFA-waarden tonen.
+	This form's scripts are turned off because one ran too long. Reopen the document to run them again.	De scripts van dit formulier staan uit omdat er een te lang duurde. Open het document opnieuw om ze weer uit te voeren.
+	This is a dynamic XFA form, which PdfCraft can't display yet. What you see is the file's placeholder page.	Dit is een dynamisch XFA-formulier, dat PdfCraft nog niet kan weergeven. Wat je ziet, is de plaatsvervangende pagina van het bestand.
+	This measurement needs at least {n} points.	Deze meting heeft minstens {n} punten nodig.
+	This page contains objects that cannot be selected together.	Deze pagina bevat objecten die niet samen geselecteerd kunnen worden.
+	This page couldn't be displayed.\n{e}	Deze pagina kon niet worden weergegeven.\n{e}
+	This PDF uses the unsupported {s} action.	Deze PDF gebruikt de niet-ondersteunde actie {s}.
+	This printer offers no settings of its own.	Deze printer heeft geen eigen instellingen.
+	This printer's driver doesn't take two-sided settings from other programs, so its own setting applies. Change it in Properties…	Het stuurprogramma van deze printer neemt dubbelzijdige instellingen niet over van andere programma's, dus de eigen instelling geldt. Wijzig die in Eigenschappen…
+	This signature uses an RSA key shorter than 2048 bits, which is no longer considered strong enough for signatures. It still validates, but it should not be relied on.	Deze handtekening gebruikt een RSA-sleutel korter dan 2048 bits, die niet meer sterk genoeg wordt geacht voor handtekeningen. Hij valideert nog wel, maar je moet er niet op vertrouwen.
+	This signature uses RIPEMD-160, a legacy 160-bit hash algorithm that is no longer recommended for signatures. It still validates, but it should not be relied on.	Deze handtekening gebruikt RIPEMD-160, een verouderd hash-algoritme van 160 bits dat niet meer wordt aanbevolen voor handtekeningen. Hij valideert nog wel, maar je moet er niet op vertrouwen.
+	This signature uses SHA-1, a weak hash algorithm: collisions in it have been demonstrated. It still validates because many documents signed years ago use it, but it should not be relied on.	Deze handtekening gebruikt SHA-1, een zwak hash-algoritme: er zijn botsingen in aangetoond. Hij valideert nog wel, omdat veel documenten die jaren geleden zijn ondertekend hem gebruiken, maar je moet er niet op vertrouwen.
+	This web address mixes letters from different alphabets, a common way to imitate another site's name.	Dit webadres mengt letters uit verschillende alfabetten, een bekende manier om de naam van een andere site na te bootsen.
+	This web address uses letters from another alphabet, which can look like familiar ones.	Dit webadres gebruikt letters uit een ander alfabet, die op bekende letters kunnen lijken.
+	Thumbnail size	Miniatuurgrootte
+	Thumbnails	Miniaturen
+	Tile scale:	Tegelschaal:
+	Timed responses	Reacties met een tijdslimiet
+	Timestamp	Tijdstempel
+	Title	Titel
+	to	tot
+	To change locked fields, also set Locked to No.	Zet Vergrendeld ook op Nee om vergrendelde velden te wijzigen.
+	to {n}	tot {n}
+	To:	Tot:
+	Today	Vandaag
+	Today: {date}	Vandaag: {date}
+	Toggle fit page / fit width	Wisselen tussen hele pagina en passend in de breedte
+	Too early	Te vroeg
+	Tools panel side	Zijde van het gereedschappenpaneel
+	Tooltip	Toelichting
+	Tooltip:	Toelichting:
+	Top-level bookmarks ({n})	Bladwijzers op het hoogste niveau ({n})
+	Total	Totaal
+	TR must be a child of Table, THead, TBody, or TFoot	TR moet een kind zijn van Table, THead, TBody of TFoot
+	Transform image	Afbeelding transformeren
+	Translate	Vertalen
+	Trim the picture with its handles; Enter or Done applies	Snijd de afbeelding bij met de grepen; Enter of Gereed past toe
+	Trust	Vertrouwen
+	Try the form as people filling it in will see it	Probeer het formulier zoals mensen het zien als ze het invullen
+calendar weekday	Tu	Di
+	Turn upside down (180°)	Ondersteboven draaien (180°)
+	two cells would both be named {name}	twee cellen zouden allebei {name} heten
+	Two-page view	Weergave van twee pagina's
+	Two-sided:	Dubbelzijdig:
+	Two-Up (Cover Page)	Twee naast elkaar (voorblad)
+	Two-Up (Facing)	Twee naast elkaar (tegenover elkaar)
+	Two-Up Continuous (Cover Page)	Twee naast elkaar, doorlopend (voorblad)
+	Two-Up Continuous (Facing)	Twee naast elkaar, doorlopend (tegenover elkaar)
+	Type	Typen
+signature pad	Type	Typen
+	Type a password.	Typ een wachtwoord.
+	Type Password	Wachtwoord typen
+	Type text	Tekst typen
+	Type the web address.	Typ het webadres.
+	Type your {what}.	Typ je {what}.
+	Typewriter	Schrijfmachine
+	Unchecked	Uitgevinkt
+	Unchecked reads	Niet-gecontroleerde leesacties
+	Underline text	Tekst onderstrepen
+	Undid {label}	{label} ongedaan gemaakt
+	Undo {action}	{action} ongedaan maken
+	Unit	Eenheid
+	Unknown author	Onbekende auteur
+	Unlock comment	Opmerking ontgrendelen
+	Unlock {name}	{name} ontgrendelen
+	Unlock {n} files	{n} bestanden ontgrendelen
+	Unlocked {n} of {m} files	{n} van {m} bestanden ontgrendeld
+	Unlocked: the combined file won't be password-protected	Ontgrendeld: het gecombineerde bestand wordt niet met een wachtwoord beveiligd
+	Unlock…	Ontgrendelen…
+	Unpin	Losmaken
+	Unpin from Home	Losmaken van Start
+	Unpin tool	Gereedschap losmaken
+	Unpin {folder}	{folder} losmaken
+	Unpinned {tool} from Home	{tool} losgemaakt van Start
+	Unplaced	Niet geplaatst
+	Unsigned signature field	Niet-ondertekend handtekeningveld
+	Unsigned signature field: {name}	Niet-ondertekend handtekeningveld: {name}
+	Unsupported measurements	Niet-ondersteunde metingen
+	Up	Omhoog
+	Update background	Achtergrond bijwerken
+	Update background…	Achtergrond bijwerken…
+	Update header & footer	Kop- en voettekst bijwerken
+	Update header & footer…	Kop- en voettekst bijwerken…
+	Update watermark	Watermerk bijwerken
+	Update watermark…	Watermerk bijwerken…
+	URL to submit to	URL om naartoe te verzenden
+	Use 72 DPI (one point per pixel)	72 DPI gebruiken (één punt per pixel)
+	Use a certificate	Een certificaat gebruiken
+	Use a Digital ID from a file	Een digitale id uit een bestand gebruiken
+	Use custom DPI	Aangepaste DPI gebruiken
+	Use each image's embedded DPI; use 72 DPI when it is absent.	De ingesloten DPI van elke afbeelding gebruiken; gebruik 72 DPI als die ontbreekt.
+	Use Flate to encode streams that are not encoded	Flate gebruiken om stromen te coderen die nog niet gecodeerd zijn
+	Use guided actions	Begeleide acties gebruiken
+	Use image resolution	Resolutie van de afbeelding gebruiken
+	Use it when a printer skips text, shading or transparency. The print is no longer searchable text; with Print in grayscale, the pictures are grey.	Gebruik dit als een printer tekst, kleurverlopen of transparantie overslaat. De afdruk is dan geen doorzoekbare tekst meer; met Afdrukken in grijswaarden zijn de afbeeldingen grijs.
+	Use JavaScript	JavaScript gebruiken
+	Use now	Nu gebruiken
+	Use overlay text	Overlaytekst gebruiken
+	Use print production	Drukwerkvoorbereiding gebruiken
+	Use system setting	Systeeminstelling gebruiken
+	Use system title bar	Systeemtitelbalk gebruiken
+	Use {what}	{what} gebruiken
+	Used when a PDF doesn't ask for a layout or zoom. Continuous scrolling never snaps between pages.	Gebruikt als een PDF geen indeling of zoom vraagt. Doorlopend schuiven springt nooit tussen pagina's.
+	Used when opening PDFs. An explicit launch or control mode takes precedence for the session.	Gebruikt bij het openen van PDF's. Een expliciete start- of besturingsmodus gaat voor deze sessie voor.
+	User Interface Options	Opties voor de gebruikersinterface
+	User password	Gebruikerswachtwoord
+	Valid	Geldig
+	Valid for 5 years, for digital signatures. Self-signed IDs are usually not trusted by others.	5 jaar geldig, voor digitale handtekeningen. Zelfondertekende id's worden door anderen meestal niet vertrouwd.
+	Valid from	Geldig vanaf
+certificate	Valid from	Geldig vanaf
+	Valid to	Geldig tot
+certificate	Valid to	Geldig tot
+	Validate	Valideren
+	Validate all	Alles valideren
+	Validate all signatures	Alle handtekeningen valideren
+	Validity ends	Geldigheid eindigt
+certificate	Validity ends	Geldigheid eindigt
+	Validity starts	Geldigheid begint
+certificate	Validity starts	Geldigheid begint
+	Value is not calculated	Waarde wordt niet berekend
+	Value is the	Waarde is de
+	Value:	Waarde:
+	Verify	Controleren
+	Verify to see what the document needs.	Controleer om te zien wat het document nodig heeft.
+certificate	Version	Versie
+	Version {v}	Versie {v}
+	Vertical reversed	Verticaal omgekeerd
+	Vertical text cannot be moved with this selection.	Verticale tekst kan met deze selectie niet worden verplaatst.
+	Video, sound and rich media must be tagged to be announced. Tag the multimedia annotations.	Video, geluid en rijke media moeten een tag hebben om te worden voorgelezen. Voorzie de multimedia-annotaties van een tag.
+	View less	Minder tonen
+	View more	Meer tonen
+	View revision {n}	Revisie {n} bekijken
+	View signed version	Ondertekende versie bekijken
+	Viewing	Bekijken
+	Viewport	Kijkvenster
+	Viewport rectangle in page points (x, y, width, height)	Kijkvensterrechthoek in paginapunten (x, y, breedte, hoogte)
+	Visible Rectangle	Zichtbare rechthoek
+	Visual	Visueel
+	Watermark	Watermerk
+	watermark	watermerk
+calendar weekday	We	Wo
+	Weak	Zwak
+	Welcome to PdfCraft	Welkom bij PdfCraft
+	What takes up the space in this file, by kind of content.	Wat de ruimte in dit bestand inneemt, per soort inhoud.
+	What word or phrase would you like to search for?	Naar welk woord of welke zin wil je zoeken?
+	White on black	Wit op zwart
+	Whole words only	Alleen hele woorden
+	Window Options	Vensteropties
+	Windows store  ·  	Windows-archief  ·  
+	Word count	Aantal woorden
+	Word counting stopped unexpectedly.	Het tellen van woorden is onverwacht gestopt.
+	Word count…	Aantal woorden…
+	Words	Woorden
+	Words or phrases to redact	Woorden of zinnen om zwart te maken
+	Write this email?	Deze e-mail schrijven?
+	Wrong password	Onjuist wachtwoord
+	Wrote 1 file to {dir}	1 bestand geschreven naar {dir}
+	Wrote {n} files to {dir}	{n} bestanden geschreven naar {dir}
+	X Object Forms	XObject-formulieren
+	XFA form: its fields and its XFA data are kept in step, so other viewers show what you fill in.	XFA-formulier: de velden en de XFA-gegevens blijven gelijk, zodat andere viewers tonen wat je invult.
+	Yellow on black	Geel op zwart
+	yesterday	gisteren
+	You are about to apply 1 redaction mark. Text, images and drawings under the marks, and comments and form fields that overlap them, are removed permanently.	Je staat op het punt 1 zwartmaakmarkering toe te passen. Tekst, afbeeldingen en tekeningen onder de markeringen, en opmerkingen en formuliervelden die ze overlappen, worden blijvend verwijderd.
+	You are about to apply {n} redaction marks. Text, images and drawings under the marks, and comments and form fields that overlap them, are removed permanently.	Je staat op het punt {n} zwartmaakmarkeringen toe te passen. Tekst, afbeeldingen en tekeningen onder de markeringen, en opmerkingen en formuliervelden die ze overlappen, worden blijvend verwijderd.
+	You are viewing revision {rev} of “{from}”. It is a snapshot: changes here won't affect the original.	Je bekijkt revisie {rev} van “{from}”. Het is een momentopname: wijzigingen hier hebben geen invloed op het origineel.
+	You are viewing the signed version of “{from}” (revision {rev}). It is a snapshot: changes here won't affect the original.	Je bekijkt de ondertekende versie van “{from}” (revisie {rev}). Het is een momentopname: wijzigingen hier hebben geen invloed op het origineel.
+	You can pin up to {n} folders. Unpin one first.	Je kunt maximaal {n} mappen vastmaken. Maak er eerst een los.
+	You have version {c}. All releases are listed at {page}.	Je hebt versie {c}. Alle releases staan op {page}.
+	You have version {c}. Download the new version from its release page.	Je hebt versie {c}. Download de nieuwe versie van de releasepagina.
+	Your name	Je naam
+	yyyy or yy year · m or mm month · mmm or mmmm month name · d or dd day · ddd or dddd weekday. H, h, M, s and t are time letters and can't be used on their own: put {escape} before a letter to show it as is.	yyyy of yy jaar · m of mm maand · mmm of mmmm maandnaam · d of dd dag · ddd of dddd weekdag. H, h, M, s en t zijn tijdsletters en kunnen niet op zichzelf worden gebruikt: zet {escape} voor een letter om die letterlijk te tonen.
+	ZIP	ZIP
+	Zip Code	Postcode
+	Zip Code + 4	Postcode + 4
+	Zoom	Zoomen
+	Zoom in ({key})	Inzoomen ({key})
+	Zoom in (⌘+)	Inzoomen (⌘+)
+	Zoom in / out (also pinch or {key}-scroll)	In- en uitzoomen (ook knijpen of {key}-schuiven)
+	Zoom in / out (also pinch or ⌘-scroll)	In- en uitzoomen (ook knijpen of ⌘-schuiven)
+	Zoom out ({key})	Uitzoomen ({key})
+	Zoom out (⌘−)	Uitzoomen (⌘−)
+	Zoom to page level	Zoomen tot paginaniveau
+	Zoom — type a percentage and press Enter	Zoomen — typ een percentage en druk op Enter
+	{0}: {1}	{0}: {1}
+	{chars} can't be written into the PDF yet: Fill & Sign text is Western European only. Pick a numeric format such as dd.mm.yyyy.	{chars} kunnen nog niet in de PDF worden geschreven: tekst van Invullen en ondertekenen is alleen West-Europees. Kies een numerieke opmaak zoals dd.mm.yyyy.
+	{c} of {n}{more}	{c} van {n}{more}
+	{dpi} pixels/inch	{dpi} pixels per inch
+@plural	{fields} builds some field names as it runs, so those reads aren't checked.|{fields} build some field names as they run, so those reads aren't checked.	{fields} bouwt sommige veldnamen tijdens het uitvoeren, dus die leesacties worden niet gecontroleerd.|{fields} bouwen sommige veldnamen tijdens het uitvoeren, dus die leesacties worden niet gecontroleerd.
+@plural	{fields} is missing from the order saved in the PDF, so other PDF viewers may not calculate it.|{fields} are missing from the order saved in the PDF, so other PDF viewers may not calculate them.	{fields} ontbreekt in de volgorde die in de PDF is opgeslagen, zodat andere PDF-viewers het misschien niet berekenen.|{fields} ontbreken in de volgorde die in de PDF is opgeslagen, zodat andere PDF-viewers ze misschien niet berekenen.
+@plural	{fields} is missing|{fields} are missing	{fields} ontbreekt|{fields} ontbreken
+	{fields} read each other	{fields} lezen elkaar
+@plural	{fields} reads it|{fields} read it	{fields} leest het|{fields} lezen het
+@plural	{field} calculates before {fields}, which it reads.|{field} calculates before {fields}, which it reads.	{field} rekent vóór {fields}, die het leest.|{field} rekent vóór {fields}, die het leest.
+	{field} reads fields named as it runs	{field} leest velden die tijdens het uitvoeren een naam krijgen
+	{field} reads its own value	{field} leest zijn eigen waarde
+	{field} reads no other field	{field} leest geen ander veld
+	{field} reads {fields}	{field} leest {fields}
+@plural	{field} reads {fields}, which the form doesn't have.|{field} reads {fields}, which the form doesn't have.	{field} leest {fields}, dat het formulier niet heeft.|{field} leest {fields}, dat het formulier niet heeft.
+	{field}: {e}	{field}: {e}
+	{file} is too large for a stamp (at most {n} MB)	{file} is te groot voor een stempel (maximaal {n} MB)
+	{folder} is already pinned to Home	{folder} is al vastgemaakt aan Start
+	{kind} field	{kind}-veld
+	{kind} Properties	{kind}-eigenschappen
+	{kind} · page {p}	{kind} · pagina {p}
+	{kind} — click to show it on the page	{kind} — klik om het op de pagina te tonen
+	{k} of {n}	{k} van {n}
+	{label} (1 issue)	{label} (1 probleem)
+	{label} ({n} issues)	{label} ({n} problemen)
+	{label} failed: {e}	{label} is mislukt: {e}
+	{month} {day}, {y}	{day} {month} {y}
+	{month} {y}	{month} {y}
+	{msg} to {dir}	{msg} naar {dir}
+	{names} and {last}	{names} en {last}
+	{name} (default)	{name} (standaard)
+	{name} can't be combined: {why}	{name} kan niet worden gecombineerd: {why}
+	{name} has no action	{name} heeft geen actie
+	{name} is read-only	{name} is alleen-lezen
+	{name} is too large for a word list (at most 1 MB).	{name} is te groot voor een woordenlijst (maximaal 1 MB).
+	{name} submits the form to {url}; PdfCraft doesn't send form data. Save the document to keep your entries.	{name} verzendt het formulier naar {url}; PdfCraft verstuurt geen formuliergegevens. Sla het document op om je invoer te bewaren.
+	{name} — unsaved changes	{name} — niet-opgeslagen wijzigingen
+	{name}: choosing images arrives on the web with file pickers for images	{name}: afbeeldingen kiezen verschijnt op het web met bestandskiezers voor afbeeldingen
+	{name}: the {other} action isn't supported yet	{name}: de actie {other} wordt nog niet ondersteund
+@plural	{n} byte|{n} bytes	{n} byte|{n} bytes
+@plural	{n} calculation now uses the new name.|{n} calculations now use the new name.	{n} berekening gebruikt nu de nieuwe naam.|{n} berekeningen gebruiken nu de nieuwe naam.
+@plural	{n} comment|{n} comments	{n} opmerking|{n} opmerkingen
+	{n} contributors · {c} commits	{n} bijdragers · {c} commits
+	{n} days ago	{n} dagen geleden
+	{n} differences found	{n} verschillen gevonden
+@plural	{n} field name collides with earlier files and will be renamed: {list}|{n} field names collide with earlier files and will be renamed: {list}	{n} veldnaam botst met eerdere bestanden en wordt hernoemd: {list}|{n} veldnamen botsen met eerdere bestanden en worden hernoemd: {list}
+@plural	{n} field shows an old value|{n} fields show old values	{n} veld toont een oude waarde|{n} velden tonen oude waarden
+	{n} fields selected	{n} velden geselecteerd
+@plural	{n} field|{n} fields	{n} veld|{n} velden
+	{n} files	{n} bestanden
+	{n} files done	{n} bestanden klaar
+	{n} files need attention	{n} bestanden hebben aandacht nodig
+@plural	{n} file|{n} files	{n} bestand|{n} bestanden
+@plural	{n} formula reads a field the form doesn't have|{n} formulas read fields the form doesn't have	{n} formule leest een veld dat het formulier niet heeft|{n} formules lezen velden die het formulier niet heeft
+	{n} h ago	{n} uur geleden
+@plural	{n} image optimized|{n} images optimized	{n} afbeelding geoptimaliseerd|{n} afbeeldingen geoptimaliseerd
+	{n} instances	{n} voorkomens
+	{n} issues	{n} problemen
+@plural	{n} item discarded|{n} items discarded	{n} item verwijderd|{n} items verwijderd
+	{n} marks	{n} markeringen
+	{n} match(es) marked for redaction.	{n} treffer(s) gemarkeerd voor zwartmaking.
+	{n} measurements use an unsupported format and are left out.	{n} metingen gebruiken een niet-ondersteunde opmaak en worden overgeslagen.
+	{n} min ago	{n} min geleden
+@plural	{n} more field calculates too early.|{n} more fields calculate too early.	{n} veld rekent nog te vroeg.|{n} velden rekenen nog te vroeg.
+@plural	{n} more formula reads a missing field.|{n} more formulas read missing fields.	{n} formule leest nog een ontbrekend veld.|{n} formules lezen nog ontbrekende velden.
+@plural	{n} object selected|{n} objects selected	{n} object geselecteerd|{n} objecten geselecteerd
+	{n} pages	{n} pagina's
+	{n} pages and no bookmarks	{n} pagina's en geen bladwijzers
+	{n} pages selected	{n} pagina's geselecteerd
+	{n} pages selected.	{n} pagina's geselecteerd.
+@plural	{n} page|{n} pages	{n} pagina|{n} pagina's
+@plural	{n} pixel|{n} pixels	{n} pixel|{n} pixels
+@plural	{n} reply|{n} replies	{n} antwoord|{n} antwoorden
+@plural	{n} result|{n} results	{n} resultaat|{n} resultaten
+	{n} selected	{n} geselecteerd
+	{n} tags	{n} tags
+	{n} word(s) or phrase(s)	{n} woord(en) of woordgroep(en)
+	{n} {kind}	{n} {kind}
+	{page} is not a page number or label	{page} is geen paginanummer of label
+	{rule} - {status}	{rule} - {status}
+	{s} action	{s}-actie
+	{ty} element on page {p}: {what}	{ty}-element op pagina {p}: {what}
+	{ty} element: {what}	{ty}-element: {what}
+	{verb} as "{name}"	{verb} als "{name}"
+	{verb} Background	{verb}: achtergrond
+	{verb} Header and Footer	{verb}: kop- en voettekst
+	{verb} Watermark	{verb}: watermerk
+	{who} in this document tried to open an address PdfCraft won't open: {e}.	{who} in dit document probeerde een adres te openen dat PdfCraft niet opent: {e}.
+	{who} in this document tried to open an address PdfCraft won't open: {e}. Only web (http, https) and email (mailto) links open from documents.	{who} in dit document probeerde een adres te openen dat PdfCraft niet opent: {e}. Alleen webkoppelingen (http, https) en e-mailkoppelingen (mailto) openen vanuit documenten.
+	{who} in this document wants to open this address in your browser:	{who} in dit document wil dit adres in je browser openen:
+	{who} in this document wants to open your email app with this address:	{who} in dit document wil je e-mailapp openen met dit adres:
+	{who}, certificate issued by an unknown issuer.	{who}, certificaat verleend door een onbekende uitgever.
+	{who}, certificate issued by {issuer}.	{who}, certificaat verleend door {issuer}.
+	{words} on {pages}	{words} op {pages}
+	{} annotation on page {p} isn't tagged	{}-annotatie op pagina {p} is niet getagd
+	{} annotations aren't allowed	{}-annotaties zijn niet toegestaan
+	ΔLOC	ΔLOC
+	— (protection is applied when you save)	— (beveiliging wordt toegepast als je opslaat)
+	“{name}” changed on disk after it was opened or last saved. Saving now replaces that newer version with this one.	“{name}” is op schijf gewijzigd nadat het is geopend of voor het laatst opgeslagen. Opslaan vervangt die nieuwere versie door deze.
+	“{name}” has security restrictions. Enter its permissions password to lift them.	“{name}” heeft beveiligingsbeperkingen. Voer het machtigingswachtwoord in om ze op te heffen.
+	“{name}” is protected. Enter a password to open it.	“{name}” is beveiligd. Voer een wachtwoord in om het te openen.
+	… and {n} more	… en nog {n}
+	−Bin	−Bin
+	−LOC	−LOC

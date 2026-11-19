@@ -1,0 +1,1261 @@
+# 한국어 (ko) interface catalog for every Crafting App.
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   @plural  English `one|other`; the translation lists this language's plural forms, `|`-separated.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary. No other product's localisation, string table or translated UI was
+# consulted or copied; add entries the same way.
+
+	% of all commits	전체 커밋 중 %
+	(Custom)	(사용자 정의)
+	(none)	(없음)
+	1 file	파일 1개
+	16 bit	16비트
+	24 bit	24비트
+	24 bits/pixel	24비트/픽셀
+	32 bit	32비트
+	32 bits/pixel	32비트/픽셀
+	8 bit	8비트
+	About	정보
+	Absolute	절대
+	Absolute Colorimetric	절대 색도계
+	Accented Edges	강조된 가장자리
+	Accessibility	접근성
+	Accurate	정확
+	Actions	액션
+	Activate Panel	패널 활성화
+	Active	활성
+	Actual Size	실제 크기
+	Adaptive	적응형
+	Add	추가
+	Add a comment	댓글 추가
+	Add Guide	안내선 추가
+	Add to Dictionary	사전에 추가
+	Add to favorites	즐겨찾기에 추가
+	Add to Swatches	견본에 추가
+	Adjust	조정
+	Adjustments	조정
+	Advanced	고급
+	Align	맞춤
+	Align center	가운데 정렬
+	Align Left	왼쪽 정렬
+	Align left	왼쪽 정렬
+	Align Right	오른쪽 정렬
+	Align right	오른쪽 정렬
+	Align Text	텍스트 맞춤
+	Align to Selection	선택 영역에 정렬
+	Alignment	정렬
+	Alignment:	맞춤:
+	All	모두
+	All Caps	모두 대문자
+	All Categories	모든 범주
+	All files	모든 파일
+	All Layers	모든 레이어
+	All pages	모든 페이지
+	All Slices	모든 분할 영역
+	Alpha	알파
+	Alt	Alt
+	Always	항상
+	Amount	양
+	Amount:	양:
+	Angle	각도
+	Angle:	각도:
+	Angular	각도
+	Animation	애니메이션
+	Anti-Alias	안티 앨리어싱
+	Anti-alias	안티 앨리어싱
+	Any	하나 이상
+	Appearance	모양새
+theme	Appearance	외관
+	Appearance Settings…	모양 설정…
+	Application	응용 프로그램
+	Apply	적용
+	Apply Character Style	문자 스타일 적용
+	Apply Data Set	데이터 세트 적용
+	Apply to:	적용 대상:
+	Arc	호
+	Area	영역
+	Arrange	정렬 순서
+	Arrow	화살표
+	Arrows	화살표
+	Artboard	아트보드
+	Artboards	아트보드
+	ArtCraft	ArtCraft
+	ArtCraft Website	ArtCraft 웹사이트
+	ArtCraft website	ArtCraft 웹사이트
+	Artistic	예술 효과
+	Aspect Ratio	가로세로 비율
+	Assign	지정
+	Assign Profile…	프로파일 지정…
+	Audio	오디오
+	Author	작성자
+	Author:	작성자:
+	Auto	자동
+	Auto Color	자동 색상
+	Automate	자동화
+	Automatic	자동
+	Automatically	자동으로
+	Average	평균
+	Background	배경
+	Background Color	배경 색상
+	Background Contents	배경 내용
+	Backspace	Backspace
+	Balance	균형
+	Bar	세로줄
+	Baseline	기준선
+	Baseline Shift	기준선 이동
+	Basic	기본
+	Basic Latin	기본 라틴
+	Batch	일괄 처리
+	Batch…	일괄 처리…
+	Bend:	구부리기:
+	Bicubic	쌍입방
+	Binary assets added	추가된 바이너리 에셋
+	Binary assets removed	삭제된 바이너리 에셋
+	Bitmap	비트맵
+	Black	검정
+	Black & White	흑백
+	Black and white	흑백
+	Black Intensity	검정 강도
+	Blacks	검정
+	Blend Mode	혼합 모드
+	Blending Mode	혼합 모드
+	Block	블록
+	Blocks	블록
+	Blue	파랑
+	Blur	흐림
+	Blur Angle	흐림 각도
+	Bold	굵게
+	Border	테두리
+	Border Thickness	테두리 두께
+	Borders	테두리
+	Both	양쪽
+	Both sides	양면
+	Bottom	아래쪽
+	Bottom Left	왼쪽 아래
+	Bottom Right	오른쪽 아래
+	Bottom:	아래쪽:
+	Break Link	링크 끊기
+	Brick	벽돌
+	Brightness	밝기
+	Bring Forward	앞으로 가져오기
+	Bring to Front	맨 앞으로 가져오기
+	Brown	갈색
+	Browse	찾아보기
+	Browse…	찾아보기…
+	Brush Size	브러시 크기
+	Brush Strokes	브러시 획
+	Brushes	브러시
+	Bulge	돌출
+	Bullet	글머리 기호
+	Burlap	삼베
+	Calculate	계산
+	Cancel	취소
+	Canvas	캔버스
+	Caption	캡션
+	Cascade	계단식 배열
+	Case Sensitive	대소문자 구분
+	Category	범주
+	Category:	범주:
+	Cell Size	셀 크기
+	Center	중앙
+	Center X	중심 X
+	Center Y	중심 Y
+	Centered	가운데 맞춤
+	Centimeters	센티미터
+	Chamfer	모따기
+	Change	변경
+	Change All	모두 변경
+	Change Case	대소문자 변경
+	Change Panel Layout	패널 레이아웃 변경
+	Channel	채널
+	Channel Mixer	채널 믹서
+	Channels	채널
+	Character	문자
+	Character Styles	문자 스타일
+	Characters	문자
+	Check Spelling…	맞춤법 검사…
+	Checkerboard	체커보드
+	Choose…	선택…
+	Circle	원
+	City	도시
+	Clarity	명료도
+	Classic	클래식
+	Clear	지우기
+	Clear All	모두 지우기
+	Clear Guides	안내선 지우기
+	Clear History	히스토리 지우기
+	Clear Recent Files	최근 파일 목록 지우기
+	Clipboard	클립보드
+	Clipping Mask	클리핑 마스크
+	Clone	복제
+	Close	닫기
+	Close All	모두 닫기
+	Close Panel	패널 닫기
+	Cmd	Cmd
+	CMYK Color	CMYK 색상
+	CMYK:	CMYK:
+	Coarse Dots	굵은 점
+	Collapse	축소
+	Collate	한 부씩 인쇄
+	Color	색
+	Color Balance	색상 균형
+	Color Burn	색상 번
+	Color Dodge	색상 닷지
+	Color Management	색상 관리
+	Color Mode	색상 모드
+	Color Picker	색상 피커
+	Color Settings	색상 설정
+	Color Settings…	색상 설정…
+	Color Space	색상 공간
+	Color Swatches	색상 견본
+	Color Table	색상 표
+	Color:	색:
+	Colorize	색상화
+	Colors	색상
+	Colors:	색상:
+	Color…	색상…
+	Colour	색상
+	Column width	열 너비
+	Columns	열
+	Columns:	열:
+	Combine	결합
+	Command	명령
+	Commands:	명령:
+	Comment	주석
+	Comments	댓글
+	Commits	커밋
+	Community	커뮤니티
+	Company	회사
+	Compare	비교
+	Comparison	비교
+	Composite	합성
+	Compression	압축
+	Cone	원뿔
+	Contains	포함
+	Continue	계속
+	Contrast	대비
+	Contributors	기여자
+	Convert	변환
+	Convert to Shape	모양으로 변환
+	Convert to sRGB	sRGB로 변환
+	Copies	부수
+	Copies:	매수:
+	Copy	복사
+	Copyright	저작권
+	Corner	모서리
+	Corners	모퉁이
+	Correction	보정
+@msg	Couldn't open {name}: {e}	{name}을(를) 열 수 없습니다: {e}
+	Country	국가/지역
+	Crack Brightness	균열 밝기
+	Crack Depth	균열 깊이
+	Crack Spacing	균열 간격
+	Create	만들기
+	Create Clipping Mask	클리핑 마스크 만들기
+	Crop	자르기
+	Cross	십자
+	Crosshatch	크로스해치
+	Crystallize	수정화
+	Crystallize…	수정화…
+	Ctrl	Ctrl
+	Current	현재
+	Current page	현재 페이지
+	Current Time	현재 시간
+	Curvature	곡률
+	Curve	곡선
+	Curves	곡선
+	Curves…	곡선…
+	Custom	사용자 지정
+	Customize…	사용자 지정…
+	Cut	잘라내기
+	Cyan	시안
+	Dark	어둡게
+	Dark Gray	어두운 회색
+	Dark gray	어두운 회색
+	Dark Strokes	어두운 선
+	Dark Theme	어두운 테마
+	Darken	어둡게 하기
+	Darkness	어둡기
+	Dashed	파선
+	Data	데이터
+	Data Sets	데이터 세트
+	Date and Time	날짜 및 시간
+	Date Created	만든 날짜
+	Date format	날짜 형식
+	Dates	날짜
+	De-Interlace	디인터레이스
+	Decrease Font Size	글꼴 크기 줄이기
+	Default	기본값
+	Delete	삭제
+	Delete Brush	브러시 삭제
+	Delete Group	그룹 삭제
+	Delete Layer	레이어 삭제
+	Delete Mask	마스크 삭제
+	Delete Style	스타일 삭제
+	Delete Workspace	작업 영역 삭제
+	Deleted	삭제됨
+	Delete…	삭제…
+	Depth	깊이
+	Desaturate	채도 감소
+	Descending	내림차순
+	Description	설명
+	Description:	설명:
+	Deselect	선택 해제
+	Deselect All	모두 선택 해제
+	Destination	대상 위치
+	Destination:	대상:
+	Details	세부 정보
+	Diagonal	대각선
+	Diameter	지름
+	Diameter:	지름:
+	Diamond	마름모
+	Difference	차이
+	Diffuse Glow	확산 광선
+	Diffusion	확산
+	Digits	숫자
+	Dimensions	치수
+	Direct Selection Tool	직접 선택 도구
+	Direction	방향
+	Direction Balance	방향 균형
+	Direction:	방향:
+	Discard	삭제
+	Discord	Discord
+	Discretionary Ligatures	임의 합자
+	Dismiss	닫기
+	Display	표시
+	Display name	표시 이름
+	Distance	거리
+	Distort	왜곡
+	Distortion	왜곡
+	Distribute	분포
+	Divide	나누기
+	Dock Panel	패널 도킹
+	Document	문서
+	Document Title	문서 제목
+	Documents	문서
+	Don't Save	저장 안 함
+	Done	완료
+	Dot	점
+	Dots	점
+	Dotted	점선
+	Double-click	더블클릭
+	Down	아래로
+	Download	다운로드
+	Draft	초안
+	Draw	그리기
+	Drop Shadow	그림자 효과
+	Drop Shadow…	그림자…
+	Duplicate	복제
+	Duplicate Layer	레이어 복제
+	Duplicate…	복제…
+	Duplication	복제
+	Duration	길이
+	Dutch	네덜란드어
+	Dynamic	동적
+	Dynamics	다이내믹
+	Edge	가장자리
+	Edge Brightness	가장자리 밝기
+	Edge Intensity	가장자리 강도
+	Edge Only	가장자리만
+	Edge Simplicity	가장자리 단순화
+	Edge Thickness	가장자리 두께
+	Edge Width	가장자리 너비
+	Edit	편집
+	Edit Contents	내용 편집
+	Edit Original	원본 편집
+	Edit Toolbar	도구 막대 편집
+	Editing	편집
+	Edit…	편집…
+	Effect	효과
+	Effects	효과
+	Elevation	고도
+	Eliminate	제거
+	Ellipse	타원
+	Ellipse Tool	타원 도구
+	Ellipsis	줄임표
+	Em Dash	엠 대시
+	Em Space	엠 공백
+	Embed	포함
+	Emboss	엠보스
+	En Dash	엔 대시
+	En Space	엔 공백
+	Enable	사용
+	Endpoint	끝점
+	Enlarged	확대
+	Enter	Enter
+	Entire Font	글꼴 전체
+	Erase	지우기
+	Eraser	지우개
+	Eraser Tool	지우개 도구
+	Error	오류
+	Even Fields	짝수 필드
+	Even pages only	짝수 페이지에만
+	Exact	정확하게
+	Example: {sample}	예: {sample}
+	Exclusion	제외
+	Exit	나가기
+	Expand	확장
+	Export	내보내기
+	Export As	다른 형식으로 내보내기
+	Export As…	다른 이름으로 내보내기…
+	Export Options	내보내기 옵션
+	Export PDF	PDF 내보내기
+	Exported to {path}	{path}(으)로 내보냄
+	Exported {path}	{path} 내보냄
+	Export…	내보내기…
+	Exposure	노출
+	Expression	식
+	Extract	추출
+	Eyedropper	스포이드
+	Eyedropper Tool	스포이드 도구
+	Faded Film	바랜 필름
+	Fast	빠름
+	Favorites	즐겨찾기
+	Feather	페더
+	Field	필드
+	Field properties	필드 속성
+	Fields	필드
+	Fields:	필드:
+	File	파일
+	File Format	파일 형식
+	File Handling	파일 처리
+	File Info…	파일 정보…
+	File Name	파일 이름
+	File Size	파일 크기
+	Files	파일
+	Fill	칠
+	Fill:	칠:
+	Filter	필터
+	Find	찾기
+	Find and Replace	찾기 및 바꾸기
+	Find Next	다음 찾기
+	Find:	찾기:
+	Find…	찾기…
+	Fine Dots	고운 점
+	Finish	마침
+	First	첫 번째
+	First commit	첫 번째 커밋
+	Fit	맞춤
+	Fit in View	화면에 맞추기
+	Fixed	고정
+	Flash	플래시
+	Flatten	병합
+	Flip	뒤집기
+	Flip Horizontal	가로로 뒤집기
+	Flip Vertical	세로로 뒤집기
+	Focus	초점
+	Folder	폴더
+	Font	글꼴
+	Font Size	글꼴 크기
+	Font size	글꼴 크기
+	Font Size:	글꼴 크기:
+	Font:	글꼴:
+	Fonts	글꼴
+	Format	서식
+	Format:	서식:
+	Fractions	분수
+	Frame	프레임
+	Free	자유
+	Free Transform	자유 변형
+	French	프랑스어
+	Frequency	주파수
+	From	시작
+	Frosted	서리 낀 유리
+	Full	전체
+	Full Screen	전체 화면
+	Full Screen Mode	전체 화면 모드
+	Functions	기능
+	Gamma	감마
+	Gamma Correction	감마 보정
+	Gamut Warning	색상 영역 경고
+	Gaussian Blur	가우시안 흐림
+	Gaussian Blur…	가우시안 흐림…
+	General	일반
+	General…	일반…
+	Generate	생성
+	Geometry	기하학
+	German	독일어
+	GitHub	GitHub
+	Glass	유리
+	Global	전체
+	Glow	광선
+	Glow Brightness	광선 밝기
+	Glow Size	광선 크기
+	Glyphs	글리프
+	Good	좋음
+	Gradient	그레이디언트
+	Gradient Tool	그레이디언트 도구
+	Gradients	그레이디언트
+	Grain	그레인
+	Grain Type	그레인 종류
+	Graininess	입자감
+	Grainy Dots	거친 입자 점
+	Graphic	그래픽
+	Graphics	그래픽
+	Gray	회색
+	Gray Gamma 2.2	회색 감마 2.2
+	Grayscale	회색조
+	Green	초록
+	Grid	격자
+	Grid Size:	격자 크기:
+	Gridline every	격자선 간격
+	Group	그룹
+	Group with	함께 그룹화
+	Groups	그룹
+	Grout Width	줄눈 너비
+	Guides	안내선
+	Halftone Pattern	하프톤 패턴
+	Hand Tool	손 도구
+	Hard	강하게
+	Hard Light	하드 라이트
+	Hard Mix	하드 혼합
+	Headings	제목
+	Heart	하트
+	Height	높이
+	Height:	높이:
+	Help	도움말
+	Hexagon	육각형
+	Hidden	숨김
+	Hidden text	숨겨진 텍스트
+	Hide	숨기기
+	Hide All	모두 숨기기
+	Hide Grid	격자 숨기기
+	Hide Others	다른 항목 숨기기
+	High	높음
+	High Pass	하이 패스
+	Highlight Area	하이라이트 영역
+	Highlights	밝은 영역
+	Hindi	힌디어
+	Histogram	히스토그램
+	History	작업 내역
+	Hollow	속이 빈
+	Home	홈
+	Horizontal	가로
+	Horizontal scale	가로 비율
+	Horizontally	가로로
+	Hue	색조
+	Hue Shift	색조 이동
+	Hue/Saturation…	색조/채도…
+	Hyphenation	하이픈 넣기
+	Icon	아이콘
+	Ignore	무시
+	Ignore All	모두 무시
+	Image	이미지
+	Image Size	이미지 크기
+	Images	이미지
+	Import	가져오기
+	Import…	가져오기…
+	Inches	인치
+	Increase Font Size	글꼴 크기 키우기
+	Index	색인
+	Inflate	볼록하게
+	Info	정보
+	Inner Glow…	내부 광선…
+	Input:	입력:
+	Insert	삽입
+	Inside	안쪽
+	Inspect Document	문서 검사
+	Install Plug-in	플러그인 설치
+	Install Plug-in…	플러그인 설치…
+	Intensity	강도
+	Interface	인터페이스
+	Interface Language	인터페이스 언어
+	Interface language	인터페이스 언어
+	Interface Theme	인터페이스 테마
+	Interlaced	인터레이스
+	Interpolation	보간
+	Intersect	교차
+	Intersection	교집합
+	Invert	반전
+	Invert Mask	마스크 반전
+	Isolate	격리
+	Italian	이탈리아어
+	Italic	기울임꼴
+	Japanese	일본어
+	Join	결합
+	Join our Discord	Discord 참여하기
+	Join the ArtCraft Discord	ArtCraft Discord 참여
+	Join the ArtCraft Discord…	ArtCraft Discord 참여…
+	Join us on Discord	Discord 참여하기
+	just now	방금
+	Justification	양끝 맞춤
+	Justify	양쪽 맞춤
+	Keep:	유지:
+	Kerning	커닝
+	Keyboard Shortcuts	키보드 단축키
+	Keyboard Shortcuts…	키보드 단축키…
+	Keywords	키워드
+	Kind	종류
+	Korean	한국어
+	Lab	Lab
+	Label	레이블
+	Labels	레이블
+	Landscape	가로
+	Language	언어
+	Language Options	언어 옵션
+@id	language.name	한국어
+	Language:	언어:
+	Large	크게
+	Lasso	올가미
+	Lasso Tool	올가미 도구
+	Last	마지막
+	Last commit	최근 커밋
+	Layer	레이어
+	Layers	레이어
+	Layout	레이아웃
+	Layout:	레이아웃:
+	Leading	행간
+	Left	왼쪽
+	Left Diagonal	왼쪽 대각선
+	Left to Right	왼쪽에서 오른쪽
+	Left:	왼쪽:
+	Legal	리걸
+	Length	길이
+	Length:	길이:
+	Lens Flare	렌즈 플레어
+	Less	간단히
+	Letter	레터
+	Level	레벨
+	Level 1	레벨 1
+	Level 2	레벨 2
+	Level 3	레벨 3
+	Level 4	레벨 4
+	Levels	레벨
+	Levels…	레벨…
+	Libraries	라이브러리
+	Library	라이브러리
+	Light	밝게
+	Light Blue	연한 파랑
+	Light Direction	조명 방향
+	Light Gray	밝은 회색
+	Light gray	밝은 회색
+	Light Intensity	조명 강도
+	Light Theme	밝은 테마
+	Light Type	조명 유형
+	Lighten	밝게 하기
+	Lighter Color	밝은 색상
+	Lighting	조명
+	Lighting Effects	조명 효과
+	Lightness	명도
+	Line	줄
+	Line delta	줄 증감
+	Line spacing	줄 간격
+	Linear	선형
+	Linear Burn	선형 번
+	Linear Gradient	선형 그레이디언트
+	Linear Light	선형 라이트
+	Lines	선
+	Lines +/−	줄 +/−
+	Lines added	추가된 줄
+	Lines deleted	삭제된 줄
+	Link	링크
+	Links	링크
+	List	목록
+	List View	목록 보기
+	Location	위치
+	Location:	위치:
+	Lock	잠금
+	Lock Guides	안내선 잠금
+	Lock Slices	분할 영역 잠그기
+	Locked	잠김
+	Long Lines	긴 선
+	Long Strokes	긴 획
+	Low	낮음
+	lowercase	소문자
+	Luminance	휘도
+	Luminosity	광도
+	Magenta	마젠타
+	Magic Wand Tool	마술봉 도구
+	Magnification	확대/축소 비율
+	Margins	여백
+	Mask	마스크
+	Masks	마스크
+	Matte	매트
+	Maximize	최대화
+	Maximum	최대
+	Measure	길이 분할
+	Median	중앙값
+	Medium	보통
+	Medium Dots	중간 점
+	Medium Gray	중간 회색
+	Medium Lines	중간 선
+	Merge	병합
+	Merge Cells	셀 병합
+	Merge Layers	레이어 병합
+	Merged PRs	병합된 PR
+	Mesh	메시
+	Message:	메시지:
+	Metadata	메타데이터
+	Method	방법
+	Method:	방법:
+	Mezzotint	메조틴트
+	Mezzotint…	메조틴트…
+	Middle	가운데
+	Midpoint	중간점
+	Midtones	중간 톤
+	Millimeters	밀리미터
+	Minimize	최소화
+	Minimum	최소
+	Mirror	미러
+	Missing	없음
+	Mobile	모바일
+	Mode	모드
+	Mode:	모드:
+	Model	모델
+	Models	모델
+	Modern	모던
+	Modified	수정됨
+	Modify	수정
+	Monitor RGB	모니터 RGB
+	Mono	모노
+	Monochrome	단색
+	More	더 보기
+	Mosaic	모자이크
+	Mosaic Tiles	모자이크 타일
+	Motion	모션
+	Move	이동
+	Move Down	아래로 이동
+	Move Panel	패널 이동
+	Move Up	위로 이동
+	Multiply	곱하기
+	Name	이름
+	Name (A–Z)	이름순(A–Z)
+	Name:	이름:
+	Navigation	탐색
+	Navigator	내비게이터
+	Neon Glow	네온 글로
+	Never	안 함
+	New	새로 만들기
+	New Document	새 문서
+	New document	새 문서
+	New from Template	템플릿에서 새로 만들기
+	New Group	새 그룹
+	New Guide	새 안내선
+	New Layer	새 레이어
+	New Layer…	새 레이어…
+	New Style…	새 스타일…
+	New Swatch…	새 견본…
+	New Window	새 창
+	New Workspace	새 작업 영역
+	New Workspace…	새 작업 영역…
+	New…	새로 만들기…
+	Next	다음
+	Next Appearance Mode	다음 모양 모드
+	Next Change	다음 변경 내용
+	Next Page	다음 페이지
+	Next page	다음 페이지
+	No	아니요
+	No Color	색상 없음
+	No Dither	디더링 없음
+	No Document	문서 없음
+	No document	문서 없음
+	No document open	열린 문서 없음
+	No limit	제한 없음
+	No matches.	일치하는 항목이 없습니다.
+	No matching commands	일치하는 명령 없음
+	No results	결과 없음
+	No Selection	선택 항목 없음
+	No selection	선택 항목 없음
+	Noise	노이즈
+	Nonbreaking Space	줄 바꿈 방지 공백
+	None	없음
+	Normal	표준
+	Not available	사용할 수 없음
+	NTSC Colors	NTSC 색상
+	Number	개수
+	Object	개체
+	Octagon	팔각형
+	Odd Fields	홀수 필드
+	Odd pages only	홀수 페이지에만
+	Off	끄기
+	Offline	오프라인
+	Offset	오프셋
+	Offset:	간격 띄우기:
+	OK	확인
+	Omit	생략
+	On	켜기
+	Only Web Colors	웹 색상만
+	Opacity	불투명도
+	Opacity:	불투명도:
+	Open	열기
+	Open Recent	최근 항목 열기
+	OpenType	OpenType
+	Open…	열기…
+	Optimized	최적화됨
+	Options	옵션
+	Options…	옵션…
+	Orange	주황
+	Ordinals	서수
+	Orientation	방향
+	Orientation:	방향:
+	Original	원본
+	Other	기타
+	Outer Glow…	외부 광선…
+	Outline	윤곽선
+	Output	출력
+	Output:	출력:
+	Outside	바깥쪽
+	Oval	타원
+	Overlap:	겹침:
+	Overlay	오버레이
+	Package…	패키지…
+	Page	페이지
+	Page {page} of {pages}	{page}/{pages} 페이지
+	Pages	페이지
+	Painting	페인팅
+	Panel	패널
+	Panel menu	패널 메뉴
+	Panel Options…	패널 옵션…
+	Panels	패널
+	Paper	용지
+	Paragraph	단락
+	Paragraph Styles	단락 스타일
+	Password	암호
+	Paste	붙여넣기
+	Paste Special	선택하여 붙여넣기
+	Patchwork	패치워크
+	Path	패스
+	Path:	패스:
+	Paths	패스
+	Pattern	패턴
+	Pattern Type	패턴 유형
+	Pause	일시 정지
+	Pen	펜
+	Pen Tool	펜 도구
+	Pencil	연필
+	Pencil Tool	연필 도구
+	Pentagon	오각형
+	Percent	백분율
+	Performance	성능
+	Perimeter	둘레
+	Perspective	원근
+	Photo	사진
+	Photocopy	복사본
+	Picas	파이카
+	Pin Light	핀 라이트
+	Pink	분홍
+	Pixelate	픽셀화
+	Pixels	픽셀
+	Play	재생
+	Plug-ins	플러그인
+	Point	점
+	Pointillize	점묘화
+	Pointillize…	점묘화…
+	Points	포인트
+	Polygon	다각형
+	Polygon Tool	다각형 도구
+	Polyline	폴리선
+	Portrait	세로
+	Portuguese	Português
+	Position	위치
+	Position:	위치:
+	Postcard	엽서
+	Poster	포스터
+	Poster Edges	포스터 가장자리
+	Posterization	포스터화
+	Posterize	포스터화
+	Preferences	환경 설정
+	Preferences…	환경 설정…
+	Prefix	접두사
+	Preserve	유지
+	Preserve Luminosity	광도 유지
+	Preset	사전 설정
+	Preset Manager	사전 설정 관리자
+	Preset:	사전 설정:
+	Presets	사전 설정
+	Presets:	사전 설정:
+	Press keys…	키를 누르세요…
+	Pressure	필압
+	Preview	미리 보기
+	Previous	이전
+	Previous Change	이전 변경 내용
+	Previous Page	이전 페이지
+	Previous page	이전 페이지
+	Print	인쇄
+	Printer	프린터
+	Printer:	프린터:
+	Printing	인쇄
+	Print…	인쇄…
+	Profile	프로필
+	Progressive	프로그레시브
+	Proof Setup	교정 설정
+	Properties	속성
+	Protect	보호
+	PRs	PR
+	Punctuation	문장 부호
+	Purple	보라
+	Pyramid	피라미드
+	Quality	품질
+	Quick Actions	빠른 실행
+	Radial	방사형
+	Radial Blur	방사형 흐림
+	Radial Blur…	방사형 흐림…
+	Radial Gradient	방사형 그레이디언트
+	Radius	반지름
+	Radius:	반지름:
+	Random	무작위
+	Range	범위
+	Range:	범위:
+	Rasterize	래스터화
+	Ratio	비율
+	Rays	광선
+	Ready	준비됨
+	Real name	실명
+	Recent	최근 항목
+	Recent Colors	최근 색상
+	Recent Files	최근 파일
+	Recover	복구
+	Rectangle	직사각형
+	Rectangle Tool	사각형 도구
+	Rectangular	사각형
+	Red	빨강
+	Redo	다시 실행
+	Reduce Noise	노이즈 감소
+	Refine	다듬기
+	Reflected	반사
+	Refresh	새로 고침
+	Regular	보통
+	Relative	상대
+	Relative Colorimetric	상대 색도계
+	Relaxed	느슨함
+	Relief	부조
+	Reload	다시 로드
+	Remove	제거
+	Remove Background	배경 제거
+	Remove from favorites	즐겨찾기에서 제거
+	Rename	이름 바꾸기
+	Rename Group…	그룹 이름 바꾸기…
+	Rename Style	스타일 이름 바꾸기
+	Rename…	이름 바꾸기…
+	Repeat	반복
+	Replace	바꾸기
+	Replace:	바꾸기:
+	Reply	답글
+	Report	보고서
+	Report an Issue…	문제 신고…
+	Reselect	다시 선택
+	Reset	재설정
+	Reset Preferences	환경 설정 재설정
+	Reset…	재설정…
+	Resize panel window	패널 창 크기 조절
+	Resize panels	패널 크기 조절
+	Resolution	해상도
+	Resolution:	해상도:
+	Restore	복원
+	Result	결과
+	Reveal in Finder	Finder에서 보기
+	Reverse	반전
+	Reverse the order	순서 뒤집기
+	Revert	되돌리기
+	Review	검토
+	RGB	RGB
+	RGB Color	RGB 색상
+	RGB:	RGB:
+	Right	오른쪽
+	Right Diagonal	오른쪽 대각선
+	Right:	오른쪽:
+	Rotate	회전
+	Rotate:	회전:
+	Rotation	회전
+	Rotation:	회전:
+	Rounded Rectangle	둥근 사각형
+	Roundness	둥글기
+	Roundness:	원형률:
+	Rows	행
+	Ruler	눈금자
+	Rulers	눈금자
+	Rulers & Grids	눈금자 및 격자
+	Russian	러시아어
+	Sample Size	샘플 크기
+	Sandstone	사암
+	Saturation	채도
+	Save	저장
+	Save a Copy	사본 저장
+	Save a Copy…	사본 저장…
+	Save As	다른 이름으로 저장
+	Save as PDF	PDF로 저장
+	Save as Template	템플릿으로 저장
+	Save as Template…	템플릿으로 저장…
+	Save As…	다른 이름으로 저장…
+	Save Preset…	사전 설정 저장…
+	Save Selection	선택 영역 저장
+	Save Selection…	선택 영역 저장…
+	Saved	저장됨
+	Save…	저장…
+	Scale	크기 조절
+	Scale:	크기 조절:
+	Scaling	크기 조절
+	Scratch Disks	스크래치 디스크
+	Scratch Disks…	스크래치 디스크…
+	Screen	스크린
+	Screen Mode	화면 모드
+	Scripts	스크립트
+	Search	검색
+	Security	보안
+	Segments	세그먼트
+	Select	선택
+	Select All	모두 선택
+	Select Objects	개체 선택
+	Select:	선택:
+	Selected pages	선택한 페이지
+	Selection	선택 영역
+	Selection Tool	선택 도구
+	Selective	선택적
+	Send Backward	뒤로 보내기
+	Send to Back	맨 뒤로 보내기
+	Sensitivity	감도
+	Sent to {printer}	{printer}(으)로 전송됨
+	Services	서비스
+	Set	설정
+	Set as Default	기본값으로 설정
+	Set:	세트:
+	Settings	설정
+	Settings:	설정:
+	Settings…	설정…
+	Shadow	그림자
+	Shadows	어두운 영역
+	Shape	모양
+	Shape Effects	모양 효과
+	Shape:	모양:
+	Shapes	모양
+	Share	공유
+	Sharpen	선명하게
+	Sharpness	선명도
+	Shift	Shift
+	Short Lines	짧은 선
+	Short Strokes	짧은 획
+	Shortcut	단축키
+	Shortcuts	단축키
+	Show	표시
+	Show All	모두 표시
+	Show Grid	격자 표시
+	Show Guides	안내선 표시
+	Show in Folder	폴더에서 보기
+	Show Mask	마스크 표시
+	Show Mesh	메시 표시
+	Show Rulers	눈금자 표시
+	Show rulers	눈금자 표시
+	Show Tool Tips	도구 설명 표시
+	Show:	표시:
+	Sides:	면 수:
+	Simplify	단순화
+	Size	크기
+	Size:	크기:
+	Sketch	스케치
+	Skew	기울이기
+	Slice	분할
+	Slice Options	슬라이스 옵션
+	Slice Options…	분할 옵션…
+	Slice Tool	슬라이스 도구
+	Slices	분할 영역
+	Small	작게
+	Small Caps	작은 대문자
+	Smart Blur	스마트 흐림
+	Smart Blur…	스마트 흐림…
+	Smart Guides	스마트 안내선
+	Smart quotes	스마트 따옴표
+	Smoothness	부드러움
+	Snap to Grid	격자에 스냅
+	Soft	부드럽게
+	Soft Light	소프트 라이트
+	Soften	부드럽게
+	Softness	부드러움
+	Solarize	솔라리스
+	Sort	정렬
+	Source	소스
+	Source code on GitHub	GitHub 소스 코드
+	Spaces	공백
+	Spacing	간격
+	Spacing:	간격:
+	Spanish	Español
+	Spatter	스패터
+	Special	특수
+	Speckle	얼룩
+	Speed	속도
+	Spelling	맞춤법
+	Spherize	구형화
+	Split	나누기
+	Spot Color	별색
+	Spray Radius	분사 반경
+	Square	정사각형
+	Square Size	사각형 크기
+	Stacked	누적
+	Stained Glass	스테인드글라스
+	Stamp	도장
+	Standard	표준
+	Standard Ligatures	표준 합자
+	Star	별
+	Start at:	시작 번호:
+	Statistics	통계
+	Status	상태
+	Status Bar	상태 표시줄
+	Stippled	점묘
+	Stop	중지
+	Strength	강도
+	Stretch	늘이기
+	Strikethrough	취소선
+	Stroke	선
+	Stroke Color	선 색상
+	Stroke Length	선 길이
+	Stroke Options	선 옵션
+	Stroke:	선:
+	Studio	스튜디오
+	Style	스타일
+	Style:	스타일:
+	Styles	스타일
+	Stylize	스타일화
+	Subdivisions	세분
+	Subject	주제
+	Subscript	아래 첨자
+	Subtitle	부제
+	Subtract	빼기
+	Sumi-e	수묵화
+	Summary	요약
+	Superscript	위 첨자
+	Swatches	견본
+	Symbol	기호
+	Symbols	심볼
+	Sync with system	시스템과 동기화
+	System	시스템
+	Tab	탭
+	Table	표
+	Table style	표 스타일
+	Tables	표
+	Tabloid	타블로이드
+	Tabs	탭
+	Taper	테이퍼
+	Target	대상
+	Target:	대상:
+	Temperature	색온도
+	Templates	템플릿
+	Text	텍스트
+	Text color	텍스트 색상
+	Text:	텍스트:
+	Texture	텍스처
+	The passwords don't match.	암호가 일치하지 않습니다.
+	Theme	테마
+	Thickness	두께
+	Threshold	한계값
+	Thumbnails	썸네일
+	Tile	바둑판식 배열
+	Tile Size	타일 크기
+	Tilt	기울이기
+	Time	시간
+	Timecode	타임코드
+	Timeline	타임라인
+	Tint	색조
+	Tint Color	색조 색상
+	Title	제목
+	To	끝
+	Tolerance	허용치
+	Tolerance:	허용치:
+	Tool	도구
+	Toolbars	도구 모음
+	Tools	도구
+	Top	위쪽
+	Top Left	왼쪽 위
+	Top Right	오른쪽 위
+	Top:	위쪽:
+	Total	합계
+	Total:	합계:
+	Tracking	자간
+	Transform	변형
+	Translate	번역
+	Transparency	투명도
+	Transparent	투명
+	Trap…	트랩…
+	Triangle	삼각형
+	Turbulent	난류
+	Twirl	돌리기
+	Twist	비틀기
+	Type	종류
+	Type Tool	문자 도구
+	Type:	유형:
+	Typewriter	타자기
+	Type…	유형…
+	Typing	문자 입력
+	Underline	밑줄
+	Undo	실행 취소
+	Undo {action}	{action} 실행 취소
+	Ungroup	그룹 해제
+	Uniform	균일
+	Union	합집합
+	Units	단위
+	Unlock	잠금 해제
+	Unsaved changes	저장하지 않은 변경 사항
+	Unsharp Mask	언샤프 마스크
+	Untitled	제목 없음
+	Up	위쪽
+	Update	업데이트
+	UPPERCASE	대문자
+	Use Default	기본값 사용
+	User	사용자
+	Username	사용자 이름
+	Value	값
+	Value:	값:
+	Variables	변수
+	Version	버전
+	Version {version}	버전 {version}
+	Vertical	세로
+	Vertical Alignment	세로 정렬
+	Vertical Type Tool	세로 문자 도구
+	Vertically	세로로
+	Very High	매우 높음
+	Vibrance	활기
+	Video	비디오
+	View	보기
+	Violet	보라
+	Visibility	가시성
+	Vivid Light	선명한 라이트
+	Voice	음성
+	W:	W:
+	Warning	경고
+	Warnings	경고
+	Warp	왜곡
+	Watermark	워터마크
+	Wave	파형
+	Wave…	파도…
+	Web	웹
+	Website	웹 사이트
+	Weight	두께
+	Wet	웻
+	White	흰색
+	White Intensity	흰색 강도
+	White Is High	흰색이 높음
+	Whites	흰색
+	Width	너비
+	Width and Height	너비와 높이
+	Width:	너비:
+	Window	창
+	Windows	Windows
+	Words	단어
+	Working CMYK	작업 CMYK
+	Workspace	작업 영역
+	Workspaces	작업 영역
+	X	X
+	Y	Y
+	Yellow	노랑
+	Yes	예
+	Your changes will be lost if you don't save them.	저장하지 않으면 변경 사항이 사라집니다.
+	Zoom	확대/축소
+	Zoom In	확대
+	Zoom in	확대
+	Zoom Out	축소
+	Zoom out	축소
+	Zoom Tool	확대/축소 도구
+@plural	{n} byte|{n} bytes	{n}바이트
+@plural	{n} commit|{n} commits	커밋 {n}개
+	{n} files	파일 {n}개
+	{n} h ago	{n}시간 전
+@plural	{n} item|{n} items	항목 {n}개
+@plural	{n} Layer|{n} Layers	레이어 {n}개
+	{n} min ago	{n}분 전
+@plural	{n} step|{n} steps	단계 {n}개
+	−Bin	−Bin
+	● Recording	● 녹화 중

@@ -1,0 +1,908 @@
+# Dansk (da) interface catalog for every Crafting App.
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   @plural  English `one|other`; the translation lists this language's plural forms, `|`-separated.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary. No other product's localisation, string table or translated UI was
+# consulted or copied; add entries the same way.
+
+	% of all commits	% af alle commits
+	16 bit	16 bit
+	24 bit	24 bit
+	24 bits/pixel	24 bits/pixel
+	32 bit	32 bit
+	32 bits/pixel	32 bits/pixel
+	8 bit	8 bit
+	About	Om
+	Absolute	Absolut
+	Absolute Colorimetric	Absolut kolorimetrisk
+	Accented Edges	Accenterede kanter
+	Accurate	Nøjagtig
+	Actions	Handlinger
+	Activate Panel	Aktivér panel
+	Actual Size	Faktisk størrelse
+	Adaptive	Adaptiv
+	Add	Foren
+	Add Guide	Tilføj hjælpelinje
+	Add to Swatches	Føj til farveprøver
+	Advanced	Avanceret
+	Align	Justér
+	Align center	Justér mod midten
+	Align left	Justér mod venstre
+	Align right	Justér mod højre
+	Align to Selection	Juster til markering
+	Alignment:	Justering:
+	All	Alt
+	All Caps	Alt i versaler
+	All Categories	Alle kategorier
+	All Layers	Alle lag
+	All Slices	Alle udsnit
+	Alt	Alt
+	Amount	Mængde
+	Amount:	Mængde:
+	Angle	Vinkel
+	Angle:	Vinkel:
+	Angular	Vinklet
+	Anti-Alias	Antialias
+	Anti-alias	Antialias
+	Appearance	Udseende
+theme	Appearance	Udseende
+	Apply	Anvend
+	Apply Character Style	Anvend tegnstil
+	Apply Data Set	Anvend datasæt
+	Arc	Bue
+	Arrange	Arrangér
+	Arrow	Pil
+	Artboard	Kunstplade
+	Artboards	Tegneflader
+	ArtCraft Website	ArtCrafts websted
+	ArtCraft website	ArtCraft-websted
+	Artistic	Kunstnerisk
+	Aspect Ratio	Sideforhold
+	Assign	Tildel
+	Assign Profile…	Tildel profil…
+	Author:	Forfatter:
+	Auto	Auto
+	Auto Color	Autofarve
+	Automate	Automatisér
+	Automatic	Automatisk
+	Automatically	Automatisk
+	Average	Gennemsnit
+	Background Contents	Baggrundens indhold
+	Backspace	Backspace
+	Balance	Balance
+	Bar	Bjælke
+	Baseline	Baslinje
+	Baseline Shift	Grundlinjeforskydning
+	Basic	Grundlæggende
+	Basic Latin	Grundlæggende latinsk
+	Batch	Batch
+	Batch…	Batch…
+	Bend:	Bøjning:
+	Bicubic	Bikubisk
+	Binary assets added	Binære aktiver tilføjet
+	Binary assets removed	Binære aktiver fjernet
+	Bitmap	Bitmap
+	Black	Sort
+	Black & White	Sort & hvid
+	Black Intensity	Sort intensitet
+	Blending Mode	Blandingstilstand
+	Blocks	Blokke
+	Blue	Blå
+	Blur	Sløring
+	Bold	Fed
+	Border Thickness	Kanttykkelse
+	Both sides	Begge sider
+	Bottom	Bund
+	Bottom Left	Nederst til venstre
+	Bottom Right	Nederst til højre
+	Bottom:	Bund:
+	Break Link	Bryd sammenkædning
+	Brick	Tegl
+	Brightness	Lysstyrke
+	Bring Forward	Flyt fremad
+	Bring to Front	Anbring forrest
+	Brown	Brun
+	Brush Strokes	Penselstrøg
+	Brushes	Pensler
+	Bullet	Kugletegn
+	Burlap	Sækkevæv
+	Cancel	Annullér
+	Canvas	Lærred
+	Cascade	Kaskade
+	Cell Size	Cellestørrelse
+	Center	Midt
+	Centimeters	Centimeter
+	Chamfer	Skrå
+	Change	Ret
+	Change All	Ret alle
+	Change Case	Ændr store/små bogstaver
+	Change Panel Layout	Skift panelets layout
+	Channel	Kanal
+	Character	Tegn
+	Character Styles	Tegnstile
+	Check Spelling…	Kontrollér stavning…
+	Choose…	Vælg…
+	Circle	Cirkel
+	Classic	Klassisk
+	Clear	Fjern
+	Clear All	Ryd alle
+	Clear Guides	Fjern hjælpelinjer
+	Clear History	Ryd historik
+	Clear Recent Files	Ryd seneste filer
+	Clipping Mask	Beskæringsmask
+	Close	Luk
+	Close All	Luk alle
+	Close Panel	Luk panel
+	Cmd	Cmd
+	CMYK Color	CMYK-farve
+	CMYK:	CMYK:
+	Coarse Dots	Grove prikker
+	Collate	Sortér
+	Color	Farve
+	Color Burn	Farvebrænding
+	Color Dodge	Farveudtynding
+	Color Management	Farvestyring
+	Color Mode	Farvetilstand
+	Color Picker	Farvevælger
+	Color Settings	Farveindstillinger
+	Color Settings…	Farveindstillinger…
+	Color Space	Farverum
+	Color Swatches	Farveprøver
+	Color Table	Farvetabel
+	Color:	Farve:
+	Colorize	Farvelæg
+	Colors	Farver
+	Colors:	Farver:
+	Columns:	Kolonner:
+	Command	Kommando
+	Commits	Commits
+	Community	Fællesskab
+	Company	Firma
+	Composite	Samlet
+	Compression	Komprimering
+	Contrast	Kontrast
+	Contributors	Bidragsydere
+	Convert	Konvertér
+	Convert to Shape	Konvertér til form
+	Convert to sRGB	Konvertér til sRGB
+	Copies:	Kopier:
+	Copy	Kopiér
+	Copyright	Copyright
+	Copyrighted	Ophavsretsbeskyttet
+	Corner	Hjørne
+	Corners	Hjørner
+@msg	Couldn't open {name}: {e}	Kunne ikke åbne {name}: {e}
+	Crack Brightness	Revneens lysstyrke
+	Crack Depth	Revnedybde
+	Crack Spacing	Revneafstand
+	Create	Opret
+	Create Clipping Mask	Opret klipemaske
+	Crop	Beskær
+	Cross	Kors
+	Crosshatch	Krydsskravering
+	Crystallize	Krystallisér
+	Crystallize…	Krystallisér…
+	Ctrl	Ctrl
+	Curvature	Krumning
+	Curves…	Kurver…
+	Custom	Brugerdefineret
+	Customize…	Tilpas…
+	Cut	Klip
+	Cyan	Cyan
+	Dark	Mørk
+	Dark Gray	Mørkegrå
+	Dark Strokes	Mørke strøg
+	Darken	Mørkere
+	Darkness	Mørke
+	Dashed	Stiplet
+	Data Sets	Datasæt
+	Dates	Datoer
+	De-Interlace	De-interlace
+	Decrease Font Size	Formindsk skriftstørrelse
+	Default	Standard
+	Delete	Slet
+	Delete Brush	Slet pensel
+	Delete Group	Slet gruppe
+	Delete Layer	Slet lag
+	Delete Style	Slet typografi
+	Delete Workspace	Slet arbejdsområde
+	Depth	Dybde
+	Description	Beskrivelse
+	Description:	Beskrivelse:
+	Deselect	Afmarkér
+	Destination:	Destination:
+	Diameter:	Diameter:
+	Diamond	Diamant
+	Difference	Difference
+	Diffuse Glow	Diffust skær
+	Diffusion	Diffusion
+	Digits	Cifre
+	Dimensions	Dimensioner
+	Direct Selection Tool	Direkte markeringsværktøj
+	Direction Balance	Retningsbalance
+	Direction:	Retning:
+	Discard	Kassér
+	Discord	Discord
+	Discretionary Ligatures	Valgfrie ligaturer
+	Display	Visning
+	Display name	Vist navn
+	Distance	Afstand
+	Distort	Forvræng
+	Distortion	Forvrængning
+	Distribute	Fordel
+	Divide	Opdel
+	Dock Panel	Dok panel
+	Document	Dokument
+	Don't Save	Gem ikke
+	Done	Udført
+	Dot	Prik
+	Dots	Prikker
+	Double-click	Dobbeltklik
+	Download	Download
+	Draft	Udkast
+	Draw	Tegn
+	Drop Shadow	Slagskygge
+	Drop Shadow…	Slagskygge…
+	Duplicate	Duplikér
+	Duplicate Layer	Duplikér lag
+	Duplication	Duplikering
+	Dutch	Hollandsk
+	Edge	Kant
+	Edge Brightness	Kantens lysstyrke
+	Edge Only	Kun kant
+	Edge Width	Kantbredde
+	Edit	Redigér
+	Edit Contents	Redigér indhold
+	Edit Original	Redigér original
+	Edit Toolbar	Redigér værktøjslinjen
+	Edit…	Redigér…
+	Effect	Effekt
+	Effects	Effekter
+	Eliminate	Eliminér
+	Ellipse	Ellipse
+	Ellipse Tool	Ellipseværktøj
+	Ellipsis	Udeladelsesprikker
+	Em Dash	Lang tankestreg
+	Em Space	Em-mellemrum
+	Embed	Integrér
+	En Dash	Kort tankestreg
+	En Space	En-mellemrum
+	Enlarged	Forstørret
+	Enter	Enter
+	Entire Font	Hele skrifttypen
+	Envelope DL	Konvolut DL
+	Eraser	Viskelæder
+	Eraser Tool	Viskelæderværktøj
+	Error	Fejl
+	Even Fields	Lige felter
+	Exact	Eksakt
+	Exclusion	Udelukkelse
+	Exit	Afslut
+	Expand	Udvid
+	Export	Eksportér
+	Export As	Eksportér som
+	Export As…	Eksportér som…
+	Export PDF	Eksportér PDF
+	Exported {path}	Eksporterede {path}
+	Export…	Eksportér…
+	Eyedropper	Pipette
+	Eyedropper Tool	Pipetteværktøj
+	Favorites	Favoritter
+	Feather	Fjer
+	File	Filer
+	File Handling	Filhåndtering
+	File Info…	Filoplysninger…
+@id	file.close	Luk
+	Files	Filer
+	Fill	Udfyldning
+	Fill:	Fyld:
+	Filter	Filter
+	Find	Find
+	Find Next	Find næste
+	Fine Dots	Fine prikker
+	First	Første
+	First commit	Første commit
+	Fit	Tilpas
+	Fit in View	Tilpas i visning
+	Fixed	Fast
+	Flatten	Fladgør
+	Flip	Vend
+	Flip Horizontal	Spejl vandret
+	Flip Vertical	Spejl lodret
+	Folder	Mappe
+	Font	Skrifttype
+	Font Size	Skriftstørrelse
+	Font:	Skrifttype:
+	Fonts	Skrifttyper
+	Format	Format
+	Format:	Format:
+	Fractions	Brøker
+	Free	Fri
+	Free Transform	Fri transformering
+	French	Fransk
+	Frequency	Frekvens
+	Frosted	Frostet
+	Full Screen Mode	Fuldskærmstilstand
+	Gamma	Gamma
+	Gamut Warning	Gamut-advarsel
+	Gaussian Blur	Gaussisk sløring
+	Gaussian Blur…	Gaussisk sløring…
+	General	Generelt
+	German	Tysk
+	Glass	Glas
+	Global	Global
+	Glyphs	Glyffer
+	Good	God
+	Gradient	Gradient
+	Gradient Tool	Gradientværktøj
+	Gradients	Gradienter
+	Grain	Korn
+	Grain Type	Korntype
+	Graininess	Kornethed
+	Grainy Dots	Kornede prikker
+	Graphic	Grafik
+	Graphics	Grafik
+	Gray	Grå
+	Gray Gamma 2.2	Grå gamma 2,2
+	Grayscale	Gråtoner
+	Green	Grøn
+	Grid	Gitter
+	Grid Size:	Gitterstørrelse:
+	Gridline every	Gitterlinje hver
+	Group	Gruppér
+	Group with	Gruppér med
+	Groups	Grupper
+	Grout Width	Fugebredde
+	Guides	Hjælpelinjer
+	Halftone Pattern	Rastermønster
+	Hand	Hånd
+	Hand Tool	Håndværktøj
+	Hard	Hård
+	Hard Light	Hårdt lys
+	Height	Højde
+	Height:	Højde:
+	Help	Hjælp
+	Hexagon	Sekskant
+	Hidden	Skjulte
+	Hide	Skjul
+	Hide Grid	Skjul gitter
+	Hide Others	Skjul andre
+	High	Høj
+	High Resolution	Høj opløsning
+	High resolution	Høj opløsning
+	Highlight Area	Fremhævet område
+	Hindi	Hindi
+	History	Historik
+	Hollow	Hul
+	Home	Home
+	Horizontal	Vandret
+	Hue	Farvetone
+	Hue Shift	Farvetoneskift
+	Hue/Saturation…	Farvetone/mætning…
+	Hyphenation	Orddeling
+	Ignore	Ignorér
+	Image	Billede
+	Image Size	Billedstørrelse
+	Images	Billeder
+	Import…	Importér…
+	Inches	Tommer
+	Increase Font Size	Forøg skriftstørrelse
+	Info	Info
+	Inner Glow…	Indre glød…
+	Insert	Indsæt
+	Inside	Indvendig
+	Inspect Document	Inspicér dokument
+	Install Plug-in	Installér plug-in
+	Install Plug-in…	Installér plug-in…
+	Intensity	Intensitet
+	Interface Language	Grænsefladesprog
+	Interlaced	Interlaceret
+	Interpolation	Interpolation
+	Intersect	Skæring
+	Invert	Invertér
+	Invert Mask	Invertér maske
+	Isolate	Isolér
+	Italian	Italiensk
+	Italic	Kursiv
+	Japanese	Japansk
+	Join	Forbind
+	Join our Discord	Deltag i vores Discord
+	Justification	Justering
+	Justify	Justér
+	Keep:	Behold:
+	Keyboard Shortcuts	Tastaturgenveje
+	Keyboard Shortcuts…	Tastaturgenveje…
+	Kind	Type
+	Lab	Lab
+	Landscape	Liggende
+	Language	Sprog
+	Language Options	Sprogindstillinger
+@id	language.name	Dansk
+	Language:	Sprog:
+	Large	Stor
+	Lasso	Lasso
+	Lasso Tool	Lassoværktøj
+	Last	Sidste
+	Last commit	Sidste commit
+	Layer	Lag
+	Layers	Lag
+	Layout	Layout
+	Layout:	Layout:
+	Leading	Linjeafstand
+	Left	Venstre
+	Left Diagonal	Venstre diagonal
+	Left to Right	Venstre til højre
+	Left:	Venstre:
+	Legal	Legal
+	Length	Længde
+	Length:	Længde:
+	Less	Mindre
+	Letter	Letter
+	Levels…	Niveauer…
+	Libraries	Biblioteker
+	Library	Bibliotek
+	Light	Lys
+	Light Blue	Lyseblå
+	Light Direction	Lysretning
+	Light Gray	Lysegrå
+	Light Intensity	Lysintensitet
+	Lighten	Lysere
+	Lighting	Belysning
+	Lightness	Lyshed
+	Line	Linje
+	Line delta	Linjeforskel
+	Linear	Lineær
+	Linear Gradient	Lineær gradient
+	Lines	Linjer
+	Lines +/−	Linjer +/−
+	Lines added	Linjer tilføjet
+	Lines deleted	Linjer slettet
+	Link	Link
+	Links	Links
+	List View	Listevisning
+	Location	Placering
+	Location:	Placering:
+	Lock	Lås
+	Lock Guides	Lås hjælpelinjer
+	Lock Slices	Lås udsnit
+	Locked	Låste
+	Long Lines	Lange linjer
+	Long Strokes	Lange strøg
+	Low	Lav
+	lowercase	små bogstaver
+	Luminosity	Luminans
+	Magenta	Magenta
+	Magic Wand Tool	Tryllestavsværktøj
+	Mask	Maskér
+	Matte	Mat
+	Maximize	Maksimér
+	Maximum	Maksimum
+	Measure	Mål
+	Medium	Medium
+	Medium Dots	Mellemstore prikker
+	Medium Gray	Mellemgrå
+	Medium Lines	Mellemstore linjer
+	Merge	Flet
+	Merge Layers	Flet lag
+	Merged PRs	Flettede PR'er
+	Mesh	Net
+	Message:	Meddelelse:
+	Method	Metode
+	Method:	Metode:
+	Mezzotint	Mezzotint
+	Mezzotint…	Mezzotint…
+	Millimeters	Millimeter
+	Minimize	Minimér
+	Minimum	Minimum
+	Mirror	Spejl
+	Missing	Mangler
+	Mobile	Mobil
+	Mode	Tilstand
+	Mode:	Tilstand:
+	Model	Model
+	Models	Modeller
+	Modern	Moderne
+	Modified	Ændret
+	Modify	Ændr
+	Monitor RGB	Skærm-RGB
+	Mono	Mono
+	Monochrome	Monokrom
+	More	Mere
+	Mosaic Tiles	Mosaikfliser
+	Move	Flyt
+	Move Down	Flyt ned
+	Move Panel	Flyt panel
+	Move Up	Flyt op
+	Multiply	Multiplikation
+	Name	Navn
+	Name (A–Z)	Navn (A–Å)
+	Name:	Navn:
+	Navigator	Navigator
+	Neon Glow	Neonglød
+	New	Ny
+	New from Template	Nyt fra skabelon
+	New Group	Ny gruppe
+	New Guide	Ny hjælpelinje
+	New Layer…	Nyt lag…
+	New Swatch…	Ny farveprøve…
+	New Window	Nyt vindue
+	New Workspace	Nyt arbejdsområde
+	New Workspace…	Nyt arbejdsområde…
+	New…	Ny…
+	Next	Næste
+	Next Page	Næste side
+	Next page	Næste side
+	No Dither	Ingen dithering
+	No Document	Intet dokument
+	No document	Intet dokument
+	No document open	Intet åbent dokument
+	No matches.	Ingen match.
+	No results	Ingen resultater
+	No Selection	Ingen markering
+	No selection	Ingen markering
+	Noise	Støj
+	Nonbreaking Space	Fast mellemrum
+	None	Ingen
+	Normal	Normal
+	NTSC Colors	NTSC-farver
+	Object	Objekt
+	Odd Fields	Ulige felter
+	Off	Fra
+	Offset	Forskydning
+	Offset:	Forskydning:
+	OK	OK
+	Omit	Udelad
+	On	Slået til
+	Only Web Colors	Kun webfarver
+	Opacity	Opacitet
+	Opacity:	Opacitet:
+	Open	Åbn
+	OpenType	OpenType
+	Open…	Åbn…
+	Optimized	Optimeret
+	Options	Indstillinger
+	Options…	Indstillinger…
+	Orange	Orange
+	Ordinals	Ordenstal
+	Orientation	Orientering
+	Orientation:	Orientering:
+	Original	Original
+	Other	Andet
+	Outer Glow…	Ydre glød…
+	Outline	Kontur
+	Output	Output
+	Output:	Output:
+	Outside	Udvendig
+	Oval	Oval
+	Overlap:	Overlap:
+	Overlay	Overlejring
+	Package…	Pakke…
+	Page	Side
+	Pages	Sider
+	Painting	Maling
+	Panel menu	Panelmenu
+	Panel Options…	Panelindstillinger…
+	Panels	Paneler
+	Paragraph	Afsnit
+	Paragraph Styles	Afsnitsstile
+	Password	Adgangskode
+	Paste	Indsæt
+	Patchwork	Patchwork
+	Path	Kurve
+	Path:	Sti:
+	Paths	Stier
+	Pattern	Mønster
+	Pattern Type	Mønstertype
+	Pen	Pen
+	Pen Tool	Pen-værktøj
+	Pencil	Blyant
+	Pencil Tool	Blyantsværktøj
+	Performance	Ydeevne
+	Perspective	Perspektiv
+	Picas	Pica
+	Pink	Lyserød
+	Pixel	Pixel
+	Pixelate	Pixelering
+	Pixels	Pixels
+	Plug-ins	Plug-ins
+	Pointillize	Pointillisme
+	Pointillize…	Pointillér…
+	Points	Punkter
+	Polygon	Polygon
+	Polygon Tool	Polygonværktøj
+	Portrait	Stående
+	Portuguese	Portugisisk
+	Position	Placering
+	Postcard	Postkort
+	Poster Edges	Plakatkanter
+	Preferences	Præferencer
+	Preferences…	Indstillinger…
+	Preserve	Bevar
+	Preset:	Forudindstilling:
+	Presets	Forudindstillinger
+	Presets:	Forudindstillinger:
+	Press keys…	Tryk på taster…
+	Pressure	Tryk
+	Preview	Forhåndsvisning
+	Previous	Forrige
+	Previous Page	Forrige side
+	Previous page	Forrige side
+	Print	Udskriv
+	Printer	Printer
+	Printer:	Printer:
+	Print…	Udskriv…
+	Progressive	Progressiv
+	Proof Setup	Korrekturopsætning
+	Properties	Egenskaber
+	PRs	PR'er
+	Public Domain	Public domain
+	Punctuation	Tegnsætning
+	Purple	Lilla
+	Quality	Kvalitet
+	Quick Actions	Hurtige handlinger
+	Radial	Radial
+	Radial Blur	Radial sløring
+	Radial Blur…	Radial sløring…
+	Radial Gradient	Radial gradient
+	Radius	Radius
+	Radius:	Radius:
+	Random	Tilfældig
+	Range:	Interval:
+	Rasterize	Rasterisér
+	Ratio	Forhold
+	Rays	Stråler
+	Ready	Klar
+	Real name	Rigtigt navn
+	Recent	Seneste
+	Recent Colors	Seneste farver
+	Recent Files	Seneste filer
+	Rectangle	Rektangel
+	Rectangle Tool	Rektangelværktøj
+	Red	Rød
+	Redo	Gør om
+	Refresh	Opdatér
+	Regular	Regular
+	Relative	Relativ
+	Relative Colorimetric	Relativ kolorimetrisk
+	Relief	Relief
+	Remove	Fjern
+	Rename	Omdøb
+	Rename Group…	Omdøb gruppe…
+	Rename Style	Omdøb typografi
+	Repeat	Gentag
+	Replace	Erstat
+	Reselect	Genmarkér
+	Reset	Nulstil
+	Reset Preferences	Nulstil indstillinger
+	Resize panel window	Tilpas størrelse på panelvindue
+	Resize panels	Tilpas størrelse på paneler
+	Resolution:	Opløsning:
+	Restore	Gendan
+	Reverse the order	Omvend rækkefølgen
+	Revert	Gendan
+	RGB	RGB
+	RGB Color	RGB-farve
+	RGB:	RGB:
+	Right	Højre
+	Right Diagonal	Højre diagonal
+	Right:	Højre:
+	Rotate	Rotér
+	Rotation	Rotation
+	Rotation:	Rotation:
+	Rounded Rectangle	Afrundet rektangel
+	Roundness:	Rundhed:
+	Rulers	Linealer
+	Rulers & Grids	Linealer og gitre
+	Sandstone	Sandsten
+	Saturation	Mætning
+	Save	Gem
+	Save a Copy	Gem en kopi
+	Save a Copy…	Gem en kopi…
+	Save As	Gem som
+	Save as Template	Gem som skabelon
+	Save as Template…	Gem som skabelon…
+	Save As…	Gem som…
+	Save Preset…	Gem forudindstilling…
+	Save Selection	Gem markering
+	Save Selection…	Gem markering…
+	Saved	Gemt
+	Save…	Gem…
+	Scale	Skalér
+	Scale:	Skala:
+	Scaling	Skalering
+	Scratch Disks	Midlertidige diske
+	Screen	Skærm
+	Screen Mode	Skærmtilstand
+	Scripts	Scripter
+	Search	Søg
+	Security	Sikkerhed
+	Segments	Segmenter
+	Select	Markér
+	Select All	Markér alt
+	Select Objects	Markér objekter
+	Select:	Markér:
+	Selection	Markering
+	Selection Tool	Markeringsværktøj
+	Selective	Selektiv
+	Send Backward	Flyt bagud
+	Send to Back	Anbring bagerst
+	Services	Tjenester
+	Set as Default	Angiv som standard
+	Set:	Sæt:
+	Settings	Indstillinger
+	Settings…	Indstillinger…
+	Shape	Form
+	Shape Effects	Formeffekter
+	Shape:	Form:
+	Shapes	Former
+	Sharpen	Skarphed
+	Sharpness	Skarphed
+	Shift	Skift
+	Short Lines	Korte linjer
+	Short Strokes	Korte strøg
+	Shortcut	Genvej
+	Shortcuts	Genveje
+	Show	Vis
+	Show All	Vis alle
+	Show Grid	Vis gitter
+	Show Guides	Vis hjælpelinjer
+	Show in Folder	Vis i mappe
+	Show Mesh	Vis mesh
+	Show Rulers	Vis linealer
+	Show Tool Tips	Vis værktøjstips
+	Show:	Vis:
+	Sides:	Sider:
+	Simplify	Forenkl
+	Size	Størrelse
+	Size:	Størrelse:
+	Sketch	Skitse
+	Skew	Skæv
+	Slice	Udsnit
+	Slice Options	Udsnitsindstillinger
+	Slice Options…	Udsnitsindstillinger…
+	Slice Tool	Udsnitsværktøj
+	Slices	Udsnit
+	Small	Lille
+	Small Caps	Kapitæler
+	Smart Blur	Smart sløring
+	Smart Blur…	Smart sløring…
+	Smart Guides	Smarte hjælpelinjer
+	Smoothness	Glatthed
+	Snap to Grid	Fastgør til gitter
+	Soft	Blød
+	Soft Light	Blødt lys
+	Softness	Blødhed
+	Sort	Sortér
+	Source code on GitHub	Kildekode på GitHub
+	Spaces	Mellemrum
+	Spacing	Mellemrum
+	Spacing:	Mellemrum:
+	Spanish	Spansk
+	Spatter	Sprøjtning
+	Speckle	Spættet
+	Spelling	Stavekontrol
+	Spot Color	Spotfarve
+	Spray Radius	Sprøjteradius
+	Square	Firkant
+	Square Size	Kvadratstørrelse
+	sRGB IEC61966-2.1	sRGB IEC61966-2.1
+	Stacked	Stablet
+	Stained Glass	Blyindfattet glas
+	Standard Ligatures	Standardligaturer
+	Star	Stjerne
+	Start at:	Start ved:
+	Status	Status
+	Stippled	Prikket
+	Stop	Stop
+	Strength	Styrke
+	Strikethrough	Gennemstreget
+	Stroke	Streg
+	Stroke Color	Stregfarve
+	Stroke Length	Strøglængde
+	Stroke Options	Konturindstillinger
+	Stroke:	Kontur:
+	Style	Typografi
+	Style:	Typografi:
+	Stylize	Stilisér
+	Subdivisions	Underinddelinger
+	Subscript	Sænket skrift
+	Subset	Delmængde
+	Subtract	Træk fra
+	Sumi-e	Sumi-e
+	Summary	Oversigt
+	Superscript	Hævet skrift
+	Swatches	Farveprøver
+	Symbol	Symbol
+	Symbols	Symboler
+	Tab	Tabulator
+	Table	Tabel
+	Tabloid	Tabloid
+	Tabs	Tabulatorer
+	Taper	Aftapering
+	Target	Mål
+	Target:	Mål:
+	Temperature	Temperatur
+	Templates	Skabeloner
+	Text	Tekst
+	Text:	Tekst:
+	Texture	Tekstur
+	Threshold	Tærskel
+	Tile	Fliselæg
+	Tile Size	Flisestørrelse
+	Tint	Nuance
+	Tolerance	Tolerance
+	Tolerance:	Tolerance:
+	Tool	Værktøj
+	Toolbars	Værktøjslinjer
+	Tools	Værktøjer
+	Top	Øverst
+	Top Left	Øverst til venstre
+	Top Right	Øverst til højre
+	Top:	Øverst:
+	Total:	I alt:
+	Tracking	Sporing
+	Transform	Transformér
+	Transparency	Gennemsigtighed
+	Transparent	Gennemsigtig
+	Trap…	Trap…
+	Triangle	Trekant
+	Twirl	Hvirvel
+	Twist	Vridning
+	Type	Tekst
+	Type Tool	Tekstværktøj
+	Type:	Type:
+	Type…	Type…
+	Typing	Indtastning
+	Underline	Understreget
+	Undo	Fortryd
+	Ungroup	Afgruppér
+	Uniform	Ensartet
+	Units	Enheder
+	Unknown	Ukendt
+	Unlock	Lås op
+	Unsharp Mask	Uskarp maskering
+	Untitled	Uden navn
+	UPPERCASE	STORE BOGSTAVER
+	Use Default	Brug standard
+	Username	Brugernavn
+	Variables	Variabler
+	Version	Version
+	Vertical	Lodret
+	Vertical Type Tool	Lodret tekstværktøj
+	Very High	Meget høj
+	Video	Video
+	View	Vis
+	Violet	Violet
+	Visibility	Synlighed
+	W:	W:
+	Warnings	Advarsler
+	Warp	Vridning
+	Wave…	Bølge…
+	Web	Web
+	Weight	Vægt
+	White	Hvid
+	White Intensity	Hvid intensitet
+	Width	Bredde
+	Width and Height	Bredde og højde
+	Width:	Bredde:
+	Window	Vindue
+	Windows	Vinduer
+	Working CMYK	Arbejds-CMYK
+	Workspace	Arbejdsområde
+	Yellow	Gul
+	Your changes will be lost if you don't save them.	Dine ændringer går tabt, hvis du ikke gemmer dem.
+	Zoom	Zoom
+	Zoom In	Zoom ind
+	Zoom Out	Zoom ud
+	Zoom Tool	Zoomværktøj
+@plural	{n} commit|{n} commits	{n} commit|{n} commits
+@plural	{n} item|{n} items	{n} element|{n} elementer
+@plural	{n} Layer|{n} Layers	{n} lag|{n} lag
+@plural	{n} step|{n} steps	{n} trin|{n} trin
+	● Recording	● Optager

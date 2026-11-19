@@ -1,0 +1,1283 @@
+# Čeština (cs) interface catalog for every Crafting App.
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   @plural  English `one|other`; the translation lists this language's plural forms, `|`-separated.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary. No other product's localisation, string table or translated UI was
+# consulted or copied; add entries the same way.
+
+	% of all commits	Podíl na commitech (%)
+	(Custom)	(Vlastní)
+	(none)	(žádné)
+	1 file	1 soubor
+	16 bit	16 bitů
+	24 bit	24 bitů
+	24 bits/pixel	24 bitů na pixel
+	32 bit	32 bitů
+	32 bits/pixel	32 bitů na pixel
+	8 bit	8 bitů
+	About	O aplikaci
+	Absolute	Absolutní
+	Absolute Colorimetric	Absolutní kolorimetrický
+	Accented Edges	Zdůrazněné okraje
+	Accessibility	Přístupnost
+	Accurate	Přesné
+	Actions	Akce
+	Activate Panel	Aktivovat panel
+	Active	Aktivní
+	Actual Size	Skutečná velikost
+	Adaptive	Adaptivní
+	Add	Přidat
+	Add a comment	Přidat komentář
+	Add Guide	Přidat vodítko
+	Add to Dictionary	Přidat do slovníku
+	Add to favorites	Přidat do oblíbených
+	Add to Swatches	Přidat do vzorníku
+	Adjust	Upravit
+	Adjustments	Korekce
+	Advanced	Pokročilé
+	Align	Zarovnat
+	Align center	Zarovnat na střed
+	Align Left	Zarovnat vlevo
+	Align left	Zarovnat doleva
+	Align Right	Zarovnat vpravo
+	Align right	Zarovnat doprava
+	Align Text	Zarovnat text
+	Align to Selection	Zarovnat k výběru
+	Alignment	Zarovnání
+	Alignment:	Zarovnání:
+	All	Vše
+	All Caps	Verzálky
+	All Categories	Všechny kategorie
+	All files	Všechny soubory
+	All Layers	Všechny vrstvy
+	All pages	Všechny stránky
+	All Slices	Všechny řezy
+	Alpha	Alfa
+	Alt	Alt
+	Always	Vždy
+	Amount	Míra
+	Amount:	Míra:
+	Angle	Úhel
+	Angle:	Úhel:
+	Angular	Úhlová
+	Animation	Animace
+	Animation effects	Animační efekty
+	Anti-Alias	Vyhlazování
+	Anti-alias	Vyhlazování
+	Any	Libovolné
+	Appearance	Vzhled
+theme	Appearance	Motiv
+	Appearance Settings…	Nastavení vzhledu…
+	Application	Aplikace
+	Apply	Použít
+	Apply Character Style	Použít styl znaků
+	Apply Data Set	Použít sadu dat
+	Apply to:	Použít na:
+	Arc	Oblouk
+	Area	Plocha
+	Arrange	Uspořádat
+	Arrow	Šipka
+	Arrows	Šipky
+	Artboard	Pracovní plocha
+	Artboards	Pracovní plochy
+	ArtCraft	ArtCraft
+	ArtCraft Website	Web ArtCraft
+	ArtCraft website	Web ArtCraft
+	Artistic	Umělecké
+	Ascending	Vzestupně
+	Aspect Ratio	Poměr stran
+	Assign	Přiřadit
+	Assign Profile…	Přiřadit profil…
+	Author	Autor
+	Author:	Autor:
+	Auto	Automaticky
+	Auto ({percent}%)	Automaticky ({percent}%)
+	Auto Color	Automatická barva
+	Automate	Automatizace
+	Automatic	Automaticky
+	Automatically	Automaticky
+	Available	Dostupné
+	Average	Zprůměrovat
+	Background	Pozadí
+	Background Color	Barva pozadí
+	Background Contents	Obsah pozadí
+	Backspace	Backspace
+	Balance	Vyvážení
+	Bar	Příčka
+	Baseline	Účaří
+	Baseline Shift	Posun účaří
+	Basic	Základní
+	Basic Latin	Základní latinka
+	Batch	Dávka
+	Batch…	Dávka…
+	Bend:	Ohyb:
+	Bicubic	Bikubické
+	Binary assets added	Přidané binární soubory
+	Binary assets removed	Odebrané binární soubory
+	Bitmap	Bitmapa
+	Black	Černá
+	Black & White	Černobílá
+	Black and white	Černobílé
+	Black Intensity	Intenzita černé
+	Blacks	Černé
+	Blend Mode	Režim prolnutí
+	Blending Mode	Režim míchání
+	Block	Blok
+	Blocks	Bloky
+	Blue	Modrá
+	Blur	Rozostření
+	Blur Angle	Úhel rozostření
+	Bold	Tučné
+	Border	Okraj
+	Border Thickness	Tloušťka okraje
+	Borders	Ohraničení
+	Both	Obě
+	Both sides	Obě strany
+	Bottom	Dole
+	Bottom Left	Vlevo dole
+	Bottom Right	Vpravo dole
+	Bottom:	Dole:
+	Break Link	Zrušit propojení
+	Brick	Cihla
+	Brightness	Jas
+	Bring Forward	Přenést blíž
+	Bring to Front	Přenést do popředí
+	Brown	Hnědá
+	Browse	Procházet
+	Browse…	Procházet…
+	Brush Size	Velikost štětce
+	Brush Strokes	Tahy štětcem
+	Brushes	Štětce
+	Bulge	Vyboulení
+	Bullet	Odrážka
+	Burlap	Pytlovina
+	Calculate	Výpočet
+	Cancel	Zrušit
+	Canvas	Plátno
+	Caption	Popisek
+	Cascade	Do kaskády
+	Category	Kategorie
+	Category:	Kategorie:
+	Cell Size	Velikost buňky
+	Center	Střed
+	Center X	Střed X
+	Center Y	Střed Y
+	Centered	Na střed
+	Centimeters	Centimetry
+	Chamfer	Sražený
+	Change	Změnit
+	Change All	Změnit vše
+	Change Case	Změnit velikost písmen
+	Change Panel Layout	Změnit rozložení panelů
+	Channel	Kanál
+	Channel Mixer	Míchání kanálů
+	Channels	Kanály
+	Character	Znak
+	Character Styles	Styly znaků
+	Characters	Znaky
+	Check for Updates	Zkontrolovat aktualizace
+	Check for updates	Zkontrolovat aktualizace
+	Check Spelling…	Zkontrolovat pravopis…
+	Choose…	Vybrat…
+	Circle	Kruh
+	City	Město
+	Clarity	Zřetelnost
+	Classic	Klasické
+	Clear	Vymazat
+	Clear All	Vymazat vše
+	Clear Guides	Vymazat vodítka
+	Clear History	Vymazat historii
+	Clear Recent Files	Vymazat nedávné soubory
+	Clipboard	Schránka
+	Clipping Mask	Ořezová maska
+	Clone	Klonovat
+	Close	Zavřít
+	Close (Esc)	Zavřít (Esc)
+	Close All	Zavřít vše
+	Close Panel	Zavřít panel
+	Cmd	Cmd
+	CMYK Color	Barvy CMYK
+	CMYK:	CMYK:
+	Coarse Dots	Hrubé tečky
+	Collapse	Sbalit
+	Collate	Kompletovat
+	Color	Barva
+	Color Balance	Vyvážení barev
+	Color Burn	Ztmavit barvy
+	Color Dodge	Zesvětlit barvy
+	Color Management	Správa barev
+	Color Mode	Barevný režim
+	Color Picker	Výběr barvy
+	Color Settings	Nastavení barev
+	Color Settings…	Nastavení barev…
+	Color Space	Barevný prostor
+	Color Swatches	Položky vzorníku
+	Color Table	Tabulka barev
+	Color:	Barva:
+	Colorize	Obarvit
+	Colors	Barvy
+	Colors:	Barvy:
+	Color…	Barva…
+	Colour	Barva
+	Column width	Šířka sloupce
+	Columns	Sloupce
+	Columns:	Sloupce:
+	Combine	Zkombinovat
+	Command	Příkaz
+	Commands:	Příkazy:
+	Comment	Komentář
+	Comments	Komentáře
+	Commits	Commity
+	Community	Komunita
+	Company	Společnost
+	Compare	Porovnat
+	Comparison	Porovnání
+	Compatibility	Kompatibilita
+	Composite	Kompozitní
+	Compression	Komprese
+	Cone	Kužel
+	Contains	Obsahuje
+	Continue	Pokračovat
+	Contrast	Kontrast
+	Contributors	Přispěvatelé
+	Convert	Převést
+	Convert to Shape	Převést na tvar
+	Convert to sRGB	Převést na sRGB
+	Copies	Kopie
+	Copies:	Kopie:
+	Copy	Kopírovat
+	Copyright	Autorská práva
+	Copyrighted	Chráněno autorským právem
+	Corner	Rohový
+	Corners	Rohy
+	Correction	Korekce
+	Couldn't open {name}: {e}	{name} nelze otevřít: {e}
+@msg	Couldn't open {name}: {e}	{name} nelze otevřít: {e}
+	Country	Země
+	Crack Brightness	Jas prasklin
+	Crack Depth	Hloubka prasklin
+	Crack Spacing	Rozestup prasklin
+	Create	Vytvořit
+	Create Clipping Mask	Vytvořit ořezovou masku
+	Crop	Oříznout
+	Cross	Kříž
+	Crosshatch	Křížové šrafování
+	Crystallize	Krystalizace
+	Crystallize…	Krystalizace…
+	Ctrl	Ctrl
+	Current	Aktuální
+	Current page	Aktuální stránka
+	Curvature	Zakřivení
+	Curve	Křivka
+	Curves	Křivky
+	Curves…	Křivky…
+	Custom	Vlastní
+	Customize…	Vlastní…
+	Cut	Vyjmout
+	Cyan	Azurová
+	Dark	Tmavý
+	Dark Gray	Tmavě šedá
+	Dark gray	Tmavě šedá
+	Dark Strokes	Tmavé tahy
+	Dark Theme	Tmavý motiv
+	Darken	Ztmavit
+	Darkness	Tmavost
+	Dashed	Čárkované
+	Data	Data
+	Data Sets	Sady dat
+	Date	Datum
+	Date and Time	Datum a čas
+	Date format	Formát data
+	Dates	Data
+	De-Interlace	Odstranit prokládání
+	Decrease Font Size	Zmenšit velikost písma
+	Default	Výchozí
+	Delete	Odstranit
+	Delete Brush	Odstranit štětec
+	Delete Group	Odstranit skupinu
+	Delete Layer	Odstranit vrstvu
+	Delete Style	Odstranit styl
+	Delete Workspace	Odstranit pracovní prostor
+	Deleted	Odstraněno
+	Depth	Hloubka
+	Desaturate	Odbarvit
+	Descending	Sestupně
+	Description	Popis
+	Description:	Popis:
+	Deselect	Zrušit výběr
+	Deselect All	Zrušit celý výběr
+	Destination	Cíl
+	Destination:	Cíl:
+	Details	Podrobnosti
+	Diagonal	Diagonální
+	Diameter	Průměr
+	Diameter:	Průměr:
+	Diamond	Kosočtverec
+	Difference	Rozdíl
+	Diffuse Glow	Rozptýlená záře
+	Diffusion	Difuze
+	Digits	Číslice
+	Dimensions	Rozměry
+	Direct Selection Tool	Nástroj Přímý výběr
+	Direction	Směr
+	Direction Balance	Vyvážení směru
+	Direction:	Směr:
+	Discard	Zahodit
+	Discord	Discord
+	Discretionary Ligatures	Volitelné ligatury
+	Dismiss	Zavřít
+	Display	Zobrazení
+	Display name	Zobrazované jméno
+	Distance	Vzdálenost
+	Distort	Zkreslení
+	Distortion	Deformace
+	Distribute	Rozmístit
+	Divide	Dělit
+	Dock Panel	Ukotvit panel
+	Document	Dokument
+	Document Title	Název dokumentu
+	Documents	Dokumenty
+	Don't Save	Neukládat
+	Done	Hotovo
+	Dot	Tečka
+	Dots	Tečky
+	Dotted	Tečkovaný
+	Double-click	Dvojklik
+	Down	Dolů
+	Download	Stáhnout
+	Draft	Koncept
+	Draw	Kreslení
+	Drop Shadow	Vržený stín
+	Drop Shadow…	Vržený stín…
+	Duplicate	Duplikovat
+	Duplicate Layer	Duplikovat vrstvu
+	Duplicate…	Duplikovat…
+	Duplication	Duplikace
+	Duration	Doba trvání
+	Dutch	Nizozemština
+	Dynamic	Dynamická
+	Dynamics	Dynamika
+	Edge	Okraj
+	Edge Brightness	Jas okraje
+	Edge Intensity	Intenzita okrajů
+	Edge Only	Jen okraje
+	Edge Simplicity	Jednoduchost okrajů
+	Edge Thickness	Tloušťka okrajů
+	Edge Width	Šířka okraje
+	Edit	Úpravy
+	Edit Contents	Upravit obsah
+	Edit Original	Upravit originál
+	Edit Toolbar	Upravit panel nástrojů
+	Editing	Úpravy
+	Edit…	Upravit…
+	Effect	Efekt
+	Effects	Efekty
+	Elevation	Elevace
+	Eliminate	Odstranit
+	Ellipse	Elipsa
+	Ellipse Tool	Nástroj Elipsa
+	Ellipsis	Výpustka
+	Em Dash	Dlouhá pomlčka
+	Em Space	Čtverčíková mezera
+	Embed	Vložit
+	Emboss	Reliéf
+	En Dash	Krátká pomlčka
+	En Space	Půlčtverčíková mezera
+	Enable	Zapnout
+	Endpoint	Koncový bod
+	Enlarged	Zvětšené
+	Enter	Enter
+	Entire Font	Celé písmo
+	Envelope DL	Obálka DL
+	Erase	Gumovat
+	Eraser	Guma
+	Eraser Tool	Nástroj Guma
+	Error	Chyba
+	Even Fields	Sudé půlsnímky
+	Even pages only	Pouze sudé stránky
+	Exact	Přesná
+	Example: {sample}	Příklad: {sample}
+	Exclusion	Vyloučit
+	Exit	Ukončit
+	Expand	Rozbalit
+	Export	Exportovat
+	Export As	Exportovat jako
+	Export As…	Exportovat jako…
+	Export Options	Možnosti exportu
+	Export PDF	Exportovat PDF
+	Export to	Exportovat do
+	Exported to {path}	Exportováno do {path}
+	Exported {path}	Exportováno: {path}
+	Export…	Exportovat…
+	Exposure	Expozice
+	Expression	Výraz
+	Extract	Extrahovat
+	Eyedropper	Kapátko
+	Eyedropper Tool	Nástroj Kapátko
+	Faded Film	Vybledlý film
+	Fast	Rychlé
+	Favorites	Oblíbené
+	Feather	Pírko
+	Field	Pole
+	Field properties	Vlastnosti pole
+	Fields	Pole
+	Fields:	Pole:
+	File	Soubor
+	File Handling	Práce se soubory
+	File Info…	Informace o souboru…
+	File Name	Název souboru
+@id	file.close	Zavřít
+	Files	Soubory
+	Fill	Výplň
+	Fill:	Výplň:
+	Filter	Filtr
+	Find	Najít
+	Find and Replace	Najít a nahradit
+	Find Next	Najít další
+	Find:	Najít:
+	Find…	Najít…
+	Fine Dots	Jemné tečky
+	Finish	Dokončit
+	First	První
+	First commit	První commit
+	Fit	Přizpůsobit
+	Fit in View	Přizpůsobit zobrazení
+	Fixed	Pevný
+	Flash	Blesk
+	Flatten	Sloučit
+	Flip	Překlopit
+	Flip Horizontal	Převrátit vodorovně
+	Flip Vertical	Převrátit svisle
+	Focus	Zaostření
+	Folder	Složka
+	Font	Písmo
+	Font Size	Velikost písma
+	Font size	Velikost písma
+	Font Size:	Velikost písma:
+	Font:	Písmo:
+	Fonts	Písma
+	Format	Formát
+	Format:	Formát:
+	Fractions	Zlomky
+	Frame	Rám
+	Free	Volné
+	Free Transform	Volná transformace
+	French	Francouzština
+	Frequency	Frekvence
+	From	Od
+	Frosted	Matné sklo
+	Full	Úplná
+	Full Screen	Celá obrazovka
+	Full Screen Mode	Celá obrazovka
+	Functions	Funkce
+	Gamma	Gama
+	Gamma Correction	Korekce gama
+	Gamut Warning	Upozornění na gamut
+	Gaussian Blur	Gaussovské rozostření
+	Gaussian Blur…	Gaussovské rozostření…
+	General	Obecné
+	General…	Obecné…
+	Generate	Generovat
+	Geometry	Geometrie
+	German	Němčina
+	GitHub	GitHub
+	Glass	Sklo
+	Global	Globální
+	Glow	Záře
+	Glow Brightness	Jas záře
+	Glow Size	Velikost záře
+	Glyphs	Glyfy
+	Good	Dobrá
+	Gradient	Přechod
+	Gradient Tool	Nástroj Přechod
+	Gradients	Přechody
+	Grain	Zrno
+	Grain Type	Typ zrna
+	Graininess	Zrnitost
+	Grainy Dots	Zrnité tečky
+	Graphic	Obrázek
+	Graphics	Grafika
+	Gray	Šedá
+	Gray Gamma 2.2	Šedá gama 2,2
+	Grayscale	Stupně šedi
+	Green	Zelená
+	Grid	Mřížka
+	Grid Size:	Velikost mřížky:
+	Grid view	Zobrazení mřížky
+	Gridline every	Čára mřížky každých
+	Group	Seskupit
+	Group with	Seskupit s
+	Groups	Skupiny
+	Grout Width	Šířka spár
+	Guides	Vodítka
+	Halftone Pattern	Polotónový vzorek
+	Hand	Ručička
+	Hand Tool	Nástroj Ručička
+	Hard	Pevné
+	Hard Light	Tvrdé světlo
+	Hard Mix	Tvrdé míchání
+	Headings	Nadpisy
+	Heart	Srdce
+	Height	Výška
+	Height:	Výška:
+	Help	Nápověda
+	Hexagon	Šestiúhelník
+	Hidden	Skryté
+	Hidden text	Skrytý text
+	Hide	Skrýt
+	Hide All	Skrýt vše
+	Hide Grid	Skrýt mřížku
+	Hide Others	Skrýt ostatní
+	High	Vysoká
+	High Pass	Horní propust
+	High Resolution	Vysoké rozlišení
+	High resolution	Vysoké rozlišení
+	Highlight Area	Oblast světel
+	Highlights	Světla
+	Hindi	Hindské
+	Histogram	Histogram
+	History	Historie
+	Hollow	Duté
+	Home	Domů
+	Horizontal	Vodorovně
+	Horizontal scale	Vodorovné měřítko
+	Horizontally	Vodorovně
+	Hue	Odstín
+	Hue Shift	Posun odstínu
+	Hue/Saturation…	Odstín/sytost…
+	Hyphenation	Dělení slov
+	Icon	Ikona
+	Ignore	Ignorovat
+	Ignore All	Ignorovat vše
+	Image	Obraz
+	Image Size	Velikost obrazu
+	Images	Obrazy
+	Import	Import
+	Import…	Importovat…
+	Inches	Palce
+	Increase Font Size	Zvětšit velikost písma
+	Index	Rejstřík
+	Inflate	Nafouknutí
+	Info	Informace
+	Inner Glow…	Vnitřní záře…
+	Input:	Vstup:
+	Insert	Vložení
+	Inside	Uvnitř
+	Inspect Document	Prozkoumat dokument
+	Install Plug-in	Nainstalovat zásuvný modul
+	Install Plug-in…	Nainstalovat zásuvný modul…
+	Intensity	Intenzita
+	Interface	Rozhraní
+	Interface Language	Jazyk rozhraní
+	Interface language	Jazyk rozhraní
+	Interface Theme	Motiv rozhraní
+	Interlaced	Prokládaný
+	Interpolation	Interpolace
+	Intersect	Protnout
+	Intersection	Průsečík
+	Invert	Invertovat
+	Invert Mask	Invertovat masku
+	Isolate	Izolovat
+	Italian	Italština
+	Italic	Kurzíva
+	Japanese	Japonština
+	Join	Spojit
+	Join our Discord	Připojit se k našemu Discordu
+	Join the ArtCraft Discord	Připojit se ke komunitě ArtCraft na Discordu
+	Join the ArtCraft Discord…	Připojit se k Discordu ArtCraft…
+	Join us on Discord	Přidejte se k nám na Discordu
+	just now	právě teď
+	Justification	Zarovnání do bloku
+	Justify	Do bloku
+	Keep:	Ponechat:
+	Kerning	Kerning
+	Keyboard Shortcuts	Klávesové zkratky
+	Keyboard Shortcuts…	Klávesové zkratky…
+	Keywords	Klíčová slova
+	Kind	Druh
+	Korean	Korejština
+	Lab	Lab
+	Label	Popisek
+	Labels	Štítky
+	Landscape	Na šířku
+	Language	Jazyk
+	Language Options	Možnosti jazyka
+@id	language.name	Čeština
+	Language:	Jazyk:
+	Large	Velké
+	Lasso	Laso
+	Lasso Tool	Nástroj Laso
+	Last	Poslední
+	Last commit	Poslední commit
+	Later	Později
+	Layer	Vrstva
+	Layers	Vrstvy
+	Layout	Rozvržení
+	Layout:	Rozvržení:
+	Leading	Proklad
+	Left	Vlevo
+	Left Diagonal	Levá diagonála
+	Left to Right	Zleva doprava
+	Left:	Vlevo:
+	Legal	Legal
+	Length	Délka
+	Length:	Délka:
+	Lens Flare	Odlesk objektivu
+	Less	Méně
+	Letter	Letter
+	Level	Úroveň
+	Level 1	Úroveň 1
+	Level 2	Úroveň 2
+	Level 3	Úroveň 3
+	Level 4	Úroveň 4
+	Levels	Úrovně
+	Levels…	Úrovně…
+	Libraries	Knihovny
+	Library	Knihovna
+	Light	Světlý
+	Light Blue	Světle modrá
+	Light Direction	Směr světla
+	Light Gray	Světle šedá
+	Light gray	Světle šedá
+	Light Intensity	Intenzita světla
+	Light Theme	Světlý motiv
+	Light Type	Typ světla
+	Lighten	Zesvětlit
+	Lighter Color	Světlejší barva
+	Lighting	Osvětlení
+	Lighting Effects	Světelné efekty
+	Lightness	Světlost
+	Line	Čára
+	Line delta	Rozdíl řádků
+	Line spacing	Řádkování
+	Linear	Lineární
+	Linear Burn	Lineárně ztmavit
+	Linear Gradient	Lineární přechod
+	Linear Light	Lineární světlo
+	Lines	Čáry
+	Lines +/−	Řádky +/−
+	Lines added	Přidané řádky
+	Lines deleted	Odstraněné řádky
+	Link	Odkaz
+	Links	Propojení
+	List	Seznam
+	List View	Zobrazení seznamu
+	List view	Zobrazení seznamu
+	Location	Umístění
+	Location:	Umístění:
+	Lock	Zamknout
+	Lock Guides	Zamknout vodítka
+	Lock Slices	Zamknout řezy
+	Locked	Zamčeno
+	Long Lines	Dlouhé čáry
+	Long Strokes	Dlouhé tahy
+	Low	Nízká
+	lowercase	malá písmena
+	Luminance	Luminance
+	Luminosity	Světlost
+	Magenta	Purpurová
+	Magic Wand Tool	Nástroj Kouzelná hůlka
+	Magnification	Zvětšení
+	Margins	Okraje
+	Mask	Maska
+	Masks	Masky
+	Matte	Podklad
+	Maximize	Maximalizovat
+	Maximum	Maximální
+	Measure	Měřítko
+	Median	Medián
+	Medium	Střední
+	Medium Dots	Střední tečky
+	Medium Gray	Středně šedá
+	Medium Lines	Střední čáry
+	Merge	Sloučit
+	Merge Cells	Sloučit buňky
+	Merge Layers	Sloučit vrstvy
+	Merged PRs	Sloučené PR
+	Mesh	Síť
+	Message:	Zpráva:
+	Metadata	Metadata
+	Method	Metoda
+	Method:	Metoda:
+	Mezzotint	Mezzotinta
+	Mezzotint…	Mezzotinta…
+	Middle	Uprostřed
+	Midpoint	Střed
+	Midtones	Střední tóny
+	Millimeters	Milimetry
+	Minimize	Minimalizovat
+	Minimum	Minimální
+	Mirror	Zrcadlit
+	Missing	Chybí
+	Mobile	Mobilní zařízení
+	Mode	Režim
+	Mode:	Režim:
+	Model	Model
+	Models	Modely
+	Modern	Moderní
+	Modified	Upraveno
+	Modify	Upravit
+	Monitor RGB	RGB monitoru
+	Mono	Jednobarevný
+	Monochrome	Jednobarevné
+	More	Více
+	Mosaic	Mozaika
+	Mosaic Tiles	Mozaikové dlaždice
+	Motion	Pohyb
+	Move	Přesunout
+	Move Down	Posunout dolů
+	Move Panel	Přesunout panel
+	Move Up	Posunout nahoru
+	Multiply	Násobit
+	Name	Jméno
+	Name (A–Z)	Jméno (A–Z)
+	Name:	Název:
+	Navigation	Navigace
+	Navigator	Navigátor
+	Neon Glow	Neonová záře
+	Never	Nikdy
+	New	Nový
+	New Document	Nový dokument
+	New document	Nový dokument
+	New from Template	Nový ze šablony
+	New Group	Nová skupina
+	New Guide	Nové vodítko
+	New Layer	Nová vrstva
+	New Layer…	Nová vrstva…
+	New Style…	Nový styl…
+	New Swatch…	Nová položka vzorníku…
+	New Window	Nové okno
+	New Workspace	Nový pracovní prostor
+	New Workspace…	Nový pracovní prostor…
+	New…	Nový…
+	Next	Další
+	Next Appearance Mode	Další režim vzhledu
+	Next Change	Další změna
+	Next Page	Další stránka
+	Next page	Další stránka
+	No	Ne
+	No Color	Žádná barva
+	No Dither	Bez rozptylu
+	No Document	Žádný dokument
+	No document	Žádný dokument
+	No document open	Není otevřen žádný dokument
+	No limit	Bez omezení
+	No matches.	Žádné shody.
+	No matching commands	Žádné odpovídající příkazy
+	No recent files	Žádné nedávné soubory
+	No results	Žádné výsledky
+	No Selection	Nic není vybráno
+	No selection	Nic není vybráno
+	Noise	Šum
+	Nonbreaking Space	Nezlomitelná mezera
+	None	Žádné
+	Normal	Normální
+	Not available	Není k dispozici
+	NTSC Colors	Barvy NTSC
+	Number	Číslo
+	Object	Objekt
+	Octagon	Osmiúhelník
+	Odd Fields	Liché půlsnímky
+	Odd pages only	Pouze liché stránky
+	Off	Vypnuto
+	Offline	Bez připojení
+	Offset	Odsazení
+	Offset:	Posun:
+	OK	OK
+	Omit	Vynechat
+	On	Zapnuto
+	Only Web Colors	Jen webové barvy
+	Opacity	Krytí
+	Opacity:	Krytí:
+	Open	Otevřít
+	Open link	Otevřít odkaz
+	Open Recent	Otevřít nedávné
+	OpenType	OpenType
+	Open…	Otevřít…
+	Optimized	Optimalizovaný
+	Options	Možnosti
+	Options…	Možnosti…
+	Orange	Oranžová
+	Ordinals	Řadové číslovky
+	Orientation	Orientace
+	Orientation:	Orientace:
+	Original	Originál
+	Other	Jiné
+	Outer Glow…	Vnější záře…
+	Outline	Obrys
+	Output	Výstup
+	Output:	Výstup:
+	Outside	Vně
+	Oval	Ovál
+	Overlap:	Překrytí:
+	Overlay	Překrýt
+	Package…	Sbalit…
+	Page	Stránka
+	Page {page} of {pages}	Stránka {page} z {pages}
+	Pages	Stránky
+	Painting	Malba
+	Panel	Panel
+	Panel menu	Nabídka panelu
+	Panel Options…	Možnosti panelu…
+	Panels	Panely
+	Paper	Papír
+	Paragraph	Odstavec
+	Paragraph Styles	Styly odstavců
+	Password	Heslo
+	Paste	Vložit
+	Paste Special	Vložit jinak
+	Patchwork	Patchwork
+	Path	Cesta
+	Path:	Cesta:
+	Paths	Cesty
+	Pattern	Vzorek
+	Pattern Type	Typ vzorku
+	Pause	Pozastavit
+	Pen	Pero
+	Pen Tool	Nástroj Pero
+	Pencil	Tužka
+	Pencil Tool	Nástroj Tužka
+	Pentagon	Pětiúhelník
+	Percent	Procenta
+	Percentage	Procento
+	Performance	Výkon
+	Perimeter	Obvod
+	Perspective	Perspektiva
+	Photo	Fotografie
+	Photocopy	Fotokopie
+	Picas	Pica
+	Pin Light	Bodové světlo
+	Pink	Růžová
+	Pixel	Obrazový bod
+	Pixelate	Pixelizace
+	Pixels	Obrazové body
+	Play	Přehrát
+	Plug-ins	Zásuvné moduly
+	Point	Bodové
+	Pointillize	Pointilismus
+	Pointillize…	Pointilismus…
+	Points	Body
+	Polygon	Mnohoúhelník
+	Polygon Tool	Nástroj Mnohoúhelník
+	Polyline	Lomená čára
+	Portrait	Na výšku
+	Portuguese	Portugalština
+	Position	Pozice
+	Position:	Umístění:
+	Postcard	Pohlednice
+	Poster	Plakát
+	Poster Edges	Plakátové okraje
+	Posterization	Posterizace
+	Posterize	Posterizace
+	Preferences	Předvolby
+	Preferences…	Předvolby…
+	Prefix	Předpona
+	Preserve	Zachovat
+	Preserve Luminosity	Zachovat světlost
+	Preset	Přednastavení
+	Preset Manager	Správce přednastavení
+	Preset:	Přednastavení:
+	Presets	Přednastavení
+	Presets:	Přednastavení:
+	Press keys…	Stiskněte klávesy…
+	Pressure	Tlak
+	Preview	Náhled
+	Previous	Předchozí
+	Previous Change	Předchozí změna
+	Previous Page	Předchozí stránka
+	Previous page	Předchozí stránka
+	Print	Tisk
+	Printer	Tiskárna
+	Printer:	Tiskárna:
+	Printing	Tisk
+	Print…	Tisk…
+	Profile	Profil
+	Progressive	Progresivní
+	Proof Setup	Nastavení nátisku
+	Properties	Vlastnosti
+	Protect	Zabezpečení
+	PRs	PR
+	Public Domain	Volné dílo
+	Punctuation	Interpunkce
+	Purple	Fialová
+	Pyramid	Pyramida
+	Quality	Kvalita
+	Quick Actions	Rychlé akce
+	Radial	Kruhové
+	Radial Blur	Radiální rozostření
+	Radial Blur…	Radiální rozostření…
+	Radial Gradient	Kruhový přechod
+	Radius	Poloměr
+	Radius:	Poloměr:
+	Random	Náhodný
+	Range	Rozsah
+	Range:	Rozsah:
+	Rasterize	Rastrovat
+	Ratio	Poměrné velikosti
+	Rays	Paprsky
+	Ready	Připraveno
+	Real name	Skutečné jméno
+	Recent	Nedávné
+	Recent Colors	Nedávné barvy
+	Recent Files	Nedávné soubory
+	Recover	Obnovit
+	Rectangle	Obdélník
+	Rectangle Tool	Nástroj Obdélník
+	Rectangular	Obdélníková
+	Red	Červená
+	Redo	Znovu
+	Reduce Noise	Redukovat šum
+	Refine	Upřesnit
+	Reflected	Zrcadlený
+	Refresh	Obnovit
+	Regular	Normální
+	Relative	Relativní
+	Relative Colorimetric	Relativní kolorimetrický
+	Relaxed	Volné
+	Relief	Reliéf
+	Reload	Znovu načíst
+	Remove	Odebrat
+	Remove Background	Odstranit pozadí
+	Remove from favorites	Odebrat z oblíbených
+	Rename	Přejmenovat
+	Rename Group…	Přejmenovat skupinu…
+	Rename Style	Přejmenovat styl
+	Rename…	Přejmenovat…
+	Repeat	Opakovat
+	Replace	Nahradit
+	Replace:	Nahradit:
+	Reply	Odpovědět
+	Report	Zpráva
+	Report an Issue…	Nahlásit problém…
+	Reselect	Znovu vybrat
+	Reset	Obnovit
+	Reset Preferences	Obnovit předvolby
+	Reset…	Obnovit…
+	Resize panel window	Změnit velikost okna panelu
+	Resize panels	Změnit velikost panelů
+	Resolution	Rozlišení
+	Resolution:	Rozlišení:
+	Restore	Obnovit
+	Result	Výsledek
+	Resume	Pokračovat
+	Reveal in Finder	Zobrazit ve Finderu
+	Reverse	Obrátit pořadí
+	Reverse the order	Obrátit pořadí
+	Revert	Vrátit k uložené verzi
+	Review	Revize
+	RGB	RGB
+	RGB Color	Barvy RGB
+	RGB:	RGB:
+	Right	Vpravo
+	Right Diagonal	Pravá diagonála
+	Right:	Vpravo:
+	Rotate	Otočit
+	Rotate:	Otočení:
+	Rotation	Otočení
+	Rotation:	Otočení:
+	Rounded Rectangle	Zaoblený obdélník
+	Roundness	Kulatost
+	Roundness:	Zakulacení:
+	Rows	Řádky
+	Ruler	Pravítko
+	Rulers	Pravítka
+	Rulers & Grids	Pravítka a mřížky
+	Russian	Ruština
+	Sample Size	Velikost vzorku
+	Sandstone	Pískovec
+	Saturation	Sytost
+	Save	Uložit
+	Save a Copy	Uložit kopii
+	Save a Copy…	Uložit kopii…
+	Save As	Uložit jako
+	Save as PDF	Uložit jako PDF
+	Save as Template	Uložit jako šablonu
+	Save as Template…	Uložit jako šablonu…
+	Save As…	Uložit jako…
+	Save Preset…	Uložit přednastavení…
+	Save Selection	Uložit výběr
+	Save Selection…	Uložit výběr…
+	Saved	Uložené
+	Save…	Uložit…
+	Scale	Měřítko
+	Scale:	Velikost:
+	Scaling	Měřítko
+	Scratch Disks	Odkládací disky
+	Scratch Disks…	Odkládací disky…
+	Screen	Závoj
+	Screen Mode	Režim obrazovky
+	Scripts	Skripty
+	Search	Hledat
+	Security	Zabezpečení
+	Segments	Segmenty
+	Select	Výběr
+	Select All	Vybrat vše
+	Select Objects	Vybrat objekty
+	Select:	Vybrat:
+	Selected pages	Vybrané stránky
+	Selection	Výběr
+	Selection Tool	Nástroj Výběr
+	Selective	Selektivní
+	Send Backward	Přesunout dál
+	Send to Back	Přesunout do pozadí
+	Sensitivity	Citlivost
+	Sent to {printer}	Odesláno do {printer}
+	Services	Služby
+	Set	Nastavit
+	Set as Default	Nastavit jako výchozí
+	Set:	Sada:
+	Settings	Nastavení
+	Settings…	Nastavení…
+	Shadow	Stíny
+	Shadows	Stíny
+	Shape	Tvar
+	Shape Effects	Efekty tvarů
+	Shape:	Tvar:
+	Shapes	Tvary
+	Share	Sdílet
+	Sharpen	Zostření
+	Sharpness	Ostrost
+	Shift	Shift
+	Short Lines	Krátké čáry
+	Short Strokes	Krátké tahy
+	Shortcut	Zkratka
+	Shortcuts	Zkratky
+	Show	Zobrazit
+	Show All	Zobrazit vše
+	Show Grid	Zobrazit mřížku
+	Show Guides	Zobrazit vodítka
+	Show in Folder	Zobrazit ve složce
+	Show Mask	Zobrazit masku
+	Show Mesh	Zobrazit síť
+	Show Rulers	Zobrazit pravítka
+	Show rulers	Zobrazit pravítka
+	Show Tool Tips	Zobrazovat popisky nástrojů
+	Show:	Zobrazit:
+	Sides:	Strany:
+	Simplify	Zjednodušit
+	Size	Velikost
+	Size:	Velikost:
+	Sketch	Skica
+	Skew	Zkosení
+	Slice	Řez
+	Slice Options	Možnosti řezu
+	Slice Options…	Možnosti řezu…
+	Slice Tool	Nástroj Řez
+	Slices	Řezy
+	Small	Malé
+	Small Caps	Kapitálky
+	Smart Blur	Chytré rozostření
+	Smart Blur…	Chytré rozostření…
+	Smart Guides	Chytrá vodítka
+	Smart quotes	Typografické uvozovky
+	Smoothness	Vyhlazení
+	Snap to Grid	Přichytávat k mřížce
+	Soft	Měkké
+	Soft Light	Měkké světlo
+	Soften	Změkčení
+	Softness	Měkkost
+	Solarize	Solarizace
+	Sort	Seřadit
+	Sort by	Seřadit podle
+	Source	Zdroj
+	Source code on GitHub	Zdrojový kód na GitHubu
+	Spaces	Mezery
+	Spacing	Rozestupy
+	Spacing:	Rozestupy:
+	Spanish	Španělština
+	Spatter	Rozstřik
+	Special	Speciální
+	Speckle	Skvrnité
+	Speed	Rychlost
+	Spelling	Pravopis
+	Spherize	Sférická deformace
+	Split	Rozdělit
+	Spot Color	Přímá barva
+	Spray Radius	Poloměr rozstřiku
+	Square	Čtverec
+	Square Size	Velikost čtverce
+	sRGB IEC61966-2.1	sRGB IEC61966-2.1
+	Stacked	Soustředně
+	Stained Glass	Vitráž
+	Stamp	Razítko
+	Standard	Standardní
+	Standard Ligatures	Standardní ligatury
+	Star	Hvězda
+	Start at:	Začít od:
+	Statistics	Statistika
+	Status	Stav
+	Status Bar	Stavový řádek
+	Stippled	Tečkované
+	Stop	Zastavit
+	Strength	Síla
+	Stretch	Roztáhnout
+	Strikethrough	Přeškrtnuté
+	Stroke	Tah
+	Stroke Color	Barva tahu
+	Stroke Length	Délka tahu
+	Stroke Options	Možnosti tahu
+	Stroke:	Tah:
+	Studio	Studio
+	Style	Styl
+	Style:	Styl:
+	Styles	Styly
+	Stylize	Stylizace
+	Subdivisions	Dělení
+	Subject	Předmět
+	Subscript	Dolní index
+	Subset	Podmnožina
+	Subtitle	Podtitul
+	Subtract	Odečíst
+	Sumi-e	Sumi-e
+	Summary	Souhrn
+	Superscript	Horní index
+	Swatches	Vzorník
+	Symbol	Symbol
+	Symbols	Symboly
+	Sync with system	Synchronizovat se systémem
+	System	Systémové
+	Tab	Tabulátor
+	Table	Tabulka
+	Table style	Styl tabulky
+	Tables	Tabulky
+	Tabloid	Tabloid
+	Tabs	Tabulátory
+	Taper	Zúžení
+	Target	Cíl
+	Target:	Cíl:
+	Temperature	Teplota
+	Templates	Šablony
+	Text	Text
+	Text color	Barva textu
+	Text:	Text:
+	Texture	Textura
+	The passwords don't match.	Hesla se neshodují.
+	Theme	Motiv
+	Thickness	Tloušťka
+	This document has no bookmarks.	Tento dokument nemá žádné záložky.
+	Threshold	Práh
+	Thumbnails	Miniatury
+	Tile	Vedle sebe
+	Tile Size	Velikost dlaždice
+	Tilt	Náklon
+	Time	Čas
+	Timeline	Časová osa
+	Tint	Tón
+	Tint Color	Barva nádechu
+	Title	Název
+	To	Do
+	Tolerance	Tolerance
+	Tolerance:	Tolerance:
+	Tool	Nástroj
+	Toolbars	Panely nástrojů
+	Tools	Nástroje
+	Top	Nahoře
+	Top Left	Vlevo nahoře
+	Top Right	Vpravo nahoře
+	Top:	Nahoře:
+	Total	Celkem
+	Total:	Celkem:
+	Tracking	Prostrkání
+	Transform	Transformace
+	Translate	Přeložit
+	Transparency	Průhlednost
+	Transparent	Průhledné
+	Trap…	Přesah barev…
+	Triangle	Trojúhelník
+	Turbulent	Turbulence
+	Twirl	Zatočení
+	Twist	Zkroucení
+	Type	Typ
+	Type Tool	Nástroj Text
+	Type:	Typ:
+	Typewriter	Psací stroj
+	Type…	Typ…
+	Typing	Psaní
+	Underline	Podtržené
+	Undo	Zpět
+	Undo {action}	Zpět: {action}
+	Ungroup	Oddělit
+	Uniform	Jednotný
+	Union	Sjednocení
+	Units	Jednotky
+	Unknown	Neznámé
+	Unlock	Odemknout
+	Unsaved changes	Neuložené změny
+	Unsharp Mask	Maska rozostření
+	Untitled	Bez názvu
+	Up	Nahoru
+	Update	Aktualizovat
+	Updates	Aktualizace
+	UPPERCASE	VELKÁ PÍSMENA
+	Use Default	Použít výchozí
+	User	Uživatel
+	Username	Uživatelské jméno
+	Value	Hodnota
+	Value:	Hodnota:
+	Variables	Proměnné
+	Version	Verze
+	Version {version}	Verze {version}
+	Vertical	Svisle
+	Vertical Alignment	Svislé zarovnání
+	Vertical Type Tool	Nástroj Svislý text
+	Vertically	Svisle
+	Very High	Velmi vysoká
+	Vibrance	Živost
+	Video	Video
+	View	Zobrazení
+	Violet	Fialová
+	Visibility	Viditelnost
+	Vivid Light	Jasné světlo
+	Voice	Hlas
+	W:	Š:
+	Warning	Upozornění
+	Warnings	Upozornění
+	Warp	Pokřivení
+	Watermark	Vodoznak
+	Wave	Vlny
+	Wave…	Vlna…
+	Web	Web
+	Website	Webová stránka
+	Weight	Tloušťka
+	Wet	Vlhkost
+	White	Bílá
+	White Intensity	Intenzita bílé
+	White Is High	Bílá je vysoko
+	Whites	Bílé
+	Width	Šířka
+	Width and Height	Šířka a výška
+	Width:	Šířka:
+	Window	Okno
+	Windows	Windows
+	Words	Slova
+	Working CMYK	Pracovní CMYK
+	Workspace	Pracovní prostor
+	Workspaces	Pracovní prostory
+	X	X
+	Y	Y
+	Yellow	Žlutá
+	Yes	Ano
+	yesterday	včera
+	Your changes will be lost if you don't save them.	Pokud změny neuložíte, budou ztraceny.
+	Zoom	Lupa
+	Zoom In	Přiblížit
+	Zoom in	Přiblížit
+	Zoom Out	Oddálit
+	Zoom out	Oddálit
+	Zoom Tool	Nástroj Lupa
+@plural	{n} byte|{n} bytes	{n} bajt|{n} bajty|{n} bajtů
+@plural	{n} commit|{n} commits	{n} commit|{n} commity|{n} commitů
+	{n} files	Soubory: {n}
+	{n} h ago	před {n} h
+@plural	{n} item|{n} items	{n} položka|{n} položky|{n} položek
+@plural	{n} Layer|{n} Layers	{n} vrstva|{n} vrstvy|{n} vrstev
+	{n} min ago	před {n} min
+@plural	{n} step|{n} steps	{n} krok|{n} kroky|{n} kroků
+	−Bin	−Bin
+	● Recording	● Záznam

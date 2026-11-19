@@ -1,0 +1,1156 @@
+# Nederlands (nl) interface catalog for every Crafting App.
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   @plural  English `one|other`; the translation lists this language's plural forms, `|`-separated.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary. No other product's localisation, string table or translated UI was
+# consulted or copied; add entries the same way.
+
+	% of all commits	% van alle commits
+	16 bit	16 bit
+	24 bit	24 bit
+	24 bits/pixel	24 bits/pixel
+	32 bit	32 bit
+	32 bits/pixel	32 bits/pixel
+	8 bit	8 bit
+	About	Over
+	Absolute	Absoluut
+	Absolute Colorimetric	Absoluut colorimetrisch
+	Accented Edges	Geaccentueerde randen
+	Accurate	Nauwkeurig
+	Actions	Acties
+	Activate Panel	Paneel activeren
+	Active	Actief
+	Actual Size	Werkelijke grootte
+	Adaptive	Adaptief
+	Add	Toevoegen
+	Add Guide	Hulplijn toevoegen
+	Add to Dictionary	Aan woordenboek toevoegen
+	Add to favorites	Toevoegen aan favorieten
+	Add to Swatches	Aan stalen toevoegen
+	Adjustments	Aanpassingen
+	Advanced	Geavanceerd
+	Align	Uitlijnen
+	Align center	Centreren
+	Align left	Links uitlijnen
+	Align right	Rechts uitlijnen
+	Align to Selection	Uitlijnen op selectie
+	Alignment	Uitlijning
+	Alignment:	Uitlijning:
+	All	Alles
+	All Caps	Alle kapitalen
+	All Categories	Alle categorieën
+	All Layers	Alle lagen
+	All Slices	Alle slices
+	Alpha	Alfa
+	Alt	Alt
+	Always	Altijd
+	Amount	Hoeveelheid
+	Amount:	Hoeveelheid:
+	Angle	Hoek
+	Angle:	Hoek:
+	Angular	Hoek
+	Anti-Alias	Anti-alias
+	Anti-alias	Anti-alias
+	Appearance	Uiterlijk
+theme	Appearance	Vormgeving
+	Appearance Settings…	Weergave-instellingen…
+	Apply	Toepassen
+	Apply Character Style	Tekenstijl toepassen
+	Apply Data Set	Gegevensset toepassen
+	Arc	Boog
+	Area	Oppervlakte
+	Arrange	Schikken
+	Arrow	Pijl
+	Artboard	Tekenbord
+	Artboards	Tekengebieden
+	ArtCraft	ArtCraft
+	ArtCraft Website	ArtCraft-website
+	ArtCraft website	Website van ArtCraft
+	Artistic	Artistiek
+	Aspect Ratio	Beeldverhouding
+	Assign	Toewijzen
+	Assign Profile…	Profiel toewijzen…
+	Audio	Audio
+	Author	Auteur
+	Author:	Auteur:
+	Auto	Automatisch
+	Auto Color	Automatische kleur
+	Automate	Automatiseren
+	Automatic	Automatisch
+	Automatically	Automatisch
+	Average	Gemiddelde
+	Background	Achtergrond
+	Background Color	Achtergrondkleur
+	Background Contents	Achtergrondinhoud
+	Backspace	Backspace
+	Balance	Balans
+	Bar	Balk
+	Baseline	Basislijn
+	Baseline Shift	Basislijnverschuiving
+	Basic	Eenvoudig
+	Basic Latin	Basic Latin
+	Batch	Batch
+	Batch…	Batch…
+	Bend:	Buiging:
+	Bicubic	Bicubisch
+	Binary assets added	Toegevoegde binaire assets
+	Binary assets removed	Verwijderde binaire assets
+	Bitmap	Bitmap
+	Black	Zwart
+	Black & White	Zwart-wit
+	Black Intensity	Zwartintensiteit
+	Blacks	Zwarten
+	Blend Mode	Overvloeimodus
+	Blending Mode	Vermengingsmodus
+	Block	Blok
+	Blocks	Blokken
+	Blue	Blauw
+	Blur	Vervagen
+	Blur Angle	Vervagingshoek
+	Bold	Vet
+	Border	Rand
+	Border Thickness	Randdikte
+	Both	Beide
+	Both sides	Beide zijden
+	Bottom	Onder
+	Bottom Left	Linksonder
+	Bottom Right	Rechtsonder
+	Bottom:	Onder:
+	Break Link	Koppeling verbreken
+	Brick	Baksteen
+	Brightness	Helderheid
+	Bring Forward	Naar voren brengen
+	Bring to Front	Naar de voorgrond brengen
+	Brown	Bruin
+	Browse	Bladeren
+	Browse…	Bladeren…
+	Brush Size	Penseelgrootte
+	Brush Strokes	Penseelstreken
+	Brushes	Penseel
+	Bulge	Uitstulping
+	Bullet	Opsommingsteken
+	Burlap	Jute
+	Cancel	Annuleren
+	Canvas	Canvas
+	Caption	Bijschrift
+	Cascade	Trapsgewijs schikken
+	Category	Categorie
+	Cell Size	Celgrootte
+	Center	Midden
+	Center X	Midden X
+	Center Y	Midden Y
+	Centimeters	Centimeter
+	Chamfer	Afkanting
+	Change	Wijzigen
+	Change All	Alles wijzigen
+	Change Case	Hoofdlettergebruik wijzigen
+	Change Panel Layout	Paneelindeling wijzigen
+	Channel	Kanaal
+	Channel Mixer	Kanaalmixer
+	Channels	Kanalen
+	Character	Teken
+	Character Styles	Tekenstijlen
+	Check for Updates	Controleren op updates
+	Check Spelling…	Spelling controleren…
+	Choose…	Kies…
+	Circle	Cirkel
+	City	Plaats
+	Clarity	Duidelijkheid
+	Classic	Klassiek
+	Clear	Wissen
+	Clear All	Alles wissen
+	Clear Guides	Hulplijnen wissen
+	Clear History	Historie wissen
+	Clear Recent Files	Recente bestanden wissen
+	Clipboard	Klembord
+	Clipping Mask	Knipmasker
+	Clone	Klonen
+	Close	Sluiten
+	Close All	Alles sluiten
+	Close Panel	Paneel sluiten
+	Cmd	Cmd
+	CMYK Color	CMYK-kleur
+	CMYK:	CMYK:
+	Coarse Dots	Grove stippen
+	Collapse	Samenvouwen
+	Collate	Sorteren
+	Color	Kleur
+	Color Balance	Kleurbalans
+	Color Burn	Na branden
+	Color Dodge	Kleur ontwijken
+	Color Management	Kleurbeheer
+	Color Mode	Kleurmodus
+	Color Picker	Kleurkiezer
+	Color Settings	Kleurinstellingen
+	Color Settings…	Kleurinstellingen…
+	Color Space	Kleurruimte
+	Color Swatches	Kleurstalen
+	Color Table	Kleurentabel
+	Color:	Kleur:
+	Colorize	Inkleuren
+	Colors	Kleuren
+	Colors:	Kleuren:
+	Color…	Kleur…
+	Column width	Kolombreedte
+	Columns	Kolommen
+	Columns:	Kolommen:
+	Command	Opdracht
+	Commits	Commits
+	Community	Community
+	Company	Bedrijf
+	Compare	Vergelijken
+	Compatibility	Compatibiliteit
+	Composite	Composiet
+	Compression	Compressie
+	Cone	Kegel
+	Continue	Doorgaan
+	Contrast	Contrast
+	Contributors	Bijdragers
+	Convert	Converteren
+	Convert to Shape	Converteren naar vorm
+	Convert to sRGB	Converteren naar sRGB
+	Copies	Exemplaren
+	Copies:	Kopieën:
+	Copy	Kopiëren
+	Copyright	Copyright
+	Copyrighted	Auteursrechtelijk beschermd
+	Corner	Hoek
+	Corners	Hoeken
+	Correction	Correctie
+@msg	Couldn't open {name}: {e}	Kon {name} niet openen: {e}
+	Country	Land
+	Crack Brightness	Scheurhelderheid
+	Crack Depth	Scheurdiepte
+	Crack Spacing	Scheurafstand
+	Create	Maken
+	Create Clipping Mask	Knipmasker maken
+	Crop	Bijsnijden
+	Cross	Kruis
+	Crosshatch	Kruisarcering
+	Crystallize	Kristalliseren
+	Crystallize…	Kristalliseren…
+	Ctrl	Ctrl
+	Current	Huidig
+	Current Time	Huidige tijd
+	Curvature	Kromming
+	Curve	Curve
+	Curves	Curven
+	Curves…	Curves…
+	Custom	Aangepast
+	Customize…	Aanpassen…
+	Cut	Knippen
+	Cyan	Cyaan
+	Dark	Donker
+	Dark Gray	Donkergrijs
+	Dark gray	Donkergrijs
+	Dark Strokes	Donkere streken
+	Dark Theme	Donker thema
+	Darken	Donkerder
+	Darkness	Donkerte
+	Dashed	Gestreept
+	Data	Gegevens
+	Data Sets	Gegevenssets
+	Date	Datum
+	Date and Time	Datum en tijd
+	Date Created	Aanmaakdatum
+	Dates	Datums
+	De-Interlace	De-interlacing
+	Decrease Font Size	Tekengrootte verkleinen
+	Default	Standaard
+	Delete	Verwijderen
+	Delete Brush	Kwast verwijderen
+	Delete Group	Groep verwijderen
+	Delete Layer	Laag verwijderen
+	Delete Mask	Masker verwijderen
+	Delete Style	Stijl verwijderen
+	Delete Workspace	Werkruimte verwijderen
+	Delete…	Verwijderen…
+	Depth	Diepte
+	Desaturate	Verzadiging verwijderen
+	Description	Beschrijving
+	Description:	Beschrijving:
+	Deselect	Deselecteren
+	Deselect All	Alles deselecteren
+	Destination	Bestemming
+	Destination:	Bestemming:
+	Details	Details
+	Diagonal	Diagonaal
+	Diameter	Diameter
+	Diameter:	Diameter:
+	Diamond	Ruit
+	Difference	Verschil
+	Diffuse Glow	Diffuse gloed
+	Diffusion	Diffusie
+	Digits	Cijfers
+	Dimensions	Afmetingen
+	Direct Selection Tool	Direct selecteren-gereedschap
+	Direction	Richting
+	Direction Balance	Richtingbalans
+	Direction:	Richting:
+	Discard	Negeren
+	Discord	Discord
+	Discretionary Ligatures	Optionele ligaturen
+	Dismiss	Sluiten
+	Display	Weergave
+	Display name	Weergavenaam
+	Distance	Afstand
+	Distort	Vervormen
+	Distortion	Vervorming
+	Distribute	Verdelen
+	Divide	Verdelen
+	Dock Panel	Paneel dokken
+	Document	Document
+	Documents	Documenten
+	Don't Save	Niet opslaan
+	Done	Gereed
+	Dot	Punt
+	Dots	Stippen
+	Dotted	Gestippeld
+	Double-click	Dubbelklik
+	Down	Omlaag
+	Download	Downloaden
+	Draft	Concept
+	Draw	Tekenen
+	Drop Shadow	Slagschaduw
+	Drop Shadow…	Slagschaduw…
+	Duplicate	Dupliceren
+	Duplicate Layer	Laag dupliceren
+	Duplicate…	Dupliceren…
+	Duplication	Verdubbeling
+	Duration	Duur
+	Dutch	Nederlands
+	Dynamics	Dynamiek
+	Edge	Rand
+	Edge Brightness	Randhelderheid
+	Edge Intensity	Randintensiteit
+	Edge Only	Alleen rand
+	Edge Simplicity	Randeenvoud
+	Edge Thickness	Randdikte
+	Edge Width	Randbreedte
+	Edit	Bewerken
+	Edit Contents	Inhoud bewerken
+	Edit Original	Origineel bewerken
+	Edit Toolbar	Werkbalk bewerken
+	Edit…	Bewerken…
+	Effect	Effect
+	Effects	Effecten
+	Elevation	Elevatie
+	Eliminate	Verwijderen
+	Ellipse	Ellips
+	Ellipse Tool	Ellips-gereedschap
+	Ellipsis	Beletselteken
+	Em Dash	Gedachtestreep
+	Em Space	Em-spatie
+	Embed	Insluiten
+	Emboss	Reliëf
+	En Dash	Halve gedachtestreep
+	En Space	En-spatie
+	Enable	Inschakelen
+	Enlarged	Vergroot
+	Enter	Enter
+	Entire Font	Volledig lettertype
+	Envelope DL	Envelop DL
+	Erase	Gummen
+	Eraser	Gom
+	Eraser Tool	Gum-gereedschap
+	Error	Fout
+	Even Fields	Even velden
+	Exact	Exact
+	Exclusion	Uitsluiting
+	Exit	Afsluiten
+	Expand	Uitbreiden
+	Export	Exporteren
+	Export As	Exporteren als
+	Export As…	Exporteren als…
+	Export Options	Exportopties
+	Export PDF	PDF exporteren
+	Export to	Exporteren naar
+	Exported {path}	{path} geëxporteerd
+	Export…	Exporteren…
+	Exposure	Belichting
+	Eyedropper	Pipet
+	Eyedropper Tool	Pipet-gereedschap
+	Faded Film	Vervaagde film
+	Fast	Snel
+	Favorites	Favorieten
+	Feather	Veer
+	File	Bestand
+	File Format	Bestandsformaat
+	File Handling	Bestandsbeheer
+	File Info…	Bestandsinfo…
+	File Name	Bestandsnaam
+	File Size	Bestandsgrootte
+@id	file.close	Sluiten
+	Files	Bestanden
+	Fill	Vulling
+	Fill:	Vulling:
+	Filter	Filteren
+	Find	Zoeken
+	Find Next	Volgende zoeken
+	Fine Dots	Fijne stippen
+	Finish	Voltooien
+	First	Eerste
+	First commit	Eerste commit
+	Fit	Passen
+	Fit in View	In beeld passen
+	Fixed	Vast
+	Flash	Flitser
+	Flatten	Platmaken
+	Flip	Spiegelen
+	Flip Horizontal	Horizontaal spiegelen
+	Flip Vertical	Verticaal spiegelen
+	Focus	Scherpstelling
+	Folder	Map
+	Font	Lettertype
+	Font Size	Lettertypegrootte
+	Font size	Lettergrootte
+	Font Size:	Lettergrootte:
+	Font:	Lettertype:
+	Fonts	Lettertypen
+	Format	Formaat
+	Format:	Indeling:
+	Fractions	Breuken
+	Frame	Kader
+	Free	Vrij
+	Free Transform	Vrij transformeren
+	French	Frans
+	Frequency	Frequentie
+	From	Van
+	Frosted	Mat
+	Full	Volledig
+	Full Screen	Volledig scherm
+	Full Screen Mode	Volledig scherm
+	Functions	Functies
+	Gamma	Gamma
+	Gamma Correction	Gammacorrectie
+	Gamut Warning	Gamutwaarschuwing
+	Gaussian Blur	Gaussiaanse vervaging
+	Gaussian Blur…	Gaussiaanse vervaging…
+	General	Algemeen
+	General…	Algemeen…
+	Generate	Genereren
+	German	Duits
+	GitHub	GitHub
+	Glass	Glas
+	Global	Globaal
+	Glow	Gloed
+	Glow Brightness	Gloedhelderheid
+	Glow Size	Gloedgrootte
+	Glyphs	Glyphs
+	Good	Goed
+	Gradient	Verloop
+	Gradient Tool	Verloop-gereedschap
+	Gradients	Verlopen
+	Grain	Korrel
+	Grain Type	Korreltype
+	Graininess	Korreligheid
+	Grainy Dots	Korrelige stippen
+	Graphic	Illustratie
+	Graphics	Illustraties
+	Gray	Grijs
+	Gray Gamma 2.2	Grijs gamma 2.2
+	Grayscale	Grijswaarden
+	Green	Groen
+	Grid	Raster
+	Grid Size:	Rastergrootte:
+	Gridline every	Rasterlijn elke
+	Group	Groeperen
+	Group with	Groeperen met
+	Groups	Groepen
+	Grout Width	Voegbreedte
+	Guides	Hulplijnen
+	Halftone Pattern	Rasterpatroon
+	Hand	Hand
+	Hand Tool	Hand-gereedschap
+	Hard	Hard
+	Hard Light	Hard licht
+	Hard Mix	Harde mix
+	Heart	Hart
+	Height	Hoogte
+	Height:	Hoogte:
+	Help	Help
+	Hexagon	Zeshoek
+	Hidden	Verborgen
+	Hide	Verbergen
+	Hide All	Alles verbergen
+	Hide Grid	Raster verbergen
+	Hide Others	Anderen verbergen
+	High	Hoog
+	High Pass	Hoogdoorlaat
+	High Resolution	Hoge resolutie
+	High resolution	Hoge resolutie
+	Highlight Area	Hooglichtgebied
+	Highlights	Hooglichten
+	Hindi	Hindi
+	Histogram	Histogram
+	History	Historie
+	Hollow	Hol
+	Home	Home
+	Horizontal	Horizontaal
+	Horizontal scale	Horizontale schaal
+	Horizontally	Horizontaal
+	Hue	Tint
+	Hue Shift	Tintverschuiving
+	Hue/Saturation…	Kleurtoon/verzadiging…
+	Hyphenation	Afbreking
+	Ignore	Negeren
+	Ignore All	Alles negeren
+	Image	Afbeelding
+	Image Size	Afbeeldingsgrootte
+	Images	Afbeeldingen
+	Import	Importeren
+	Import…	Importeren…
+	Inches	Inch
+	Increase Font Size	Tekengrootte vergroten
+	Inflate	Opblazen
+	Info	Info
+	Inner Glow…	Inwendige gloed…
+	Input:	Invoer:
+	Insert	Invoegen
+	Inside	Binnen
+	Inspect Document	Document inspecteren
+	Install Plug-in	Plug-in installeren
+	Install Plug-in…	Plug-in installeren…
+	Intensity	Intensiteit
+	Interface	Interface
+	Interface Language	Interfacetaal
+	Interlaced	Interlaced
+	Interpolation	Interpolatie
+	Intersect	Doorsnede
+	Invert	Omkeren
+	Invert Mask	Masker omkeren
+	Isolate	Isoleren
+	Italian	Italiaans
+	Italic	Cursief
+	Japanese	Japans
+	Join	Verbinden
+	Join our Discord	Word lid van onze Discord
+	Join the ArtCraft Discord	Deelnemen aan de ArtCraft-Discord
+	Join the ArtCraft Discord…	Deelnemen aan de ArtCraft-Discord…
+	Join us on Discord	Doe mee op Discord
+	Justification	Uitvullen
+	Justify	Uitvullen
+	Keep:	Behouden:
+	Kerning	Kerning
+	Keyboard Shortcuts	Sneltoetsen
+	Keyboard Shortcuts…	Sneltoetsen…
+	Keywords	Trefwoorden
+	Kind	Soort
+	Lab	Lab
+	Label	Label
+	Labels	Labels
+	Landscape	Liggend
+	Language	Taal
+	Language Options	Taalopties
+@id	language.name	Nederlands
+	Language:	Taal:
+	Large	Groot
+	Lasso	Lasso
+	Lasso Tool	Lasso-gereedschap
+	Last	Laatste
+	Last commit	Laatste commit
+	Layer	Laag
+	Layers	Lagen
+	Layout	Layout
+	Layout:	Indeling:
+	Leading	Regelafstand
+	Left	Links
+	Left Diagonal	Diagonaal links
+	Left to Right	Links naar rechts
+	Left:	Links:
+	Legal	Legal
+	Length	Lengte
+	Length:	Lengte:
+	Lens Flare	Lensschittering
+	Less	Minder
+	Letter	Letter
+	Level	Niveau
+	Levels	Niveaus
+	Levels…	Niveaus…
+	Libraries	Bibliotheken
+	Library	Bibliotheek
+	Light	Licht
+	Light Blue	Lichtblauw
+	Light Direction	Lichtrichting
+	Light Gray	Lichtgrijs
+	Light gray	Lichtgrijs
+	Light Intensity	Lichtintensiteit
+	Light Theme	Licht thema
+	Light Type	Lichttype
+	Lighten	Lichter
+	Lighter Color	Lichtere kleur
+	Lighting	Belichting
+	Lighting Effects	Belichtingseffecten
+	Lightness	Helderheid
+	Line	Lijn
+	Line delta	Regelverschil
+	Linear	Lineair
+	Linear Burn	Lineair doordrukken
+	Linear Gradient	Lineair verloop
+	Linear Light	Lineair licht
+	Lines	Lijnen
+	Lines +/−	Regels +/−
+	Lines added	Toegevoegde regels
+	Lines deleted	Verwijderde regels
+	Link	Koppeling
+	Links	Koppelingen
+	List	Lijst
+	List View	Lijstweergave
+	Location	Locatie
+	Location:	Locatie:
+	Lock	Vergrendelen
+	Lock Guides	Hulplijnen vergrendelen
+	Lock Slices	Slices vergrendelen
+	Locked	Vergrendeld
+	Long Lines	Lange lijnen
+	Long Strokes	Lange streken
+	Low	Laag
+	lowercase	kleine letters
+	Luminance	Luminantie
+	Luminosity	Luminositeit
+	Magenta	Magenta
+	Magic Wand Tool	Toverstaf-gereedschap
+	Mask	Masker
+	Masks	Maskers
+	Matte	Mat
+	Maximize	Maximaliseren
+	Maximum	Maximum
+	Measure	Meten
+	Median	Mediaan
+	Medium	Gemiddeld
+	Medium Dots	Middelgrote stippen
+	Medium Gray	Middelgrijs
+	Medium Lines	Middellange lijnen
+	Merge	Samenvoegen
+	Merge Layers	Lagen samenvoegen
+	Merged PRs	Samengevoegde PR's
+	Mesh	Net
+	Message:	Bericht:
+	Metadata	Metagegevens
+	Method	Methode
+	Method:	Methode:
+	Mezzotint	Mezzotint
+	Mezzotint…	Mezzotint…
+	Middle	Midden
+	Midpoint	Middelpunt
+	Midtones	Middentonen
+	Millimeters	Millimeter
+	Minimize	Minimaliseren
+	Minimum	Minimum
+	Mirror	Spiegelen
+	Missing	Ontbreekt
+	Mobile	Mobiel
+	Mode	Modus
+	Mode:	Modus:
+	Model	Model
+	Models	Modellen
+	Modern	Modern
+	Modified	Gewijzigd
+	Modify	Wijzigen
+	Monitor RGB	Monitor-RGB
+	Mono	Mono
+	Monochrome	Monochroom
+	More	Meer
+	Mosaic	Mozaïek
+	Mosaic Tiles	Mozaïektegels
+	Motion	Beweging
+	Move	Verplaatsen
+	Move Down	Omlaag verplaatsen
+	Move Panel	Paneel verplaatsen
+	Move Up	Omhoog verplaatsen
+	Multiply	Vermenigvuldigen
+	Name	Naam
+	Name (A–Z)	Naam (A–Z)
+	Name:	Naam:
+	Navigator	Navigator
+	Neon Glow	Neongloed
+	Never	Nooit
+	New	Nieuw
+	New Document	Nieuw document
+	New document	Nieuw document
+	New from Template	Nieuw uit sjabloon
+	New Group	Nieuwe groep
+	New Guide	Nieuwe hulplijn
+	New Layer	Nieuwe laag
+	New Layer…	Nieuwe laag…
+	New Style…	Nieuwe stijl…
+	New Swatch…	Nieuw staal…
+	New Window	Nieuw venster
+	New Workspace	Nieuwe werkruimte
+	New Workspace…	Nieuwe werkruimte…
+	New…	Nieuw…
+	Next	Volgende
+	Next Appearance Mode	Volgende weergavemodus
+	Next Page	Volgende pagina
+	Next page	Volgende pagina
+	No	Nee
+	No Color	Geen kleur
+	No Dither	Geen dithering
+	No Document	Geen document
+	No document	Geen document
+	No document open	Geen document geopend
+	No matches.	Geen overeenkomsten.
+	No matching commands	Geen overeenkomende opdrachten
+	No recent files	Geen recente bestanden
+	No results	Geen resultaten
+	No Selection	Geen selectie
+	No selection	Geen selectie
+	Noise	Ruis
+	Nonbreaking Space	Vaste spatie
+	None	Geen
+	Normal	Normaal
+	NTSC Colors	NTSC-kleuren
+	Number	Aantal
+	Object	Object
+	Octagon	Achthoek
+	Odd Fields	Oneven velden
+	Off	Uit
+	Offset	Offset
+	Offset:	Offset:
+	OK	OK
+	Omit	Weglaten
+	On	Aan
+	Only Web Colors	Alleen webkleuren
+	Opacity	Dekking
+	Opacity:	Dekking:
+	Open	Openen
+	Open Recent	Recent geopend
+	OpenType	OpenType
+	Open…	Openen…
+	Optimized	Geoptimaliseerd
+	Options	Opties
+	Options…	Opties…
+	Orange	Oranje
+	Ordinals	Rangtelwoorden
+	Orientation	Oriëntatie
+	Orientation:	Oriëntatie:
+	Original	Origineel
+	Other	Overig
+	Outer Glow…	Uitwendige gloed…
+	Outline	Omtrek
+	Output	Uitvoer
+	Output:	Uitvoer:
+	Outside	Buiten
+	Oval	Ovaal
+	Overlap:	Overlap:
+	Overlay	Bedekken
+	Package…	Verpakken…
+	Page	Pagina
+	Pages	Pagina's
+	Painting	Schilderen
+	Panel	Paneel
+	Panel menu	Paneelmenu
+	Panel Options…	Paneelopties…
+	Panels	Panelen
+	Paper	Papier
+	Paragraph	Alinea
+	Paragraph Styles	Alineastijlen
+	Password	Wachtwoord
+	Paste	Plakken
+	Paste Special	Speciaal plakken
+	Patchwork	Patchwork
+	Path	Pad
+	Path:	Pad:
+	Paths	Paden
+	Pattern	Patroon
+	Pattern Type	Patroontype
+	Pause	Pauze
+	Pen	Pen
+	Pen Tool	Pen-gereedschap
+	Pencil	Potlood
+	Pencil Tool	Potlood-gereedschap
+	Pentagon	Vijfhoek
+	Percent	Procent
+	Percentage	Percentage
+	Performance	Prestaties
+	Perimeter	Omtrek
+	Perspective	Perspectief
+	Photo	Foto
+	Photocopy	Fotokopie
+	Picas	Pica's
+	Pin Light	Puntlicht
+	Pink	Roze
+	Pixel	Pixel
+	Pixelate	Pixeleren
+	Pixels	Pixels
+	Play	Afspelen
+	Plug-ins	Plug-ins
+	Point	Punt
+	Pointillize	Pointilleren
+	Pointillize…	Pointilleren…
+	Points	Punten
+	Polygon	Polygoon
+	Polygon Tool	Polygoon-gereedschap
+	Portrait	Staand
+	Portuguese	Portugees
+	Position	Positie
+	Postcard	Ansichtkaart
+	Poster	Poster
+	Poster Edges	Posterranden
+	Posterization	Posterisatie
+	Posterize	Posteriseren
+	Preferences	Voorkeuren
+	Preferences…	Voorkeuren…
+	Preserve	Behouden
+	Preserve Luminosity	Lichtsterkte behouden
+	Preset	Voorinstelling
+	Preset Manager	Voorinstellingenbeheer
+	Preset:	Voorinstelling:
+	Presets	Voorinstellingen
+	Presets:	Voorinstellingen:
+	Press keys…	Druk op toetsen…
+	Pressure	Druk
+	Preview	Voorbeeld
+	Previous	Vorige
+	Previous Page	Vorige pagina
+	Previous page	Vorige pagina
+	Print	Afdrukken
+	Printer	Printer
+	Printer:	Printer:
+	Print…	Afdrukken…
+	Profile	Profiel
+	Progressive	Progressief
+	Proof Setup	Kleurproef instellen
+	Properties	Eigenschappen
+	PRs	PR's
+	Public Domain	Publiek domein
+	Punctuation	Interpunctie
+	Purple	Paars
+	Quality	Kwaliteit
+	Quick Actions	Snelle acties
+	Radial	Radiaal
+	Radial Blur	Radiale vervaging
+	Radial Blur…	Radiaal vervagen…
+	Radial Gradient	Radiaal verloop
+	Radius	Straal
+	Radius:	Radius:
+	Random	Willekeurig
+	Range	Bereik
+	Range:	Bereik:
+	Rasterize	Rasteriseren
+	Ratio	Verhouding
+	Rays	Stralen
+	Ready	Klaar
+	Real name	Echte naam
+	Recent	Recent
+	Recent Colors	Recente kleuren
+	Recent Files	Recente bestanden
+	Rectangle	Rechthoek
+	Rectangle Tool	Rechthoek-gereedschap
+	Rectangular	Rechthoekig
+	Red	Rood
+	Redo	Opnieuw uitvoeren
+	Reduce Noise	Ruis verminderen
+	Refine	Verfijnen
+	Reflected	Gespiegeld
+	Refresh	Vernieuwen
+	Regular	Standaard
+	Relative	Relatief
+	Relative Colorimetric	Relatief colorimetrisch
+	Relief	Reliëf
+	Remove	Verwijderen
+	Remove Background	Achtergrond verwijderen
+	Remove from favorites	Verwijderen uit favorieten
+	Rename	Hernoemen
+	Rename Group…	Groep hernoemen…
+	Rename Style	Stijl hernoemen
+	Rename…	Hernoemen…
+	Repeat	Herhalen
+	Replace	Vervangen
+	Report an Issue…	Probleem melden…
+	Reselect	Opnieuw selecteren
+	Reset	Opnieuw instellen
+	Reset Preferences	Voorkeuren herstellen
+	Resize panel window	Paneelvenster van formaat wijzigen
+	Resize panels	Panelen van formaat wijzigen
+	Resolution	Resolutie
+	Resolution:	Resolutie:
+	Restore	Herstellen
+	Result	Resultaat
+	Resume	Hervatten
+	Reveal in Finder	Weergeven in Finder
+	Reverse	Omkeren
+	Reverse the order	Volgorde omkeren
+	Revert	Terugzetten
+	RGB	RGB
+	RGB Color	RGB-kleur
+	RGB:	RGB:
+	Right	Rechts
+	Right Diagonal	Diagonaal rechts
+	Right:	Rechts:
+	Rotate	Roteren
+	Rotate:	Roteren:
+	Rotation	Rotatie
+	Rotation:	Rotatie:
+	Rounded Rectangle	Afgeronde rechthoek
+	Roundness	Rondheid
+	Roundness:	Rondheid:
+	Rows	Rijen
+	Ruler	Liniaal
+	Rulers	Linialen
+	Rulers & Grids	Linialen & rasters
+	Sample Size	Monstergrootte
+	Sandstone	Zandsteen
+	Saturation	Verzadiging
+	Save	Opslaan
+	Save a Copy	Kopie opslaan
+	Save a Copy…	Een kopie opslaan…
+	Save As	Opslaan als
+	Save as PDF	Opslaan als PDF
+	Save as Template	Opslaan als sjabloon
+	Save as Template…	Opslaan als sjabloon…
+	Save As…	Opslaan als…
+	Save Preset…	Voorinstelling opslaan…
+	Save Selection	Selectie opslaan
+	Save Selection…	Selectie opslaan…
+	Saved	Opgeslagen
+	Save…	Opslaan…
+	Scale	Schaal
+	Scale:	Schaal:
+	Scaling	Schaling
+	Scratch Disks	Scratchschijven
+	Scratch Disks…	Werkschijven…
+	Screen	Scherm
+	Screen Mode	Schermmodus
+	Scripts	Scripts
+	Search	Zoeken
+	Security	Beveiliging
+	Segments	Segmenten
+	Select	Selecteren
+	Select All	Alles selecteren
+	Select Objects	Objecten selecteren
+	Select:	Selecteren:
+	Selection	Selectie
+	Selection Tool	Selectie-gereedschap
+	Selective	Selectief
+	Send Backward	Naar achteren brengen
+	Send to Back	Naar de achtergrond brengen
+	Sensitivity	Gevoeligheid
+	Sent to {printer}	Verzonden naar {printer}
+	Services	Diensten
+	Set as Default	Als standaard instellen
+	Set:	Set:
+	Settings	Instellingen
+	Settings:	Instellingen:
+	Settings…	Instellingen…
+	Shadow	Schaduw
+	Shadows	Schaduwen
+	Shape	Vorm
+	Shape Effects	Vormeffecten
+	Shape:	Vorm:
+	Shapes	Vormen
+	Sharpen	Verscherpen
+	Sharpness	Scherpte
+	Shift	Shift
+	Short Lines	Korte lijnen
+	Short Strokes	Korte streken
+	Shortcut	Sneltoets
+	Shortcuts	Sneltoetsen
+	Show	Tonen
+	Show All	Alles tonen
+	Show Grid	Raster tonen
+	Show Guides	Hulplijnen tonen
+	Show in Folder	Tonen in map
+	Show Mask	Masker tonen
+	Show Mesh	Vlechtwerk tonen
+	Show Rulers	Linialen tonen
+	Show rulers	Linialen tonen
+	Show Tool Tips	Tooltips tonen
+	Show:	Weergeven:
+	Sides:	Zijden:
+	Simplify	Vereenvoudigen
+	Size	Grootte
+	Size:	Grootte:
+	Sketch	Schets
+	Skew	Schuin
+	Slice	Slice
+	Slice Options	Slice-opties
+	Slice Options…	Sliceopties…
+	Slice Tool	Slice-gereedschap
+	Slices	Slices
+	Small	Klein
+	Small Caps	Kleine kapitalen
+	Smart Blur	Slim vervagen
+	Smart Blur…	Slim vervagen…
+	Smart Guides	Slimme hulplijnen
+	Smart quotes	Slimme aanhalingstekens
+	Smoothness	Gladheid
+	Snap to Grid	Uitlijnen op raster
+	Soft	Zacht
+	Soft Light	Zacht licht
+	Soften	Verzachten
+	Softness	Zachtheid
+	Solarize	Solariseren
+	Sort	Sorteren
+	Source	Bron
+	Source code on GitHub	Broncode op GitHub
+	Spaces	Spaties
+	Spacing	Spatiëring
+	Spacing:	Tussenruimte:
+	Spanish	Spaans
+	Spatter	Spatten
+	Speckle	Spikkels
+	Speed	Snelheid
+	Spelling	Spelling
+	Spherize	Bolvorm
+	Spot Color	Steunkleur
+	Spray Radius	Spuitradius
+	Square	Vierkant
+	Square Size	Vierkantgrootte
+	sRGB IEC61966-2.1	sRGB IEC61966-2.1
+	Stacked	Gestapeld
+	Stained Glass	Glas in lood
+	Stamp	Stempel
+	Standard	Standaard
+	Standard Ligatures	Standaardligaturen
+	Star	Ster
+	Start at:	Beginnen bij:
+	Statistics	Statistieken
+	Status	Status
+	Stippled	Gestippeld
+	Stop	Stoppen
+	Strength	Sterkte
+	Stretch	Uitrekken
+	Strikethrough	Doorhalen
+	Stroke	Contour
+	Stroke Color	Contourkleur
+	Stroke Length	Streeklengte
+	Stroke Options	Lijnopties
+	Stroke:	Lijn:
+	Studio	Studio
+	Style	Stijl
+	Style:	Stijl:
+	Styles	Stijlen
+	Stylize	Stileren
+	Subdivisions	Onderverdelingen
+	Subject	Onderwerp
+	Subscript	Subscript
+	Subset	Subset
+	Subtract	Aftrekken
+	Sumi-e	Sumi-e
+	Summary	Samenvatting
+	Superscript	Superscript
+	Swatches	Stalen
+	Symbol	Symbool
+	Symbols	Symbolen
+	Sync with system	Synchroniseren met systeem
+	System	Systeem
+	Tab	Tab
+	Table	Tabel
+	Tabloid	Tabloid
+	Tabs	Tabs
+	Taper	Taps
+	Target	Doel
+	Target:	Doel:
+	Temperature	Temperatuur
+	Templates	Sjablonen
+	Text	Tekst
+	Text color	Tekstkleur
+	Text:	Tekst:
+	Texture	Textuur
+	Theme	Thema
+	Thickness	Dikte
+	Threshold	Drempel
+	Tile	Naast elkaar schikken
+	Tile Size	Tegelgrootte
+	Tilt	Kanteling
+	Time	Tijd
+	Timecode	Tijdcode
+	Timeline	Tijdlijn
+	Tint	Tint
+	Tint Color	Tintkleur
+	Tolerance	Tolerantie
+	Tolerance:	Tolerantie:
+	Tool	Gereedschap
+	Toolbars	Werkbalken
+	Tools	Gereedschappen
+	Top	Boven
+	Top Left	Linksboven
+	Top Right	Rechtsboven
+	Top:	Boven:
+	Total:	Totaal:
+	Tracking	Tracking
+	Transform	Transformeren
+	Transparency	Transparantie
+	Transparent	Transparant
+	Trap…	Overbrugging…
+	Triangle	Driehoek
+	Turbulent	Turbulent
+	Twirl	Draaien
+	Twist	Torsie
+	Type	Type
+	Type Tool	Type-gereedschap
+	Type:	Type:
+	Type…	Type…
+	Typing	Typen
+	Underline	Onderstrepen
+	Undo	Ongedaan maken
+	Ungroup	Groepering opheffen
+	Uniform	Uniform
+	Units	Eenheden
+	Unknown	Onbekend
+	Unlock	Ontgrendelen
+	Unsaved changes	Niet-opgeslagen wijzigingen
+	Unsharp Mask	Onscherp maskeren
+	Untitled	Naamloos
+	Update	Bijwerken
+	Updates	Updates
+	UPPERCASE	HOOFDLETTERS
+	Use Default	Standaard gebruiken
+	Username	Gebruikersnaam
+	Variables	Variabelen
+	Version	Versie
+	Version {version}	Versie {version}
+	Vertical	Verticaal
+	Vertical Type Tool	Verticaal type-gereedschap
+	Vertically	Verticaal
+	Very High	Zeer hoog
+	Vibrance	Levendigheid
+	Video	Video
+	View	Beeld
+	Violet	Violet
+	Visibility	Zichtbaarheid
+	Vivid Light	Fel licht
+	W:	W:
+	Warning	Waarschuwing
+	Warnings	Waarschuwingen
+	Warp	Warp
+	Wave	Golf
+	Wave…	Golf…
+	Web	Web
+	Weight	Dikte
+	Wet	Nat
+	White	Wit
+	White Intensity	Witintensiteit
+	White Is High	Wit is hoog
+	Whites	Witten
+	Width	Breedte
+	Width and Height	Breedte en hoogte
+	Width:	Breedte:
+	Window	Venster
+	Windows	Vensters
+	Working CMYK	CMYK-werkruimte
+	Workspace	Werkruimte
+	Workspaces	Werkruimten
+	X	X
+	Y	Y
+	Yellow	Geel
+	Yes	Ja
+	Your changes will be lost if you don't save them.	Je wijzigingen gaan verloren als je ze niet opslaat.
+	Zoom	Zoom
+	Zoom In	Inzoomen
+	Zoom in	Inzoomen
+	Zoom Out	Uitzoomen
+	Zoom out	Uitzoomen
+	Zoom Tool	Zoom-gereedschap
+@plural	{n} commit|{n} commits	{n} commit|{n} commits
+@plural	{n} item|{n} items	{n} item|{n} items
+@plural	{n} Layer|{n} Layers	{n} laag|{n} lagen
+@plural	{n} step|{n} steps	{n} stap|{n} stappen
+	● Recording	● Opnemen

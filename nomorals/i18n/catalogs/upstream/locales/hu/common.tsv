@@ -1,0 +1,1290 @@
+# Magyar (hu) interface catalog for every Crafting App.
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   @plural  English `one|other`; the translation lists this language's plural forms, `|`-separated.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary. No other product's localisation, string table or translated UI was
+# consulted or copied; add entries the same way.
+
+	% of all commits	Az összes commit %-a
+	(Custom)	(Egyéni)
+	(none)	(nincs)
+	1 file	1 fájl
+	16 bit	16 bit
+	24 bit	24 bit
+	24 bits/pixel	24 bit/pixel
+	32 bit	32 bit
+	32 bits/pixel	32 bit/pixel
+	8 bit	8 bit
+	About	Névjegy
+	Absolute	Abszolút
+	Absolute Colorimetric	Abszolút kolorimetrikus
+	Accented Edges	Kiemelt élek
+	Accessibility	Akadálymentesség
+	Accurate	Pontos
+	Actions	Műveletek
+	Activate Panel	Panel aktiválása
+	Active	Aktív
+	Actual Size	Tényleges méret
+	Adaptive	Adaptív
+	Add	Hozzáadás
+	Add a comment	Megjegyzés hozzáadása
+	Add Guide	Segédvonal hozzáadása
+	Add to Dictionary	Hozzáadás a szótárhoz
+	Add to favorites	Hozzáadás a kedvencekhez
+	Add to Swatches	Hozzáadás a színmintákhoz
+	Adjust	Beállítás
+	Adjustments	Korrekciók
+	Advanced	Speciális
+	Align	Igazítás
+	Align center	Igazítás középre
+	Align Left	Balra igazítás
+	Align left	Igazítás balra
+	Align Right	Jobbra igazítás
+	Align right	Igazítás jobbra
+	Align Text	Szöveg igazítása
+	Align to Selection	Igazítás a kijelöléshez
+	Alignment	Igazítás
+	Alignment:	Igazítás:
+	All	Mind
+	All Caps	Csupa nagybetű
+	All Categories	Összes kategória
+	All files	Minden fájl
+	All Layers	Összes réteg
+	All pages	Minden oldal
+	All Slices	Összes szelet
+	Alpha	Alfa
+	Alt	Alt
+	Always	Mindig
+	Amount	Mérték
+	Amount:	Mérték:
+	Angle	Szög
+	Angle:	Szög:
+	Angular	Szög
+	Animation	Animáció
+	Animation effects	Animációs effektusok
+	Anti-Alias	Élsimítás
+	Anti-alias	Élsimítás
+	Any	Bármely
+	Appearance	Megjelenés
+theme	Appearance	Kinézet
+	Appearance Settings…	Megjelenési beállítások…
+	Application	Alkalmazás
+	Apply	Alkalmaz
+	Apply Character Style	Karakterstílus alkalmazása
+	Apply Data Set	Adatkészlet alkalmazása
+	Apply to:	Alkalmazás erre:
+	Arc	Ív
+	Area	Terület
+	Arrange	Elrendezés
+	Arrow	Nyíl
+	Arrows	Nyilak
+	Artboard	Rajztábla
+	Artboards	Rajztáblák
+	ArtCraft	ArtCraft
+	ArtCraft Website	Az ArtCraft webhelye
+	ArtCraft website	Az ArtCraft webhelye
+	Artistic	Művészi
+	Ascending	Növekvő
+	Aspect Ratio	Méretarány
+	Assign	Hozzárendelés
+	Assign Profile…	Profil hozzárendelése…
+	Audio	Hang
+	Author	Szerző
+	Author:	Szerző:
+	Auto	Automatikus
+	Auto ({percent}%)	Automatikus ({percent}%)
+	Auto Color	Automatikus szín
+	Automate	Automatizálás
+	Automatic	Automatikus
+	Automatically	Automatikusan
+	Available	Elérhető
+	Average	Átlagolás
+	Background	Háttér
+	Background Color	Háttérszín
+	Background Contents	Háttértartalom
+	Backspace	Backspace
+	Balance	Egyensúly
+	Bar	Vonal
+	Baseline	Alapvonal
+	Baseline Shift	Alapvonal-eltolás
+	Basic	Alap
+	Basic Latin	Alap latin
+	Batch	Kötegelt feldolgozás
+	Batch…	Kötegelt feldolgozás…
+	Bend:	Hajlítás mértéke:
+	Bicubic	Bikubikus
+	Binary assets added	Hozzáadott bináris elemek
+	Binary assets removed	Eltávolított bináris fájlok
+	Bitmap	Bitkép
+	Black	Fekete
+	Black & White	Fekete-fehér
+	Black and white	Fekete-fehér
+	Black Intensity	Fekete erőssége
+	Blacks	Feketék
+	Blend Mode	Keverési mód
+	Blending Mode	Keverési mód
+	Block	Blokk
+	Blocks	Kockák
+	Blue	Kék
+	Blur	Elmosás
+	Blur Angle	Elmosás szöge
+	Bold	Félkövér
+	Border	Szegély
+	Border Thickness	Szegélyvastagság
+	Borders	Szegélyek
+	Both	Mindkettő
+	Both sides	Mindkét oldal
+	Bottom	Lent
+	Bottom Left	Bal alsó
+	Bottom Right	Jobb alsó
+	Bottom:	Alul:
+	Break Link	Csatolás bontása
+	Brick	Tégla
+	Brightness	Fényesség
+	Bring Forward	Előrébb hozás
+	Bring to Front	Előre hozás
+	Brown	Barna
+	Browse	Tallózás
+	Browse…	Tallózás…
+	Brush Size	Ecsetméret
+	Brush Strokes	Ecsetvonások
+	Brushes	Ecsetek
+	Bulge	Kidudorodás
+	Bullet	Felsorolásjel
+	Burlap	Zsákvászon
+	Calculate	Számítás
+	Cancel	Mégse
+	Canvas	Vászon
+	Caption	Képaláírás
+	Cascade	Lépcsőzetes elrendezés
+	Category	Kategória
+	Category:	Kategória:
+	Cell Size	Cellaméret
+	Center	Közép
+	Center X	Középpont X
+	Center Y	Középpont Y
+	Centered	Középre igazított
+	Centimeters	Centiméter
+	Chamfer	Letörés
+	Change	Csere
+	Change All	Összes cseréje
+	Change Case	Kis- és nagybetű váltása
+	Change Panel Layout	Panelelrendezés módosítása
+	Channel	Csatorna
+	Channel Mixer	Csatornakeverő
+	Channels	Csatornák
+	Character	Karakter
+	Character Styles	Karakterstílusok
+	Characters	Karakterek
+	Check for Updates	Frissítések keresése
+	Check for updates	Frissítések keresése
+	Check Spelling…	Helyesírás-ellenőrzés…
+	Choose…	Kiválasztás…
+	Circle	Kör
+	City	Város
+	Clarity	Tisztaság
+	Classic	Klasszikus
+	Clear	Törlés
+	Clear All	Összes törlése
+	Clear Guides	Segédvonalak törlése
+	Clear History	Előzmények törlése
+	Clear Recent Files	Legutóbbi fájlok listájának törlése
+	Clipboard	Vágólap
+	Clipping Mask	Vágómaszk
+	Clone	Klónozás
+	Close	Bezárás
+	Close (Esc)	Bezárás (Esc)
+	Close All	Összes bezárása
+	Close Panel	Panel bezárása
+	Cmd	Cmd
+	CMYK Color	CMYK-szín
+	CMYK:	CMYK:
+	Coarse Dots	Durva pontok
+	Collapse	Összecsukás
+	Collate	Leválogatás
+	Color	Szín
+	Color Balance	Színegyensúly
+	Color Burn	Színsötétítés
+	Color Dodge	Színvilágosítás
+	Color Management	Színkezelés
+	Color Mode	Színmód
+	Color Picker	Színválasztó
+	Color Settings	Színbeállítások
+	Color Settings…	Színbeállítások…
+	Color Space	Színtér
+	Color Swatches	Színminták
+	Color Table	Színtábla
+	Color:	Szín:
+	Colorize	Színezés
+	Colors	Színek
+	Colors:	Színek:
+	Color…	Szín…
+	Colour	Szín
+	Column width	Oszlopszélesség
+	Columns	Oszlopok
+	Columns:	Oszlopok:
+	Combine	Kombinálás
+	Command	Parancs
+	Commands:	Parancsok:
+	Comment	Megjegyzés
+	Comments	Megjegyzések
+	Commits	Commitok
+	Community	Közösség
+	Company	Cég
+	Compare	Összehasonlítás
+	Comparison	Összehasonlítás
+	Compatibility	Kompatibilitás
+	Composite	Kompozit
+	Compression	Tömörítés
+	Cone	Kúp
+	Contains	Tartalmazza
+	Continue	Folytat
+	Contrast	Kontraszt
+	Contributors	Közreműködők
+	Convert	Átalakítás
+	Convert to Shape	Átalakítás alakzattá
+	Convert to sRGB	Átalakítás sRGB-re
+	Copies	Példányszám
+	Copies:	Példányszám:
+	Copy	Másolás
+	Copyright	Szerzői jog
+	Copyrighted	Szerzői jogvédett
+	Corner	Sarok
+	Corners	Sarkok
+	Correction	Korrekció
+	Couldn't open {name}: {e}	{name} megnyitása nem sikerült: {e}
+@msg	Couldn't open {name}: {e}	Nem sikerült megnyitni: {name}: {e}
+	Country	Ország
+	Crack Brightness	Repedések fényessége
+	Crack Depth	Repedések mélysége
+	Crack Spacing	Repedések távolsága
+	Create	Létrehozás
+	Create Clipping Mask	Vágómaszk létrehozása
+	Crop	Körülvágás
+	Cross	Kereszt
+	Crosshatch	Keresztsraffozás
+	Crystallize	Kristályosítás
+	Crystallize…	Kristályosítás…
+	Ctrl	Ctrl
+	Current	Jelenlegi
+	Current page	Aktuális oldal
+	Current Time	Aktuális idő
+	Curvature	Görbület
+	Curve	Görbe
+	Curves	Görbék
+	Curves…	Görbék…
+	Custom	Egyéni
+	Customize…	Testreszabás…
+	Cut	Kivágás
+	Cyan	Cián
+	Dark	Sötét
+	Dark Gray	Sötétszürke
+	Dark gray	Sötétszürke
+	Dark Strokes	Sötét vonások
+	Dark Theme	Sötét téma
+	Darken	Sötétítés
+	Darkness	Sötétség
+	Dashed	Szaggatott
+	Data	Adatok
+	Data Sets	Adatkészletek
+	Date	Dátum
+	Date and Time	Dátum és idő
+	Date Created	Létrehozás dátuma
+	Date format	Dátumformátum
+	Dates	Dátumok
+	De-Interlace	Váltottsorosság megszüntetése
+	Decrease Font Size	Betűméret csökkentése
+	Default	Alapértelmezett
+	Delete	Törlés
+	Delete Brush	Ecset törlése
+	Delete Group	Csoport törlése
+	Delete Layer	Réteg törlése
+	Delete Mask	Maszk törlése
+	Delete Style	Stílus törlése
+	Delete Workspace	Munkaterület törlése
+	Deleted	Törölve
+	Delete…	Törlés…
+	Depth	Mélység
+	Desaturate	Színtelenítés
+	Descending	Csökkenő
+	Description	Leírás
+	Description:	Leírás:
+	Deselect	Kijelölés megszüntetése
+	Deselect All	Összes kijelölés megszüntetése
+	Destination	Cél
+	Destination:	Cél:
+	Details	Részletek
+	Diagonal	Átlós
+	Diameter	Átmérő
+	Diameter:	Átmérő:
+	Diamond	Rombusz
+	Difference	Különbség
+	Diffuse Glow	Szórt ragyogás
+	Diffusion	Diffúziós
+	Digits	Számjegyek
+	Dimensions	Méretek
+	Direct Selection Tool	Közvetlen kijelölés
+	Direction	Irány
+	Direction Balance	Irányegyensúly
+	Direction:	Irány:
+	Discard	Elvetés
+	Discord	Discord
+	Discretionary Ligatures	Választható ligatúrák
+	Dismiss	Elvetés
+	Display	Megjelenítés
+	Display name	Megjelenített név
+	Distance	Távolság
+	Distort	Torzítás
+	Distortion	Torzítás
+	Distribute	Elosztás
+	Divide	Felosztás
+	Dock Panel	Panel dokkolása
+	Document	Dokumentum
+	Document Title	Dokumentum címe
+	Documents	Dokumentumok
+	Don't Save	Mentés nélkül
+	Done	Kész
+	Dot	Pont
+	Dots	Pontok
+	Dotted	Pontozott
+	Double-click	Dupla kattintás
+	Down	Le
+	Download	Letöltés
+	Draft	Vázlat
+	Draw	Rajzolás
+	Drop Shadow	Vetett árnyék
+	Drop Shadow…	Vetett árnyék…
+	Duplicate	Kettőzés
+	Duplicate Layer	Réteg kettőzése
+	Duplicate…	Kettőzés…
+	Duplication	Kettőzés
+	Duration	Időtartam
+	Dutch	Holland
+	Dynamic	Dinamikus
+	Dynamics	Dinamika
+	Edge	Él
+	Edge Brightness	Él fényessége
+	Edge Intensity	Élek intenzitása
+	Edge Only	Csak élek
+	Edge Simplicity	Élek egyszerűsége
+	Edge Thickness	Élek vastagsága
+	Edge Width	Élszélesség
+	Edit	Szerkesztés
+	Edit Contents	Tartalom szerkesztése
+	Edit Original	Eredeti szerkesztése
+	Edit Toolbar	Eszköztár szerkesztése
+	Editing	Szerkesztés
+	Edit…	Szerkesztés…
+	Effect	Effektus
+	Effects	Effektusok
+	Elevation	Magassági szög
+	Eliminate	Eltávolítás
+	Ellipse	Ellipszis
+	Ellipse Tool	Ellipszis
+	Ellipsis	Három pont
+	Em Dash	Nagykötőjel
+	Em Space	Kvirtszóköz
+	Embed	Beágyazás
+	Emboss	Domborítás
+	En Dash	Gondolatjel
+	En Space	Félkvirtszóköz
+	Enable	Bekapcsolás
+	Endpoint	Végpont
+	Enlarged	Nagyított
+	Enter	Enter
+	Entire Font	Teljes betűtípus
+	Envelope DL	Boríték DL
+	Erase	Radírozás
+	Eraser	Radír
+	Eraser Tool	Radír
+	Error	Hiba
+	Even Fields	Páros félképek
+	Even pages only	Csak a páros oldalak
+	Exact	Pontos
+	Example: {sample}	Példa: {sample}
+	Exclusion	Kizárás
+	Exit	Kilépés
+	Expand	Kibontás
+	Export	Exportálás
+	Export As	Exportálás másként
+	Export As…	Exportálás másként…
+	Export Options	Exportálás beállításai
+	Export PDF	PDF exportálása
+	Export to	Exportálás célja
+	Exported to {path}	Exportálva ide: {path}
+	Exported {path}	Exportálva: {path}
+	Export…	Exportálás…
+	Exposure	Expozíció
+	Expression	Kifejezés
+	Extract	Kinyerés
+	Eyedropper	Pipetta
+	Eyedropper Tool	Pipetta
+	Faded Film	Fakult film
+	Fast	Gyors
+	Favorites	Kedvencek
+	Feather	Tollazat
+	Field	Mező
+	Field properties	Mező tulajdonságai
+	Fields	Mezők
+	Fields:	Mezők:
+	File	Fájl
+	File Format	Fájlformátum
+	File Handling	Fájlkezelés
+	File Info…	Fájlinformáció…
+	File Name	Fájlnév
+	File Size	Fájlméret
+@id	file.close	Bezárás
+	Files	Fájlok
+	Fill	Kitöltés
+	Fill:	Kitöltés:
+	Filter	Szűrő
+	Find	Keresés
+	Find and Replace	Keresés és csere
+	Find Next	Következő keresése
+	Find:	Keresés:
+	Find…	Keresés…
+	Fine Dots	Finom pontok
+	Finish	Befejezés
+	First	Első
+	First commit	Első commit
+	Fit	Illesztés
+	Fit in View	Igazítás a nézethez
+	Fixed	Rögzített
+	Flash	Vaku
+	Flatten	Egyesítés
+	Flip	Tükrözés
+	Flip Horizontal	Vízszintes tükrözés
+	Flip Vertical	Függőleges tükrözés
+	Focus	Fókusz
+	Folder	Mappa
+	Font	Betűtípus
+	Font Size	Betűméret
+	Font size	Betűméret
+	Font Size:	Betűméret:
+	Font:	Betűtípus:
+	Fonts	Betűtípusok
+	Format	Formátum
+	Format:	Formátum:
+	Fractions	Törtek
+	Frame	Keret
+	Free	Szabad
+	Free Transform	Szabad átalakítás
+	French	Francia
+	Frequency	Vonalsűrűség
+	From	Kezdőszín
+	Frosted	Matt
+	Full	Teljes
+	Full Screen	Teljes képernyő
+	Full Screen Mode	Teljes képernyős mód
+	Functions	Funkciók
+	Gamma	Gamma
+	Gamma Correction	Gammakorrekció
+	Gamut Warning	Színtartomány-figyelmeztetés
+	Gaussian Blur	Gauss-elmosás
+	Gaussian Blur…	Gauss-elmosás…
+	General	Általános
+	General…	Általános…
+	Generate	Létrehozás
+	Geometry	Geometria
+	German	Német
+	GitHub	GitHub
+	Glass	Üveg
+	Global	Globális
+	Glow	Izzás
+	Glow Brightness	Fény fényereje
+	Glow Size	Fény mérete
+	Glyphs	Glifák
+	Good	Jó
+	Gradient	Színátmenet
+	Gradient Tool	Színátmenet
+	Gradients	Színátmenetek
+	Grain	Szemcsézet
+	Grain Type	Szemcsetípus
+	Graininess	Szemcsézettség
+	Grainy Dots	Szemcsés pontok
+	Graphic	Grafika
+	Graphics	Grafikák
+	Gray	Szürke
+	Gray Gamma 2.2	Szürke, gamma 2,2
+	Grayscale	Szürkeárnyalatos
+	Green	Zöld
+	Grid	Rács
+	Grid Size:	Rácsméret:
+	Grid view	Rácsnézet
+	Gridline every	Rácsvonalak távolsága
+	Group	Csoportosítás
+	Group with	Csoportosítás ezzel:
+	Groups	Csoportok
+	Grout Width	Fugaszélesség
+	Guides	Segédvonalak
+	Halftone Pattern	Féltónus minta
+	Hand	Kéz
+	Hand Tool	Kéz
+	Hard	Szigorú
+	Hard Light	Kemény fény
+	Hard Mix	Kemény keverés
+	Headings	Címsorok
+	Heart	Szív
+	Height	Magasság
+	Height:	Magasság:
+	Help	Súgó
+	Hexagon	Hatszög
+	Hidden	Rejtett
+	Hidden text	Rejtett szöveg
+	Hide	Elrejtés
+	Hide All	Minden elrejtése
+	Hide Grid	Rács elrejtése
+	Hide Others	Többi elrejtése
+	High	Magas
+	High Pass	Felüláteresztő
+	High Resolution	Nagy felbontás
+	High resolution	Nagy felbontás
+	Highlight Area	Csúcsfény-terület
+	Highlights	Csúcsfények
+	Hindi	Hindi
+	Histogram	Hisztogram
+	History	Előzmények
+	Hollow	Üreges
+	Home	Kezdőlap
+	Horizontal	Vízszintes
+	Horizontal scale	Vízszintes méretarány
+	Horizontally	Vízszintesen
+	Hue	Színárnyalat
+	Hue Shift	Színárnyalat-eltolás
+	Hue/Saturation…	Színárnyalat/telítettség…
+	Hyphenation	Elválasztás
+	Icon	Ikon
+	Ignore	Kihagy
+	Ignore All	Mindet kihagy
+	Image	Kép
+	Image Size	Képméret
+	Images	Képek
+	Import	Importálás
+	Import…	Importálás…
+	Inches	Hüvelyk
+	Increase Font Size	Betűméret növelése
+	Index	Tárgymutató
+	Inflate	Felfújás
+	Info	Információ
+	Inner Glow…	Belső ragyogás…
+	Input:	Bemenet:
+	Insert	Beszúrás
+	Inside	Belül
+	Inspect Document	Dokumentum vizsgálata
+	Install Plug-in	Bővítmény telepítése
+	Install Plug-in…	Bővítmény telepítése…
+	Intensity	Erősség
+	Interface	Felület
+	Interface Language	Felület nyelve
+	Interface language	Felület nyelve
+	Interface Theme	Felület témája
+	Interlaced	Váltottsoros
+	Interpolation	Interpoláció
+	Intersect	Metszet
+	Intersection	Metszet
+	Invert	Invertálás
+	Invert Mask	Maszk invertálása
+	Isolate	Elkülönítés
+	Italian	Olasz
+	Italic	Dőlt
+	Japanese	Japán
+	Join	Összekapcsolás
+	Join our Discord	Csatlakozz a Discordunkhoz
+	Join the ArtCraft Discord	Csatlakozás az ArtCraft Discordhoz
+	Join the ArtCraft Discord…	Csatlakozás az ArtCraft Discordhoz…
+	Join us on Discord	Csatlakozz hozzánk a Discordon
+	just now	épp most
+	Justification	Sorkizárás
+	Justify	Sorkizárás
+	Keep:	Megtartás:
+	Kerning	Alávágás
+	Keyboard Shortcuts	Billentyűparancsok
+	Keyboard Shortcuts…	Billentyűparancsok…
+	Keywords	Kulcsszavak
+	Kind	Típus
+	Korean	Koreai
+	Lab	Lab
+	Label	Címke
+	Labels	Címkék
+	Landscape	Fekvő
+	Language	Nyelv
+	Language Options	Nyelvi beállítások
+@id	language.name	Magyar
+	Language:	Nyelv:
+	Large	Nagy
+	Lasso	Lasszó
+	Lasso Tool	Lasszó
+	Last	Utolsó
+	Last commit	Utolsó commit
+	Later	Később
+	Layer	Réteg
+	Layers	Rétegek
+	Layout	Elrendezés
+	Layout:	Elrendezés:
+	Leading	Sorköz
+	Left	Bal
+	Left Diagonal	Bal átló
+	Left to Right	Balról jobbra
+	Left:	Bal:
+	Legal	Legal
+	Length	Hossz
+	Length:	Hossz:
+	Lens Flare	Lencsecsillanás
+	Less	Kevesebb
+	Letter	Letter
+	Level	Szint
+	Level 1	1. szint
+	Level 2	2. szint
+	Level 3	3. szint
+	Level 4	4. szint
+	Levels	Szintek
+	Levels…	Szintek…
+	Libraries	Könyvtárak
+	Library	Könyvtár
+	Light	Világos
+	Light Blue	Világoskék
+	Light Direction	Fény iránya
+	Light Gray	Világosszürke
+	Light gray	Világosszürke
+	Light Intensity	Fény erőssége
+	Light Theme	Világos téma
+	Light Type	Fényforrás típusa
+	Lighten	Világosítás
+	Lighter Color	Világosabb szín
+	Lighting	Megvilágítás
+	Lighting Effects	Fényhatások
+	Lightness	Világosság
+	Line	Vonal
+	Line delta	Sorváltozás
+	Line spacing	Sorköz
+	Linear	Lineáris
+	Linear Burn	Lineáris égetés
+	Linear Gradient	Lineáris színátmenet
+	Linear Light	Lineáris fény
+	Lines	Vonalak
+	Lines +/−	Sorok +/−
+	Lines added	Hozzáadott sorok
+	Lines deleted	Törölt sorok
+	Link	Link
+	Links	Csatolások
+	List	Lista
+	List View	Listanézet
+	List view	Listanézet
+	Location	Hely
+	Location:	Hely:
+	Lock	Zárolás
+	Lock Guides	Segédvonalak zárolása
+	Lock Slices	Szeletek zárolása
+	Locked	Zárolva
+	Long Lines	Hosszú vonalak
+	Long Strokes	Hosszú vonások
+	Low	Alacsony
+	lowercase	kisbetűs
+	Luminance	Luminancia
+	Luminosity	Fényerő
+	Magenta	Magenta
+	Magic Wand Tool	Varázspálca
+	Magnification	Nagyítás
+	Margins	Margók
+	Mask	Maszk
+	Masks	Maszkok
+	Matte	Matt háttér
+	Maximize	Teljes méret
+	Maximum	Maximális
+	Measure	Mérés
+	Median	Medián
+	Medium	Közepes
+	Medium Dots	Közepes pontok
+	Medium Gray	Középszürke
+	Medium Lines	Közepes vonalak
+	Merge	Összeolvasztás
+	Merge Cells	Cellák egyesítése
+	Merge Layers	Rétegek egyesítése
+	Merged PRs	Beolvasztott PR-ek
+	Mesh	Háló
+	Message:	Üzenet:
+	Metadata	Metaadatok
+	Method	Módszer
+	Method:	Módszer:
+	Mezzotint	Mezzotinto
+	Mezzotint…	Mezzotinto…
+	Middle	Közép
+	Midpoint	Középpont
+	Midtones	Középtónusok
+	Millimeters	Milliméter
+	Minimize	Kis méret
+	Minimum	Minimális
+	Mirror	Tükrözött ismétlés
+	Missing	Hiányzó
+	Mobile	Mobil
+	Mode	Mód
+	Mode:	Mód:
+	Model	Modell
+	Models	Modellek
+	Modern	Modern
+	Modified	Módosítva
+	Modify	Módosítás
+	Monitor RGB	Monitor-RGB
+	Mono	Egyszínű
+	Monochrome	Egyszínű
+	More	Továbbiak
+	Mosaic	Mozaik
+	Mosaic Tiles	Mozaikcsempék
+	Motion	Mozgókép
+	Move	Áthelyezés
+	Move Down	Lejjebb
+	Move Panel	Panel áthelyezése
+	Move Up	Feljebb
+	Multiply	Szorzás
+	Name	Név
+	Name (A–Z)	Név (A–Z)
+	Name:	Név:
+	Navigation	Navigáció
+	Navigator	Navigátor
+	Neon Glow	Neonfény
+	Never	Soha
+	New	Új
+	New Document	Új dokumentum
+	New document	Új dokumentum
+	New from Template	Új sablonból
+	New Group	Új csoport
+	New Guide	Új segédvonal
+	New Layer	Új réteg
+	New Layer…	Új réteg…
+	New Style…	Új stílus…
+	New Swatch…	Új színminta…
+	New Window	Új ablak
+	New Workspace	Új munkaterület
+	New Workspace…	Új munkaterület…
+	New…	Új…
+	Next	Következő
+	Next Appearance Mode	Következő megjelenési mód
+	Next Change	Következő módosítás
+	Next Page	Következő oldal
+	Next page	Következő oldal
+	No	Nem
+	No Color	Nincs szín
+	No Dither	Nincs árnyalatkeverés
+	No Document	Nincs dokumentum
+	No document	Nincs dokumentum
+	No document open	Nincs megnyitott dokumentum
+	No limit	Nincs korlát
+	No matches.	Nincs találat.
+	No matching commands	Nincs egyező parancs
+	No recent files	Nincs legutóbbi fájl
+	No results	Nincs találat
+	No Selection	Nincs kijelölés
+	No selection	Nincs kijelölés
+	Noise	Zaj
+	Nonbreaking Space	Nem törő szóköz
+	None	Nincs
+	Normal	Normál
+	Not available	Nem elérhető
+	NTSC Colors	NTSC-színek
+	Number	Szám
+	Object	Objektum
+	Octagon	Nyolcszög
+	Odd Fields	Páratlan félképek
+	Odd pages only	Csak a páratlan oldalak
+	Off	Ki
+	Offline	Nincs kapcsolat
+	Offset	Eltolás
+	Offset:	Eltolás:
+	OK	OK
+	Omit	Kihagyás
+	On	Be
+	Only Web Colors	Csak webes színek
+	Opacity	Átlátszatlanság
+	Opacity:	Átlátszatlanság:
+	Open	Megnyitás
+	Open link	Hivatkozás megnyitása
+	Open Recent	Legutóbbi megnyitása
+	OpenType	OpenType
+	Open…	Megnyitás…
+	Optimized	Optimalizált
+	Options	Beállítások
+	Options…	Beállítások…
+	Orange	Narancs
+	Ordinals	Sorszámjelek
+	Orientation	Tájolás
+	Orientation:	Tájolás:
+	Original	Eredeti
+	Other	Egyéb
+	Outer Glow…	Külső ragyogás…
+	Outline	Vázlat
+	Output	Kimenet
+	Output:	Kimenet:
+	Outside	Kívül
+	Oval	Ovális
+	Overlap:	Átfedés:
+	Overlay	Átfedés
+	Package…	Csomagolás…
+	Page	Oldal
+	Page {page} of {pages}	Oldal: {page}/{pages}
+	Pages	Oldalak
+	Painting	Festés
+	Panel	Panel
+	Panel menu	Panelmenü
+	Panel Options…	Panel beállításai…
+	Panels	Panelek
+	Paper	Papír
+	Paragraph	Bekezdés
+	Paragraph Styles	Bekezdésstílusok
+	Password	Jelszó
+	Paste	Beillesztés
+	Paste Special	Speciális beillesztés
+	Patchwork	Foltvarrás
+	Path	Útvonal
+	Path:	Útvonal:
+	Paths	Útvonalak
+	Pattern	Mintázat
+	Pattern Type	Mintatípus
+	Pause	Szünet
+	Pen	Toll
+	Pen Tool	Toll
+	Pencil	Ceruza
+	Pencil Tool	Ceruza
+	Pentagon	Ötszög
+	Percent	Százalék
+	Percentage	Százalék
+	Performance	Teljesítmény
+	Perimeter	Kerület
+	Perspective	Perspektíva
+	Photo	Fotó
+	Photocopy	Fénymásolat
+	Picas	Pica
+	Pin Light	Pontfény
+	Pink	Rózsaszín
+	Pixel	Pixel
+	Pixelate	Pixelesítés
+	Pixels	Pixel
+	Play	Lejátszás
+	Plug-ins	Bővítmények
+	Point	Pont
+	Pointillize	Pointillista
+	Pointillize…	Pointillista…
+	Points	Pont
+	Polygon	Sokszög
+	Polygon Tool	Sokszög
+	Polyline	Töröttvonal
+	Portrait	Álló
+	Portuguese	Portugál
+	Position	Pozíció
+	Position:	Pozíció:
+	Postcard	Képeslap
+	Poster	Plakát
+	Poster Edges	Poszterszélek
+	Posterization	Poszterizálás
+	Posterize	Poszterizálás
+	Preferences	Beállítások
+	Preferences…	Beállítások…
+	Prefix	Előtag
+	Preserve	Megtartás
+	Preserve Luminosity	Fényesség megőrzése
+	Preset	Előbeállítás
+	Preset Manager	Előbeállítás-kezelő
+	Preset:	Előbeállítás:
+	Presets	Előbeállítások
+	Presets:	Előbeállítások:
+	Press keys…	Nyomd le a billentyűket…
+	Pressure	Nyomás
+	Preview	Előnézet
+	Previous	Előző
+	Previous Change	Előző módosítás
+	Previous Page	Előző oldal
+	Previous page	Előző oldal
+	Print	Nyomtatás
+	Printer	Nyomtató
+	Printer:	Nyomtató:
+	Printing	Nyomtatás
+	Print…	Nyomtatás…
+	Profile	Profil
+	Progressive	Progresszív
+	Proof Setup	Színpróba beállítása
+	Properties	Tulajdonságok
+	Protect	Védelem
+	PRs	PR-ek
+	Public Domain	Közkincs
+	Punctuation	Írásjelek
+	Purple	Lila
+	Pyramid	Piramis
+	Quality	Minőség
+	Quick Actions	Gyorsműveletek
+	Radial	Körkörös
+	Radial Blur	Körkörös elmosás
+	Radial Blur…	Körkörös elmosás…
+	Radial Gradient	Körkörös színátmenet
+	Radius	Sugár
+	Radius:	Sugár:
+	Random	Véletlenszerű
+	Range	Terjedelem
+	Range:	Tartomány:
+	Rasterize	Raszterizálás
+	Ratio	Arányos
+	Rays	Sugarak
+	Ready	Kész
+	Real name	Valódi név
+	Recent	Legutóbbiak
+	Recent Colors	Legutóbbi színek
+	Recent Files	Legutóbbi fájlok
+	Recover	Helyreállítás
+	Rectangle	Téglalap
+	Rectangle Tool	Téglalap
+	Rectangular	Téglalap
+	Red	Piros
+	Redo	Újra
+	Reduce Noise	Zajcsökkentés
+	Refine	Finomítás
+	Reflected	Tükrözött
+	Refresh	Frissítés
+	Regular	Normál
+	Relative	Relatív
+	Relative Colorimetric	Relatív kolorimetrikus
+	Relaxed	Laza
+	Relief	Dombormű
+	Reload	Újratöltés
+	Remove	Eltávolítás
+	Remove Background	Háttér eltávolítása
+	Remove from favorites	Eltávolítás a kedvencek közül
+	Rename	Átnevezés
+	Rename Group…	Csoport átnevezése…
+	Rename Style	Stílus átnevezése
+	Rename…	Átnevezés…
+	Repeat	Ismétlés
+	Replace	Csere
+	Replace:	Mit:
+	Reply	Válasz
+	Report	Jelentés
+	Report an Issue…	Hiba bejelentése…
+	Reselect	Újrakijelölés
+	Reset	Visszaállít
+	Reset Preferences	Beállítások visszaállítása
+	Reset…	Visszaállítás…
+	Resize panel window	Panelablak átméretezése
+	Resize panels	Panelek átméretezése
+	Resolution	Felbontás
+	Resolution:	Felbontás:
+	Restore	Előző méret
+	Result	Eredmény
+	Resume	Folytatás
+	Reveal in Finder	Megjelenítés a Finderben
+	Reverse	Megfordítás
+	Reverse the order	Fordított sorrend
+	Revert	Visszaállítás
+	Review	Véleményezés
+	RGB	RGB
+	RGB Color	RGB-szín
+	RGB:	RGB:
+	Right	Jobb
+	Right Diagonal	Jobb átló
+	Right:	Jobb:
+	Rotate	Forgatás
+	Rotate:	Forgatás:
+	Rotation	Elforgatás
+	Rotation:	Elforgatás:
+	Rounded Rectangle	Lekerekített téglalap
+	Roundness	Kerekség
+	Roundness:	Kerekség:
+	Rows	Sorok
+	Ruler	Vonalzó
+	Rulers	Vonalzók
+	Rulers & Grids	Vonalzók és rácsok
+	Russian	Orosz
+	Sample Size	Mintaméret
+	Sandstone	Homokkő
+	Saturation	Telítettség
+	Save	Mentés
+	Save a Copy	Másolat mentése
+	Save a Copy…	Másolat mentése…
+	Save As	Mentés másként
+	Save as PDF	Mentés PDF-ként
+	Save as Template	Mentés sablonként
+	Save as Template…	Mentés sablonként…
+	Save As…	Mentés másként…
+	Save Preset…	Előbeállítás mentése…
+	Save Selection	Kijelölés mentése
+	Save Selection…	Kijelölés mentése…
+	Saved	Mentve
+	Save…	Mentés…
+	Scale	Méretezés
+	Scale:	Méretezés:
+	Scaling	Méretezés
+	Scratch Disks	Munkalemezek
+	Scratch Disks…	Lapozólemezek…
+	Screen	Képernyő
+	Screen Mode	Képernyőmód
+	Scripts	Szkriptek
+	Search	Keresés
+	Security	Biztonság
+	Segments	Szakaszok
+	Select	Kijelölés
+	Select All	Az összes kijelölése
+	Select Objects	Objektumok kijelölése
+	Select:	Kijelölés:
+	Selected pages	Kijelölt oldalak
+	Selection	Kijelölés
+	Selection Tool	Kijelölés
+	Selective	Szelektív
+	Send Backward	Hátrébb küldés
+	Send to Back	Hátra küldés
+	Sensitivity	Érzékenység
+	Sent to {printer}	Elküldve ide: {printer}
+	Services	Szolgáltatások
+	Set	Beállítás
+	Set as Default	Beállítás alapértelmezettként
+	Set:	Készlet:
+	Settings	Beállítások
+	Settings:	Beállítások:
+	Settings…	Beállítások…
+	Shadow	Árnyék
+	Shadows	Árnyékok
+	Shape	Alakzat
+	Shape Effects	Alakzateffektusok
+	Shape:	Alak:
+	Shapes	Alakzatok
+	Share	Megosztás
+	Sharpen	Élesítés
+	Sharpness	Élesség
+	Shift	Shift
+	Short Lines	Rövid vonalak
+	Short Strokes	Rövid vonások
+	Shortcut	Billentyűparancs
+	Shortcuts	Billentyűparancsok
+	Show	Megjelenítés
+	Show All	Összes megjelenítése
+	Show Grid	Rács megjelenítése
+	Show Guides	Segédvonalak megjelenítése
+	Show in Folder	Megjelenítés mappában
+	Show Mask	Maszk megjelenítése
+	Show Mesh	Háló megjelenítése
+	Show Rulers	Vonalzók megjelenítése
+	Show rulers	Vonalzók megjelenítése
+	Show Tool Tips	Elemleírások megjelenítése
+	Show:	Megjelenítés:
+	Sides:	Oldalak:
+	Simplify	Egyszerűsítés
+	Size	Méret
+	Size:	Méret:
+	Sketch	Vázlat
+	Skew	Ferde
+	Slice	Szelet
+	Slice Options	Szelet beállításai
+	Slice Options…	Szelet beállításai…
+	Slice Tool	Szelet
+	Slices	Szeletek
+	Small	Kicsi
+	Small Caps	Kiskapitális
+	Smart Blur	Intelligens elmosás
+	Smart Blur…	Intelligens elmosás…
+	Smart Guides	Intelligens segédvonalak
+	Smart quotes	Tipográfiai idézőjelek
+	Smoothness	Simaság
+	Snap to Grid	Illesztés a rácshoz
+	Soft	Lágy
+	Soft Light	Lágy fény
+	Soften	Lágyítás
+	Softness	Lágyság
+	Solarize	Szolarizáció
+	Sort	Rendezés
+	Sort by	Rendezés alapja
+	Source	Forrás
+	Source code on GitHub	Forráskód a GitHubon
+	Spaces	Szóközök
+	Spacing	Térköz
+	Spacing:	Térköz:
+	Spanish	Spanyol
+	Spatter	Fröcskölés
+	Special	Különleges
+	Speckle	Pöttyös
+	Speed	Sebesség
+	Spelling	Helyesírás
+	Spherize	Gömbösítés
+	Split	Felosztás
+	Spot Color	Direktszín
+	Spray Radius	Szórási sugár
+	Square	Négyzetes
+	Square Size	Négyzetméret
+	sRGB IEC61966-2.1	sRGB IEC61966-2.1
+	Stacked	Halmozott
+	Stained Glass	Ólomüveg
+	Stamp	Bélyegző
+	Standard	Alapszínek
+	Standard Ligatures	Szabványos ligatúrák
+	Star	Csillag
+	Start at:	Kezdőérték:
+	Statistics	Statisztika
+	Status	Állapot
+	Status Bar	Állapotsor
+	Stippled	Pontozott
+	Stop	Leállítás
+	Strength	Erősség
+	Stretch	Nyújtás
+	Strikethrough	Áthúzott
+	Stroke	Körvonal
+	Stroke Color	Körvonalszín
+	Stroke Length	Vonáshossz
+	Stroke Options	Körvonal beállításai
+	Stroke:	Körvonal:
+	Studio	Studio
+	Style	Stílus
+	Style:	Stílus:
+	Styles	Stílusok
+	Stylize	Stilizálás
+	Subdivisions	Osztások
+	Subject	Tárgy
+	Subscript	Alsó index
+	Subset	Részhalmaz
+	Subtitle	Alcím
+	Subtract	Kivonás
+	Sumi-e	Sumi-e
+	Summary	Összegzés
+	Superscript	Felső index
+	Swatches	Színminták
+	Symbol	Szimbólum
+	Symbols	Szimbólumok
+	Sync with system	Rendszer szerint
+	System	Rendszer
+	Tab	Tabulátor
+	Table	Táblázat
+	Table style	Táblázatstílus
+	Tables	Táblázatok
+	Tabloid	Tabloid
+	Tabs	Tabulátorok
+	Taper	Elvékonyodás
+	Target	Célzás
+	Target:	Cél:
+	Temperature	Színhőmérséklet
+	Templates	Sablonok
+	Text	Szöveg
+	Text color	Szövegszín
+	Text:	Szöveg:
+	Texture	Textúra
+	The passwords don't match.	A két jelszó nem egyezik.
+	Theme	Téma
+	Thickness	Vastagság
+	This document has no bookmarks.	Ebben a dokumentumban nincs könyvjelző.
+	Threshold	Küszöbérték
+	Thumbnails	Bélyegképek
+	Tile	Mozaikelrendezés
+	Tile Size	Csempeméret
+	Tilt	Dőlés
+	Time	Idő
+	Timecode	Időkód
+	Timeline	Idővonal
+	Tint	Tónus
+	Tint Color	Színezés színe
+	Title	Cím
+	To	Végszín
+	Tolerance	Tűréshatár
+	Tolerance:	Tűréshatár:
+	Tool	Eszköz
+	Toolbars	Eszköztárak
+	Tools	Eszközök
+	Top	Fent
+	Top Left	Bal felső
+	Top Right	Jobb felső
+	Top:	Felső:
+	Total	Összesen
+	Total:	Összesen:
+	Tracking	Betűköz
+	Transform	Átalakítás
+	Translate	Fordítás
+	Transparency	Átlátszóság
+	Transparent	Átlátszó
+	Trap…	Csapdázás…
+	Triangle	Háromszög
+	Turbulent	Turbulens
+	Twirl	Örvénylés
+	Twist	Csavarás
+	Type	Típus
+	Type Tool	Szöveg
+	Type:	Típus:
+	Typewriter	Írógép
+	Type…	Típus…
+	Typing	Gépelés
+	Underline	Aláhúzott
+	Undo	Visszavonás
+	Undo {action}	Visszavonás: {action}
+	Ungroup	Csoportbontás
+	Uniform	Egyenletes
+	Union	Unió
+	Units	Mértékegységek
+	Unknown	Ismeretlen
+	Unlock	Feloldás
+	Unsaved changes	Nem mentett módosítások
+	Unsharp Mask	Életlenítő maszk
+	Untitled	Névtelen
+	Up	Fel
+	Update	Frissítés
+	Updates	Frissítések
+	UPPERCASE	NAGYBETŰS
+	Use Default	Alapértelmezett használata
+	Username	Felhasználónév
+	Value	Érték
+	Value:	Érték:
+	Variables	Változók
+	Version	Verzió
+	Version {version}	Verzió: {version}
+	Vertical	Függőleges
+	Vertical Alignment	Függőleges igazítás
+	Vertical Type Tool	Függőleges szöveg
+	Vertically	Függőlegesen
+	Very High	Nagyon magas
+	Vibrance	Élénkség
+	Video	Videó
+	View	Nézet
+	Violet	Ibolya
+	Visibility	Láthatóság
+	Vivid Light	Élénk fény
+	Voice	Hang
+	W:	Sz:
+	Warning	Figyelmeztetés
+	Warnings	Figyelmeztetések
+	Warp	Hajlítás
+	Watermark	Vízjel
+	Wave	Hullám
+	Wave…	Hullám…
+	Web	Web
+	Website	Webhely
+	Weight	Vastagság
+	Wet	Nedvesség
+	White	Fehér
+	White Intensity	Fehér erőssége
+	White Is High	Fehér a magas
+	Whites	Fehérek
+	Width	Szélesség
+	Width and Height	Szélesség és magasság
+	Width:	Szélesség:
+	Window	Ablak
+	Windows	Windows
+	Words	Szavak
+	Working CMYK	Munka-CMYK
+	Workspace	Munkaterület
+	Workspaces	Munkaterületek
+	X	X
+	Y	Y
+	Yellow	Sárga
+	Yes	Igen
+	yesterday	tegnap
+	Your changes will be lost if you don't save them.	Ha nem mented, a módosításaid elvesznek.
+	Zoom	Nagyítás
+	Zoom In	Nagyítás
+	Zoom in	Nagyítás
+	Zoom Out	Kicsinyítés
+	Zoom out	Kicsinyítés
+	Zoom Tool	Nagyító
+@plural	{n} commit|{n} commits	{n} commit|{n} commit
+	{n} files	{n} fájl
+	{n} h ago	{n} órája
+@plural	{n} item|{n} items	{n} elem|{n} elem
+@plural	{n} Layer|{n} Layers	{n} réteg|{n} réteg
+	{n} min ago	{n} perce
+@plural	{n} step|{n} steps	{n} lépés|{n} lépés
+	−Bin	−Bin
+	● Recording	● Felvétel

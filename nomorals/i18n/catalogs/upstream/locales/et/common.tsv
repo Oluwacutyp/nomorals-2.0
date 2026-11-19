@@ -1,0 +1,440 @@
+# Eesti (et) interface catalog for every Crafting App.
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   @plural  English `one|other`; the translation lists this language's plural forms, `|`-separated.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary. No other product's localisation, string table or translated UI was
+# consulted or copied; add entries the same way.
+
+	% of all commits	% kõigist commitidest
+	(Custom)	(Kohandatud)
+	(none)	(puudub)
+	About	Teave
+	Accessibility	Ligipääsetavus
+	Add	Lisa
+	Add a comment	Lisa kommentaar
+	Add to Dictionary	Lisa sõnastikku
+	Adjust	Kohanda
+	Advanced	Täpsem
+	Align	Joonda
+	Align Left	Joonda vasakule
+	Align Right	Joonda paremale
+	Align Text	Joonda tekst
+	Alignment	Joondus
+	Alignment:	Joondus:
+	All	Kõik
+	All Caps	Suurtähed
+	All files	Kõik failid
+	All pages	Kõik leheküljed
+	Animation	Animatsioon
+	Apply	Rakenda
+	Apply Character Style	Rakenda märgistiil
+	Apply to:	Rakenda:
+	Area	Pind
+	Arrange	Paiguta
+	Arrow	Nool
+	Arrows	Nooled
+	Ascending	Kasvavalt
+	Assign	Määra
+	Author	Autor
+	Auto	Automaatne
+	Auto ({percent}%)	Automaatne ({percent}%)
+	Automatic	Automaatne
+	Backspace	Tagasilüke
+	Bar	Joon
+	Binary assets added	Lisatud binaarvarad
+	Binary assets removed	Eemaldatud binaarvarad
+	Bold	Paks
+	Borders	Äärised
+	Bottom	All
+	Bottom:	All:
+	Break Link	Katkesta link
+	Bring Forward	Too ettepoole
+	Browse…	Sirvi…
+	Bullet	Täpp
+	Cancel	Loobu
+	Caption	Pealdis
+	Category	Kategooria
+	Cell Size	Lahtri suurus
+	Center	Keskele
+	Centered	Keskele joondatud
+	Centimeters	Sentimeetrid
+	Change	Muuda
+	Change Case	Muuda tähesuurust
+	Character	Märk
+	Characters	Märgid
+	Circle	Ring
+	City	Linn
+	Clear	Tühjenda
+	Clear All	Tühjenda kõik
+	Clipboard	Lõikelaud
+	Close	Sulge
+	Collapse	Ahenda
+	Color	Värv
+	Color:	Värv:
+	Colors	Värvid
+	Colors:	Värvid:
+	Column width	Veeru laius
+	Columns	Veerud
+	Columns:	Veerud:
+	Combine	Ühenda
+	Commands:	Käsud:
+	Comment	Kommentaar
+	Comments	Kommentaarid
+	Commits	Commitid
+	Company	Ettevõte
+	Compare	Võrdle
+	Comparison	Võrdlus
+	Contains	Sisaldab
+	Contributors	Panustajad
+	Convert	Teisenda
+	Copies	Koopiad
+	Copy	Kopeeri
+	Copyright	Autoriõigus
+	Country	Riik
+	Create	Loo
+	Crop	Kärbi
+	Current	Praegune
+	Current page	Praegune lehekülg
+	Custom	Kohandatud
+	Customize…	Kohanda…
+	Cut	Lõika
+	Dark	Tume
+	Dashed	Katkendjoon
+	Data	Andmed
+	Date and Time	Kuupäev ja kellaaeg
+	Date format	Kuupäeva vorming
+	Decrease Font Size	Vähenda fondi suurust
+	Default	Vaikimisi
+	Delete	Kustuta
+	Delete Style	Kustuta stiil
+	Deleted	Kustutatud
+	Descending	Kahanevalt
+	Description:	Kirjeldus:
+	Diagonal	Diagonaal
+	Diamond	Romb
+	Direction:	Suund:
+	Discord	Discord
+	Display	Kuva
+	Display name	Kuvatav nimi
+	Document	Dokument
+	Document Title	Dokumendi pealkiri
+	Documents	Dokumendid
+	Don't Save	Ära salvesta
+	Dotted	Punktiir
+	Down	Alla
+	Draft	Mustand
+	Draw	Joonista
+	Dutch	Hollandi
+	Editing	Redigeerimine
+	Edit…	Muuda…
+	Effects	Efektid
+	Ellipsis	Kolmikpunkt
+	Em Dash	Mõttekriips (em)
+	Em Space	Em-tühik
+	Emboss	Reljeef
+	En Dash	Lühike mõttekriips (en)
+	En Space	En-tühik
+	Envelope DL	Ümbrik DL
+	Eraser	Kustutuskumm
+	Even pages only	Ainult paarisleheküljed
+	Example: {sample}	Näide: {sample}
+	Expand	Laienda
+	Export	Ekspordi
+	Export PDF	Ekspordi PDF
+	Exported {path}	Eksporditud: {path}
+	Expression	Avaldis
+	Field	Väli
+	Field properties	Välja atribuudid
+	Fields	Väljad
+	Fields:	Väljad:
+	File	Fail
+	Fill	Täide
+	Find	Otsi
+	Find and Replace	Otsi ja asenda
+	Find Next	Otsi järgmine
+	Find:	Otsi:
+	Finish	Lõpeta
+	First	Esimene
+	First commit	Esimene commit
+	Fit	Sobita
+	Flip Horizontal	Peegelda horisontaalselt
+	Flip Vertical	Peegelda vertikaalselt
+	Focus	Keskendu
+	Font	Font
+	Font Size	Fondi suurus
+	Font:	Font:
+	Fonts	Fondid
+	Format	Vorming
+	Format:	Vorming:
+	Full Screen	Täisekraan
+	General	Üldine
+	Glow	Kuma
+	Graphic	Pilt
+	Grayscale	Halltoonid
+	Group	Rühmita
+	Headings	Pealkirjad
+	Heart	Süda
+	Height:	Kõrgus:
+	Help	Abi
+	Hidden	Peidetud
+	Hidden text	Peidetud tekst
+	Hindi	Hindi
+	Hollow	Õõnes
+	Home	Avaleht
+	Horizontal	Rõhtne
+	Hyphenation	Poolitus
+	Ignore All	Eira kõiki
+	Inches	Tollid
+	Increase Font Size	Suurenda fondi suurust
+	Index	Register
+	Inflate	Paisutus
+	Info	Teave
+	Insert	Lisa
+	Inspect Document	Kontrolli dokumenti
+	Interface	Kasutajaliides
+	Interface language	Kasutajaliidese keel
+	Interface Theme	Kasutajaliidese kujundus
+	Italian	Itaalia
+	Italic	Kaldkiri
+	Japanese	Jaapani
+	Justification	Joondus
+	Justify	Rööpjoonda
+	Keywords	Märksõnad
+	Korean	Korea
+	Labels	Sildid
+	Landscape	Rõhtpaigutus
+	Language	Keel
+@id	language.name	Eesti
+	Lasso	Lasso
+	Last	Viimane
+	Last commit	Viimane commit
+	Layout	Paigutus
+	Left	Vasak
+	Left:	Vasakul:
+	Letter	Kiri
+	Light	Hele
+	Line	Joon
+	Line delta	Ridade muutus
+	Line spacing	Reavahe
+	Linear	Lineaarne
+	Lines	Read
+	Lines +/−	Read +/−
+	Lines added	Lisatud read
+	Lines deleted	Kustutatud read
+	Link	Link
+	Links	Lingid
+	List	Loend
+	Location	Asukoht
+	lowercase	väiketähed
+	Margins	Veerised
+	Medium	Keskmine
+	Merge	Ühenda
+	Merge Cells	Ühenda lahtrid
+	Merged PRs	Ühendatud PR-id
+	Middle	Keskel
+	Millimeters	Millimeetrid
+	Model	Mudel
+	Models	Mudelid
+	Move Down	Teisalda alla
+	Move Up	Teisalda üles
+	Name	Nimi
+	Name (A–Z)	Nimi (A–Z)
+	Name:	Nimi:
+	Navigation	Navigeerimine
+	New	Uus
+	New Document	Uus dokument
+	New document	Uus dokument
+	New from Template	Uus mallist
+	New Group	Uus rühm
+	New Style…	Uus stiil…
+	New Window	Uus aken
+	New…	Uus…
+	Next	Järgmine
+	Next Change	Järgmine muudatus
+	Next Page	Järgmine leht
+	No	Ei
+	No Color	Värvita
+	No limit	Piiranguta
+	Nonbreaking Space	Poolitamatu tühik
+	None	Puudub
+	Number	Number
+	Object	Objekt
+	Odd pages only	Ainult paaritud leheküljed
+	Off	Väljas
+	OK	OK
+	Omit	Jäta välja
+	On	Sees
+	Open	Ava
+	Options	Valikud
+	Options…	Suvandid…
+	Orientation	Suund
+	Other	Muu
+	Outline	Liigendus
+	Oval	Ovaal
+	Page	Leht
+	Page {page} of {pages}	Leht {page} / {pages}
+	Pages	Lehed
+	Paper	Paber
+	Paragraph	Lõik
+	Password	Parool
+	Paste	Kleebi
+	Paste Special	Erikleepimine
+	Pause	Peata
+	Pen	Pliiats
+	Pencil	Grafiitpliiats
+	Picas	Piikad
+	Play	Esita
+	Points	Punktid
+	Portrait	Püstpaigutus
+	Position	Asukoht
+	Position:	Asukoht:
+	Presets	Eelseadistused
+	Preview	Eelvaade
+	Previous	Eelmine
+	Previous Change	Eelmine muudatus
+	Previous Page	Eelmine lehekülg
+	Print	Prindi
+	Printer	Printer
+	Printing	Printimine
+	Properties	Atribuudid
+	Protect	Kaitse
+	PRs	PR-id
+	Pyramid	Püramiid
+	Real name	Pärisnimi
+	Recent	Hiljutised
+	Recent Colors	Viimati kasutatud värvid
+	Recover	Taasta
+	Rectangle	Ristkülik
+	Redo	Tee uuesti
+	Refresh	Värskenda
+	Relaxed	Hõre
+	Remove	Eemalda
+	Remove Background	Eemalda taust
+	Rename	Nimeta ümber
+	Rename Style	Nimeta stiil ümber
+	Rename…	Nimeta ümber…
+	Repeat	Korda
+	Replace	Asenda
+	Replace:	Asenda:
+	Reply	Vasta
+	Report	Aruanne
+	Reset	Lähtesta
+	Reset…	Lähtesta…
+	Result	Tulemus
+	Reverse the order	Pööra järjestus ümber
+	Review	Läbivaatus
+	Right	Parem
+	Right:	Paremal:
+	Rotate	Pööra
+	Rotation	Pööramine
+	Rotation:	Pööre:
+	Rounded Rectangle	Ümarnurkadega ristkülik
+	Ruler	Joonlaud
+	Russian	Vene
+	Save	Salvesta
+	Save As	Salvesta nimega
+	Save as Template	Salvesta mallina
+	Saved	Salvestatud
+	Scale	Mõõtkava
+	Search	Otsi
+	Select	Vali
+	Select All	Vali kõik
+	Select Objects	Vali objektid
+	Selected pages	Valitud leheküljed
+	Selection	Valik
+	Send Backward	Saada tahapoole
+	Set	Määra
+	Set as Default	Määra vaikevalikuks
+	Settings…	Sätted…
+	Shadow	Vari
+	Shape Effects	Kujundi efektid
+	Shapes	Kujundid
+	Share	Jaga
+	Show	Kuva
+	Show rulers	Kuva joonlauad
+	Size	Suurus
+	Size:	Suurus:
+	Small Caps	Kapiteelkiri
+	Sort	Sordi
+	Sort by	Sordi välja järgi
+	Spaces	Tühikud
+	Spacing	Vahe
+	Spacing:	Vahe:
+	Special	Erimärgid
+	Speed	Kiirus
+	Spelling	Õigekiri
+	Split	Tükelda
+	Square	Ruudukujuline
+	Stacked	Virnas
+	Standard	Standard
+	Star	Täht
+	Start at:	Alusta kohalt:
+	Statistics	Statistika
+	Status Bar	Olekuriba
+	Stop	Lõpeta
+	Strikethrough	Läbikriipsutus
+	Studio	Stuudio
+	Style	Stiil
+	Style:	Laad:
+	Styles	Stiilid
+	Subject	Teema
+	Subscript	Allindeks
+	Subtitle	Alapealkiri
+	Superscript	Ülaindeks
+	Symbol	Sümbol
+	Symbols	Sümbolid
+	System	Süsteem
+	Tab	Tabeldus
+	Table	Tabel
+	Table style	Tabelistiil
+	Tables	Tabelid
+	Tabs	Tabelduskohad
+	Templates	Mallid
+	Text	Tekst
+	Text:	Tekst:
+	The passwords don't match.	Paroolid ei ühti.
+	Thickness	Paksus
+	Title	Pealkiri
+	Tools	Tööriistad
+	Top	Ülal
+	Top:	Ülal:
+	Total	Kokku
+	Tracking	Jälitus
+	Transform	Teisenda
+	Translate	Tõlgi
+	Transparency	Läbipaistvus
+	Triangle	Kolmnurk
+	Type	Tüüp
+	Type:	Tüüp:
+	Underline	Allajoon
+	Undo	Võta tagasi
+	Undo {action}	Võta tagasi: {action}
+	Ungroup	Tühista rühmitus
+	Up	Üles
+	UPPERCASE	SUURTÄHED
+	Username	Kasutajanimi
+	Value	Väärtus
+	Version	Versioon
+	Vertical	Püstine
+	Vertical Alignment	Püstjoondus
+	View	Vaade
+	Voice	Hääl
+	W:	L:
+	Watermark	Vesimärk
+	Wave	Laineline
+	Website	Veebisait
+	Weight	Jämedus
+	Width:	Laius:
+	Window	Aken
+	Words	Sõnad
+	Yes	Jah
+	Your changes will be lost if you don't save them.	Salvestamata muudatused lähevad kaotsi.
+	Zoom	Suum
+	Zoom In	Suurenda
+	Zoom Out	Vähenda

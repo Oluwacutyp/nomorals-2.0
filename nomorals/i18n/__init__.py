@@ -36,17 +36,39 @@ parts that change meaning — are fully rule-driven here.
 
 from __future__ import annotations
 
+from .bidi import (
+    fmt,
+    fmt_plain,
+    has_bidi_control,
+    has_rtl,
+    isolate,
+    ltr,
+    strip_isolates,
+)
 from .catalog import (
     Catalog,
+    CatalogError,
     CatalogIssue,
     CatalogSet,
     Entry,
+    dir_from_env,
     load_catalogs,
+    load_upstream_tree,
     parse_catalog,
+    parse_upstream_catalog,
     placeholders,
 )
-from .check import CheckReport, check_catalogs, render_parity
+from .check import (
+    CheckReport,
+    check_catalogs,
+    check_upstream_text,
+    check_upstream_tree,
+    render_parity,
+    upstream_coverage,
+)
+from .fold import Folded, Folder
 from .locale import DEFAULT_LOCALE, fallback_chain, language_of, normalize_locale
+from .parity import run_case, run_i18n_parity
 from .plural import plural_categories, plural_category
 from .runtime import (
     I18nError,
@@ -57,22 +79,43 @@ from .runtime import (
     translate,
     translate_detailed,
 )
+from .scripts import (
+    Direction,
+    base_direction,
+    direction,
+    han,
+    region_script,
+    scripts,
+    usual_script,
+)
+from .upstream import UpstreamCatalogSet, candidates
 
 __all__ = [
     "Catalog",
+    "CatalogError",
     "CatalogIssue",
     "CatalogSet",
     "Entry",
+    "dir_from_env",
     "load_catalogs",
+    "load_upstream_tree",
     "parse_catalog",
+    "parse_upstream_catalog",
     "placeholders",
     "CheckReport",
     "check_catalogs",
+    "check_upstream_text",
+    "check_upstream_tree",
     "render_parity",
+    "upstream_coverage",
+    "Folded",
+    "Folder",
     "DEFAULT_LOCALE",
     "fallback_chain",
     "language_of",
     "normalize_locale",
+    "run_case",
+    "run_i18n_parity",
     "plural_categories",
     "plural_category",
     "I18nError",
@@ -82,4 +125,20 @@ __all__ = [
     "reset_default_translator",
     "translate",
     "translate_detailed",
+    "Direction",
+    "base_direction",
+    "direction",
+    "han",
+    "region_script",
+    "scripts",
+    "usual_script",
+    "UpstreamCatalogSet",
+    "candidates",
+    "fmt",
+    "fmt_plain",
+    "has_bidi_control",
+    "has_rtl",
+    "isolate",
+    "ltr",
+    "strip_isolates",
 ]

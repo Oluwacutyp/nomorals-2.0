@@ -1,0 +1,386 @@
+# Slovenščina (sl) interface catalog for every Crafting App.
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   @plural  English `one|other`; the translation lists this language's plural forms, `|`-separated.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary. No other product's localisation, string table or translated UI was
+# consulted or copied; add entries the same way.
+
+	% of all commits	% vseh commitov
+	(none)	(brez)
+	1 file	1 datoteka
+	About	O programu
+	Accessibility	Dostopnost
+	Actions	Dejanja
+	Active	Aktivno
+	Actual Size	Dejanska velikost
+	Add	Dodaj
+	Add a comment	Dodaj komentar
+	Advanced	Napredno
+	Align	Poravnaj
+	Align left	Poravnaj levo
+	Align right	Poravnaj desno
+	Alignment:	Poravnava:
+	All	Vse
+	All pages	Vse strani
+	Angle	Kot
+	Animation effects	Učinki animacije
+	Any	Poljubno
+	Appearance	Videz
+	Application	Program
+	Apply	Uporabi
+	Area	Ploščina
+	Arrow	Puščica
+	ArtCraft website	Spletna stran ArtCraft
+	Author	Avtor
+	Auto	Samodejno
+	Auto ({percent}%)	Samodejno ({percent} %)
+	Available	Na voljo
+	Background	Ozadje
+	Binary assets added	Dodani binarni viri
+	Binary assets removed	Odstranjeni binarni viri
+	Black	Črna
+	Black and white	Črno-belo
+	Blue	Modra
+	Bold	Krepko
+	Both	Oboje
+	Both sides	Obe strani
+	Bottom	Spodaj
+	Bottom:	Spodaj:
+	Browse…	Prebrskaj…
+	Calculate	Izračunaj
+	Cancel	Prekliči
+	Category:	Kategorija:
+	Center	Sredinsko
+	Characters	Znaki
+	Check for updates	Preveri posodobitve
+	Circle	Krog
+	Clear	Počisti
+	Clear All	Počisti vse
+	Clear Recent Files	Počisti nedavne datoteke
+	Clipboard	Odložišče
+	Close	Zapri
+	Close (Esc)	Zapri (Esc)
+	Collapse	Strni
+	Collate	Zloži po vrsti
+	Color:	Barva:
+	Colour	Barva
+	Combine	Združi
+	Command	Ukaz
+	Comments	Komentarji
+	Commits	Commiti
+	Company	Podjetje
+	Compare	Primerjaj
+	Compatibility	Združljivost
+	Compression	Stiskanje
+	Continue	Nadaljuj
+	Contributors	Sodelavci
+	Convert	Pretvori
+	Copies:	Kopije:
+	Copy	Kopiraj
+	Couldn't open {name}: {e}	Datoteke {name} ni bilo mogoče odpreti: {e}
+	Create	Ustvari
+	Cross	Križec
+	Current page	Trenutna stran
+	Custom	Po meri
+	Cut	Izreži
+	Dark	Temno
+	Dark gray	Temno siva
+	Dashed	Črtkano
+	Date	Datum
+	Date format	Oblika datuma
+	Dates	Datumi
+	Default	Privzeto
+	Delete	Izbriši
+	Deleted	Izbrisano
+	Description	Opis
+	Description:	Opis:
+	Details	Podrobnosti
+	Diamond	Romb
+	Direction:	Smer:
+	Discard	Zavrzi
+	Dismiss	Opusti
+	Display name	Prikazno ime
+	Distance	Razdalja
+	Distribute	Porazdeli
+	Document	Dokument
+	Document Title	Naslov dokumenta
+	Done	Opravljeno
+	Dot	Pika
+	Double-click	Dvoklik
+	Download	Prenesi
+	Draw	Riši
+	Duplicate…	Podvoji…
+	Dynamic	Dinamično
+	Edit	Urejanje
+	Editing	Urejanje
+	Edit…	Uredi…
+	Endpoint	Končna točka
+	Erase	Izbriši
+	Eraser	Radirka
+	Even pages only	Samo sode strani
+	Example: {sample}	Primer: {sample}
+	Expand	Razširi
+	Export	Izvozi
+	Export to	Izvozi v
+	Exported to {path}	Izvoženo v {path}
+	Export…	Izvozi…
+	Extract	Izvleci
+	Field	Polje
+	Field properties	Lastnosti polja
+	Fields	Polja
+	File	Datoteka
+	File Name	Ime datoteke
+	Fill	Izpolni
+	Find…	Poišči…
+	First	Prva
+	First commit	Prvi commit
+	Fit	Prilagodi
+	Flatten	Splošči
+	Flip Horizontal	Prezrcali vodoravno
+	Flip Vertical	Prezrcali navpično
+	Font size	Velikost pisave
+	Font Size:	Velikost pisave:
+	Font:	Pisava:
+	Fonts	Pisave
+	Format	Oblika
+	Format:	Oblika:
+	From	Od
+	Full Screen	Celoten zaslon
+	General	Splošno
+	Graphic	Grafika
+	Gray	Siva
+	Green	Zelena
+	Grid view	Pogled mreže
+	Headings	Naslovi
+	Height	Višina
+	Height:	Višina:
+	Help	Pomoč
+	Hidden text	Skrito besedilo
+	High	Visoka
+	High Resolution	Visoka ločljivost
+	High resolution	Visoka ločljivost
+	Home	Domov
+	Horizontal	Vodoravno
+	Horizontal scale	Vodoravno merilo
+	Horizontally	Vodoravno
+	Icon	Ikona
+	Image	Slika
+	Images	Slike
+	Index	Kazalo
+	Insert	Vstavi
+	Interface language	Jezik vmesnika
+	Intersection	Presek
+	Invert	Obrni barve
+	Italic	Ležeče
+	Join our Discord	Discord kanal
+	Join the ArtCraft Discord	Pridružite se Discordu ArtCraft
+	just now	pravkar
+	Justify	Obojestransko poravnano
+	Keywords	Ključne besede
+	Label	Oznaka
+	Labels	Oznake
+	Landscape	Ležeče
+	Language	Jezik
+@id	language.name	Slovenščina
+	Last	Zadnja
+	Last commit	Zadnji commit
+	Later	Prekliči
+	Layers	Plasti
+	Left	Levo
+	Left:	Levo:
+	Light	Svetlo
+	Light gray	Svetlo siva
+	Line	Črta
+	Line delta	Sprememba vrstic
+	Line spacing	Razmik med vrsticami
+	Lines +/−	Vrstice +/−
+	Lines added	Dodane vrstice
+	Lines deleted	Izbrisane vrstice
+	Link	Povezava
+	List	Seznam
+	List view	Pogled seznama
+	Location	Lokacija
+	Locked	Zaklenjeno
+	Low	Nizka
+	Magnification	Povečava
+	Margins	Robovi
+	Maximize	Povečaj
+	Maximum	Največ
+	Measure	Izmeri
+	Medium	Srednja
+	Merged PRs	Združeni PR-ji
+	Metadata	Metapodatki
+	Midpoint	Središčna točka
+	Minimize	Pomanjšaj
+	Minimum	Najmanj
+	Mobile	Mobilna naprava
+	Model	Model
+	Models	Modeli
+	Modified	Spremenjeno
+	More	Več
+	Name	Ime
+	Name (A–Z)	Ime (A–Ž)
+	Name:	Ime:
+	Next page	Naslednja stran
+	No	Ne
+	No limit	Brez omejitve
+	No matches.	Ni zadetkov.
+	No recent files	Ni nedavnih datotek
+	None	Brez
+	Number	Številka
+	Odd pages only	Samo lihe strani
+	Off	Izklopljeno
+	OK	V redu
+	Opacity	Neprosojnost
+	Opacity:	Prekrivnost:
+	Open	Odpri
+	Open link	Odpri povezavo
+	Open Recent	Odpri nedavne
+	Open…	Odpri…
+	Options	Možnosti
+	Options…	Možnosti…
+	Orange	Oranžna
+	Orientation:	Usmerjenost:
+	Original	Izvirnik
+	Outline	Oris
+	Output	Izhod
+	Oval	Elipsa
+	Overlap:	Prekrivanje:
+	Page	Stran
+	Pages	Strani
+	Panels	Razdelki
+	Password	Geslo
+	Path	Pot
+	Paths	Poti
+	Pattern	Vzorec
+	Percentage	Odstotek
+	Perimeter	Obseg
+	Photo	Fotografija
+	Pink	Roza
+	Polygon	Mnogokotnik
+	Polyline	Lomljenica
+	Portrait	Pokončno
+	Position	Položaj
+	Poster	Plakat
+	Preferences	Nastavitve
+	Preferences…	Nastavitve…
+	Prefix	Predpona
+	Preview	Predogled
+	Previous page	Prejšnja stran
+	Print	Natisni
+	Printer:	Tiskalnik:
+	Printing	Tiskanje
+	Print…	Natisni…
+	Protect	Zaščiti
+	PRs	PR-ji
+	Purple	Vijolična
+	Quality	Kakovost
+	Ready	Omogočeno
+	Real name	Pravo ime
+	Recent	Nedavno
+	Recover	Obnovi
+	Rectangle	Pravokotnik
+	Red	Rdeča
+	Redo	Ponovi
+	Reload	Znova naloži
+	Remove	Odstrani
+	Rename	Preimenuj
+	Replace	Zamenjaj
+	Reply	Odgovori
+	Report	Poročilo
+	Resize panel window	Spremeni velikost okna razdelka
+	Resize panels	Spremeni velikost razdelkov
+	Resolution	Ločljivost
+	Resolution:	Ločljivost:
+	Restore	Obnovi
+	Reveal in Finder	Prikaži v Finderju
+	Reverse the order	Obrni vrstni red
+	Revert	Povrni
+	Review	Pregled
+	Right	Desno
+	Rotate	Zavrti
+	Rotate:	Zavrti:
+	Rotation	Rotacija
+	Rotation:	Rotacija:
+	Rows	Vrstice
+	Save	Shrani
+	Save as PDF	Shrani kot PDF
+	Scripts	Skripti
+	Search	Iskanje
+	Security	Varnost
+	Select All	Izberi vse
+	Selected pages	Izbrane strani
+	Selection	Izbor
+	Sensitivity	Občutljivost
+	Sent to {printer}	Poslano na {printer}
+	Settings	Nastavitve
+	Show	Pokaži
+	Show:	Pokaži:
+	Size	Velikost
+	Sort	Razvrsti
+	Sort by	Razvrsti po
+	Source	Vir
+	Special	Posebno
+	Split	Razdeli
+	Square	Kvadrat
+	Stamp	Žig
+	Standard	Standardno
+	Star	Zvezda
+	Status	Stanje
+	Strikethrough	Prečrtanje
+	Style	Slog
+	Subject	Zadeva
+	Subset	Podmnožica
+	Summary	Povzetek
+	Table	Tabela
+	Tables	Tabele
+	Text	Besedilo
+	The passwords don't match.	Gesli se ne ujemata.
+	Thickness	Debelina
+	This document has no bookmarks.	Ta dokument nima zaznamkov.
+	Thumbnails	Sličice
+	Time	Čas
+	Title	Naslov
+	Tool	Orodje
+	Tools	Orodja
+	Top	Zgoraj
+	Total	Skupaj
+	Translate	Prevedi
+	Type	Vrsta
+	Typewriter	Pisalni stroj
+	Underline	Podčrtaj
+	Undo	Razveljavi
+	Undo {action}	Razveljavi: {action}
+	Units	Enote
+	Unknown	Neznano
+	Unlock	Odkleni
+	Up	Navzgor
+	Update	Posodobi
+	Username	Uporabniško ime
+	Value:	Vrednost:
+	Version	Različica
+	Vertical	Navpično
+	Vertically	Navpično
+	View	Pogled
+	Warnings	Opozorila
+	Watermark	Vodni žig
+	Width	Širina
+	Width:	Širina:
+	Words	Besede
+	Yellow	Rumena
+	Yes	Da
+	yesterday	včeraj
+	Your changes will be lost if you don't save them.	Vaše spremembe bodo izgubljene, če jih ne shranite.
+	Zoom	Povečava
+	Zoom in	Povečaj
+	Zoom out	Pomanjšaj
+	{n} files	Datotek: {n}
+	{n} h ago	pred {n} h
+	{n} min ago	pred {n} min
+	−Bin	−Bin

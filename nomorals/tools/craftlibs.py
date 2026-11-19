@@ -2,7 +2,8 @@
 
 A thin surface over :mod:`nomorals.craftlibs` — the organ owns the
 ZIP package codec, both noise engines, the ai-core data model, the
-PDF primitives, the i18n formatting rung and the shared parity +
+PDF primitives, the i18n formatting rung, the craft-i18n catalog
+runtime and the shared parity +
 attribution runners; the tool only routes arguments and shapes the
 reply. Every action reads or builds bytes in memory (or runs the
 local motion provider); nothing here writes a file, sends data
@@ -27,6 +28,24 @@ __all__ = ["craftlibs_action", "register", "run"]
 
 _ACTIONS = ("noise", "codec", "pdf", "i18n", "ai", "parity",
             "attribution", "status")
+
+#: The vendored upstream catalog set, loaded once per process.
+_I18N_UPSTREAM = None
+
+
+def _i18n_translator(locale: str):
+    """A translator over the vendored upstream catalogs, writing
+    numbers as the locale's formatter does."""
+    global _I18N_UPSTREAM
+    if _I18N_UPSTREAM is None:
+        from ..i18n.upstream import UpstreamCatalogSet
+
+        _I18N_UPSTREAM = UpstreamCatalogSet.vendored()
+    from ..i18n.catalog import CatalogSet
+    from ..i18n.runtime import Translator
+
+    return Translator(CatalogSet(), upstream=_I18N_UPSTREAM,
+                      formatter=_i18n.Format.from_tag(locale))
 
 
 def _as_jsonable(value):
@@ -54,7 +73,10 @@ def register(registry: Any) -> None:
             "document=<dict>>; pdf=<safe_url=<url> | write=<text>, "
             "title=<str>>; i18n=<format=<number>, locale=<tag>, "
             "decimals=<n> | parse=<text>, locale=<tag> | "
-            "file_size=<bytes>, style=<binary|decimal|iec>>; "
+            "file_size=<bytes>, style=<binary|decimal|iec> | "
+            "op=<translate, key=<source>, locale=<tag> | plural, "
+            "source=<one|other>, count=<n>, locale=<tag> | check | "
+            "languages>>; "
             "ai=<suggest=<prompt>, kind=<motion|easing> | models | "
             "conformance | status=<role> | bind=<role, connection, "
             "model> | plan=<role, prompt> | tools=<role> | "
@@ -229,6 +251,12 @@ def craftlibs_action(action: str = "status",
                    style: str = "binary",
                    suggest: str = "",
                    kind: str = "motion",
+                   op: str = "",
+                   key: str = "",
+                   source: str = "",
+                   context: str = "",
+                   app: str | None = None,
+                   count: float | None = None,
                    role: str = "",
                    base: str = "",
                    connection: str = "",
@@ -287,6 +315,50 @@ def craftlibs_action(action: str = "status",
         raise ValueError("craftlibs pdf needs safe_url=<url> or "
                          "write=<text>")
     if action == "i18n":
+        if op:
+            translator = _i18n_translator(locale)
+            if op == "translate":
+                if not key:
+                    raise ValueError(
+                        "craftlibs i18n translate needs key=<text>")
+                if context:
+                    text = translator.tc(key, context, locale,
+                                         app=app)
+                else:
+                    text = translator.t(key, locale, app=app)
+                return {"key": key, "locale": locale,
+                        "text": text,
+                        "reply": f"{key!r} in {locale} is {text!r}."}
+            if op == "plural":
+                if not source or count is None:
+                    raise ValueError(
+                        "craftlibs i18n plural needs source=<one|other> "
+                        "and count=<n>")
+                text = translator.trn(source, locale, int(count))
+                return {"source": source, "locale": locale,
+                        "count": count, "text": text,
+                        "reply": f"{count} of {source!r} in {locale} "
+                                 f"is {text!r}."}
+            if op == "check":
+                from ..i18n.check import check_upstream_tree
+
+                root = _I18N_UPSTREAM.root
+                issues = check_upstream_tree(root)
+                files = len(list(root.rglob("*.tsv")))
+                kinds = sorted({issue["kind"] for issue in issues})
+                return {"files": files,
+                        "issues": len(issues), "kinds": kinds,
+                        "reply": (f"checker: {len(issues)} findings "
+                                  f"across {files} files "
+                                  f"(kinds: {', '.join(kinds)}).")}
+            if op == "languages":
+                languages = translator.languages()
+                names = {code: translator.name(code)
+                         for code in languages}
+                return {"languages": languages, "names": names,
+                        "reply": (f"{len(languages)} languages: "
+                                  f"{', '.join(languages)}.")}
+            raise ValueError(f"unknown craftlibs i18n op {op!r}")
         if parse:
             value = _i18n.parse_number(parse, locale)
             return {"text": parse, "locale": locale, "value": value,

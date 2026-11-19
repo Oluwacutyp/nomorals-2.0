@@ -1,0 +1,677 @@
+# Deutsch (de) interface catalog for DeckCraft.
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   @plural  English `one|other`; the translation lists this language's plural forms, `|`-separated.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary. No other product's localisation, string table or translated UI was
+# consulted or copied; add entries the same way.
+
+	  Fixed date (empty = update automatically):	  Festes Datum (leer = automatisch aktualisieren):
+	  Footer text:	  Fußzeilentext:
+	  Present  	  Vorführen  
+	 (not checked)	 (nicht geprüft)
+	 — Edited	 — Bearbeitet
+	(no spelling suggestions)	(keine Rechtschreibvorschläge)
+	+ Add	+ Hinzufügen
+	+ New Comment	+ Neuer Kommentar
+	+ Row	+ Zeile
+	+ Series	+ Datenreihe
+	3-D	3D
+	3-D Format	3D-Format
+	3-D Rotation	3D-Drehung
+	About DeckCraft	Über DeckCraft
+	Accept	Annehmen
+	Accept Revision	Änderung annehmen
+	Accept\nAll	Alle\nannehmen
+	Accessibility Checker	Barrierefreiheit prüfen
+	Account	Konto
+	Action	Aktion
+	Action Buttons	Interaktive Schaltflächen
+	Action Settings	Aktionseinstellungen
+	Action Settings…	Aktionseinstellungen…
+	Add a title with a picture or some text to get layout ideas.	Fügen Sie einen Titel mit einem Bild oder etwas Text hinzu, um Layoutideen zu erhalten.
+	Add Animation	Animation hinzufügen
+	Add Pictures…	Bilder hinzufügen…
+	Add Point	Punkt hinzufügen
+	Add Section	Abschnitt hinzufügen
+	Add Shape	Form hinzufügen
+	Add\nAnimation	Animation\nhinzufügen
+	Address:	Adresse:
+	Adjust Shape	Form anpassen
+	After	Danach
+	After:	Nach:
+	Album theme	Albumdesign
+	Align Cell Text	Zelltext ausrichten
+	All caps	Großbuchstaben
+	ALL pictures black and white	ALLE Bilder schwarz-weiß
+	Alt Text	Alternativtext
+	Alt text	Alternativtext
+	Alt\nText	Alternativ-\ntext
+	An open-source, clean-room project. Not affiliated with Microsoft.	Ein quelloffenes Clean-Room-Projekt. Nicht mit Microsoft verbunden.
+	Animation Painter (double-click to keep it on)	Animation übertragen (Doppelklick hält es aktiv)
+	Animation Styles	Animationsarten
+	Animation\nPainter	Animation\nübertragen
+	Animation\nPane	Animations-\nbereich
+	Animations	Animationen
+	Applies to this presentation's theme colours.	Gilt für die Designfarben dieser Präsentation.
+	Apply Animation	Animation anwenden
+	Apply Design Idea	Designidee anwenden
+	Apply only to this picture	Nur auf dieses Bild anwenden
+	Apply to All	Auf alle anwenden
+	Apply To All	Auf alle anwenden
+	Apply\nTo All	Auf alle\nanwenden
+	Artistic Effects	Künstlerische Effekte
+	Artistic\nEffects	Künstlerische\nEffekte
+	As:	Als:
+	Audio from File…	Audio aus Datei…
+	AutoCorrect	AutoKorrektur
+	AutoCorrect as you type	AutoKorrektur während der Eingabe
+	AutoCorrect Options…	AutoKorrektur-Optionen…
+	Autofit	Automatisch anpassen
+	Automatic bulleted and numbered lists	Automatische Aufzählungen und Nummerierungen
+	Available formats:	Verfügbare Formate:
+	Back	Zurück
+	Back (Esc)	Zurück (Esc)
+	Background\nStyles	Hintergrund-\nformate
+	Banded Columns	Gebänderte Spalten
+	Banded Rows	Gebänderte Zeilen
+	Blank Presentation	Leere Präsentation
+	Body:	Textkörper:
+	Bring\nForward	Nach vorne\nbringen
+	Browse for Themes…	Nach Designs suchen…
+	Bullets	Aufzählungszeichen
+	Bullets and Numbering	Aufzählungszeichen und Nummerierung
+	Bullets and Numbering…	Aufzählungszeichen und Nummerierung…
+	Camera capture is not available yet	Kameraaufnahme ist noch nicht verfügbar
+	Capitalize first letter of sentences	Ersten Buchstaben eines Satzes großschreiben
+	Capitalize names of days	Wochentage großschreiben
+	Caps	Großbuchstaben
+	Captions under pictures	Beschriftungen unter Bildern
+	Cell Margins	Zellenränder
+	Center	Zentriert
+	Change Chart Type	Diagrammtyp ändern
+	Change Colors	Farben ändern
+	Change File Type	Dateityp ändern
+	Change Layout	Layout ändern
+	Change Picture	Bild ändern
+	Change Picture…	Bild ändern…
+	Change Shape	Form ändern
+	Change Spelling	Schreibweise ändern
+	Change to:	Ändern in:
+	Change\nChart Type	Diagrammtyp\nändern
+	Character Spacing	Zeichenabstand
+	Chart	Diagramm
+	Chart cell	Diagrammzelle
+	Chart Data	Diagrammdaten
+	Chart Design	Diagrammentwurf
+	Chart Elements	Diagrammelemente
+	Chart…	Diagramm…
+	Check for Updates…	Nach Updates suchen…
+	Check\nAccessibility	Barrierefreiheit\nprüfen
+	Choose a SmartArt Graphic	SmartArt-Grafik auswählen
+	Choosing a presentation to reuse needs the desktop app	Zum Auswählen einer Präsentation zur Wiederverwendung wird die Desktop-App benötigt
+	Choosing a sound file needs the desktop app	Zum Auswählen einer Audiodatei wird die Desktop-App benötigt
+	Clear All	Alle löschen
+	Clear All Formatting	Alle Formatierungen löschen
+	Click a colour in the picture to make it transparent	Klicken Sie auf eine Farbe im Bild, um sie transparent zu machen
+	Click a symbol to insert it at the insertion point.	Klicken Sie auf ein Symbol, um es an der Einfügemarke einzufügen.
+	Click the slide to take the colour under the pointer	Klicken Sie auf die Folie, um die Farbe unter dem Zeiger aufzunehmen
+	Click to add notes	Klicken, um Notizen hinzuzufügen
+	Click to add text	Klicken, um Text hinzuzufügen
+	Click to change this one; Shift-click to change all	Klicken ändert diese Stelle, Umschalt-Klick ändert alle
+	Close Path	Pfad schließen
+	Close\nMaster View	Masteransicht\nschließen
+	Collapse the Ribbon	Menüband reduzieren
+	Columns…	Spalten…
+	Command Palette	Befehlspalette
+	Community Links	Community-Links
+	Compare this presentation with a revised copy from Review › Compare.	Vergleichen Sie diese Präsentation über Überprüfen › Vergleichen mit einer überarbeiteten Kopie.
+	Compare…	Vergleichen…
+	Compress	Komprimieren
+	Compress Pictures	Bilder komprimieren
+	Compression options	Komprimierungsoptionen
+	Connect Shapes	Formen verbinden
+	Convert to Shapes	In Formen umwandeln
+	Convert to SmartArt	In SmartArt umwandeln
+	Convert to Text	In Text umwandeln
+	Copy path	Pfad kopieren
+	Correct accidental use of cAPS LOCK key	Versehentliches Verwenden der fESTSTELLTASTE korrigieren
+	Correct TWo INitial CApitals	ZWei GRoßbuchstaben am WOrtanfang korrigieren
+	Corrections	Korrekturen
+	Create a PDF Document	PDF-Dokument erstellen
+	Create Handouts	Handzettel erstellen
+	Create New Theme Colors	Neue Designfarben erstellen
+	Create New Theme Fonts	Neue Designschriftarten erstellen
+	Crop	Zuschneiden
+	Crop to Shape	Auf Form zuschneiden
+	Custom character:	Benutzerdefiniertes Zeichen:
+	Custom Show 1	Benutzerdefinierte Präsentation 1
+	Custom Shows	Benutzerdefinierte Präsentationen
+	Custom Slide Show	Benutzerdefinierte Bildschirmpräsentation
+	Custom\nShow	Benutzerdef.\nPräsentation
+	Customize Colors…	Farben anpassen…
+	Customize Fonts…	Schriftarten anpassen…
+	Customize Quick Access Toolbar	Symbolleiste für den Schnellzugriff anpassen
+	Dark appearance	Dunkle Darstellung
+	Dark Mode	Dunkler Modus
+	Dark\nMode	Dunkler\nModus
+	Dash	Strichart
+	Date & Time	Datum & Uhrzeit
+	Date &\nTime	Datum &\nUhrzeit
+	Date and time	Datum und Uhrzeit
+	DeckCraft has no accounts: there is nothing to sign in to, and your presentations stay on your device.	DeckCraft hat keine Konten: Es gibt nichts, wofür Sie sich anmelden müssten, und Ihre Präsentationen bleiben auf Ihrem Gerät.
+	DeckCraft prints through a PDF: it downloads, ready to print from your browser or PDF viewer.	DeckCraft druckt über eine PDF-Datei: Sie wird heruntergeladen und kann aus Ihrem Browser oder PDF-Viewer gedruckt werden.
+	DeckCraft prints through a PDF: it opens in your PDF viewer, where you choose the printer.	DeckCraft druckt über eine PDF-Datei: Sie öffnet sich in Ihrem PDF-Viewer, dort wählen Sie den Drucker.
+	Decrease List Level	Listenebene verringern
+	Decrease {label}	{label} verringern
+	Default tab stops (in):	Standardtabstopps (Zoll):
+	Delay	Verzögerung
+	Delay:	Verzögerung:
+	Delete Columns	Spalten löschen
+	Delete Comment	Kommentar löschen
+	Delete cropped areas of pictures	Zugeschnittene Bildbereiche löschen
+	Delete Guide	Hilfslinie löschen
+	Delete Layout	Layout löschen
+	Delete Point	Punkt löschen
+	Delete Repeated Word	Wiederholtes Wort löschen
+	Delete Rows	Zeilen löschen
+	Delete Segment	Segment löschen
+	Delete Slide	Folie löschen
+	Delete Table	Tabelle löschen
+	Delete Text	Text löschen
+	Demote	Tiefer stufen
+	Design	Entwurf
+	Design\nIdeas	Design-\nideen
+	Display drawing guides on screen	Zeichnungshilfslinien anzeigen
+	Display grid on screen	Raster anzeigen
+	Distribute Columns	Spalten verteilen
+	Distribute Horizontally	Horizontal verteilen
+	Distribute Rows	Zeilen verteilen
+	Distribute Vertically	Vertikal verteilen
+	Distributed	Verteilt
+	Do not check spelling or grammar	Rechtschreibung und Grammatik nicht prüfen
+	Don't show on title slide	Nicht auf Titelfolie anzeigen
+	Double	Doppelt
+	Draw Table	Tabelle zeichnen
+	Duplicate Selected Slides	Ausgewählte Folien duplizieren
+	Duplicate Slide	Folie duplizieren
+	Duration	Dauer
+	Duration:	Dauer:
+	e.g. 1-3, 5	z. B. 1-3, 5
+	Edit Alt Text…	Alternativtext bearbeiten…
+	Edit Data	Daten bearbeiten
+	Edit Photo Album…	Fotoalbum bearbeiten…
+	Edit Points	Punkte bearbeiten
+	Edit SmartArt Text	SmartArt-Text bearbeiten
+	Edit Text	Text bearbeiten
+	Edit the data: first row = series names, first column = categories.	Daten bearbeiten: erste Zeile = Namen der Datenreihen, erste Spalte = Kategorien.
+	Edit\nData	Daten\nbearbeiten
+	Edit\nShape	Form\nbearbeiten
+	Effect Options	Effektoptionen
+	Effect\nOptions	Effekt-\noptionen
+	Email address:	E-Mail-Adresse:
+	End Review	Überprüfung beenden
+	End Show	Präsentation beenden
+	End trim (s):	Ende kürzen (s):
+	End\nReview	Überprüfung\nbeenden
+	Equation	Formel
+	Exit Edit Points	Punktbearbeitung beenden
+	Export the presentation as:	Präsentation exportieren als:
+	Fade in (s):	Einblenden (s):
+	Fade out (s):	Ausblenden (s):
+	Find what:	Suchen nach:
+	Find whole words only	Nur ganze Wörter suchen
+	First Column	Erste Spalte
+	First line	Erste Zeile
+	Fit slide to current window	Folie an aktuelles Fenster anpassen
+	Fit to Window	An Fenster anpassen
+	Fit to\nWindow	An Fenster\nanpassen
+	Follow Path	Pfad folgen
+	Font Color	Schriftfarbe
+	Font name	Schriftartname
+	Font…	Schriftart…
+	Footer	Fußzeile
+	Footers	Fußzeilen
+	For rectangles and rounded rectangles	Für Rechtecke und abgerundete Rechtecke
+	Format Background	Hintergrund formatieren
+	Format Background…	Hintergrund formatieren…
+	Format Painter (double-click to keep it on)	Format übertragen (Doppelklick hält es aktiv)
+	Format Shape…	Form formatieren…
+	Format\nBackground	Hintergrund\nformatieren
+	Format\nPane	Format-\nbereich
+	Frame shape	Rahmenform
+	Frame Slides	Folien rahmen
+	Freeform	Freihandform
+	From slide:	Von Folie:
+	From the top-left corner of the slide	Von der linken oberen Ecke der Folie
+	From\nBeginning	Von\nBeginn an
+	From\nCurrent Slide	Ab aktueller\nFolie
+	Go to	Gehe zu
+	Gradient bar	Verlaufsleiste
+	Gradient stops	Farbverlaufsstopps
+	Gradient…	Farbverlauf…
+	Grid Options	Rasteroptionen
+	Grid Options…	Rasteroptionen…
+	Grid\nOptions	Raster-\noptionen
+	Gridlines	Gitternetzlinien
+	Group Objects	Objekte gruppieren
+	Handout Master	Handzettelmaster
+	Handout Placeholders	Handzettel-Platzhalter
+	Handout\nMaster	Handzettel-\nmaster
+	Hanging	Hängend
+	Header &\nFooter	Kopf- und\nFußzeile
+	Header and Footer	Kopf- und Fußzeile
+	Header and Footer…	Kopf- und Fußzeile…
+	Header Row	Kopfzeile
+	Heading and body fonts for this presentation.	Überschrift- und Textschriftarten dieser Präsentation.
+	Heading:	Überschrift:
+	Heavy	Dick
+	Height ({abbr}):	Höhe ({abbr}):
+	Hide background graphics	Hintergrundgrafiken ausblenden
+	Hide Background Graphics	Hintergrundgrafiken ausblenden
+	Hide During Show	Während der Präsentation ausblenden
+	Hide Slide	Folie ausblenden
+	Hide\nSlide	Folie\nausblenden
+	Highlight click	Klick hervorheben
+	How would you describe this object and its context to someone who is blind or has low vision?	Wie würden Sie dieses Objekt und seinen Kontext einer blinden oder sehbehinderten Person beschreiben?
+	Icons	Symbole
+	Include hidden slides	Ausgeblendete Folien einschließen
+	Increase List Level	Listenebene erhöhen
+	Increase {label}	{label} erhöhen
+	Indentation	Einzug
+	Ink to Math (coming soon)	Freihand in Formel (folgt bald)
+	Ink to Shape	Freihand in Form
+	Ink to Shape: turn drawn lines, rectangles, ovals and triangles into shapes	Freihand in Form: gezeichnete Linien, Rechtecke, Ellipsen und Dreiecke in Formen umwandeln
+	Ink to Text (coming soon)	Freihand in Text (folgt bald)
+	Ink to\nMath	Freihand\nin Formel
+	Ink to\nShape	Freihand\nin Form
+	Ink to\nText	Freihand\nin Text
+	Insert Above	Oberhalb einfügen
+	Insert Below	Unterhalb einfügen
+	Insert Hyperlink	Hyperlink einfügen
+	Insert Layout	Layout einfügen
+	Insert Left	Links einfügen
+	Insert Picture	Bild einfügen
+	Insert picture from file…	Bild aus Datei einfügen…
+	Insert Picture in SmartArt	Bild in SmartArt einfügen
+	Insert Picture in SmartArt…	Bild in SmartArt einfügen…
+	Insert Placeholder	Platzhalter einfügen
+	Insert Right	Rechts einfügen
+	Insert Synonym	Synonym einfügen
+	Insert Table	Tabelle einfügen
+	Insert Table…	Tabelle einfügen…
+	Insert\nAbove	Oberhalb\neinfügen
+	Insert\nBelow	Unterhalb\neinfügen
+	Insert\nLayout	Layout\neinfügen
+	Insert\nLeft	Links\neinfügen
+	Insert\nPlaceholder	Platzhalter\neinfügen
+	Insert\nRight	Rechts\neinfügen
+	Insert…	Einfügen…
+	Interface language:	Sprache der Benutzeroberfläche:
+	Interface size	Größe der Benutzeroberfläche
+	Join our community on Discord	Treten Sie unserer Community auf Discord bei
+	Join the ArtCraft community on Discord	Treten Sie der ArtCraft-Community auf Discord bei
+	Justify low	Blocksatz unten
+	Keep source formatting	Ursprüngliche Formatierung beibehalten
+	Keeps the layout, fonts and pictures	Behält Layout, Schriftarten und Bilder bei
+	Language for All Text	Sprache für gesamten Text
+	Last Column	Letzte Spalte
+	Layout Placeholders	Layoutplatzhalter
+	Learn\nMore	Mehr\nerfahren
+	Leave the slide background out: only what is on the slide is drawn	Folienhintergrund weglassen: Nur der Inhalt der Folie wird gezeichnet
+	Less Brightness	Weniger Helligkeit
+	Less Contrast	Weniger Kontrast
+	Light/Dark appearance	Helle/dunkle Darstellung
+	Line Spacing	Zeilenabstand
+	Line Spacing Options…	Zeilenabstandsoptionen…
+	Lock aspect ratio	Seitenverhältnis sperren
+	Loop continuously until 'Esc'	Wiederholen, bis „Esc“ gedrückt wird
+	Loop forever	Endlos wiederholen
+	Loop until Stopped	Wiederholen bis zum Beenden
+	Margins (pt)	Ränder (pt)
+	Mark as decorative	Als dekorativ markieren
+	Match case	Groß-/Kleinschreibung beachten
+	Maximize content (else ensure fit)	Inhalt maximieren (sonst Passform sicherstellen)
+	Measurement units:	Maßeinheiten:
+	Media position	Medienposition
+	Merge Shapes	Formen zusammenführen
+	Merge\nCells	Zellen\nverbinden
+	Merge\nShapes	Formen\nzusammenführen
+	MIT OR Apache-2.0 · © 2026 ArtCraft Team and the DeckCraft contributors	MIT OR Apache-2.0 · © 2026 ArtCraft Team und die Mitwirkenden an DeckCraft
+	Month names and AM/PM are listed for English. Other languages list the numeric date and 24-hour time.	Monatsnamen und AM/PM werden für Englisch aufgeführt. Andere Sprachen zeigen das Datum als Zahl und die Uhrzeit im 24-Stunden-Format.
+	More Brightness	Mehr Helligkeit
+	More Colors… #	Weitere Farben… #
+	More Columns…	Weitere Spalten…
+	More Contrast	Mehr Kontrast
+	More presentations	Weitere Präsentationen
+	More templates	Weitere Vorlagen
+	More themes	Weitere Designs
+	Move Guide	Hilfslinie verschieben
+	Move Handle	Ziehpunkt verschieben
+	Move Point	Punkt verschieben
+	Move Section	Abschnitt verschieben
+	Move Section Down	Abschnitt nach unten verschieben
+	Move Section Up	Abschnitt nach oben verschieben
+	Move Slide	Folie verschieben
+	New Comment	Neuer Kommentar
+	New Photo Album…	Neues Fotoalbum…
+	New show name:	Name der neuen Präsentation:
+	New Slide	Neue Folie
+	New Slide (⇧⌘N)	Neue Folie (⇧⌘N)
+	New Text Box	Neues Textfeld
+	New\nComment	Neuer\nKommentar
+	New\nSlide	Neue\nFolie
+	New\nWindow	Neues\nFenster
+	No accessibility issues found. People with disabilities should not have difficulty reading this document.	Keine Probleme mit der Barrierefreiheit gefunden. Menschen mit Behinderungen sollten dieses Dokument ohne Schwierigkeiten lesen können.
+	No comments.	Keine Kommentare.
+	No contributor data was built into this copy.	In diese Version wurden keine Daten zu Mitwirkenden eingebaut.
+	No differences left.	Keine Unterschiede mehr.
+	No Glow	Kein Leuchten
+	No icons match.	Keine passenden Symbole.
+	No model credits were built into this copy.	In diese Version wurden keine Angaben zu Modellen eingebaut.
+	No notes.	Keine Notizen.
+	No pictures yet	Noch keine Bilder
+	No presentation is open.	Keine Präsentation geöffnet.
+	Not a copy of this presentation: slides are matched by position.	Keine Kopie dieser Präsentation: Folien werden nach ihrer Position zugeordnet.
+	Not saved yet	Noch nicht gespeichert
+	Notes	Notizen
+	Notes Master	Notizenmaster
+	Notes Page	Notizenseite
+	Notes Placeholders	Notizen-Platzhalter
+	Notes\nMaster	Notizen-\nmaster
+	Nothing to print: every slide in the range is hidden.	Nichts zu drucken: Alle Folien im Bereich sind ausgeblendet.
+	Nudge	Schrittweise verschieben
+	Number of columns:	Anzahl der Spalten:
+	Number of rows:	Anzahl der Zeilen:
+	Number:	Zahl:
+	Numbering	Nummerierung
+	On Click of… (none)	Beim Klicken auf… (keine)
+	On Mouse Click	Bei Mausklick
+	Open a presentation from a folder (Ctrl+O)	Präsentation aus einem Ordner öffnen (Strg+O)
+	Open another window on this presentation	Weiteres Fenster für diese Präsentation öffnen
+	Open Dialog	Dialog öffnen
+	Open file location	Dateispeicherort öffnen
+	Open Path	Pfad öffnen
+	Open source under MIT OR Apache-2.0. Not affiliated with Microsoft.	Open Source unter MIT OR Apache-2.0. Nicht mit Microsoft verbunden.
+	Opens on any device with a PDF viewer	Lässt sich auf jedem Gerät mit PDF-Viewer öffnen
+	Order Objects	Objekte anordnen
+	Ordinals (1st) with superscript	Ordnungszahlen (1st) hochstellen
+	Other Sound…	Anderer Sound…
+	Outline	Gliederung
+	Outline View	Gliederungsansicht
+	Page Setup…	Seite einrichten…
+	Paper size	Papierformat
+	Paragraph…	Absatz…
+	Paste (⌘V)	Einfügen (⌘V)
+	Paste and Match Formatting	Einfügen und Formatierung anpassen
+	Paste Formatting	Formatierung einfügen
+	Paste or type an outline. Unindented lines become slide titles; tab-indented lines become bullets.	Fügen Sie eine Gliederung ein oder tippen Sie sie. Nicht eingerückte Zeilen werden Folientitel, mit Tab eingerückte Zeilen werden Aufzählungspunkte.
+	Paste Special…	Inhalte einfügen…
+	Pause animated GIF	Animiertes GIF anhalten
+	Percent:	Prozent:
+	Photo Album	Fotoalbum
+	Photo Album options	Fotoalbum-Optionen
+	Photo Album…	Fotoalbum…
+	Photo\nAlbum	Foto-\nalbum
+	Pick a design for this slide. Ideas are generated on your device.	Wählen Sie ein Design für diese Folie. Die Ideen werden auf Ihrem Gerät erzeugt.
+	Pick a graphic; type one item per line.	Wählen Sie eine Grafik und geben Sie einen Eintrag pro Zeile ein.
+	Picture	Bild
+	Picture Border	Bildrahmen
+	Picture Format	Bildformat
+	Picture from File…	Bild aus Datei…
+	Picture layout	Bildlayout
+	Picture source	Bildquelle
+	Picture Styles	Bildformatvorlagen
+	Pictures	Bilder
+	Pictures in album	Bilder im Album
+	Play Across Slides	Folienübergreifend wiedergeben
+	Play animated GIF	Animiertes GIF abspielen
+	Play from\nCurrent Slide	Ab aktueller\nFolie
+	Play from\nStart	Von Beginn\nan
+	Play Full Screen	Im Vollbild wiedergeben
+	Play Narrations	Kommentare wiedergeben
+	Play this slide's animations on the canvas	Animationen dieser Folie auf der Arbeitsfläche abspielen
+	Playback	Wiedergabe
+	Point Type	Punkttyp
+	Position and Size	Position und Größe
+	Position Objects	Objekte positionieren
+	Post	Senden
+	Poster Frame	Vorschaubild
+	Presentations	Präsentationen
+	Presentations and slide shows, rebuilt from scratch in pure Rust.	Präsentationen und Bildschirmpräsentationen, von Grund auf neu in reinem Rust gebaut.
+	Presentations you open show up here. Use Open to browse for one.	Präsentationen, die Sie öffnen, erscheinen hier. Mit „Öffnen“ suchen Sie eine aus.
+	Presenter View	Referentenansicht
+	Presenter\nView	Referenten-\nansicht
+	Preset gradients	Voreingestellte Farbverläufe
+	Preview Animations	Animationsvorschau
+	Print Hidden Slides	Ausgeblendete Folien drucken
+	Print layout	Drucklayout
+	Print layout:	Drucklayout:
+	Print range	Druckbereich
+	Print them for your audience	Für Ihr Publikum drucken
+	Product Information	Produktinformationen
+	Program:	Programm:
+	Promote	Höher stufen
+	Put a picture in the selected node's picture placeholder	Bild in den Bildplatzhalter des ausgewählten Knotens einfügen
+	Quick Access Toolbar	Symbolleiste für den Schnellzugriff
+	Quick Styles	Schnellformatvorlagen
+	Quick\nStyles	Schnell-\nformate
+	Reading View	Leseansicht
+	Recolor	Neu einfärben
+	Record	Aufzeichnen
+	Recording narration needs audio capture (coming soon)	Zum Aufzeichnen von Kommentaren wird eine Audioaufnahme benötigt (folgt bald)
+	Recover Unsaved Presentations	Nicht gespeicherte Präsentationen wiederherstellen
+	Reflection	Spiegelung
+	Regroup	Gruppierung wiederherstellen
+	Rehearse\nTimings	Neue Zeiten\nüben
+	Reject	Ablehnen
+	Remove All Animations	Alle Animationen entfernen
+	Remove All Sections	Alle Abschnitte entfernen
+	Remove Animation	Animation entfernen
+	Remove bullets and numbering	Aufzählungszeichen und Nummerierung entfernen
+	Remove from Quick Access Toolbar	Aus der Symbolleiste für den Schnellzugriff entfernen
+	Remove from Recent	Aus „Zuletzt geöffnet“ entfernen
+	Remove Section	Abschnitt entfernen
+	Remove Section & Slides	Abschnitt und Folien entfernen
+	Remove Shape	Form entfernen
+	Remove stop	Stopp entfernen
+	Remove the picture style	Bildformatvorlage entfernen
+	Remove\nBackground	Hintergrund\nentfernen
+	Rename Layout	Layout umbenennen
+	Rename Section	Abschnitt umbenennen
+	Rename Section…	Abschnitt umbenennen…
+	Rename Slide	Folie umbenennen
+	Reopen	Erneut öffnen
+	Reorder Animation	Animation neu anordnen
+	Reorder Objects	Objekte neu anordnen
+	Repeated word	Wiederholtes Wort
+	Replace All	Alle ersetzen
+	Replace Font	Schriftart ersetzen
+	Replace Fonts	Schriftarten ersetzen
+	Replace Fonts…	Schriftarten ersetzen…
+	Replace fractions (1/2) with fraction characters (½)	Brüche (1/2) durch Bruchzeichen (½) ersetzen
+	Replace straight quotes with smart quotes	Gerade Anführungszeichen durch typografische ersetzen
+	Replace text as you type	Text während der Eingabe ersetzen
+	Replace with:	Ersetzen durch:
+	Replace…	Ersetzen…
+	Reply…	Antworten…
+	Rescan Installed Fonts	Installierte Schriftarten neu einlesen
+	Reset 3-D	3D zurücksetzen
+	Reset Background	Hintergrund zurücksetzen
+	Reset Effects	Effekte zurücksetzen
+	Reset Picture	Bild zurücksetzen
+	Reset Slide	Folie zurücksetzen
+	Reset Slide Background	Folienhintergrund zurücksetzen
+	Reset Style	Formatvorlage zurücksetzen
+	Reset to Defaults	Auf Standard zurücksetzen
+	Resolve	Erledigen
+	Resolve Thread	Unterhaltung erledigen
+	Reuse Slides	Folien wiederverwenden
+	Reuse Slides…	Folien wiederverwenden…
+	Rewind after Playing	Nach Wiedergabe zurückspulen
+	Ribbon Tab	Registerkarte des Menübands
+	Right-click any ribbon button to add it.	Klicken Sie mit der rechten Maustaste auf eine Schaltfläche im Menüband, um sie hinzuzufügen.
+	Right-to-Left Text Direction	Textrichtung von rechts nach links
+	Rotate Left	Nach links drehen
+	Rotate Left 90°	90° nach links drehen
+	Rotate Right	Nach rechts drehen
+	Rotate Right 90°	90° nach rechts drehen
+	Rotate with shape	Mit Form drehen
+	Save as type	Dateityp
+	Scheme name	Name des Schemas
+	Screenshot	Bildschirmfoto
+	Screenshot (not available yet)	Bildschirmfoto (noch nicht verfügbar)
+	ScreenTip:	QuickInfo:
+	Scroll ribbon left	Menüband nach links blättern
+	Scroll ribbon right	Menüband nach rechts blättern
+	Search commands (⇧⌘P)	Befehle suchen (⇧⌘P)
+	Search commands…	Befehle suchen…
+	Search for a file	Nach einer Datei suchen
+	Search for a word	Nach einem Wort suchen
+	Search for themes and templates	Nach Designs und Vorlagen suchen
+	Search icons	Symbole suchen
+	Seconds per slide:	Sekunden pro Folie:
+	Section	Abschnitt
+	Segment Type	Segmenttyp
+	Select a chart first.	Wählen Sie zuerst ein Diagramm aus.
+	Select a shape to format it.	Wählen Sie eine Form aus, um sie zu formatieren.
+	Select a SmartArt graphic to edit its text.	Wählen Sie eine SmartArt-Grafik aus, um ihren Text zu bearbeiten.
+	Select a word on the slide, or type one above.	Wählen Sie ein Wort auf der Folie aus oder geben Sie oben eines ein.
+	Select an object on the slide and add an animation from the Animations tab.	Wählen Sie ein Objekt auf der Folie aus und fügen Sie auf der Registerkarte „Animationen“ eine Animation hinzu.
+	Select None	Nichts auswählen
+	Selection Pane…	Auswahlbereich…
+	Selection\nPane	Auswahl-\nbereich
+	Send\nBackward	Nach hinten\nstellen
+	Set as Default Shape	Als Standardform festlegen
+	Set Text	Text festlegen
+	Set Transparent Color	Transparente Farbe bestimmen
+	Set Up Slide Show	Bildschirmpräsentation einrichten
+	Set Up Slide Show…	Bildschirmpräsentation einrichten…
+	Set Up\nSlide Show	Bildschirm-\npräsentation einrichten
+	Set Zoom	Zoom festlegen
+	Several slides on each page of a PDF	Mehrere Folien auf jeder Seite einer PDF-Datei
+	Shading	Schattierung
+	Shape Fill	Formfüllung
+	Shape Format	Formformat
+	Shape Outline	Formkontur
+	Shape\nStyles	Form-\nformate
+	Show Media Controls	Mediensteuerelemente anzeigen
+	Show smart guides	Intelligente Hilfslinien anzeigen
+	Show type	Art der Präsentation
+	Show without animation	Präsentation ohne Animation
+	Show without narration	Präsentation ohne Kommentar
+	Show/Hide	Ein-/Ausblenden
+	Show\nComments	Kommentare\nanzeigen
+	Single	Einfach
+	Size (% of text):	Größe (% des Texts):
+	Size and Position	Größe und Position
+	Size and Position…	Größe und Position…
+	Slide Master	Folienmaster
+	Slide number	Foliennummer
+	Slide Number	Foliennummer
+	Slide Show	Bildschirmpräsentation
+	Slide Size	Foliengröße
+	Slide Sorter	Foliensortierung
+	Slide {n} of {total}	Folie {n} von {total}
+	Slide\nMaster	Folien-\nmaster
+	Slide\nNumber	Folien-\nnummer
+	Slide\nSize	Folien-\ngröße
+	Slides	Folien
+	Slides (e.g. 1,3,5):	Folien (z. B. 1,3,5):
+	Slides from Outline	Folien aus Gliederung
+	Slides from Outline…	Folien aus Gliederung…
+	Slides per page	Folien pro Seite
+	Slides sized for:	Foliengröße für:
+	Slides:	Folien:
+	Small caps	Kapitälchen
+	SmartArt Design	SmartArt-Entwurf
+	SmartArt items	SmartArt-Elemente
+	SmartArt Styles	SmartArt-Formatvorlagen
+	SmartArt text	SmartArt-Text
+	Smooth Corners	Abgerundete Ecken
+	Snap	Ausrichten
+	Snap objects to grid	Objekte am Raster ausrichten
+	Snap objects to other objects	Objekte an anderen Objekten ausrichten
+	Soft Edges	Weiche Kanten
+	Spacing (in):	Abstand (Zoll):
+	Spacing (pt):	Abstand (pt):
+	Spelling is checked for languages marked (dictionary).	Die Rechtschreibung wird für Sprachen geprüft, die mit (dictionary) markiert sind.
+	Split Cells	Zellen teilen
+	Split\nCells	Zellen\nteilen
+	Standard Colors	Standardfarben
+	Start Automatically	Automatisch starten
+	Start time (s):	Startzeit (s):
+	System language	Systemsprache
+	Tab stop position (in):	Tabstoppposition (Zoll):
+	Tab stops:	Tabstopps:
+	Table Design	Tabellenentwurf
+	Table Eraser	Tabellenradierer
+	Table Style Options	Optionen für Tabellenformat
+	Table Styles	Tabellenformatvorlagen
+	Table…	Tabelle…
+	Tabs…	Tabulatoren…
+	Task Pane	Aufgabenbereich
+	Text Box	Textfeld
+	Text Box Margins	Textfeldränder
+	Text box:	Textfeld:
+	Text Direction	Textrichtung
+	Text Effects	Texteffekte
+	Text Fill	Textfüllung
+	Text Highlight Color	Texthervorhebungsfarbe
+	Text Outline	Textkontur
+	Text ruler	Textlineal
+	Text Shadow	Textschatten
+	Text Transform	Texttransformation
+	Text Transparency	Texttransparenz
+	Text\nBox	Text-\nfeld
+	Text\nPane	Text-\nbereich
+	The presentation keeps its own file	Die Präsentation behält ihre eigene Datei
+	The spelling check is complete. No issues found.	Die Rechtschreibprüfung ist abgeschlossen. Keine Probleme gefunden.
+	Theme Colors	Designfarben
+	Themes	Designs
+	Themes (whole presentation)	Designs (gesamte Präsentation)
+	This presentation has no custom shows (Slide Show ▸ Custom Slide Show).	Diese Präsentation hat keine benutzerdefinierten Präsentationen (Bildschirmpräsentation ▸ Benutzerdefinierte Bildschirmpräsentation).
+	Three a page leaves lines for notes	Drei pro Seite lässt Linien für Notizen frei
+	Tile picture as texture	Bild als Textur nebeneinander anordnen
+	Timing	Anzeigedauer
+	To slide:	Bis Folie:
+	Total Row	Ergebniszeile
+	Transition	Übergang
+	Transitions	Übergänge
+	Translation needs a language model (not bundled)	Für Übersetzungen wird ein Sprachmodell benötigt (nicht enthalten)
+	Transparent background	Transparenter Hintergrund
+	Trigger	Auslöser
+	Trim	Kürzen
+	Trim Media	Medien kürzen
+	Type an equation in linear form (e.g. a^2+b^2=c^2, x=(-b±√(b^2-4ac))/2a).	Geben Sie eine Formel in linearer Form ein (z. B. a^2+b^2=c^2, x=(-b±√(b^2-4ac))/2a).
+	Type and organise the diagram's text	Text des Diagramms eingeben und gliedern
+	Type Text	Text eingeben
+	Type your text here	Geben Sie hier Ihren Text ein
+	Update automatically	Automatisch aktualisieren
+	Use Timings	Anzeigedauern verwenden
+	Use timings, if present	Anzeigedauern verwenden, falls vorhanden
+	User Information	Benutzerinformationen
+	Variants	Varianten
+	Vertical alignment	Vertikale Ausrichtung
+	Video from File…	Video aus Datei…
+	Volume	Lautstärke
+	Wavy	Gewellt
+	Widescreen (16:9)	Breitbild (16:9)
+	Width (pixels):	Breite (Pixel):
+	Width ({abbr}):	Breite ({abbr}):
+	Width: 	Breite: 
+	Window title bar	Titelleiste des Fensters
+	With	Mit
+	With:	Mit:
+	Wrap text in shape	Text in Form umbrechen
+	Wrap Text in Shape	Text in Form umbrechen
+	Your name (comments):	Ihr Name (Kommentare):
+	Zoom level	Zoomstufe
+	Zoom to	Zoomen auf
+	{label} value	Wert für {label}
+	{name} options	Optionen für {name}

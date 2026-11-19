@@ -1,0 +1,1273 @@
+# Polski (pl) interface catalog for every Crafting App.
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   @plural  English `one|other`; the translation lists this language's plural forms, `|`-separated.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary. No other product's localisation, string table or translated UI was
+# consulted or copied; add entries the same way.
+
+	% of all commits	% wszystkich commitów
+	(Custom)	(Niestandardowe)
+	(none)	(brak)
+	1 file	1 plik
+	16 bit	16 bitów
+	24 bit	24 bity
+	24 bits/pixel	24 bity/piksel
+	32 bit	32 bity
+	32 bits/pixel	32 bity/piksel
+	8 bit	8 bitów
+	About	Informacje
+	Absolute	Bezwzględne
+	Absolute Colorimetric	Kolorymetryczna bezwzględna
+	Accented Edges	Akcentowane krawędzie
+	Accessibility	Ułatwienia dostępu
+	Accurate	Dokładnie
+	Actions	Akcje
+	Activate Panel	Aktywuj panel
+	Active	Aktywny
+	Actual Size	Rzeczywisty rozmiar
+	Adaptive	Adaptacyjna
+	Add	Dodaj
+	Add a comment	Dodaj komentarz
+	Add Guide	Dodaj linię pomocniczą
+	Add to Dictionary	Dodaj do słownika
+	Add to favorites	Dodaj do ulubionych
+	Add to Swatches	Dodaj do próbek
+	Adjust	Dopasowanie
+	Adjustments	Korekty
+	Advanced	Zaawansowane
+	Align	Wyrównaj
+	Align center	Wyrównaj do środka
+	Align Left	Wyrównaj do lewej
+	Align left	Wyrównaj do lewej
+	Align Right	Wyrównaj do prawej
+	Align right	Wyrównaj do prawej
+	Align Text	Wyrównaj tekst
+	Align to Selection	Wyrównaj do zaznaczenia
+	Alignment	Wyrównanie
+	Alignment:	Wyrównanie:
+	All	Wszystkie
+	All Caps	Wersaliki
+	All Categories	Wszystkie kategorie
+	All files	Wszystkie pliki
+	All Layers	Wszystkie warstwy
+	All pages	Wszystkie strony
+	All Slices	Wszystkie plasterki
+	Alpha	Alfa
+	Alt	Alt
+	Always	Zawsze
+	Amount	Wartość
+	Amount:	Wartość:
+	Angle	Kąt
+	Angle:	Kąt:
+	Angular	Kątowy
+	Animation	Animacja
+	Animation effects	Efekty animacji
+	Anti-Alias	Wygładzanie krawędzi
+	Anti-alias	Wygładzanie
+	Any	Dowolne
+	Appearance	Wygląd
+theme	Appearance	Wygląd
+	Appearance Settings…	Ustawienia wyglądu…
+	Application	Aplikacja
+	Apply	Zastosuj
+	Apply Character Style	Zastosuj styl znakowy
+	Apply Data Set	Zastosuj zestaw danych
+	Apply to:	Zastosuj do:
+	Arc	Łuk
+	Area	Powierzchnia
+	Arrange	Ułóż
+	Arrow	Strzałka
+	Arrows	Strzałki
+	Artboard	Obszar kompozycji
+	Artboards	Obszary kompozycji
+	ArtCraft	ArtCraft
+	ArtCraft Website	Strona ArtCraft
+	ArtCraft website	Strona ArtCraft
+	Artistic	Artystyczne
+	Ascending	Rosnąco
+	Aspect Ratio	Proporcje
+	Assign	Przypisz
+	Assign Profile…	Przypisz profil…
+	Audio	Dźwięk
+	Author	Autor
+	Author:	Autor:
+	Auto	Automatycznie
+	Auto ({percent}%)	Automatycznie ({percent}%)
+	Auto Color	Kolor automatyczny
+	Automate	Automatyzacja
+	Automatic	Automatycznie
+	Automatically	Automatycznie
+	Available	Dostępne
+	Average	Uśrednij
+	Background	Tło
+	Background Color	Kolor tła
+	Background Contents	Zawartość tła
+	Backspace	Backspace
+	Balance	Równowaga
+	Bar	Kreska
+	Baseline	Linia bazowa
+	Baseline Shift	Przesunięcie linii bazowej
+	Basic	Podstawowy
+	Basic Latin	Łaciński podstawowy
+	Batch	Przetwarzanie wsadowe
+	Batch…	Przetwarzanie wsadowe…
+	Bend:	Wygięcie:
+	Bicubic	Dwusześcienne
+	Binary assets added	Dodane zasoby binarne
+	Binary assets removed	Usunięte zasoby binarne
+	Bitmap	Bitmapa
+	Black	Czarny
+	Black & White	Czarno-biała
+	Black and white	Czarno-biały
+	Black Intensity	Natężenie czerni
+	Blacks	Czernie
+	Blend Mode	Tryb mieszania
+	Blending Mode	Tryb mieszania
+	Block	Blok
+	Blocks	Bloki
+	Blue	Niebieski
+	Blur	Rozmycie
+	Blur Angle	Kąt rozmycia
+	Bold	Pogrubienie
+	Border	Obramowanie
+	Border Thickness	Grubość obramowania
+	Borders	Krawędzie
+	Both	Obie
+	Both sides	Obie strony
+	Bottom	Do dołu
+	Bottom Left	Lewy dolny
+	Bottom Right	Prawy dolny
+	Bottom:	Dolny:
+	Break Link	Zerwij łącze
+	Brick	Cegła
+	Brightness	Jasność
+	Bring Forward	Przesuń do przodu
+	Bring to Front	Przenieś na wierzch
+	Browse	Przeglądaj
+	Browse…	Przeglądaj…
+	Brush Size	Rozmiar pędzla
+	Brush Strokes	Pociągnięcia pędzla
+	Brushes	Pędzle
+	Bulge	Wybrzuszenie
+	Bullet	Punktor
+	Burlap	Juta
+	Calculate	Obliczenia
+	Cancel	Anuluj
+	Canvas	Płótno
+	Caption	Podpis
+	Cascade	Kaskadowo
+	Category	Kategoria
+	Category:	Kategoria:
+	Cell Size	Rozmiar komórki
+	Center	Środek
+	Center X	Środek X
+	Center Y	Środek Y
+	Centered	Wyśrodkowany
+	Centimeters	Centymetry
+	Chamfer	Ścięcie
+	Change	Zmień
+	Change All	Zmień wszystkie
+	Change Case	Zmień wielkość liter
+	Change Panel Layout	Zmień układ paneli
+	Channel	Kanał
+	Channel Mixer	Mikser kanałów
+	Channels	Kanały
+	Character	Znak
+	Character Styles	Style znakowe
+	Characters	Znaki
+	Check for Updates	Sprawdź dostępność aktualizacji
+	Check for updates	Sprawdź aktualizacje
+	Check Spelling…	Sprawdź pisownię…
+	Choose…	Wybierz…
+	Circle	Okrąg
+	City	Miasto
+	Clarity	Przejrzystość
+	Classic	Klasyczne
+	Clear	Wyczyść
+	Clear All	Wyczyść wszystko
+	Clear Guides	Usuń linie pomocnicze
+	Clear History	Wyczyść historię
+	Clear Recent Files	Wyczyść listę ostatnich plików
+	Clipboard	Schowek
+	Clipping Mask	Maska przycinająca
+	Clone	Klonuj
+	Close	Zamknij
+	Close (Esc)	Zamknij (Esc)
+	Close All	Zamknij wszystkie
+	Close Panel	Zamknij panel
+	Cmd	Cmd
+	CMYK Color	Kolor CMYK
+	CMYK:	CMYK:
+	Coarse Dots	Grube kropki
+	Collapse	Zwiń
+	Collate	Sortuj
+	Color	Kolor
+	Color Balance	Balans kolorów
+	Color Burn	Ściemnianie koloru
+	Color Dodge	Rozjaśnianie koloru
+	Color Management	Zarządzanie kolorem
+	Color Mode	Tryb koloru
+	Color Picker	Próbnik kolorów
+	Color Settings	Ustawienia kolorów
+	Color Settings…	Ustawienia kolorów…
+	Color Space	Przestrzeń kolorów
+	Color Swatches	Próbki kolorów
+	Color Table	Tablica kolorów
+	Color:	Kolor:
+	Colorize	Koloruj
+	Colors	Kolory
+	Colors:	Kolory:
+	Color…	Kolor…
+	Colour	Kolor
+	Column width	Szerokość kolumny
+	Columns	Kolumny
+	Columns:	Kolumny:
+	Combine	Połącz
+	Command	Polecenie
+	Commands:	Polecenia:
+	Comment	Komentarz
+	Comments	Komentarze
+	Commits	Commity
+	Community	Społeczność
+	Company	Firma
+	Compare	Porównaj
+	Comparison	Porównanie
+	Compatibility	Zgodność
+	Composite	Kompozyt
+	Compression	Kompresja
+	Cone	Stożek
+	Contains	Zawiera
+	Continue	Kontynuuj
+	Contrast	Kontrast
+	Contributors	Współtwórcy
+	Convert	Konwertuj
+	Convert to Shape	Konwertuj na kształt
+	Convert to sRGB	Konwertuj na sRGB
+	Copies	Kopie
+	Copies:	Kopie:
+	Copy	Kopiuj
+	Copyright	Prawa autorskie
+	Copyrighted	Chronione prawem autorskim
+	Corner	Narożny
+	Corners	Narożniki
+	Correction	Korekcja
+	Couldn't open {name}: {e}	Nie można otworzyć {name}: {e}
+@msg	Couldn't open {name}: {e}	Nie udało się otworzyć {name}: {e}
+	Country	Kraj
+	Crack Brightness	Jasność spękań
+	Crack Depth	Głębokość spękań
+	Crack Spacing	Odstęp spękań
+	Create	Utwórz
+	Create Clipping Mask	Utwórz maskę przycinającą
+	Crop	Przytnij
+	Cross	Krzyżyk
+	Crosshatch	Kreskowanie krzyżowe
+	Crystallize	Krystalizacja
+	Crystallize…	Krystalizacja…
+	Ctrl	Ctrl
+	Current	Bieżący
+	Current page	Bieżąca strona
+	Current Time	Bieżący czas
+	Curvature	Krzywizna
+	Curve	Krzywa
+	Curves	Krzywe
+	Curves…	Krzywe…
+	Custom	Niestandardowe
+	Customize…	Dostosuj…
+	Cut	Wytnij
+	Cyan	Cyjan
+	Dark	Ciemny
+	Dark Gray	Ciemnoszary
+	Dark gray	Ciemnoszary
+	Dark Strokes	Ciemne pociągnięcia
+	Dark Theme	Ciemny motyw
+	Darken	Ciemniej
+	Darkness	Zaciemnienie
+	Dashed	Kreskowane
+	Data	Dane
+	Data Sets	Zestawy danych
+	Date	Data
+	Date and Time	Data i godzina
+	Date Created	Data utworzenia
+	Date format	Format daty
+	Dates	Daty
+	De-Interlace	Usuń przeplot
+	Decrease Font Size	Zmniejsz rozmiar czcionki
+	Default	Domyślne
+	Delete	Usuń
+	Delete Brush	Usuń pędzel
+	Delete Group	Usuń grupę
+	Delete Layer	Usuń warstwę
+	Delete Style	Usuń styl
+	Delete Workspace	Usuń obszar roboczy
+	Deleted	Usunięto
+	Depth	Głębokość
+	Desaturate	Usuń nasycenie
+	Descending	Malejąco
+	Description	Opis
+	Description:	Opis:
+	Deselect	Usuń zaznaczenie
+	Deselect All	Odznacz wszystko
+	Destination	Miejsce docelowe
+	Destination:	Miejsce docelowe:
+	Details	Szczegóły
+	Diagonal	Ukośna
+	Diameter:	Średnica:
+	Diamond	Romb
+	Difference	Różnica
+	Diffuse Glow	Rozproszony blask
+	Diffusion	Dyfuzja
+	Digits	Cyfry
+	Dimensions	Wymiary
+	Direct Selection Tool	Narzędzie Zaznaczanie bezpośrednie
+	Direction	Kierunek
+	Direction Balance	Równowaga kierunku
+	Direction:	Kierunek:
+	Discard	Odrzuć
+	Discord	Discord
+	Discretionary Ligatures	Ligatury opcjonalne
+	Dismiss	Zamknij
+	Display	Wyświetlanie
+	Display name	Nazwa wyświetlana
+	Distance	Odległość
+	Distort	Zniekształcenie
+	Distortion	Zniekształcenie
+	Distribute	Rozmieść równomiernie
+	Divide	Podziel
+	Dock Panel	Zadokuj panel
+	Document	Dokument
+	Document Title	Tytuł dokumentu
+	Documents	Dokumenty
+	Don't Save	Nie zapisuj
+	Done	Gotowe
+	Dot	Kropka nad znakiem
+	Dots	Kropki
+	Dotted	Kropkowany
+	Double-click	Kliknij dwukrotnie
+	Down	W dół
+	Download	Pobierz
+	Draft	Robocza
+	Draw	Rysowanie
+	Drop Shadow	Cień
+	Drop Shadow…	Cień…
+	Duplicate	Powiel
+	Duplicate Layer	Powiel warstwę
+	Duplicate…	Duplikuj…
+	Duplication	Powielanie
+	Duration	Czas trwania
+	Dutch	Niderlandzki
+	Dynamic	Dynamiczne
+	Dynamics	Dynamika
+	Edge	Krawędź
+	Edge Brightness	Jasność krawędzi
+	Edge Intensity	Intensywność krawędzi
+	Edge Only	Tylko krawędzie
+	Edge Simplicity	Prostota krawędzi
+	Edge Thickness	Grubość krawędzi
+	Edge Width	Szerokość krawędzi
+	Edit	Edycja
+	Edit Contents	Edytuj zawartość
+	Edit Original	Edytuj oryginał
+	Edit Toolbar	Edytuj pasek narzędzi
+	Editing	Edytowanie
+	Edit…	Edytuj…
+	Effect	Efekt
+	Effects	Efekty
+	Elevation	Wzniesienie
+	Eliminate	Usuń
+	Ellipse	Elipsa
+	Ellipse Tool	Narzędzie Elipsa
+	Ellipsis	Wielokropek
+	Em Dash	Pauza
+	Em Space	Spacja firetowa
+	Embed	Osadź
+	Emboss	Płaskorzeźba
+	En Dash	Półpauza
+	En Space	Spacja półfiretowa
+	Endpoint	Punkt końcowy
+	Enlarged	Powiększone
+	Enter	Enter
+	Entire Font	Cała czcionka
+	Envelope DL	Koperta DL
+	Erase	Wymaż
+	Eraser	Gumka
+	Eraser Tool	Narzędzie Gumka
+	Error	Błąd
+	Even Fields	Pola parzyste
+	Even pages only	Tylko strony parzyste
+	Exact	Dokładne
+	Example: {sample}	Przykład: {sample}
+	Exclusion	Wykluczenie
+	Exit	Zakończ
+	Expand	Rozwiń
+	Export	Eksportuj
+	Export As	Eksportuj jako
+	Export As…	Eksportuj jako…
+	Export PDF	Eksportuj PDF
+	Export to	Eksportuj do
+	Exported to {path}	Wyeksportowano do {path}
+	Exported {path}	Wyeksportowano {path}
+	Export…	Eksportuj…
+	Exposure	Ekspozycja
+	Expression	Wyrażenie
+	Extract	Wyodrębnij
+	Eyedropper	Kroplomierz
+	Eyedropper Tool	Narzędzie Kroplomierz
+	Faded Film	Wyblakły film
+	Fast	Szybko
+	Favorites	Ulubione
+	Feather	Pióro
+	Field	Pole
+	Field properties	Właściwości pola
+	Fields	Pola
+	Fields:	Pola:
+	File	Plik
+	File Handling	Obsługa plików
+	File Info…	Informacje o pliku…
+	File Name	Nazwa pliku
+	Files	Pliki
+	Fill	Wypełnienie
+	Fill:	Wypełnienie:
+	Filter	Filtr
+	Find	Znajdź
+	Find and Replace	Znajdź i zamień
+	Find Next	Znajdź następny
+	Find:	Znajdź:
+	Find…	Znajdź…
+	Fine Dots	Drobne kropki
+	Finish	Zakończ
+	First	Pierwszy
+	First commit	Pierwszy commit
+	Fit	Dopasuj
+	Fit in View	Dopasuj do widoku
+	Fixed	Stały
+	Flash	Lampa błyskowa
+	Flatten	Spłaszcz
+	Flip	Odbicie
+	Flip Horizontal	Przerzuć w poziomie
+	Flip Vertical	Przerzuć w pionie
+	Focus	Ostrość
+	Folder	Folder
+	Font	Czcionka
+	Font Size	Rozmiar czcionki
+	Font size	Rozmiar czcionki
+	Font Size:	Rozmiar czcionki:
+	Font:	Czcionka:
+	Fonts	Czcionki
+	Format	Format
+	Format:	Format:
+	Fractions	Ułamki
+	Frame	Ramka
+	Free	Swobodny
+	Free Transform	Swobodne przekształcanie
+	French	Francuski
+	Frequency	Częstotliwość
+	From	Od
+	Frosted	Matowe szkło
+	Full	Pełna
+	Full Screen	Pełny ekran
+	Full Screen Mode	Tryb pełnoekranowy
+	Functions	Funkcje
+	Gamma	Gamma
+	Gamma Correction	Korekcja gamma
+	Gamut Warning	Ostrzeżenie gamutu
+	Gaussian Blur	Rozmycie gaussowskie
+	Gaussian Blur…	Rozmycie gaussowskie…
+	General	Ogólne
+	General…	Ogólne…
+	Generate	Generuj
+	Geometry	Geometria
+	German	Niemiecki
+	GitHub	GitHub
+	Glass	Szkło
+	Global	Globalny
+	Glow	Poświata
+	Glow Brightness	Jasność poświaty
+	Glow Size	Rozmiar poświaty
+	Glyphs	Glify
+	Good	Dobra
+	Gradient	Gradient
+	Gradient Tool	Narzędzie Gradient
+	Gradients	Gradienty
+	Grain	Ziarno
+	Grain Type	Rodzaj ziarna
+	Graininess	Ziarnistość
+	Grainy Dots	Ziarniste kropki
+	Graphic	Grafika
+	Graphics	Grafiki
+	Gray	Szary
+	Gray Gamma 2.2	Szary gamma 2.2
+	Grayscale	Skala szarości
+	Green	Zielony
+	Grid	Siatka
+	Grid Size:	Rozmiar siatki:
+	Gridline every	Linia siatki co
+	Group	Grupuj
+	Group with	Grupuj z
+	Groups	Grupy
+	Grout Width	Szerokość fugi
+	Guides	Linie pomocnicze
+	Halftone Pattern	Wzór rastra
+	Hand	Rączka
+	Hand Tool	Narzędzie Rączka
+	Hard	Ścisły
+	Hard Light	Ostre światło
+	Hard Mix	Twarde mieszanie
+	Headings	Nagłówki
+	Heart	Serce
+	Height	Wysokość
+	Height:	Wysokość:
+	Help	Pomoc
+	Hexagon	Sześciokąt
+	Hidden	Ukryte
+	Hidden text	Tekst ukryty
+	Hide	Ukryj
+	Hide All	Ukryj wszystko
+	Hide Grid	Ukryj siatkę
+	Hide Others	Ukryj pozostałe
+	High	Wysoka
+	High Pass	Górnoprzepustowy
+	High Resolution	Wysoka rozdzielczość
+	High resolution	Wysoka rozdzielczość
+	Highlight Area	Obszar świateł
+	Highlights	Światła
+	Hindi	Hindi
+	Histogram	Histogram
+	History	Historia
+	Hollow	Puste
+	Home	Start
+	Horizontal	Poziomo
+	Horizontal scale	Skala pozioma
+	Horizontally	W poziomie
+	Hue	Barwa
+	Hue Shift	Przesunięcie barwy
+	Hue/Saturation…	Barwa/nasycenie…
+	Hyphenation	Dzielenie wyrazów
+	Icon	Ikona
+	Ignore	Ignoruj
+	Ignore All	Ignoruj wszystko
+	Image	Obraz
+	Image Size	Rozmiar obrazu
+	Images	Obrazy
+	Import	Importuj
+	Import…	Importuj…
+	Inches	Cale
+	Increase Font Size	Zwiększ rozmiar czcionki
+	Index	Indeks
+	Inflate	Nadmuchanie
+	Info	Informacje
+	Inner Glow…	Blask wewnętrzny…
+	Input:	Wejście:
+	Insert	Wstaw
+	Inside	Wewnątrz
+	Inspect Document	Zbadaj dokument
+	Install Plug-in	Zainstaluj wtyczkę
+	Install Plug-in…	Zainstaluj wtyczkę…
+	Intensity	Natężenie
+	Interface	Interfejs
+	Interface Language	Język interfejsu
+	Interface language	Język interfejsu
+	Interface Theme	Motyw interfejsu
+	Interlaced	Z przeplotem
+	Interpolation	Interpolacja
+	Intersect	Przetnij
+	Intersection	Iloczyn zbiorów
+	Invert	Odwróć
+	Invert Mask	Odwróć maskę
+	Isolate	Izoluj
+	Italian	Włoski
+	Italic	Kursywa
+	Japanese	Japoński
+	Join	Połącz
+	Join our Discord	Dołącz do naszego Discorda
+	Join the ArtCraft Discord	Dołącz do Discorda ArtCraft
+	Join the ArtCraft Discord…	Dołącz do Discorda ArtCraft…
+	Join us on Discord	Dołącz do nas na Discordzie
+	just now	przed chwilą
+	Justification	Justowanie
+	Justify	Wyjustuj
+	Keep:	Zachowaj:
+	Kerning	Kerning
+	Keyboard Shortcuts	Skróty klawiaturowe
+	Keyboard Shortcuts…	Skróty klawiaturowe…
+	Keywords	Słowa kluczowe
+	Kind	Rodzaj
+	Korean	Koreański
+	Lab	Lab
+	Label	Etykieta
+	Labels	Etykiety
+	Landscape	Pozioma
+	Language	Język
+	Language Options	Opcje języka
+@id	language.name	Polski
+	Language:	Język:
+	Large	Duże
+	Lasso	Lasso
+	Lasso Tool	Narzędzie Lasso
+	Last	Ostatni
+	Last commit	Ostatni commit
+	Later	Później
+	Layer	Warstwa
+	Layers	Warstwy
+	Layout	Układ
+	Layout:	Układ:
+	Leading	Interlinia
+	Left	Do lewej
+	Left Diagonal	Przekątna w lewo
+	Left to Right	Od lewej do prawej
+	Left:	Lewe:
+	Legal	Legal
+	Length	Długość
+	Length:	Długość:
+	Lens Flare	Flara obiektywu
+	Less	Mniej
+	Letter	Letter
+	Level	Poziom
+	Level 1	Poziom 1
+	Level 2	Poziom 2
+	Level 3	Poziom 3
+	Level 4	Poziom 4
+	Levels	Poziomy
+	Levels…	Poziomy…
+	Libraries	Biblioteki
+	Library	Biblioteka
+	Light	Jasny
+	Light Blue	Jasnoniebieski
+	Light Direction	Kierunek światła
+	Light Gray	Jasnoszary
+	Light gray	Jasnoszary
+	Light Intensity	Natężenie światła
+	Light Theme	Jasny motyw
+	Light Type	Typ światła
+	Lighten	Jaśniej
+	Lighter Color	Jaśniejszy kolor
+	Lighting	Oświetlenie
+	Lighting Effects	Efekty oświetlenia
+	Lightness	Jasność
+	Line	Linia
+	Line delta	Różnica wierszy
+	Line spacing	Interlinia
+	Linear	Liniowy
+	Linear Burn	Wypalanie liniowe
+	Linear Gradient	Gradient liniowy
+	Linear Light	Światło liniowe
+	Lines	Linie
+	Lines +/−	Wiersze +/−
+	Lines added	Dodane wiersze
+	Lines deleted	Usunięte wiersze
+	Link	Link
+	Links	Łącza
+	List	Lista
+	List View	Widok listy
+	Location	Położenie
+	Location:	Położenie:
+	Lock	Zablokuj
+	Lock Guides	Zablokuj linie pomocnicze
+	Lock Slices	Zablokuj plasterki
+	Locked	Zablokowane
+	Long Lines	Długie linie
+	Long Strokes	Długie pociągnięcia
+	Low	Niska
+	lowercase	małe litery
+	Luminance	Luminancja
+	Luminosity	Jasność
+	Magenta	Magenta
+	Magic Wand Tool	Narzędzie Różdżka
+	Magnification	Powiększenie
+	Margins	Marginesy
+	Mask	Maska
+	Matte	Matowanie
+	Maximize	Maksymalizuj
+	Maximum	Maksymalna
+	Measure	Mierz
+	Median	Mediana
+	Medium	Średnia
+	Medium Dots	Średnie kropki
+	Medium Gray	Średnio szary
+	Medium Lines	Średnie linie
+	Merge	Scal
+	Merge Cells	Scal komórki
+	Merge Layers	Scal warstwy
+	Merged PRs	Scalone PR-y
+	Mesh	Siatka
+	Message:	Komunikat:
+	Metadata	Metadane
+	Method	Metoda
+	Method:	Metoda:
+	Mezzotint	Mezzotinta
+	Mezzotint…	Mezzotinta…
+	Middle	Środek
+	Midpoint	Punkt środkowy
+	Midtones	Półcienie
+	Millimeters	Milimetry
+	Minimize	Minimalizuj
+	Minimum	Minimalna
+	Mirror	Lustro
+	Missing	Brak
+	Mobile	Urządzenia mobilne
+	Mode	Tryb
+	Mode:	Tryb:
+	Model	Model
+	Models	Modele
+	Modern	Nowoczesny
+	Modified	Zmodyfikowano
+	Modify	Modyfikuj
+	Monitor RGB	RGB monitora
+	Mono	Mono
+	Monochrome	Monochromatyczny
+	More	Więcej
+	Mosaic	Mozaika
+	Mosaic Tiles	Kafelki mozaiki
+	Motion	Ruch
+	Move	Przesuń
+	Move Down	Przesuń w dół
+	Move Panel	Przesuń panel
+	Move Up	Przesuń w górę
+	Multiply	Mnożenie
+	Name	Nazwa
+	Name (A–Z)	Nazwa (A–Z)
+	Name:	Nazwa:
+	Navigation	Nawigacja
+	Navigator	Nawigator
+	Neon Glow	Neonowa poświata
+	Never	Nigdy
+	New	Nowy
+	New Document	Nowy dokument
+	New document	Nowy dokument
+	New from Template	Nowy z szablonu
+	New Group	Nowa grupa
+	New Guide	Nowa linia pomocnicza
+	New Layer	Nowa warstwa
+	New Layer…	Nowa warstwa…
+	New Style…	Nowy styl…
+	New Swatch…	Nowa próbka…
+	New Window	Nowe okno
+	New Workspace	Nowy obszar roboczy
+	New Workspace…	Nowy obszar roboczy…
+	New…	Nowy…
+	Next	Następny
+	Next Appearance Mode	Następny tryb wyglądu
+	Next Change	Następna zmiana
+	Next Page	Następna strona
+	Next page	Następna strona
+	No	Nie
+	No Color	Bez koloru
+	No Dither	Bez rozpraszania
+	No Document	Brak dokumentu
+	No document	Brak dokumentu
+	No document open	Brak otwartego dokumentu
+	No limit	Bez limitu
+	No matches.	Brak dopasowań.
+	No matching commands	Brak pasujących poleceń
+	No recent files	Brak ostatnich plików
+	No results	Brak wyników
+	No Selection	Brak zaznaczenia
+	No selection	Brak zaznaczenia
+	Noise	Szum
+	Nonbreaking Space	Spacja nierozdzielająca
+	None	Brak
+	Normal	Normalny
+	Not available	Niedostępna
+	NTSC Colors	Kolory NTSC
+	Number	Liczba
+	Object	Obiekt
+	Octagon	Ośmiokąt
+	Odd Fields	Pola nieparzyste
+	Odd pages only	Tylko strony nieparzyste
+	Off	Wyłączone
+	Offline	Offline
+	Offset	Odsunięcie
+	Offset:	Odsunięcie:
+	OK	OK
+	Omit	Pomiń
+	On	Włączone
+	Only Web Colors	Tylko kolory WWW
+	Opacity	Krycie
+	Opacity:	Krycie:
+	Open	Otwórz
+	Open link	Otwórz łącze
+	Open Recent	Otwórz ostatnie
+	OpenType	OpenType
+	Open…	Otwórz…
+	Optimized	Zoptymalizowany
+	Options	Opcje
+	Options…	Opcje…
+	Orange	Pomarańczowy
+	Ordinals	Liczebniki porządkowe
+	Orientation	Orientacja
+	Orientation:	Orientacja:
+	Original	Oryginał
+	Other	Inne
+	Outer Glow…	Blask zewnętrzny…
+	Outline	Kontur
+	Output	Wyjście
+	Output:	Wyjście:
+	Outside	Na zewnątrz
+	Oval	Owal
+	Overlap:	Nakładanie:
+	Overlay	Nakładka
+	Package…	Spakuj…
+	Page	Strona
+	Page {page} of {pages}	Strona {page} z {pages}
+	Pages	Strony
+	Painting	Malowanie
+	Panel menu	Menu panelu
+	Panel Options…	Opcje panelu…
+	Panels	Panele
+	Paper	Papier
+	Paragraph	Akapit
+	Paragraph Styles	Style akapitowe
+	Password	Hasło
+	Paste	Wklej
+	Paste Special	Wklej specjalnie
+	Patchwork	Patchwork
+	Path	Ścieżka
+	Path:	Ścieżka:
+	Paths	Ścieżki
+	Pattern	Wzorek
+	Pattern Type	Typ wzoru
+	Pause	Pauza
+	Pen	Pióro
+	Pen Tool	Narzędzie Pióro
+	Pencil	Ołówek
+	Pencil Tool	Narzędzie Ołówek
+	Pentagon	Pięciokąt
+	Percent	Procent
+	Percentage	Procent
+	Performance	Wydajność
+	Perimeter	Obwód
+	Perspective	Perspektywa
+	Photo	Zdjęcie
+	Photocopy	Fotokopia
+	Picas	Pica
+	Pin Light	Światło punktowe
+	Pink	Różowy
+	Pixel	Piksel
+	Pixelate	Pikselizacja
+	Pixels	Piksele
+	Play	Odtwórz
+	Plug-ins	Wtyczki
+	Point	Punkt
+	Pointillize	Puentylizm
+	Pointillize…	Puentylizm…
+	Points	Punkty
+	Polygon	Wielokąt
+	Polygon Tool	Narzędzie Wielokąt
+	Polyline	Łamana
+	Portrait	Pionowa
+	Portuguese	Portugalski
+	Position	Położenie
+	Position:	Położenie:
+	Postcard	Pocztówka
+	Poster	Plakat
+	Poster Edges	Krawędzie plakatu
+	Posterization	Posteryzacja
+	Posterize	Posteryzacja
+	Preferences	Preferencje
+	Preferences…	Preferencje…
+	Prefix	Prefiks
+	Preserve	Zachowaj
+	Preserve Luminosity	Zachowaj luminancję
+	Preset	Ustawienie wstępne
+	Preset Manager	Menedżer ustawień wstępnych
+	Preset:	Ustawienie:
+	Presets	Ustawienia wstępne
+	Presets:	Ustawienia:
+	Press keys…	Naciśnij klawisze…
+	Pressure	Nacisk
+	Preview	Podgląd
+	Previous	Wstecz
+	Previous Change	Poprzednia zmiana
+	Previous Page	Poprzednia strona
+	Previous page	Poprzednia strona
+	Print	Drukuj
+	Printer	Drukarka
+	Printer:	Drukarka:
+	Printing	Drukowanie
+	Print…	Drukuj…
+	Profile	Profil
+	Progressive	Progresywny
+	Proof Setup	Ustawienia próby
+	Properties	Właściwości
+	Protect	Ochrona
+	PRs	PR-y
+	Public Domain	Domena publiczna
+	Punctuation	Interpunkcja
+	Purple	Fioletowy
+	Pyramid	Piramida
+	Quality	Jakość
+	Quick Actions	Szybkie operacje
+	Radial	Promieniste
+	Radial Blur	Rozmycie promieniste
+	Radial Blur…	Rozmycie promieniste…
+	Radial Gradient	Gradient promienisty
+	Radius	Promień
+	Radius:	Promień:
+	Random	Losowy
+	Range	Zakres
+	Range:	Zakres:
+	Rasterize	Rasteryzuj
+	Ratio	Proporcjonalne
+	Rays	Promienie
+	Ready	Gotowe
+	Real name	Imię i nazwisko
+	Recent	Ostatnie
+	Recent Colors	Ostatnie kolory
+	Recent Files	Ostatnie pliki
+	Recover	Odzyskaj
+	Rectangle	Prostokąt
+	Rectangle Tool	Narzędzie Prostokąt
+	Rectangular	Prostokątny
+	Red	Czerwony
+	Redo	Ponów
+	Reduce Noise	Redukuj szum
+	Refine	Dopracuj
+	Reflected	Odbity
+	Refresh	Odśwież
+	Regular	Normalny
+	Relative	Względne
+	Relative Colorimetric	Kolorymetryczna względna
+	Relaxed	Swobodne
+	Relief	Płaskorzeźba
+	Reload	Wczytaj ponownie
+	Remove	Usuń
+	Remove Background	Usuń tło
+	Remove from favorites	Usuń z ulubionych
+	Rename	Zmień nazwę
+	Rename Group…	Zmień nazwę grupy…
+	Rename Style	Zmień nazwę stylu
+	Rename…	Zmień nazwę…
+	Repeat	Powtórzenie
+	Replace	Zamień
+	Replace:	Zamień:
+	Reply	Odpowiedz
+	Report	Raport
+	Report an Issue…	Zgłoś problem…
+	Reselect	Zaznacz ponownie
+	Reset	Resetuj
+	Reset Preferences	Resetuj preferencje
+	Reset…	Resetuj…
+	Resize panel window	Zmień rozmiar okna paneli
+	Resize panels	Zmień rozmiar paneli
+	Resolution	Rozdzielczość
+	Resolution:	Rozdzielczość:
+	Restore	Przywróć
+	Result	Wynik
+	Resume	Wznów
+	Reveal in Finder	Pokaż w Finderze
+	Reverse	Odwróć kolejność
+	Reverse the order	Odwróć kolejność
+	Revert	Przywróć
+	Review	Recenzja
+	RGB	RGB
+	RGB Color	Kolor RGB
+	RGB:	RGB:
+	Right	Do prawej
+	Right Diagonal	Przekątna w prawo
+	Right:	Prawy:
+	Rotate	Obróć
+	Rotate:	Obrót:
+	Rotation	Obrót
+	Rotation:	Obrót:
+	Rounded Rectangle	Zaokrąglony prostokąt
+	Roundness	Zaokrąglenie
+	Roundness:	Okrągłość:
+	Rows	Wiersze
+	Ruler	Linijka
+	Rulers	Linijki
+	Rulers & Grids	Linijki i siatki
+	Russian	Rosyjski
+	Sandstone	Piaskowiec
+	Saturation	Nasycenie
+	Save	Zapisz
+	Save a Copy	Zapisz kopię
+	Save a Copy…	Zapisz kopię…
+	Save As	Zapisz jako
+	Save as PDF	Zapisz jako PDF
+	Save as Template	Zapisz jako szablon
+	Save as Template…	Zapisz jako szablon…
+	Save As…	Zapisz jako…
+	Save Preset…	Zapisz ustawienie…
+	Save Selection	Zapisz zaznaczenie
+	Save Selection…	Zapisz zaznaczenie…
+	Saved	Zapisane
+	Save…	Zapisz…
+	Scale	Skaluj
+	Scale:	Skala:
+	Scaling	Skalowanie
+	Scratch Disks	Dyski robocze
+	Scratch Disks…	Dyski robocze…
+	Screen	Mnożenie odwrotne
+	Screen Mode	Tryb ekranu
+	Scripts	Skrypty
+	Search	Wyszukaj
+	Security	Zabezpieczenia
+	Segments	Segmenty
+	Select	Zaznacz
+	Select All	Zaznacz wszystko
+	Select Objects	Zaznacz obiekty
+	Select:	Zaznacz:
+	Selected pages	Wybrane strony
+	Selection	Zaznaczenie
+	Selection Tool	Narzędzie Zaznaczanie
+	Selective	Selektywna
+	Send Backward	Przesuń do tyłu
+	Send to Back	Przenieś pod spód
+	Sensitivity	Czułość
+	Sent to {printer}	Wysłano do {printer}
+	Services	Usługi
+	Set	Ustaw
+	Set as Default	Ustaw jako domyślne
+	Set:	Zestaw:
+	Settings	Ustawienia
+	Settings:	Ustawienia:
+	Settings…	Ustawienia…
+	Shadow	Cień
+	Shadows	Cienie
+	Shape	Kształt
+	Shape Effects	Efekty kształtów
+	Shape:	Kształt:
+	Shapes	Kształty
+	Share	Udostępnij
+	Sharpen	Wyostrzanie
+	Sharpness	Ostrość
+	Shift	Shift
+	Short Lines	Krótkie linie
+	Short Strokes	Krótkie pociągnięcia
+	Shortcut	Skrót
+	Shortcuts	Skróty
+	Show	Pokaż
+	Show All	Pokaż wszystko
+	Show Grid	Pokaż siatkę
+	Show Guides	Pokaż linie pomocnicze
+	Show in Folder	Pokaż w folderze
+	Show Mask	Pokaż maskę
+	Show Mesh	Pokaż siatkę
+	Show Rulers	Pokaż linijki
+	Show rulers	Pokaż linijki
+	Show Tool Tips	Pokaż podpowiedzi
+	Show:	Pokaż:
+	Sides:	Boki:
+	Simplify	Uprość
+	Size	Rozmiar
+	Size:	Rozmiar:
+	Sketch	Szkic
+	Skew	Pochylenie
+	Slice	Plasterek
+	Slice Options	Opcje plasterka
+	Slice Options…	Opcje plasterka…
+	Slice Tool	Narzędzie Plasterek
+	Slices	Plasterki
+	Small	Małe
+	Small Caps	Kapitaliki
+	Smart Blur	Inteligentne rozmycie
+	Smart Blur…	Inteligentne rozmycie…
+	Smart Guides	Inteligentne linie pomocnicze
+	Smart quotes	Typograficzne cudzysłowy
+	Smoothness	Gładkość
+	Snap to Grid	Przyciągaj do siatki
+	Soft	Miękki
+	Soft Light	Łagodne światło
+	Soften	Zmiękcz
+	Softness	Miękkość
+	Solarize	Solaryzacja
+	Sort	Sortuj
+	Sort by	Sortuj według
+	Source	Źródło
+	Source code on GitHub	Kod źródłowy w serwisie GitHub
+	Spaces	Spacje
+	Spacing	Odstępy
+	Spacing:	Odstępy:
+	Spanish	Hiszpański
+	Spatter	Rozpryski
+	Special	Specjalne
+	Speckle	Plamki
+	Speed	Prędkość
+	Spelling	Pisownia
+	Spherize	Sferyzacja
+	Split	Podziel
+	Spot Color	Kolor dodatkowy
+	Spray Radius	Promień natrysku
+	Square	Kwadrat
+	Square Size	Rozmiar kwadratu
+	sRGB IEC61966-2.1	sRGB IEC61966-2.1
+	Stacked	Nałożone
+	Stained Glass	Witraż
+	Stamp	Stempel
+	Standard	Standardowe
+	Standard Ligatures	Ligatury standardowe
+	Star	Gwiazda
+	Start at:	Zacznij od:
+	Statistics	Statystyki
+	Status	Status
+	Status Bar	Pasek stanu
+	Stippled	Punktowane
+	Stop	Zatrzymaj
+	Strength	Siła
+	Stretch	Rozciągnięcie
+	Strikethrough	Przekreślenie
+	Stroke	Obrys
+	Stroke Color	Kolor obrysu
+	Stroke Length	Długość pociągnięcia
+	Stroke Options	Opcje obrysu
+	Stroke:	Obrys:
+	Studio	Studio
+	Style	Styl
+	Style:	Styl:
+	Styles	Style
+	Stylize	Stylizacja
+	Subdivisions	Podpodziały
+	Subject	Temat
+	Subscript	Indeks dolny
+	Subset	Podzbiór
+	Subtitle	Podtytuł
+	Subtract	Odejmij
+	Sumi-e	Sumi-e
+	Summary	Podsumowanie
+	Superscript	Indeks górny
+	Swatches	Próbki
+	Symbol	Symbol
+	Symbols	Symbole
+	Sync with system	Synchronizuj z systemem
+	System	Systemowe
+	Tab	Tabulator
+	Table	Tabela
+	Table style	Styl tabeli
+	Tables	Tabele
+	Tabloid	Tabloid
+	Tabs	Tabulatory
+	Taper	Zwężenie
+	Target	Cel
+	Target:	Cel:
+	Temperature	Temperatura
+	Templates	Szablony
+	Text	Tekst
+	Text color	Kolor tekstu
+	Text:	Tekst:
+	Texture	Tekstura
+	The passwords don't match.	Hasła nie są zgodne.
+	Theme	Motyw
+	Thickness	Grubość linii
+	This document has no bookmarks.	Ten dokument nie zawiera zakładek.
+	Threshold	Próg
+	Thumbnails	Miniatury
+	Tile	Sąsiadująco
+	Tile Size	Rozmiar kafelka
+	Tilt	Nachylenie
+	Time	Czas
+	Timecode	Kod czasowy
+	Timeline	Oś czasu
+	Tint	Tinta
+	Tint Color	Kolor odcienia
+	Title	Tytuł
+	Tolerance	Tolerancja
+	Tolerance:	Tolerancja:
+	Tool	Narzędzie
+	Toolbars	Paski narzędzi
+	Tools	Narzędzia
+	Top	Do góry
+	Top Left	Lewy górny
+	Top Right	Prawy górny
+	Top:	Góra:
+	Total	Razem
+	Total:	Razem:
+	Tracking	Światło
+	Transform	Przekształć
+	Translate	Przetłumacz
+	Transparency	Przezroczystość
+	Transparent	Przezroczyste
+	Trap…	Zalewka…
+	Triangle	Trójkąt
+	Turbulent	Burzliwy
+	Twirl	Wir
+	Twist	Skręcenie
+	Type	Typ
+	Type Tool	Narzędzie Tekst
+	Type:	Typ:
+	Typewriter	Tekst maszynowy
+	Type…	Typ…
+	Typing	Pisanie
+	Underline	Podkreślenie
+	Undo	Cofnij
+	Undo {action}	Cofnij: {action}
+	Ungroup	Rozgrupuj
+	Uniform	Jednolity
+	Union	Suma zbiorów
+	Units	Jednostki
+	Unknown	Nieznany
+	Unlock	Odblokuj
+	Unsaved changes	Niezapisane zmiany
+	Unsharp Mask	Maska wyostrzająca
+	Untitled	Bez tytułu
+	Up	W górę
+	Update	Aktualizuj
+	Updates	Aktualizacje
+	UPPERCASE	WIELKIE LITERY
+	Use Default	Użyj domyślnego
+	Username	Nazwa użytkownika
+	Value	Wartość
+	Value:	Wartość:
+	Variables	Zmienne
+	Version	Wersja
+	Version {version}	Wersja {version}
+	Vertical	Pionowo
+	Vertical Alignment	Wyrównanie w pionie
+	Vertical Type Tool	Narzędzie Tekst pionowy
+	Vertically	W pionie
+	Very High	Bardzo wysoka
+	Vibrance	Jaskrawość
+	Video	Wideo
+	View	Widok
+	Violet	Fioletowy
+	Visibility	Widoczność
+	Vivid Light	Jaskrawe światło
+	Voice	Głos
+	W:	S:
+	Warnings	Ostrzeżenia
+	Warp	Wypaczenie
+	Watermark	Znak wodny
+	Wave	Fala
+	Wave…	Fala…
+	Web	Internet
+	Website	Witryna internetowa
+	Weight	Grubość
+	Wet	Wilgotność
+	White	Biały
+	White Intensity	Natężenie bieli
+	White Is High	Biel jest wysoka
+	Whites	Biele
+	Width	Szerokość
+	Width and Height	Szerokość i wysokość
+	Width:	Szerokość:
+	Window	Okno
+	Windows	Windows
+	Words	Słowa
+	Working CMYK	Roboczy CMYK
+	Workspace	Obszar roboczy
+	X	X
+	Y	Y
+	Yellow	Żółty
+	Yes	Tak
+	yesterday	wczoraj
+	Your changes will be lost if you don't save them.	Jeśli nie zapiszesz zmian, zostaną utracone.
+	Zoom	Powiększenie
+	Zoom In	Powiększ
+	Zoom in	Powiększ
+	Zoom Out	Pomniejsz
+	Zoom out	Pomniejsz
+	Zoom Tool	Narzędzie Lupka
+@plural	{n} commit|{n} commits	{n} commit|{n} commity|{n} commitów
+	{n} files	Liczba plików: {n}
+	{n} h ago	{n} godz. temu
+@plural	{n} item|{n} items	{n} element|{n} elementy|{n} elementów
+@plural	{n} Layer|{n} Layers	{n} warstwa|{n} warstwy|{n} warstw
+	{n} min ago	{n} min temu
+@plural	{n} step|{n} steps	{n} krok|{n} kroki|{n} kroków
+	−Bin	−Bin
+	● Recording	● Nagrywanie

@@ -1,0 +1,1289 @@
+# 日本語 (ja) interface catalog for every Crafting App.
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   @plural  English `one|other`; the translation lists this language's plural forms, `|`-separated.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary. No other product's localisation, string table or translated UI was
+# consulted or copied; add entries the same way.
+
+	% of all commits	全コミットに占める割合（%）
+	(Custom)	(カスタム)
+	(none)	（なし）
+	1 file	1 個のファイル
+	16 bit	16 ビット
+	24 bit	24 ビット
+	24 bits/pixel	24 ビット/ピクセル
+	32 bit	32 ビット
+	32 bits/pixel	32 ビット/ピクセル
+	8 bit	8 ビット
+	About	概要
+	Absolute	絶対
+	Absolute Colorimetric	絶対的な色域を維持
+	Accented Edges	エッジの強調
+	Accessibility	アクセシビリティ
+	Accurate	精細
+	Actions	アクション
+	Activate Panel	パネルをアクティブにする
+	Active	使用中
+	Actual Size	100% 表示
+	Adaptive	アダプティブ
+	Add	追加
+	Add a comment	注釈を追加
+	Add Guide	ガイドを追加
+	Add to Dictionary	辞書に追加
+	Add to favorites	お気に入りに追加
+	Add to Swatches	スウォッチに追加
+	Adjust	調整
+	Adjustments	色調補正
+	Advanced	詳細設定
+	Align	整列
+	Align center	中央揃え
+	Align Left	左揃え
+	Align left	左揃え
+	Align Right	右揃え
+	Align right	右揃え
+	Align Text	文字の配置
+	Align to Selection	選択範囲に整列
+	Alignment	整列
+	Alignment:	配置:
+	All	すべて
+	All Caps	すべて大文字
+	All Categories	すべてのカテゴリ
+	All files	すべてのファイル
+	All Layers	すべてのレイヤー
+	All pages	すべてのページ
+	All Slices	すべてのスライス
+	Alpha	アルファ
+	Alt	Alt
+	Always	常に
+	Amount	量
+	Amount:	量:
+	Angle	角度
+	Angle:	角度:
+	Angular	角度
+	Animation	アニメーション
+	Animation effects	アニメーション効果
+	Anti-Alias	アンチエイリアス
+	Anti-alias	アンチエイリアス
+	Any	いずれか
+	Appearance	外観
+theme	Appearance	外観
+	Appearance Settings…	外観設定…
+	Application	アプリケーション
+	Apply	適用
+	Apply Character Style	文字スタイルを適用
+	Apply Data Set	データセットを適用
+	Apply to:	適用先:
+	Arc	円弧
+	Area	面積
+	Arrange	重ね順
+	Arrow	矢印
+	Arrows	矢印
+	Artboard	アートボード
+	Artboards	アートボード
+	ArtCraft	ArtCraft
+	ArtCraft Website	ArtCraft の Web サイト
+	ArtCraft website	ArtCraft の Web サイト
+	Artistic	アーティスティック
+	Ascending	昇順
+	Aspect Ratio	縦横比
+	Assign	指定
+	Assign Profile…	プロファイルの指定…
+	Audio	オーディオ
+	Author	作成者
+	Author:	作成者:
+	Auto	自動
+	Auto ({percent}%)	自動 ({percent}%)
+	Auto Color	自動カラー
+	Automate	自動処理
+	Automatic	自動
+	Automatically	自動
+	Available	使用可能
+	Average	平均
+	Background	背景
+	Background Color	背景色
+	Background Contents	背景のカラー
+	Backspace	Backspace
+	Balance	バランス
+	Bar	縦線
+	Baseline	ベースライン
+	Baseline Shift	ベースラインシフト
+	Basic	基本
+	Basic Latin	基本ラテン文字
+	Batch	バッチ
+	Batch…	バッチ…
+	Bend:	カーブ:
+	Bicubic	バイキュービック
+	Binary assets added	追加したバイナリファイル数
+	Binary assets removed	削除したバイナリアセット
+	Bitmap	ビットマップ
+	Black	黒
+	Black & White	白黒
+	Black and white	白黒
+	Black Intensity	黒の強さ
+	Blacks	ブラック
+	Blend Mode	描画モード
+	Blending Mode	描画モード
+	Block	ブロック
+	Blocks	ブロック
+	Blue	ブルー
+	Blur	ぼかし
+	Blur Angle	ぼかしの角度
+	Bold	太字
+	Border	境界
+	Border Thickness	境界線の太さ
+	Borders	境界
+	Both	両方
+	Both sides	両面
+	Bottom	下
+	Bottom Left	左下
+	Bottom Right	右下
+	Bottom:	下:
+	Break Link	リンクを解除
+	Brick	レンガ
+	Brightness	明るさ
+	Bring Forward	前面へ
+	Bring to Front	最前面へ
+	Brown	ブラウン
+	Browse	参照
+	Browse…	参照…
+	Brush Size	ブラシサイズ
+	Brush Strokes	ブラシストローク
+	Brushes	ブラシ
+	Bulge	膨らみ
+	Bullet	箇条書き記号
+	Burlap	麻布
+	Calculate	計算
+	Cancel	キャンセル
+	Canvas	カンバス
+	Caption	キャプション
+	Cascade	重ねて表示
+	Case Sensitive	大文字と小文字を区別
+	Category	カテゴリー
+	Category:	カテゴリ:
+	Cell Size	セルの大きさ
+	Center	中央
+	Center X	中心 X
+	Center Y	中心 Y
+	Centered	中央揃え
+	Centimeters	センチメートル
+	Chamfer	面取り
+	Change	変更
+	Change All	すべてを変更
+	Change Case	大文字と小文字の変更
+	Change Panel Layout	パネルの配置を変更
+	Channel	チャンネル
+	Channel Mixer	チャンネルミキサー
+	Channels	チャンネル
+	Character	文字
+	Character Styles	文字スタイル
+	Characters	文字数
+	Check for Updates	更新を確認
+	Check for updates	アップデートを確認
+	Check Spelling…	スペルチェック…
+	Checkerboard	チェッカーボード
+	Choose…	選択…
+	Circle	円形
+	City	市区町村
+	Clarity	明瞭度
+	Classic	クラシック
+	Clear	クリア
+	Clear All	すべてクリア
+	Clear Guides	ガイドを消去
+	Clear History	ヒストリーを消去
+	Clear Recent Files	最近使ったファイルを消去
+	Clipboard	クリップボード
+	Clipping Mask	クリッピングマスク
+	Clone	クローン
+	Close	閉じる
+	Close (Esc)	閉じる（Esc）
+	Close All	すべて閉じる
+	Close Panel	パネルを閉じる
+	Cmd	Cmd
+	CMYK Color	CMYK カラー
+	CMYK:	CMYK:
+	Coarse Dots	粗い点
+	Collapse	折りたたむ
+	Collate	部単位で印刷
+	Color	色
+	Color Balance	カラーバランス
+	Color Burn	焼き込みカラー
+	Color Dodge	覆い焼きカラー
+	Color Management	カラーマネジメント
+	Color Mode	カラーモード
+	Color Picker	カラーピッカー
+	Color Settings	カラー設定
+	Color Settings…	カラー設定…
+	Color Space	カラースペース
+	Color Swatches	カラースウォッチ
+	Color Table	カラーテーブル
+	Color:	色:
+	Colorize	カラー化
+	Colors	カラー
+	Colors:	カラー数:
+	Color…	カラー…
+	Colour	カラー
+	Column width	列の幅
+	Columns	列
+	Columns:	列数:
+	Combine	結合
+	Command	コマンド
+	Commands:	コマンド:
+	Comment	コメント
+	Comments	コメント
+	Commits	コミット
+	Community	コミュニティ
+	Company	企業
+	Compare	比較
+	Comparison	比較
+	Compatibility	互換性
+	Composite	コンポジット
+	Compression	圧縮
+	Cone	円錐
+	Contains	含む
+	Continue	続行
+	Contrast	コントラスト
+	Contributors	貢献者
+	Convert	変換
+	Convert to Shape	シェイプに変換
+	Convert to sRGB	sRGB に変換
+	Copies	部数
+	Copies:	コピー:
+	Copy	コピー
+	Copyright	著作権
+	Copyrighted	著作権あり
+	Corner	コーナー
+	Corners	コーナー
+	Correction	補正
+	Couldn't open {name}: {e}	{name} を開けませんでした: {e}
+@msg	Couldn't open {name}: {e}	{name} を開けませんでした: {e}
+	Country	国
+	Crack Brightness	溝の明るさ
+	Crack Depth	溝の深さ
+	Crack Spacing	溝の間隔
+	Create	作成
+	Create Clipping Mask	クリッピングマスクを作成
+	Crop	切り抜き
+	Cross	十字
+	Crosshatch	クロスハッチ
+	Crystallize	結晶化
+	Crystallize…	結晶化…
+	Ctrl	Ctrl
+	Current	現在
+	Current page	現在のページ
+	Current Time	現在の時間
+	Curvature	曲線
+	Curve	カーブ
+	Curves	トーンカーブ
+	Curves…	トーンカーブ…
+	Custom	カスタム
+	Customize…	カスタマイズ…
+	Cut	切り取り
+	Cyan	シアン
+	Dark	ダーク
+	Dark Gray	ダークグレー
+	Dark gray	ダークグレー
+	Dark Strokes	暗いストローク
+	Dark Theme	ダークテーマ
+	Darken	比較 (暗)
+	Darkness	濃さ
+	Dashed	破線
+	Data	データ
+	Data Sets	データセット
+	Date	日付
+	Date and Time	日付と時刻
+	Date Created	作成日
+	Date format	日付の形式
+	Dates	日付
+	De-Interlace	インターレース解除
+	Decrease Font Size	フォントサイズを小さく
+	Default	既定
+	Delete	削除
+	Delete Brush	ブラシを削除
+	Delete Group	グループを削除
+	Delete Layer	レイヤーを削除
+	Delete Mask	マスクを削除
+	Delete Style	スタイルを削除
+	Delete Workspace	ワークスペースを削除
+	Deleted	削除
+	Delete…	削除…
+	Depth	深さ
+	Desaturate	彩度を下げる
+	Descending	降順
+	Description	説明
+	Description:	説明:
+	Deselect	選択を解除
+	Deselect All	すべての選択を解除
+	Destination	保存先
+	Destination:	出力先:
+	Details	詳細
+	Diagonal	斜め
+	Diameter:	直径:
+	Diamond	ひし形
+	Difference	差の絶対値
+	Diffuse Glow	光彩拡散
+	Diffusion	拡散
+	Digits	数字
+	Dimensions	寸法
+	Direct Selection Tool	ダイレクト選択ツール
+	Direction	方向
+	Direction Balance	方向のバランス
+	Direction:	方向:
+	Discard	破棄
+	Discord	Discord
+	Discretionary Ligatures	任意の合字
+	Dismiss	閉じる
+	Display	表示
+	Display name	表示名
+	Distance	距離
+	Distort	ゆがみ
+	Distortion	変形
+	Distribute	分布
+	Divide	除算
+	Dock Panel	パネルをドッキング
+	Document	文書
+	Document Title	文書タイトル
+	Documents	ドキュメント
+	Don't Save	保存しない
+	Done	完了
+	Dot	点
+	Dots	点線
+	Dotted	点線
+	Double-click	ダブルクリック
+	Down	下
+	Download	ダウンロード
+	Draft	ドラフト
+	Draw	描画
+	Drop Shadow	ドロップシャドウ
+	Drop Shadow…	ドロップシャドウ…
+	Duplicate	複製
+	Duplicate Layer	レイヤーを複製
+	Duplicate…	複製…
+	Duplication	複製
+	Duration	継続時間
+	Dutch	オランダ語
+	Dynamic	動的
+	Dynamics	ダイナミクス
+	Edge	エッジ
+	Edge Brightness	エッジの明るさ
+	Edge Intensity	エッジの強さ
+	Edge Only	エッジのみ
+	Edge Simplicity	エッジの単純さ
+	Edge Thickness	エッジの太さ
+	Edge Width	エッジの幅
+	Edit	編集
+	Edit Contents	内容を編集
+	Edit Original	オリジナルを編集
+	Edit Toolbar	ツールバーを編集
+	Editing	編集
+	Edit…	編集…
+	Effect	効果
+	Effects	効果
+	Elevation	仰角
+	Eliminate	削除
+	Ellipse	楕円形
+	Ellipse Tool	楕円形ツール
+	Ellipsis	省略記号
+	Em Dash	EM ダッシュ
+	Em Space	EM スペース
+	Embed	埋め込み
+	Emboss	エンボス
+	En Dash	EN ダッシュ
+	En Space	EN スペース
+	Enable	有効
+	Endpoint	端点
+	Enlarged	拡大
+	Enter	Enter
+	Entire Font	フォント全体
+	Envelope DL	封筒 DL
+	Erase	消去
+	Eraser	消しゴム
+	Eraser Tool	消しゴムツール
+	Error	エラー
+	Even Fields	偶数フィールド
+	Even pages only	偶数ページのみ
+	Exact	正確
+	Example: {sample}	例: {sample}
+	Exclusion	除外
+	Exit	終了
+	Expand	展開
+	Export	書き出し
+	Export As	形式を指定して書き出し
+	Export As…	形式を指定して書き出し…
+	Export Options	書き出しオプション
+	Export PDF	PDF を書き出し
+	Export to	書き出し形式
+	Exported to {path}	{path} に書き出しました
+	Exported {path}	{path} を書き出しました
+	Export…	書き出し…
+	Exposure	露光量
+	Expression	式
+	Extract	抽出
+	Eyedropper	スポイト
+	Eyedropper Tool	スポイトツール
+	Faded Film	色あせたフィルム
+	Fast	高速
+	Favorites	お気に入り
+	Feather	ぼかし
+	Field	フィールド
+	Field properties	フィールドのプロパティ
+	Fields	フィールド
+	Fields:	フィールド:
+	File	ファイル
+	File Format	ファイル形式
+	File Handling	ファイル管理
+	File Info…	ファイル情報…
+	File Name	ファイル名
+	File Size	ファイルサイズ
+	Files	ファイル
+	Fill	塗り
+	Fill:	塗り:
+	Filter	フィルター
+	Find	検索
+	Find and Replace	検索と置換
+	Find Next	次を検索
+	Find:	検索文字列:
+	Find…	検索…
+	Fine Dots	細かい点
+	Finish	完了
+	First	最初
+	First commit	最初のコミット
+	Fit	合わせる
+	Fit in View	表示に合わせる
+	Fixed	固定
+	Flash	フラッシュ
+	Flatten	統合
+	Flip	反転
+	Flip Horizontal	左右反転
+	Flip Vertical	上下反転
+	Focus	フォーカス
+	Folder	フォルダー
+	Font	フォント
+	Font Size	フォントサイズ
+	Font size	フォントサイズ
+	Font Size:	フォントサイズ:
+	Font:	フォント:
+	Fonts	フォント
+	Format	形式
+	Format:	書式:
+	Fractions	分数
+	Frame	フレーム
+	Free	自由
+	Free Transform	自由変形
+	French	フランス語
+	Frequency	線数
+	From	開始
+	Frosted	すりガラス
+	Full	フル
+	Full Screen	フルスクリーン
+	Full Screen Mode	フルスクリーンモード
+	Functions	機能
+	Gamma	ガンマ
+	Gamma Correction	ガンマ補正
+	Gamut Warning	色域外警告
+	Gaussian Blur	ぼかし (ガウス)
+	Gaussian Blur…	ぼかし (ガウス)…
+	General	一般
+	General…	一般…
+	Generate	自動生成
+	German	ドイツ語
+	GitHub	GitHub
+	Glass	ガラス
+	Global	グローバル
+	Glow	グロー
+	Glow Brightness	光彩の明るさ
+	Glow Size	光彩のサイズ
+	Glyphs	字形
+	Good	標準
+	Gradient	グラデーション
+	Gradient Tool	グラデーションツール
+	Gradients	グラデーション
+	Grain	粒状
+	Grain Type	粒子の種類
+	Graininess	粒子
+	Grainy Dots	粒状の点
+	Graphic	グラフィック
+	Graphics	グラフィックス
+	Gray	グレー
+	Gray Gamma 2.2	グレー ガンマ 2.2
+	Grayscale	グレースケール
+	Green	グリーン
+	Grid	グリッド
+	Grid Size:	グリッドのサイズ:
+	Grid view	グリッド表示
+	Gridline every	グリッド線の間隔
+	Group	グループ
+	Group with	グループ化先
+	Groups	グループ
+	Grout Width	目地の幅
+	Guides	ガイド
+	Halftone Pattern	ハーフトーンパターン
+	Hand	手のひら
+	Hand Tool	手のひらツール
+	Hard	ハード
+	Hard Light	ハードライト
+	Hard Mix	ハードミックス
+	Headings	見出し
+	Heart	ハート
+	Height	高さ
+	Height:	高さ:
+	Help	ヘルプ
+	Hexagon	六角形
+	Hidden	非表示
+	Hidden text	非表示テキスト
+	Hide	隠す
+	Hide All	すべて非表示
+	Hide Grid	グリッドを隠す
+	Hide Others	その他を隠す
+	High	高
+	High Pass	ハイパス
+	High Resolution	高解像度
+	High resolution	高解像度
+	Highlight Area	ハイライト領域
+	Highlights	ハイライト
+	Hindi	ヒンディー数字
+	Histogram	ヒストグラム
+	History	履歴
+	Hollow	中空
+	Home	ホーム
+	Horizontal	横
+	Horizontal scale	水平比率
+	Horizontally	水平方向
+	Hue	色相
+	Hue Shift	色相シフト
+	Hue/Saturation…	色相・彩度…
+	Hyphenation	ハイフネーション
+	Icon	アイコン
+	Ignore	無視
+	Ignore All	すべて無視
+	Image	画像
+	Image Size	イメージサイズ
+	Images	画像
+	Import	読み込み
+	Import…	読み込み…
+	Inches	インチ
+	Increase Font Size	フォントサイズを大きく
+	Index	インデックス
+	Inflate	膨張
+	Info	情報
+	Inner Glow…	光彩 (内側)…
+	Input:	入力:
+	Insert	挿入
+	Inside	内側
+	Inspect Document	ドキュメントを調査
+	Install Plug-in	プラグインをインストール
+	Install Plug-in…	プラグインをインストール…
+	Intensity	強さ
+	Interface	インターフェイス
+	Interface Language	表示言語
+	Interface language	表示言語
+	Interface Theme	表示テーマ
+	Interlaced	インターレース
+	Interpolation	補間
+	Intersect	交差
+	Intersection	交点
+	Invert	反転
+	Invert Mask	マスクを反転
+	Isolate	分離
+	Italian	イタリア語
+	Italic	斜体
+	Japanese	日本語
+	Join	連結
+	Join our Discord	Discord に参加
+	Join the ArtCraft Discord	ArtCraft の Discord に参加
+	Join the ArtCraft Discord…	ArtCraft の Discord に参加…
+	Join us on Discord	Discord に参加
+	just now	たった今
+	Justification	文字組み
+	Justify	両端揃え
+	Keep:	保持:
+	Kerning	カーニング
+	Keyboard Shortcuts	キーボードショートカット
+	Keyboard Shortcuts…	キーボードショートカット…
+	Keywords	キーワード
+	Kind	種類
+	Korean	韓国語
+	Lab	Lab
+	Label	ラベル
+	Labels	ラベル
+	Landscape	横
+	Language	言語
+	Language Options	言語オプション
+@id	language.name	日本語
+	Language:	言語:
+	Large	大
+	Lasso	投げ縄
+	Lasso Tool	なげなわツール
+	Last	最後
+	Last commit	最後のコミット
+	Later	後で
+	Layer	レイヤー
+	Layers	レイヤー
+	Layout	レイアウト
+	Layout:	レイアウト:
+	Leading	行送り
+	Left	左
+	Left Diagonal	左斜め
+	Left to Right	左から右
+	Left:	左:
+	Legal	リーガル
+	Length	長さ
+	Length:	長さ:
+	Lens Flare	レンズフレア
+	Less	少なく
+	Letter	レター
+	Level	レベル
+	Level 1	レベル 1
+	Level 2	レベル 2
+	Level 3	レベル 3
+	Level 4	レベル 4
+	Levels	レベル数
+	Levels…	レベル補正…
+	Libraries	ライブラリ
+	Library	ライブラリ
+	Light	ライト
+	Light Blue	ライトブルー
+	Light Direction	光源の方向
+	Light Gray	ライトグレー
+	Light gray	ライトグレー
+	Light Intensity	光の強さ
+	Light Theme	ライトテーマ
+	Light Type	光源の種類
+	Lighten	比較 (明)
+	Lighter Color	カラー比較 (明)
+	Lighting	照明
+	Lighting Effects	照明効果
+	Lightness	明度
+	Line	直線
+	Line delta	行数の増減
+	Line spacing	行間
+	Linear	直線
+	Linear Burn	焼き込み (リニア)
+	Linear Gradient	線形グラデーション
+	Linear Light	リニアライト
+	Lines	線
+	Lines +/−	行数 +/−
+	Lines added	追加した行数
+	Lines deleted	削除した行数
+	Link	リンク
+	Links	リンク
+	List	リスト
+	List View	リスト表示
+	List view	リスト表示
+	Location	場所
+	Location:	位置:
+	Lock	ロック
+	Lock Guides	ガイドをロック
+	Lock Slices	スライスをロック
+	Locked	ロック
+	Long Lines	長い線
+	Long Strokes	長いストローク
+	Low	低
+	lowercase	すべて小文字
+	Luminance	輝度
+	Luminosity	輝度
+	Magenta	マゼンタ
+	Magic Wand Tool	自動選択ツール
+	Magnification	倍率
+	Margins	余白
+	Mask	マスク
+	Masks	マスク
+	Matte	マット
+	Maximize	最大化
+	Maximum	最高
+	Measure	測定
+	Median	中央値
+	Medium	中
+	Medium Dots	中程度の点
+	Medium Gray	ミディアムグレー
+	Medium Lines	中程度の線
+	Merge	結合
+	Merge Cells	セルの結合
+	Merge Layers	レイヤーを統合
+	Merged PRs	マージ済みの PR
+	Mesh	メッシュ
+	Message:	メッセージ:
+	Metadata	メタデータ
+	Method	方法
+	Method:	方法:
+	Mezzotint	メゾティント
+	Mezzotint…	メゾティント…
+	Middle	中央
+	Midpoint	中間点
+	Midtones	中間調
+	Millimeters	ミリメートル
+	Minimize	最小化
+	Minimum	最小値
+	Mirror	ミラー
+	Missing	見つかりません
+	Mobile	モバイル
+	Mode	モード
+	Mode:	モード:
+	Model	モデル
+	Models	モデル
+	Modern	モダン
+	Modified	更新日
+	Modify	修正
+	Monitor RGB	モニター RGB
+	Mono	モノクロ
+	Monochrome	モノクロ
+	More	多く
+	Mosaic	モザイク
+	Mosaic Tiles	モザイクタイル
+	Motion	モーション
+	Move	移動
+	Move Down	下へ移動
+	Move Panel	パネルを移動
+	Move Up	上へ移動
+	Multiply	乗算
+	Name	名前
+	Name (A–Z)	名前（A–Z）
+	Name:	名前:
+	Navigation	ナビゲーション
+	Navigator	ナビゲーター
+	Neon Glow	ネオングロー
+	Never	しない
+	New	新規
+	New Document	新規ドキュメント
+	New document	新規ドキュメント
+	New from Template	テンプレートから新規作成
+	New Group	新規グループ
+	New Guide	新規ガイド
+	New Layer	新規レイヤー
+	New Layer…	新規レイヤー…
+	New Style…	新規スタイル…
+	New Swatch…	新規スウォッチ…
+	New Window	新規ウィンドウ
+	New Workspace	新規ワークスペース
+	New Workspace…	新規ワークスペース…
+	New…	新規…
+	Next	次へ
+	Next Appearance Mode	次の外観モード
+	Next Change	次の変更箇所
+	Next Page	次のページ
+	Next page	次のページ
+	No	いいえ
+	No Color	カラーなし
+	No Dither	ディザなし
+	No Document	ドキュメントなし
+	No document	ドキュメントがありません
+	No document open	ドキュメントが開かれていません
+	No limit	制限なし
+	No matches.	一致する項目がありません。
+	No matching commands	一致するコマンドがありません
+	No recent files	最近のファイルがありません
+	No results	結果はありません
+	No Selection	選択なし
+	No selection	選択なし
+	Noise	ノイズ
+	Nonbreaking Space	改行なしスペース
+	None	なし
+	Normal	通常
+	Not available	利用不可
+	NTSC Colors	NTSC カラー
+	Number	数
+	Object	オブジェクト
+	Octagon	八角形
+	Odd Fields	奇数フィールド
+	Odd pages only	奇数ページのみ
+	Off	オフ
+	Offline	オフライン
+	Offset	オフセット
+	Offset:	オフセット:
+	OK	OK
+	Omit	省略
+	On	オン
+	Only Web Colors	Web カラーのみ
+	Opacity	不透明度
+	Opacity:	不透明度:
+	Open	開く
+	Open link	リンクを開く
+	Open Recent	最近使ったファイルを開く
+	OpenType	OpenType
+	Open…	開く…
+	Optimized	最適化
+	Options	オプション
+	Options…	オプション…
+	Orange	オレンジ
+	Ordinals	序数
+	Orientation	方向
+	Orientation:	向き:
+	Original	オリジナル
+	Other	その他
+	Outer Glow…	光彩 (外側)…
+	Outline	アウトライン
+	Output	出力
+	Output:	出力:
+	Outside	外側
+	Oval	楕円
+	Overlap:	重なり:
+	Overlay	オーバーレイ
+	Package…	パッケージ…
+	Page	ページ
+	Page {page} of {pages}	{page} / {pages} ページ
+	Pages	ページ
+	Painting	ペイント
+	Panel	パネル
+	Panel menu	パネルメニュー
+	Panel Options…	パネルオプション…
+	Panels	パネル
+	Paper	用紙
+	Paragraph	段落
+	Paragraph Styles	段落スタイル
+	Password	パスワード
+	Paste	貼り付け
+	Paste Special	特殊貼り付け
+	Patchwork	パッチワーク
+	Path	パス
+	Path:	パス:
+	Paths	パス
+	Pattern	パターン
+	Pattern Type	パターンタイプ
+	Pause	一時停止
+	Pen	ペン
+	Pen Tool	ペンツール
+	Pencil	鉛筆
+	Pencil Tool	鉛筆ツール
+	Pentagon	五角形
+	Percent	パーセント
+	Percentage	パーセント
+	Performance	パフォーマンス
+	Perimeter	周囲長
+	Perspective	遠近
+	Photo	写真
+	Photocopy	コピー
+	Picas	パイカ
+	Pin Light	ピンライト
+	Pink	ピンク
+	Pixel	ピクセル
+	Pixelate	ピクセレート
+	Pixels	ピクセル
+	Play	再生
+	Plug-ins	プラグイン
+	Point	ポイント
+	Pointillize	点描
+	Pointillize…	点描…
+	Points	ポイント
+	Polygon	多角形
+	Polygon Tool	多角形ツール
+	Polyline	折れ線
+	Portrait	縦
+	Portuguese	ポルトガル語
+	Position	位置
+	Position:	位置:
+	Postcard	ポストカード
+	Poster	ポスター
+	Poster Edges	ポスターエッジ
+	Posterization	ポスタリゼーション
+	Posterize	ポスタリゼーション
+	Preferences	環境設定
+	Preferences…	環境設定…
+	Prefix	接頭辞
+	Preserve	保持
+	Preserve Luminosity	輝度を保持
+	Preset	プリセット
+	Preset Manager	プリセットマネージャー
+	Preset:	プリセット:
+	Presets	プリセット
+	Presets:	プリセット:
+	Press keys…	キーを押してください…
+	Pressure	筆圧
+	Preview	プレビュー
+	Previous	前へ
+	Previous Change	前の変更箇所
+	Previous Page	前のページ
+	Previous page	前のページ
+	Print	印刷
+	Printer	プリンター
+	Printer:	プリンター:
+	Printing	印刷
+	Print…	印刷…
+	Profile	プロファイル
+	Progressive	プログレッシブ
+	Proof Setup	校正設定
+	Properties	プロパティ
+	Protect	保護
+	PRs	PRs
+	Public Domain	パブリックドメイン
+	Punctuation	句読点
+	Purple	紫
+	Pyramid	ピラミッド
+	Quality	画質
+	Quick Actions	クイックアクション
+	Radial	円形
+	Radial Blur	ぼかし (放射状)
+	Radial Blur…	ぼかし (放射状)…
+	Radial Gradient	円形グラデーション
+	Radius	半径
+	Radius:	半径:
+	Random	ランダム
+	Range	範囲
+	Range:	範囲:
+	Rasterize	ラスタライズ
+	Ratio	比率
+	Rays	光線
+	Ready	適用可能
+	Real name	本名
+	Recent	最近使ったファイル
+	Recent Colors	最近使用したカラー
+	Recent Files	最近使ったファイル
+	Recover	復元
+	Rectangle	長方形
+	Rectangle Tool	長方形ツール
+	Rectangular	長方形
+	Red	レッド
+	Redo	やり直し
+	Reduce Noise	ノイズを軽減
+	Refine	調整
+	Reflected	反射形
+	Refresh	更新
+	Regular	標準
+	Relative	相対
+	Relative Colorimetric	相対的な色域を維持
+	Relaxed	控えめ
+	Relief	レリーフ
+	Reload	再読み込み
+	Remove	削除
+	Remove Background	背景を削除
+	Remove from favorites	お気に入りから削除
+	Rename	名前を変更
+	Rename Group…	グループ名を変更…
+	Rename Style	スタイルの名前を変更
+	Rename…	名前を変更…
+	Repeat	繰り返し
+	Replace	置換
+	Replace:	置換前:
+	Reply	返信
+	Report	レポート
+	Report an Issue…	問題を報告…
+	Reselect	再選択
+	Reset	リセット
+	Reset Preferences	環境設定をリセット
+	Reset…	リセット…
+	Resize panel window	パネルウィンドウのサイズを変更
+	Resize panels	パネルのサイズを変更
+	Resolution	解像度
+	Resolution:	解像度:
+	Restore	復元
+	Result	結果
+	Resume	再開
+	Reveal in Finder	Finder で表示
+	Reverse	反転
+	Reverse the order	順序を逆にする
+	Revert	保存済みの状態に戻す
+	Review	レビュー
+	RGB	RGB
+	RGB Color	RGB カラー
+	RGB:	RGB:
+	Right	右
+	Right Diagonal	右斜め
+	Right:	右:
+	Rotate	回転
+	Rotate:	回転:
+	Rotation	回転
+	Rotation:	回転:
+	Rounded Rectangle	角丸長方形
+	Roundness	真円率
+	Roundness:	真円率:
+	Rows	行
+	Ruler	定規
+	Rulers	定規
+	Rulers & Grids	定規とグリッド
+	Russian	ロシア語
+	Sample Size	サンプルサイズ
+	Sandstone	砂岩
+	Saturation	彩度
+	Save	保存
+	Save a Copy	コピーを保存
+	Save a Copy…	コピーを保存…
+	Save As	名前を付けて保存
+	Save as PDF	PDF として保存
+	Save as Template	テンプレートとして保存
+	Save as Template…	テンプレートとして保存…
+	Save As…	別名で保存…
+	Save Preset…	プリセットを保存…
+	Save Selection	選択範囲を保存
+	Save Selection…	選択範囲を保存…
+	Saved	保存済み
+	Save…	保存…
+	Scale	拡大・縮小
+	Scale:	拡大・縮小:
+	Scaling	拡大・縮小
+	Scratch Disks	スクラッチディスク
+	Scratch Disks…	スクラッチディスク…
+	Screen	スクリーン
+	Screen Mode	スクリーンモード
+	Scripts	スクリプト
+	Search	検索
+	Security	セキュリティ
+	Segments	分割数
+	Select	選択
+	Select All	すべて選択
+	Select Objects	オブジェクトを選択
+	Select:	選択:
+	Selected pages	選択したページ
+	Selection	選択範囲
+	Selection Tool	選択ツール
+	Selective	特定色
+	Send Backward	背面へ
+	Send to Back	最背面へ
+	Sensitivity	感度
+	Sent to {printer}	{printer} に送信しました
+	Services	サービス
+	Set	設定
+	Set as Default	デフォルトに設定
+	Set:	セット：
+	Settings	設定
+	Settings:	設定:
+	Settings…	設定…
+	Shadow	シャドウ
+	Shadows	シャドウ
+	Shape	シェイプ
+	Shape Effects	シェイプ効果
+	Shape:	形状:
+	Shapes	シェイプ
+	Share	共有
+	Sharpen	シャープ
+	Sharpness	シャープさ
+	Shift	Shift
+	Short Lines	短い線
+	Short Strokes	短いストローク
+	Shortcut	ショートカット
+	Shortcuts	ショートカット
+	Show	表示
+	Show All	すべてを表示
+	Show Grid	グリッドを表示
+	Show Guides	ガイドを表示
+	Show in Folder	フォルダーに表示
+	Show Mask	マスクを表示
+	Show Mesh	メッシュを表示
+	Show Rulers	定規を表示
+	Show rulers	定規を表示
+	Show Tool Tips	ツールヒントを表示
+	Show:	表示:
+	Sides:	辺の数:
+	Simplify	単純化
+	Size	サイズ
+	Size:	サイズ:
+	Sketch	スケッチ
+	Skew	歪み
+	Slice	スライス
+	Slice Options	スライスオプション
+	Slice Options…	スライスオプション…
+	Slice Tool	スライスツール
+	Slices	スライス
+	Small	小
+	Small Caps	スモールキャップ
+	Smart Blur	ぼかし (詳細)
+	Smart Blur…	ぼかし (詳細)…
+	Smart Guides	スマートガイド
+	Smart quotes	スマート引用符
+	Smoothness	滑らかさ
+	Snap to Grid	グリッドにスナップ
+	Soft	ソフト
+	Soft Light	ソフトライト
+	Soften	ぼかし
+	Softness	柔らかさ
+	Solarize	ソラリゼーション
+	Sort	並べ替え
+	Sort by	並べ替え
+	Source	ソース
+	Source code on GitHub	GitHub のソースコード
+	Spaces	スペース
+	Spacing	間隔
+	Spacing:	間隔:
+	Spanish	スペイン語
+	Spatter	はね
+	Special	特殊
+	Speckle	斑点
+	Speed	速度
+	Spelling	スペルチェック
+	Spherize	球面
+	Split	分割
+	Spot Color	特色
+	Spray Radius	スプレー半径
+	Square	四角形
+	Square Size	正方形のサイズ
+	sRGB IEC61966-2.1	sRGB IEC61966-2.1
+	Stacked	積み重ね
+	Stained Glass	ステンドグラス
+	Stamp	スタンプ
+	Standard	標準
+	Standard Ligatures	標準合字
+	Star	星形
+	Start at:	開始番号：
+	Statistics	統計情報
+	Status	状態
+	Status Bar	ステータス バー
+	Stippled	スティップル
+	Stop	停止
+	Strength	強さ
+	Stretch	引き伸ばし
+	Strikethrough	取り消し線
+	Stroke	線
+	Stroke Color	カラー (線)
+	Stroke Length	ストロークの長さ
+	Stroke Options	線オプション
+	Stroke:	線:
+	Studio	スタジオ
+	Style	スタイル
+	Style:	スタイル:
+	Styles	スタイル
+	Stylize	スタイライズ
+	Subdivisions	分割数
+	Subject	件名
+	Subscript	下付き
+	Subset	対象範囲
+	Subtitle	字幕
+	Subtract	減算
+	Sumi-e	墨絵
+	Summary	概要
+	Superscript	上付き
+	Swatches	スウォッチ
+	Symbol	記号と特殊文字
+	Symbols	シンボル
+	Sync with system	システムと同期
+	System	システム
+	Tab	タブ
+	Table	表
+	Table style	表スタイル
+	Tables	表
+	Tabloid	タブロイド
+	Tabs	タブ
+	Taper	テーパー
+	Target	ターゲット
+	Target:	ターゲット:
+	Temperature	色温度
+	Templates	テンプレート
+	Text	テキスト
+	Text color	文字色
+	Text:	テキスト:
+	Texture	テクスチャ
+	The passwords don't match.	パスワードが一致しません。
+	Theme	テーマ
+	Thickness	太さ
+	This document has no bookmarks.	この文書にしおりはありません。
+	Threshold	しきい値
+	Thumbnails	サムネイル
+	Tile	並べて表示
+	Tile Size	タイルのサイズ
+	Tilt	チルト
+	Time	時間
+	Timecode	タイムコード
+	Timeline	タイムライン
+	Tint	濃度
+	Tint Color	色合い
+	Title	タイトル
+	To	変更先
+	Tolerance	許容値
+	Tolerance:	許容値:
+	Tool	ツール
+	Toolbars	ツールバー
+	Tools	ツール
+	Top	上
+	Top Left	左上
+	Top Right	右上
+	Top:	上:
+	Total	合計
+	Total:	合計:
+	Tracking	トラッキング
+	Transform	変形
+	Translate	翻訳
+	Transparency	透明
+	Transparent	透明
+	Trap…	トラップ…
+	Triangle	三角形
+	Turbulent	乱流
+	Twirl	渦巻き
+	Twist	ねじり
+	Type	種類
+	Type Tool	文字ツール
+	Type:	種類:
+	Typewriter	タイプライター
+	Type…	種類…
+	Typing	文字入力
+	Underline	下線
+	Undo	取り消し
+	Undo {action}	元に戻す: {action}
+	Ungroup	グループ解除
+	Uniform	縦横比を固定
+	Units	単位
+	Unknown	不明
+	Unlock	ロック解除
+	Unsaved changes	未保存の変更
+	Unsharp Mask	アンシャープマスク
+	Untitled	名称未設定
+	Up	上へ
+	Update	更新
+	Updates	更新
+	UPPERCASE	すべて大文字
+	Use Default	既定を使用
+	User	ユーザー
+	Username	ユーザー名
+	Value	値
+	Value:	値:
+	Variables	変数
+	Version	バージョン
+	Version {version}	バージョン {version}
+	Vertical	縦
+	Vertical Alignment	垂直方向の整列
+	Vertical Type Tool	縦書き文字ツール
+	Vertically	垂直方向
+	Very High	最高
+	Vibrance	自然な彩度
+	Video	ビデオ
+	View	表示
+	Violet	バイオレット
+	Visibility	表示状態
+	Vivid Light	ビビッドライト
+	Voice	音声
+	W:	W:
+	Warning	警告
+	Warnings	警告
+	Warp	ワープ
+	Watermark	透かし
+	Wave	波形
+	Wave…	波形…
+	Web	Web
+	Website	Web サイト
+	Weight	線幅
+	Wet	ウェット
+	White	白
+	White Intensity	白の強さ
+	White Is High	白を高く
+	Whites	白レベル
+	Width	幅
+	Width and Height	幅と高さ
+	Width:	幅:
+	Window	ウィンドウ
+	Windows	Windows
+	Words	単語数
+	Working CMYK	作業用 CMYK
+	Workspace	ワークスペース
+	Workspaces	ワークスペース
+	X	X
+	Y	Y
+	Yellow	イエロー
+	Yes	はい
+	yesterday	昨日
+	Your changes will be lost if you don't save them.	保存しないと変更は失われます。
+	Zoom	ズーム
+	Zoom In	ズームイン
+	Zoom in	拡大
+	Zoom Out	ズームアウト
+	Zoom out	縮小
+	Zoom Tool	ズームツール
+@plural	{n} commit|{n} commits	コミット {n} 件
+	{n} files	{n} 個のファイル
+	{n} h ago	{n} 時間前
+@plural	{n} item|{n} items	{n} 項目
+@plural	{n} Layer|{n} Layers	{n} レイヤー
+	{n} min ago	{n} 分前
+@plural	{n} step|{n} steps	{n} ステップ
+	−Bin	−Bin
+	● Recording	● 記録中

@@ -1,0 +1,908 @@
+# Craft-I18n attribution (lane 116). Every ported unit maps to its
+# upstream file at its commit plus the SHA-256 of the source read.
+# Upstream: storytold/craft-i18n at c199dc45, storytold/craft-libs
+# at 38740b43 — both dual MIT/Apache-2.0. Devon-authored modules
+# list their lineage below.
+
+[[assets]]
+id = "scripts"
+repo = "craft-libs"
+upstream = "crates/i18n/src/scripts.rs"
+sha256 = "40e2ec4674150d204d2c0fb391d6ffe272e6ae38fd59df7543746c519a72788e"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/scripts.py"
+
+[[assets]]
+id = "fold"
+repo = "craft-libs"
+upstream = "crates/i18n/src/fold.rs"
+sha256 = "7ee975f2e620ccb03cc8ed71a125c0baaae356a82568cdfa9aa45382d7d256a9"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/fold.py"
+
+[[assets]]
+id = "bidi"
+repo = "craft-libs"
+upstream = "crates/i18n/src/lib.rs"
+sha256 = "c2bdfd9ce5ffee0bde13c719b5d308d1055a18fa248dff7bf90dc208b23d5b32"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/bidi.py"
+
+[[assets]]
+id = "catalog-upstream"
+repo = "craft-i18n"
+upstream = "crates/craft-i18n-tests/src/catalog.rs"
+sha256 = "5f2b20fa0d93ac0f2bf06f546656e796545d892048cfbf07e7c6a2a63983da1a"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalog.py"
+
+[[assets]]
+id = "check-tree"
+repo = "craft-i18n"
+upstream = "crates/craft-i18n-tests/src/tree.rs"
+sha256 = "12dd326a305b24e55966bfa9d003831f3f85ef912df4a59671cb9221c78c90de"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/check.py"
+
+[[assets]]
+id = "check-locale"
+repo = "craft-i18n"
+upstream = "crates/craft-i18n-tests/src/locale.rs"
+sha256 = "7d2e0f942d211596824ce0a960a3e30c90a68c3517b6284c6ce3f40b49d7970e"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/check.py"
+
+[[assets]]
+id = "runtime-upstream"
+repo = "craft-libs"
+upstream = "crates/i18n/src/lib.rs"
+sha256 = "c2bdfd9ce5ffee0bde13c719b5d308d1055a18fa248dff7bf90dc208b23d5b32"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/runtime.py"
+
+[[assets]]
+id = "upstream-lib"
+repo = "craft-libs"
+upstream = "crates/i18n/src/lib.rs"
+sha256 = "c2bdfd9ce5ffee0bde13c719b5d308d1055a18fa248dff7bf90dc208b23d5b32"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/upstream.py"
+
+[[assets]]
+id = "upstream-catalog"
+repo = "craft-i18n"
+upstream = "crates/craft-i18n-tests/src/catalog.rs"
+sha256 = "5f2b20fa0d93ac0f2bf06f546656e796545d892048cfbf07e7c6a2a63983da1a"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/upstream.py"
+
+[[assets]]
+id = "catalog-locales-ar-cadcraft"
+repo = "craft-i18n"
+upstream = "locales/ar/cadcraft.tsv"
+sha256 = "ffdfcad44276b371cd8faa75209628f787f6f443ed16d8e695ab8b96f49568d5"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/ar/cadcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-ar-common"
+repo = "craft-i18n"
+upstream = "locales/ar/common.tsv"
+sha256 = "0faa3ace9da4b6bc170adc1f304691b59304062e0c344c2859b8d8df4030916a"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/ar/common.tsv"
+
+[[assets]]
+id = "catalog-locales-ar-pdfcraft"
+repo = "craft-i18n"
+upstream = "locales/ar/pdfcraft.tsv"
+sha256 = "4f1fdc21ccd30781433d570e07f3e1f51ce5c3deae90e6d20cf657c85dcd43ab"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/ar/pdfcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-ar-wordcraft"
+repo = "craft-i18n"
+upstream = "locales/ar/wordcraft.tsv"
+sha256 = "085ee17e15748ffdfa38137473fefc6c92b5c62edd1fe33ff7694e712073825e"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/ar/wordcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-bg-common"
+repo = "craft-i18n"
+upstream = "locales/bg/common.tsv"
+sha256 = "8b702398d49da2a739b261c809a31a74012dfd20f7c596a16d9080bdf9d540c4"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/bg/common.tsv"
+
+[[assets]]
+id = "catalog-locales-bn-common"
+repo = "craft-i18n"
+upstream = "locales/bn/common.tsv"
+sha256 = "50114ffb6d6ca4ba5c2801323ccf47f3f35a880b42c5545217dc5b0dfb181843"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/bn/common.tsv"
+
+[[assets]]
+id = "catalog-locales-bs-common"
+repo = "craft-i18n"
+upstream = "locales/bs/common.tsv"
+sha256 = "5ff4e7d315da5132f52cdd5cf6ca371b5e66b03ff0625c20576586adb533ad06"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/bs/common.tsv"
+
+[[assets]]
+id = "catalog-locales-ca-common"
+repo = "craft-i18n"
+upstream = "locales/ca/common.tsv"
+sha256 = "38344eb4fc7715563e981292e213eeab9a11416625d3ad93f0f10a0277ec588d"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/ca/common.tsv"
+
+[[assets]]
+id = "catalog-locales-ckb-common"
+repo = "craft-i18n"
+upstream = "locales/ckb/common.tsv"
+sha256 = "cdd848f904bb4920580fa6a640c5f860dbe18e504254dbd9bf749cf9a2a986fd"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/ckb/common.tsv"
+
+[[assets]]
+id = "catalog-locales-cs-common"
+repo = "craft-i18n"
+upstream = "locales/cs/common.tsv"
+sha256 = "a2a4c5f93898d0f2e344856bad5d2c56bab7733a41ac382f9c5c7c90e0658277"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/cs/common.tsv"
+
+[[assets]]
+id = "catalog-locales-da-common"
+repo = "craft-i18n"
+upstream = "locales/da/common.tsv"
+sha256 = "bca7e0dae073bc1b79ca1805016b11892dee43b7bf7ad574fa7a3a8c76e68a21"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/da/common.tsv"
+
+[[assets]]
+id = "catalog-locales-de-cadcraft"
+repo = "craft-i18n"
+upstream = "locales/de/cadcraft.tsv"
+sha256 = "75b6c44309d67bc8807b7efd46cf463950eadb5c4ee5ea132fe1cedffaf1614d"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/de/cadcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-de-common"
+repo = "craft-i18n"
+upstream = "locales/de/common.tsv"
+sha256 = "17fdedf8be2cc765c09f38274ddc6ea23e4508f43299978d3b55a49d3a578c1f"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/de/common.tsv"
+
+[[assets]]
+id = "catalog-locales-de-craft-launcher"
+repo = "craft-i18n"
+upstream = "locales/de/craft-launcher.tsv"
+sha256 = "480f6b7e26c856bd168bf108b0f37c3610e77c05019ea23417c38dfd09489fa7"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/de/craft-launcher.tsv"
+
+[[assets]]
+id = "catalog-locales-de-deckcraft"
+repo = "craft-i18n"
+upstream = "locales/de/deckcraft.tsv"
+sha256 = "d7095d101e84ddbc874c2fdb1304ddbb973e5f40ab53f66493e49eadc3e2868e"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/de/deckcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-de-filmcraft"
+repo = "craft-i18n"
+upstream = "locales/de/filmcraft.tsv"
+sha256 = "6a1ddebeb56090625d65d074ea12821bd106497a0ee7c494b7e31e0c4be3dc78"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/de/filmcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-de-pdfcraft"
+repo = "craft-i18n"
+upstream = "locales/de/pdfcraft.tsv"
+sha256 = "5dda4d9b397a09e556aec5914d593f9fc6d4a90771ef0880def9c673b4d6e867"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/de/pdfcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-de-photocraft"
+repo = "craft-i18n"
+upstream = "locales/de/photocraft.tsv"
+sha256 = "5f1627d171fdfc4161fcb0e13e1b40f6be660b5475726efdf6dba0f58e409458"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/de/photocraft.tsv"
+
+[[assets]]
+id = "catalog-locales-de-vectorcraft"
+repo = "craft-i18n"
+upstream = "locales/de/vectorcraft.tsv"
+sha256 = "8aad49c3a3e75d79e9bcd601e977279fc5b4c7a197153ebb1173f3628bedff8a"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/de/vectorcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-de-wordcraft"
+repo = "craft-i18n"
+upstream = "locales/de/wordcraft.tsv"
+sha256 = "349185b60cefcf7594984a5f56a8f6245b5f5788f2861e5f59a002e809c51abe"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/de/wordcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-dv-common"
+repo = "craft-i18n"
+upstream = "locales/dv/common.tsv"
+sha256 = "a9bfdbd9c0832fda6a037c8e0f724bbb8d47f77395bb66e5fddd42816b676e13"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/dv/common.tsv"
+
+[[assets]]
+id = "catalog-locales-el-common"
+repo = "craft-i18n"
+upstream = "locales/el/common.tsv"
+sha256 = "c8a7cdaed97b968ea00cf081385096f590fff20f6c26d0f27fb47c102a568684"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/el/common.tsv"
+
+[[assets]]
+id = "catalog-locales-es-cadcraft"
+repo = "craft-i18n"
+upstream = "locales/es/cadcraft.tsv"
+sha256 = "3ab1f2f96f1747e1542bfc25093519be91d3b367ef04c62157167939faf3c492"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/es/cadcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-es-common"
+repo = "craft-i18n"
+upstream = "locales/es/common.tsv"
+sha256 = "fc58c0edd260fa421aceaa5418fd6952038fe20c0cea9f5854603076e7ffa962"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/es/common.tsv"
+
+[[assets]]
+id = "catalog-locales-es-craft-launcher"
+repo = "craft-i18n"
+upstream = "locales/es/craft-launcher.tsv"
+sha256 = "b56c1c6af03f1f35c850c9d5536cd4a7789148fb45be01825c7e08f51a4b6fb4"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/es/craft-launcher.tsv"
+
+[[assets]]
+id = "catalog-locales-es-filmcraft"
+repo = "craft-i18n"
+upstream = "locales/es/filmcraft.tsv"
+sha256 = "92d75976a4cc1e9c7258be3062f60d92081dea10f98d0349f12a6f9a4c413ee5"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/es/filmcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-es-pdfcraft"
+repo = "craft-i18n"
+upstream = "locales/es/pdfcraft.tsv"
+sha256 = "93941508d3167144bd0a0698d14c86ccd466662f87815f0c37355b838b6488a7"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/es/pdfcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-es-photocraft"
+repo = "craft-i18n"
+upstream = "locales/es/photocraft.tsv"
+sha256 = "8f53155686e672e518b518f826a9ca2d94b68fc9b93922e28009242bafd4b0df"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/es/photocraft.tsv"
+
+[[assets]]
+id = "catalog-locales-es-vectorcraft"
+repo = "craft-i18n"
+upstream = "locales/es/vectorcraft.tsv"
+sha256 = "b064b951f965f234162560b067a25ba2b5863ee441a3e61002df42289439548f"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/es/vectorcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-es-wordcraft"
+repo = "craft-i18n"
+upstream = "locales/es/wordcraft.tsv"
+sha256 = "856e055e3c24d8e45335b52758d845d9cc91e4d569dbf99dbcc4d3a1b9076f2c"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/es/wordcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-et-common"
+repo = "craft-i18n"
+upstream = "locales/et/common.tsv"
+sha256 = "ed05dac22aff059613960655d7ae761e02f18f006b12c95d51e71365cf4f3154"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/et/common.tsv"
+
+[[assets]]
+id = "catalog-locales-fa-common"
+repo = "craft-i18n"
+upstream = "locales/fa/common.tsv"
+sha256 = "5e7613d852fd319f136be9e2d42a81fdd25c5bddedd377cec33cc372e733ba65"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/fa/common.tsv"
+
+[[assets]]
+id = "catalog-locales-fi-common"
+repo = "craft-i18n"
+upstream = "locales/fi/common.tsv"
+sha256 = "c64b86f51ff0224f27a929b2fa0a4f2d08b4cacc371d5ee7671591b20bd25c0a"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/fi/common.tsv"
+
+[[assets]]
+id = "catalog-locales-fr-cadcraft"
+repo = "craft-i18n"
+upstream = "locales/fr/cadcraft.tsv"
+sha256 = "26037e61985f9f122c33a567c2f9c9f80662e7a31fceb73ef30759a244ec6516"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/fr/cadcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-fr-common"
+repo = "craft-i18n"
+upstream = "locales/fr/common.tsv"
+sha256 = "b80a9a2d2d40418772238d24d92879b9e91ad995d813fe204ee0f3a7973807b4"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/fr/common.tsv"
+
+[[assets]]
+id = "catalog-locales-fr-craft-launcher"
+repo = "craft-i18n"
+upstream = "locales/fr/craft-launcher.tsv"
+sha256 = "720294b0df57587f14e4158596a65a7e8ce2e3e1dcf691ef20d5127bdd5f7662"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/fr/craft-launcher.tsv"
+
+[[assets]]
+id = "catalog-locales-fr-filmcraft"
+repo = "craft-i18n"
+upstream = "locales/fr/filmcraft.tsv"
+sha256 = "5643d345cd17f348e68c82369314c22b8151c021cd5ca158df447dd3280dd42f"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/fr/filmcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-fr-pdfcraft"
+repo = "craft-i18n"
+upstream = "locales/fr/pdfcraft.tsv"
+sha256 = "057134cc94677f62bb7786369711de4ac3ede087e701f4faf8c377395bbf4a49"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/fr/pdfcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-fr-photocraft"
+repo = "craft-i18n"
+upstream = "locales/fr/photocraft.tsv"
+sha256 = "f2a56e9930174f22b15e8e906a2759848c1c183fe41d2ceab64f3befeed1102e"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/fr/photocraft.tsv"
+
+[[assets]]
+id = "catalog-locales-fr-vectorcraft"
+repo = "craft-i18n"
+upstream = "locales/fr/vectorcraft.tsv"
+sha256 = "672dea01c2a79b57dd2c559e2b4234440bd42a7c99c9d08d38356a77a2333f4f"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/fr/vectorcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-fr-wordcraft"
+repo = "craft-i18n"
+upstream = "locales/fr/wordcraft.tsv"
+sha256 = "f1a1ae30852b167325cd0cab82fb64ac0adf987864d05c2fbe1721bb346afc89"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/fr/wordcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-gl-common"
+repo = "craft-i18n"
+upstream = "locales/gl/common.tsv"
+sha256 = "3ee6e658410fbb05db085fcb75bbadf6d252acf1a9da7dd266ba0c4ae0455f14"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/gl/common.tsv"
+
+[[assets]]
+id = "catalog-locales-he-common"
+repo = "craft-i18n"
+upstream = "locales/he/common.tsv"
+sha256 = "6abe21a5e3aca35462d74530ce6eadd1ec1ae2be779582afdb12009992c48135"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/he/common.tsv"
+
+[[assets]]
+id = "catalog-locales-hi-common"
+repo = "craft-i18n"
+upstream = "locales/hi/common.tsv"
+sha256 = "c5538adac2da1914aac455a04722e7fe946567524d9241ec7fa8788a2b65fbec"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/hi/common.tsv"
+
+[[assets]]
+id = "catalog-locales-hi-pdfcraft"
+repo = "craft-i18n"
+upstream = "locales/hi/pdfcraft.tsv"
+sha256 = "6ee3f900dc65edc42434536837340e9841c179cd83133db3fe515c58512add6d"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/hi/pdfcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-hr-common"
+repo = "craft-i18n"
+upstream = "locales/hr/common.tsv"
+sha256 = "19f02677e51fb68416b526bfdea22760beda7c49f9fae927513fca3ba10bdf3d"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/hr/common.tsv"
+
+[[assets]]
+id = "catalog-locales-hu-common"
+repo = "craft-i18n"
+upstream = "locales/hu/common.tsv"
+sha256 = "acbb20c606e8274e9e95e3fa75886735d4574d0c8007e19a936fe1df270adfcf"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/hu/common.tsv"
+
+[[assets]]
+id = "catalog-locales-id-common"
+repo = "craft-i18n"
+upstream = "locales/id/common.tsv"
+sha256 = "12591c9fc60bb2c6b806f38dafcefe3fa9b4c1f3ce981c696a2956838dcd1be8"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/id/common.tsv"
+
+[[assets]]
+id = "catalog-locales-it-cadcraft"
+repo = "craft-i18n"
+upstream = "locales/it/cadcraft.tsv"
+sha256 = "3f41489d751cc804f543931edbdafcb829c1e24e533f234651116f8e59f3340d"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/it/cadcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-it-common"
+repo = "craft-i18n"
+upstream = "locales/it/common.tsv"
+sha256 = "bd8c57b9c74c186a9ed15d38575821e287c0ef9ed6c7898c82faf539aa74fa16"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/it/common.tsv"
+
+[[assets]]
+id = "catalog-locales-it-filmcraft"
+repo = "craft-i18n"
+upstream = "locales/it/filmcraft.tsv"
+sha256 = "ec884eb9c58a17f0fd4956eb0c26387b476fa1914d0092f167d1dec0ef5e1c87"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/it/filmcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-it-pdfcraft"
+repo = "craft-i18n"
+upstream = "locales/it/pdfcraft.tsv"
+sha256 = "c8fa2c242599bbc1a7a282cae1e18615b014754adf0c08b7ebe565e83012cf85"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/it/pdfcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-it-photocraft"
+repo = "craft-i18n"
+upstream = "locales/it/photocraft.tsv"
+sha256 = "23c2c22b2e75472032d366ed059712d08a5c4d67fe8f790e69ce2bcc6cf80e95"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/it/photocraft.tsv"
+
+[[assets]]
+id = "catalog-locales-it-vectorcraft"
+repo = "craft-i18n"
+upstream = "locales/it/vectorcraft.tsv"
+sha256 = "b2bf98f800110766161647e56f6fc0acff3ae94cd4c5a0dacec740282b91f0e7"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/it/vectorcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-it-wordcraft"
+repo = "craft-i18n"
+upstream = "locales/it/wordcraft.tsv"
+sha256 = "e416f1da28fb19a0e32c893df8cffe69b4e6b46d29fa355c8d1e3b0e2301973c"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/it/wordcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-ja-common"
+repo = "craft-i18n"
+upstream = "locales/ja/common.tsv"
+sha256 = "2b264589b0791daab1681235185b14d719cf40d49b9bbc0f0ad23a1e0a19cbe7"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/ja/common.tsv"
+
+[[assets]]
+id = "catalog-locales-ja-craft-launcher"
+repo = "craft-i18n"
+upstream = "locales/ja/craft-launcher.tsv"
+sha256 = "585aad9e58a87c563c62172c6ff7c5888779cfb826a93a8ab6791162e0bfdf95"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/ja/craft-launcher.tsv"
+
+[[assets]]
+id = "catalog-locales-ja-filmcraft"
+repo = "craft-i18n"
+upstream = "locales/ja/filmcraft.tsv"
+sha256 = "7125a009b50069c4af3df91e48934dd37d5929638e1fa3eca7df0edbd7a75275"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/ja/filmcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-ja-pdfcraft"
+repo = "craft-i18n"
+upstream = "locales/ja/pdfcraft.tsv"
+sha256 = "8820ba462b77b8eddefb3f03f8dfea93c25e6e9b4d4bab1386aeba0f1d4bb201"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/ja/pdfcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-ja-photocraft"
+repo = "craft-i18n"
+upstream = "locales/ja/photocraft.tsv"
+sha256 = "bbc13ce459db785e8627360c2c51098399c21db3c70360860b352443595de3e1"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/ja/photocraft.tsv"
+
+[[assets]]
+id = "catalog-locales-ja-vectorcraft"
+repo = "craft-i18n"
+upstream = "locales/ja/vectorcraft.tsv"
+sha256 = "757ef8e430beb779f66b2e9d7b7aee6df49daa6017951c1087d6bedfc54bec97"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/ja/vectorcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-ja-wordcraft"
+repo = "craft-i18n"
+upstream = "locales/ja/wordcraft.tsv"
+sha256 = "79e616e063895c83b1a3c4e77e9e812af3833ea101f7ccd2f50aa95a2149bb8d"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/ja/wordcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-ka-common"
+repo = "craft-i18n"
+upstream = "locales/ka/common.tsv"
+sha256 = "cc72ce8c3fb7643f0cb2b71fa3cbccb79dbb43a0adf5c2e84a254d2cef52fa61"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/ka/common.tsv"
+
+[[assets]]
+id = "catalog-locales-kk-common"
+repo = "craft-i18n"
+upstream = "locales/kk/common.tsv"
+sha256 = "df9cf3d993f18e8cb03a57df9296af388b50854980f0156b7c9d4c7992e2adc4"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/kk/common.tsv"
+
+[[assets]]
+id = "catalog-locales-ko-common"
+repo = "craft-i18n"
+upstream = "locales/ko/common.tsv"
+sha256 = "453ed41627b9b327079cdc844d3b3a70667f0070f51ab05370c6baac3f4a539a"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/ko/common.tsv"
+
+[[assets]]
+id = "catalog-locales-lo-common"
+repo = "craft-i18n"
+upstream = "locales/lo/common.tsv"
+sha256 = "d4f2c87a39324a97b362518db150d848ec3b5b4ca744720a383fc51efb57ef42"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/lo/common.tsv"
+
+[[assets]]
+id = "catalog-locales-lt-common"
+repo = "craft-i18n"
+upstream = "locales/lt/common.tsv"
+sha256 = "04e4b5576c774f0a19e994d38a4b7b6d10d93d649f6f34d438a7ac57696b9608"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/lt/common.tsv"
+
+[[assets]]
+id = "catalog-locales-nb-common"
+repo = "craft-i18n"
+upstream = "locales/nb/common.tsv"
+sha256 = "6d0bf6ce1edf4c47dfb612b08656de1f3d1b19b70e4c3ddf99b8933412e7db6c"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/nb/common.tsv"
+
+[[assets]]
+id = "catalog-locales-nl-common"
+repo = "craft-i18n"
+upstream = "locales/nl/common.tsv"
+sha256 = "54c22916345f8b3936335c68e426fa98a100f586a482465c62949163cad69b8c"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/nl/common.tsv"
+
+[[assets]]
+id = "catalog-locales-nl-pdfcraft"
+repo = "craft-i18n"
+upstream = "locales/nl/pdfcraft.tsv"
+sha256 = "a663c7ba38e3935fa7377ce2a1915c40de6746953af4d3c58b2f19727f1c5b37"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/nl/pdfcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-nl-photocraft"
+repo = "craft-i18n"
+upstream = "locales/nl/photocraft.tsv"
+sha256 = "a2cd74ea90df881f6795efd0fc05e4a80f61919131690aaddb9bff3d24ed4bb5"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/nl/photocraft.tsv"
+
+[[assets]]
+id = "catalog-locales-nl-vectorcraft"
+repo = "craft-i18n"
+upstream = "locales/nl/vectorcraft.tsv"
+sha256 = "7fe96ad988b285e75a46f75e886ddf476c105cefcfdf8f6a8c1ac2d04ca1506a"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/nl/vectorcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-nl-wordcraft"
+repo = "craft-i18n"
+upstream = "locales/nl/wordcraft.tsv"
+sha256 = "41e4c011854ff757eb583dcf84062182abbb9cccbdfc80134e6624e75f7cbf81"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/nl/wordcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-pl-common"
+repo = "craft-i18n"
+upstream = "locales/pl/common.tsv"
+sha256 = "1b03d88486ef8afc653a0cff14451ea844a73da8cb93555ad64afc095769c26f"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/pl/common.tsv"
+
+[[assets]]
+id = "catalog-locales-pt-br-cadcraft"
+repo = "craft-i18n"
+upstream = "locales/pt-br/cadcraft.tsv"
+sha256 = "1c307389112d8ae23fdb8fa16a11ff8c9ed71572562ce82668d7773b545edb63"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/pt-br/cadcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-pt-br-common"
+repo = "craft-i18n"
+upstream = "locales/pt-br/common.tsv"
+sha256 = "4d805f426282767dbab6961bcde16c85d51e14312c335c4eaf8f8a305c7ab8da"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/pt-br/common.tsv"
+
+[[assets]]
+id = "catalog-locales-pt-br-craft-launcher"
+repo = "craft-i18n"
+upstream = "locales/pt-br/craft-launcher.tsv"
+sha256 = "f17131bfa042e1a2f074667c75c62390ccf17a995dc60bb4c1aca418f917cc1e"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/pt-br/craft-launcher.tsv"
+
+[[assets]]
+id = "catalog-locales-pt-br-filmcraft"
+repo = "craft-i18n"
+upstream = "locales/pt-br/filmcraft.tsv"
+sha256 = "81d111c9d2f253f69d494b1a42a56d6d025b1726c64247eb7271fae71095b2a7"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/pt-br/filmcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-pt-br-pdfcraft"
+repo = "craft-i18n"
+upstream = "locales/pt-br/pdfcraft.tsv"
+sha256 = "a4c698c3d4b5e1ce8fc6f68deb9d35f03dc49aa3f15b0cedbf7e4cc401e9d54b"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/pt-br/pdfcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-pt-br-photocraft"
+repo = "craft-i18n"
+upstream = "locales/pt-br/photocraft.tsv"
+sha256 = "5d9978f6d0960fee7678cab292b70fc5575fa2c12190eeb39c2ab3f46be13f61"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/pt-br/photocraft.tsv"
+
+[[assets]]
+id = "catalog-locales-pt-br-vectorcraft"
+repo = "craft-i18n"
+upstream = "locales/pt-br/vectorcraft.tsv"
+sha256 = "0c72301598f3c16a6c76e6b69c877bcf07597de05d4b7c3e18e3a539d66fbab0"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/pt-br/vectorcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-pt-br-wordcraft"
+repo = "craft-i18n"
+upstream = "locales/pt-br/wordcraft.tsv"
+sha256 = "7f4a62dca05b3db01da7589020a70012f5afb7c07a599ca1e706ec261385dffa"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/pt-br/wordcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-ro-common"
+repo = "craft-i18n"
+upstream = "locales/ro/common.tsv"
+sha256 = "288b673646b52c00e77093b964caa4f042795be220eb552a432bdd237745e26f"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/ro/common.tsv"
+
+[[assets]]
+id = "catalog-locales-ru-cadcraft"
+repo = "craft-i18n"
+upstream = "locales/ru/cadcraft.tsv"
+sha256 = "a6ff9c6a05632973c8198cd176dcccb9dec5e72915e13c43353d32de930c87e4"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/ru/cadcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-ru-common"
+repo = "craft-i18n"
+upstream = "locales/ru/common.tsv"
+sha256 = "405bed05a75e5cd10412bdbbee08a48bb186c7a6d397d85f8659c7636fd63518"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/ru/common.tsv"
+
+[[assets]]
+id = "catalog-locales-ru-craft-launcher"
+repo = "craft-i18n"
+upstream = "locales/ru/craft-launcher.tsv"
+sha256 = "e7e7a4a6a6213241d5325d6202312329655da974e8e388d9171e686941eb7d54"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/ru/craft-launcher.tsv"
+
+[[assets]]
+id = "catalog-locales-ru-filmcraft"
+repo = "craft-i18n"
+upstream = "locales/ru/filmcraft.tsv"
+sha256 = "ae7bf9435111168c927a31dc6ae8991fa4905cdc446962e0344142143f3e4b14"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/ru/filmcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-ru-pdfcraft"
+repo = "craft-i18n"
+upstream = "locales/ru/pdfcraft.tsv"
+sha256 = "054ca3000b4f7b6abb8b8a3e8eb73eecf31ba72f0c578a3502289c18954d9d54"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/ru/pdfcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-ru-photocraft"
+repo = "craft-i18n"
+upstream = "locales/ru/photocraft.tsv"
+sha256 = "d9d69450b682fe338589eb6b4a93acfb285d134898d5e24948c1ec40274a59e5"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/ru/photocraft.tsv"
+
+[[assets]]
+id = "catalog-locales-ru-vectorcraft"
+repo = "craft-i18n"
+upstream = "locales/ru/vectorcraft.tsv"
+sha256 = "3d6334c227d73e3379e675e1ae129590e32c88da392461c02f55ab5c9c407fe8"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/ru/vectorcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-ru-wordcraft"
+repo = "craft-i18n"
+upstream = "locales/ru/wordcraft.tsv"
+sha256 = "3f814b8855da8f0b78f0dbeb361a95016be9140bf5e9dd8072346c5eb58c8081"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/ru/wordcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-sk-wordcraft"
+repo = "craft-i18n"
+upstream = "locales/sk/wordcraft.tsv"
+sha256 = "9b41c0f5f13816d77d0c1016e979f2abb10849087d0dcb89f56e182b0ede902f"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/sk/wordcraft.tsv"
+
+[[assets]]
+id = "catalog-locales-sl-common"
+repo = "craft-i18n"
+upstream = "locales/sl/common.tsv"
+sha256 = "86aa1d87d5877346351568b90b0ca8946d9f5a0eda2d3e42e69886266b7de1ec"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/sl/common.tsv"
+
+[[assets]]
+id = "catalog-locales-sq-common"
+repo = "craft-i18n"
+upstream = "locales/sq/common.tsv"
+sha256 = "814f681cb98af91543bc3527d1c95b764b464d647382204ae8bec999271121e7"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/sq/common.tsv"
+
+[[assets]]
+id = "catalog-locales-sr-common"
+repo = "craft-i18n"
+upstream = "locales/sr/common.tsv"
+sha256 = "a70316f79e74ad37c435c66e4a5dccbfc37966dea34e6289cd4d24e178c471cb"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/sr/common.tsv"
+
+[[assets]]
+id = "catalog-locales-sr-latn-common"
+repo = "craft-i18n"
+upstream = "locales/sr-latn/common.tsv"
+sha256 = "9318a857d76dc441c903ca93880dbcebe95e48735640878f48d54bbee2a6f78a"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/sr-latn/common.tsv"
+
+[[assets]]
+id = "catalog-locales-sv-common"
+repo = "craft-i18n"
+upstream = "locales/sv/common.tsv"
+sha256 = "de45d706b87db52fbca6ba748ed3191d6d5f9591c49c37f66e9bc400e574cbbe"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/sv/common.tsv"
+
+[[assets]]
+id = "catalog-locales-ta-common"
+repo = "craft-i18n"
+upstream = "locales/ta/common.tsv"
+sha256 = "fd64051faa0d4b84d1695dfd820a47dd0497bdbf719ad1367410b749f83f032e"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/ta/common.tsv"
+
+[[assets]]
+id = "catalog-locales-te-common"
+repo = "craft-i18n"
+upstream = "locales/te/common.tsv"
+sha256 = "1f54e2d14868634439ee1c7cc32c255fe166491ccdad5cc51443f1f2a6fbfddf"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/te/common.tsv"
+
+[[assets]]
+id = "catalog-locales-th-common"
+repo = "craft-i18n"
+upstream = "locales/th/common.tsv"
+sha256 = "325092329992297d2ca5cae5f6e8b73e35c6454675c76e99f23bf6b6d864111e"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/th/common.tsv"
+
+[[assets]]
+id = "catalog-locales-tr-common"
+repo = "craft-i18n"
+upstream = "locales/tr/common.tsv"
+sha256 = "e8a2214c6dac1aa94b7f2f1a7cfc155ee86115e43b23c5058b870b69ad077634"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/tr/common.tsv"
+
+[[assets]]
+id = "catalog-locales-uk-common"
+repo = "craft-i18n"
+upstream = "locales/uk/common.tsv"
+sha256 = "5afaae6cc90fbb6bf760151f64119823f0707922d7f382b908e335ebd23282e0"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/i18n/catalogs/upstream/locales/uk/common.tsv"
+
+[[devon]]
+id = "crafti18n-parity-toml"
+path = "nomorals/i18n/crafti18n-parity.toml"
+lineage = "Devon-authored: parity cases for the craft-i18n port"
+
+[[devon]]
+id = "crafti18n-parity-runner"
+path = "nomorals/i18n/parity.py"
+lineage = "Devon-authored: case runner over the vendored tree"
+
+[[devon]]
+id = "craftlibs-tool-i18n"
+path = "nomorals/tools/craftlibs.py"
+lineage = "Devon-authored: craftlibs tool i18n action (extended in place)"

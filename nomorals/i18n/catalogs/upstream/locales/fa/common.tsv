@@ -1,0 +1,1294 @@
+# فارسی (fa) interface catalog for every Crafting App.
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   @plural  English `one|other`; the translation lists this language's plural forms, `|`-separated.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary. No other product's localisation, string table or translated UI was
+# consulted or copied; add entries the same way.
+
+	% of all commits	٪ از همهٔ کامیت‌ها
+	(Custom)	(سفارشی)
+	(none)	(هیچ)
+	1 file	۱ فایل
+	16 bit	۱۶ بیت
+	24 bit	۲۴ بیت
+	24 bits/pixel	۲۴ بیت/پیکسل
+	32 bit	۳۲ بیت
+	32 bits/pixel	۳۲ بیت/پیکسل
+	8 bit	۸ بیت
+	About	درباره
+	Absolute	مطلق
+	Absolute Colorimetric	رنگ‌سنجی مطلق
+	Accented Edges	لبه‌های برجسته
+	Accessibility	دسترس‌پذیری
+	Accurate	دقیق
+	Actions	کنش‌ها
+	Activate Panel	فعال‌کردن پنل
+	Active	فعال
+	Actual Size	اندازهٔ واقعی
+	Adaptive	انطباقی
+	Add	افزودن
+	Add a comment	افزودن نظر
+	Add Guide	افزودن راهنما
+	Add to Dictionary	افزودن به واژه‌نامه
+	Add to favorites	افزودن به برگزیده‌ها
+	Add to Swatches	افزودن به نمونه‌رنگ‌ها
+	Adjust	تنظیم
+	Adjustments	تنظیمات
+	Advanced	پیشرفته
+	Align	تراز
+	Align center	تراز وسط
+	Align Left	تراز چپ
+	Align left	تراز چپ
+	Align Right	تراز راست
+	Align right	تراز راست
+	Align Text	تراز متن
+	Align to Selection	تراز با انتخاب
+	Alignment	ترازبندی
+	Alignment:	ترازبندی:
+	All	همه
+	All Caps	همه حروف بزرگ
+	All Categories	همهٔ دسته‌ها
+	All files	همهٔ فایل‌ها
+	All Layers	همهٔ لایه‌ها
+	All pages	همهٔ صفحه‌ها
+	All Slices	همهٔ برش‌ها
+	Alpha	آلفا
+	Alt	Alt
+	Always	همیشه
+	Amount	میزان
+	Amount:	میزان:
+	Angle	زاویه
+	Angle:	زاویه:
+	Angular	زاویه‌دار
+	Animation	پویانمایی
+	Animation effects	جلوه‌های پویانمایی
+	Anti-Alias	ضدپله
+	Anti-alias	ضدپله
+	Any	هر
+	Appearance	ظاهر
+theme	Appearance	ظاهر
+	Appearance Settings…	تنظیمات ظاهر…
+	Application	برنامه
+	Apply	اعمال
+	Apply Character Style	اعمال سبک کاراکتر
+	Apply Data Set	اعمال مجموعهٔ داده
+	Apply to:	اعمال بر:
+	Arc	کمان
+	Area	ناحیه
+	Arrange	چیدن
+	Arrow	فلش
+	Arrows	فلش‌ها
+	Artboard	بوم هنری
+	Artboards	بوم‌های هنری
+	ArtCraft	ArtCraft
+	ArtCraft Website	وبگاه ArtCraft
+	ArtCraft website	وبگاه ArtCraft
+	Artistic	هنری
+	Ascending	صعودی
+	Aspect Ratio	نسبت ابعاد
+	Assign	تخصیص
+	Assign Profile…	تخصیص نمایه…
+	Audio	صدا
+	Author	نویسنده
+	Author:	نویسنده:
+	Auto	خودکار
+	Auto ({percent}%)	خودکار ({percent}٪)
+	Auto Color	رنگ خودکار
+	Automate	خودکارسازی
+	Automatic	خودکار
+	Automatically	به‌صورت خودکار
+	Available	در دسترس
+	Average	میانگین
+	Background	پس‌زمینه
+	Background Color	رنگ پس‌زمینه
+	Background Contents	محتویات پس‌زمینه
+	Backspace	Backspace
+	Balance	تعادل
+	Bar	میله
+	Baseline	خط پایه
+	Baseline Shift	جابه‌جایی خط پایه
+	Basic	پایه
+	Basic Latin	لاتین پایه
+	Batch	دسته‌ای
+	Batch…	دسته‌ای…
+	Bend:	خم:
+	Bicubic	دوسطحی
+	Binary assets added	دارایی‌های دودویی افزوده‌شده
+	Binary assets removed	دارایی‌های دودویی حذف‌شده
+	Bitmap	بیت‌نقشه
+	Black	سیاه
+	Black & White	سیاه و سفید
+	Black and white	سیاه و سفید
+	Black Intensity	شدت سیاه
+	Blacks	سیاه‌ها
+	Blend Mode	حالت آمیزش
+	Blending Mode	حالت آمیزش
+	Block	بلوک
+	Blocks	بلوک‌ها
+	Blue	آبی
+	Blur	محو
+	Blur Angle	زاویهٔ محو
+	Bold	پررنگ
+	Border	حاشیه
+	Border Thickness	ضخامت حاشیه
+	Borders	حاشیه‌ها
+	Both	هر دو
+	Both sides	هر دو طرف
+	Bottom	پایین
+	Bottom Left	پایین چپ
+	Bottom Right	پایین راست
+	Bottom:	پایین:
+	Break Link	شکستن پیوند
+	Brick	آجری
+	Brightness	روشنایی
+	Bring Forward	آوردن به جلو
+	Bring to Front	آوردن به پیش
+	Brown	قهوه‌ای
+	Browse	مرور
+	Browse…	مرور…
+	Brush Size	اندازهٔ قلم‌مو
+	Brush Strokes	ضربه‌های قلم‌مو
+	Brushes	قلم‌موها
+	Bulge	برآمدگی
+	Bullet	گلوله
+	Burlap	کرباس
+	Calculate	محاسبه
+	Cancel	لغو
+	Canvas	بوم
+	Caption	عنوان
+	Cascade	آبشاری
+	Case Sensitive	حساس به بزرگی حروف
+	Category	دسته
+	Category:	دسته:
+	Cell Size	اندازهٔ خانه
+	Center	مرکز
+	Center X	مرکز X
+	Center Y	مرکز Y
+	Centered	وسط‌چین
+	Centimeters	سانتی‌متر
+	Chamfer	پخ
+	Change	تغییر
+	Change All	تغییر همه
+	Change Case	تغییر حالت حروف
+	Change Panel Layout	تغییر چیدمان پنل
+	Channel	کانال
+	Channel Mixer	آمیزندهٔ کانال
+	Channels	کانال‌ها
+	Character	کاراکتر
+	Character Styles	سبک‌های کاراکتر
+	Characters	کاراکترها
+	Check for Updates	بررسی به‌روزرسانی‌ها
+	Check for updates	بررسی به‌روزرسانی‌ها
+	Check Spelling…	بررسی املا…
+	Checkerboard	صفحه‌شطرنجی
+	Choose…	انتخاب…
+	Circle	دایره
+	City	شهر
+	Clarity	شفافیت
+	Classic	کلاسیک
+	Clear	پاک‌کردن
+	Clear All	پاک‌کردن همه
+	Clear Guides	پاک‌کردن راهنماها
+	Clear History	پاک‌کردن تاریخچه
+	Clear Recent Files	پاک‌کردن فایل‌های اخیر
+	Clipboard	کلیپ‌بورد
+	Clipping Mask	ماسک برشی
+	Clone	همانندسازی
+	Close	بستن
+	Close (Esc)	بستن (Esc)
+	Close All	بستن همه
+	Close Panel	بستن پنل
+	Cmd	Cmd
+	CMYK Color	رنگ CMYK
+	CMYK:	CMYK:
+	Coarse Dots	نقطه‌های درشت
+	Collapse	جمع‌کردن
+	Collate	ترتیب‌دادن
+	Color	رنگ
+	Color Balance	تعادل رنگ
+	Color Burn	سوزاندن رنگ
+	Color Dodge	روشن‌کردن رنگ
+	Color Management	مدیریت رنگ
+	Color Mode	حالت رنگ
+	Color Picker	انتخابگر رنگ
+	Color Settings	تنظیمات رنگ
+	Color Settings…	تنظیمات رنگ…
+	Color Space	فضای رنگ
+	Color Swatches	نمونه‌رنگ‌ها
+	Color Table	جدول رنگ
+	Color:	رنگ:
+	Colorize	رنگ‌آمیزی
+	Colors	رنگ‌ها
+	Colors:	رنگ‌ها:
+	Color…	رنگ…
+	Colour	رنگ
+	Column width	عرض ستون
+	Columns	ستون‌ها
+	Columns:	ستون‌ها:
+	Combine	ترکیب
+	Command	فرمان
+	Commands:	فرمان‌ها:
+	Comment	نظر
+	Comments	نظرها
+	Commits	کامیت‌ها
+	Community	انجمن
+	Company	شرکت
+	Compare	مقایسه
+	Comparison	مقایسه
+	Compatibility	سازگاری
+	Composite	ترکیبی
+	Compression	فشرده‌سازی
+	Cone	مخروط
+	Contains	شامل می‌شود
+	Continue	ادامه
+	Contrast	کنتراست
+	Contributors	مشارکت‌کنندگان
+	Convert	تبدیل
+	Convert to Shape	تبدیل به شکل
+	Convert to sRGB	تبدیل به sRGB
+	Copies	نسخه‌ها
+	Copies:	نسخه‌ها:
+	Copy	رونوشت
+	Copyright	حق مؤلف
+	Copyrighted	دارای حق مؤلف
+	Corner	گوشه
+	Corners	گوشه‌ها
+	Correction	اصلاح
+	Couldn't open {name}: {e}	باز کردن {name} ناموفق بود: {e}
+@msg	Couldn't open {name}: {e}	باز کردن {name} ناموفق بود: {e}
+	Country	کشور
+	Crack Brightness	روشنایی ترک
+	Crack Depth	عمق ترک
+	Crack Spacing	فاصلهٔ ترک
+	Create	ساختن
+	Create Clipping Mask	ساختن ماسک برشی
+	Crop	برش
+	Cross	متقاطع
+	Crosshatch	هاشور متقاطع
+	Crystallize	بلورین‌سازی
+	Crystallize…	بلورین‌سازی…
+	Ctrl	Ctrl
+	Current	جاری
+	Current page	صفحهٔ جاری
+	Current Time	زمان جاری
+	Curvature	خمیدگی
+	Curve	منحنی
+	Curves	منحنی‌ها
+	Curves…	منحنی‌ها…
+	Custom	سفارشی
+	Customize…	سفارشی‌سازی…
+	Cut	برش
+	Cyan	فیروزه‌ای
+	Dark	تیره
+	Dark Gray	خاکستری تیره
+	Dark gray	خاکستری تیره
+	Dark Strokes	ضربه‌های تیره
+	Dark Theme	پوستهٔ تیره
+	Darken	تیره‌کردن
+	Darkness	تیرگی
+	Dashed	خط‌چین
+	Data	داده
+	Data Sets	مجموعه‌های داده
+	Date	تاریخ
+	Date and Time	تاریخ و ساعت
+	Date Created	تاریخ ساخت
+	Date format	قالب تاریخ
+	Dates	تاریخ‌ها
+	De-Interlace	رفع درهم‌بافتگی
+	Decrease Font Size	کاهش اندازهٔ قلم
+	Default	پیش‌فرض
+	Delete	حذف
+	Delete Brush	حذف قلم‌مو
+	Delete Group	حذف گروه
+	Delete Layer	حذف لایه
+	Delete Mask	حذف ماسک
+	Delete Style	حذف سبک
+	Delete Workspace	حذف فضای کار
+	Deleted	حذف‌شده
+	Delete…	حذف…
+	Depth	عمق
+	Desaturate	کم‌اشباع‌سازی
+	Descending	نزولی
+	Description	توضیح
+	Description:	توضیح:
+	Deselect	لغو انتخاب
+	Deselect All	لغو انتخاب همه
+	Destination	مقصد
+	Destination:	مقصد:
+	Details	جزئیات
+	Diagonal	مورب
+	Diameter	قطر
+	Diameter:	قطر:
+	Diamond	لوزی
+	Difference	تفاوت
+	Diffuse Glow	درخشش پخش‌شده
+	Diffusion	پخش
+	Digits	ارقام
+	Dimensions	ابعاد
+	Direct Selection Tool	ابزار انتخاب مستقیم
+	Direction	جهت
+	Direction Balance	تعادل جهت
+	Direction:	جهت:
+	Discard	دور انداختن
+	Discord	Discord
+	Discretionary Ligatures	لیگاتورهای اختیاری
+	Dismiss	رد کردن
+	Display	نمایش
+	Display name	نام نمایش
+	Distance	فاصله
+	Distort	اعوجاج
+	Distortion	اعوجاج
+	Distribute	توزیع
+	Divide	تقسیم
+	Dock Panel	پنل داک
+	Document	سند
+	Document Title	عنوان سند
+	Documents	سندها
+	Don't Save	ذخیره نکن
+	Done	انجام شد
+	Dot	نقطه
+	Dots	نقطه‌ها
+	Dotted	نقطه‌چین
+	Double-click	دوبار کلیک
+	Down	پایین
+	Download	بارگیری
+	Draft	پیش‌نویس
+	Draw	ترسیم
+	Drop Shadow	سایهٔ افتاده
+	Drop Shadow…	سایهٔ افتاده…
+	Duplicate	تکثیر
+	Duplicate Layer	تکثیر لایه
+	Duplicate…	تکثیر…
+	Duplication	تکثیر
+	Duration	مدت
+	Dutch	هلندی
+	Dynamic	پویا
+	Dynamics	پویایی
+	Edge	لبه
+	Edge Brightness	روشنایی لبه
+	Edge Intensity	شدت لبه
+	Edge Only	فقط لبه
+	Edge Simplicity	سادگی لبه
+	Edge Thickness	ضخامت لبه
+	Edge Width	عرض لبه
+	Edit	ویرایش
+	Edit Contents	ویرایش محتوا
+	Edit Original	ویرایش اصلی
+	Edit Toolbar	ویرایش نوارابزار
+	Editing	ویرایش
+	Edit…	ویرایش…
+	Effect	جلوه
+	Effects	جلوه‌ها
+	Elevation	ارتفاع
+	Eliminate	حذف
+	Ellipse	بیضی
+	Ellipse Tool	ابزار بیضی
+	Ellipsis	سه‌نقطه
+	Em Dash	خط بلند Em
+	Em Space	فاصلهٔ Em
+	Embed	جای‌گذاری
+	Emboss	برجسته‌سازی
+	En Dash	خط کوتاه En
+	En Space	فاصلهٔ En
+	Enable	فعال‌کردن
+	Endpoint	نقطهٔ پایانی
+	Enlarged	بزرگ‌شده
+	Enter	Enter
+	Entire Font	کل قلم
+	Envelope DL	پاکت DL
+	Erase	پاک‌کردن
+	Eraser	پاک‌کن
+	Eraser Tool	ابزار پاک‌کن
+	Error	خطا
+	Even Fields	میدان‌های زوج
+	Even pages only	فقط صفحه‌های زوج
+	Exact	دقیق
+	Example: {sample}	مثال: {sample}
+	Exclusion	طرد
+	Exit	خروج
+	Expand	گسترش
+	Export	برون‌بری
+	Export As	برون‌بری به‌عنوان
+	Export As…	برون‌بری به‌عنوان…
+	Export Options	گزینه‌های برون‌بری
+	Export PDF	برون‌بری PDF
+	Export to	برون‌بری به
+	Exported to {path}	برون‌بری شد به {path}
+	Exported {path}	برون‌بری‌شده {path}
+	Export…	برون‌بری…
+	Exposure	نوردهی
+	Expression	عبارت
+	Extract	استخراج
+	Eyedropper	قطره‌چکان
+	Eyedropper Tool	ابزار قطره‌چکان
+	Faded Film	فیلم محو
+	Fast	سریع
+	Favorites	برگزیده‌ها
+	Feather	پرمانند
+	Field	فیلد
+	Field properties	ویژگی‌های فیلد
+	Fields	فیلدها
+	Fields:	فیلدها:
+	File	فایل
+	File Format	قالب فایل
+	File Handling	مدیریت فایل
+	File Info…	اطلاعات فایل…
+	File Name	نام فایل
+	File Size	اندازهٔ فایل
+@id	file.close	بستن
+	Files	فایل‌ها
+	Fill	پُرکننده
+	Fill:	پُرکننده:
+	Filter	پالایه
+	Find	یافتن
+	Find and Replace	یافتن و جایگزینی
+	Find Next	یافتن بعدی
+	Find:	یافتن:
+	Find…	یافتن…
+	Fine Dots	نقطه‌های ریز
+	Finish	پایان
+	First	اول
+	First commit	اولین کامیت
+	Fit	جای‌دادن
+	Fit in View	جای‌دادن در نما
+	Fixed	ثابت
+	Flash	فلاش
+	Flatten	تخت‌سازی
+	Flip	وارونه‌سازی
+	Flip Horizontal	وارونه‌سازی افقی
+	Flip Vertical	وارونه‌سازی عمودی
+	Focus	فوکوس
+	Folder	پوشه
+	Font	قلم
+	Font Size	اندازهٔ قلم
+	Font size	اندازهٔ قلم
+	Font Size:	اندازهٔ قلم:
+	Font:	قلم:
+	Fonts	قلم‌ها
+	Format	قالب
+	Format:	قالب:
+	Fractions	کسرها
+	Frame	قاب
+	Free	آزاد
+	Free Transform	تبدیل آزاد
+	French	فرانسوی
+	Frequency	بسامد
+	From	از
+	Frosted	مات
+	Full	کامل
+	Full Screen	تمام‌صفحه
+	Full Screen Mode	حالت تمام‌صفحه
+	Functions	توابع
+	Gamma	گاما
+	Gamma Correction	اصلاح گاما
+	Gamut Warning	هشدار گاموت
+	Gaussian Blur	محوی گاوسی
+	Gaussian Blur…	محوی گاوسی…
+	General	عمومی
+	General…	عمومی…
+	Generate	تولید
+	Geometry	هندسه
+	German	آلمانی
+	GitHub	GitHub
+	Glass	شیشه
+	Global	سراسری
+	Glow	درخشش
+	Glow Brightness	روشنایی درخشش
+	Glow Size	اندازهٔ درخشش
+	Glyphs	گلیف‌ها
+	Good	خوب
+	Gradient	گرادیان
+	Gradient Tool	ابزار گرادیان
+	Gradients	گرادیان‌ها
+	Grain	دانه
+	Grain Type	نوع دانه
+	Graininess	دانه‌داری
+	Grainy Dots	نقطه‌های دانه‌دار
+	Graphic	نگاره
+	Graphics	نگاره‌ها
+	Gray	خاکستری
+	Gray Gamma 2.2	گامای خاکستری ۲٫۲
+	Grayscale	خاکستری
+	Green	سبز
+	Grid	شبکه
+	Grid Size:	اندازهٔ شبکه:
+	Grid view	نمای شبکه
+	Gridline every	خط شبکه هر
+	Group	گروه
+	Group with	گروه با
+	Groups	گروه‌ها
+	Grout Width	عرض بند
+	Guides	راهنماها
+	Halftone Pattern	الگوی نیم‌لایه
+	Hand	دست
+	Hand Tool	ابزار دست
+	Hard	سخت
+	Hard Light	نور سخت
+	Hard Mix	آمیزش سخت
+	Headings	سرتیترها
+	Heart	قلب
+	Height	ارتفاع
+	Height:	ارتفاع:
+	Help	راهنما
+	Hexagon	شش‌ضلعی
+	Hidden	پنهان
+	Hidden text	متن پنهان
+	Hide	پنهان‌کردن
+	Hide All	پنهان‌کردن همه
+	Hide Grid	پنهان‌کردن شبکه
+	Hide Others	پنهان‌کردن دیگران
+	High	زیاد
+	High Pass	گذر بالا
+	High Resolution	تفکیک‌پذیری بالا
+	High resolution	تفکیک‌پذیری بالا
+	Highlight Area	ناحیهٔ برجسته‌سازی
+	Highlights	برجسته‌ها
+	Hindi	هندی
+	Histogram	هیستوگرام
+	History	تاریخچه
+	Hollow	توخالی
+	Home	خانه
+	Horizontal	افقی
+	Horizontal scale	مقیاس افقی
+	Horizontally	افقی
+	Hue	فام
+	Hue Shift	جابه‌جایی فام
+	Hue/Saturation…	فام/اشباع…
+	Hyphenation	خط‌تیره‌گذاری
+	Icon	نماد
+	Ignore	نادیده بگیر
+	Ignore All	نادیده‌گرفتن همه
+	Image	تصویر
+	Image Size	اندازهٔ تصویر
+	Images	تصاویر
+	Import	درون‌ریزی
+	Import…	درون‌ریزی…
+	Inches	اینچ
+	Increase Font Size	افزایش اندازهٔ قلم
+	Index	نمایه
+	Inflate	بادکردن
+	Info	اطلاعات
+	Inner Glow…	درخشش درونی…
+	Input:	ورودی:
+	Insert	درج
+	Inside	داخل
+	Inspect Document	بررسی سند
+	Install Plug-in	نصب افزونه
+	Install Plug-in…	نصب افزونه…
+	Intensity	شدت
+	Interface	رابط
+	Interface Language	زبان رابط
+	Interface language	زبان رابط
+	Interface Theme	پوستهٔ رابط
+	Interlaced	درهم‌بافته
+	Interpolation	درون‌یابی
+	Intersect	اشتراک
+	Intersection	اشتراک
+	Invert	معکوس
+	Invert Mask	معکوس ماسک
+	Isolate	جداکردن
+	Italian	ایتالیایی
+	Italic	ایتالیک
+	Japanese	ژاپنی
+	Join	پیوستن
+	Join our Discord	به Discord ما بپیوندید
+	Join the ArtCraft Discord	به Discord ArtCraft بپیوندید
+	Join the ArtCraft Discord…	به Discord ArtCraft بپیوندید…
+	Join us on Discord	در Discord به ما بپیوندید
+	just now	همین حالا
+	Justification	ترازبندی
+	Justify	هم‌تراز
+	Keep:	نگه‌داشتن:
+	Kerning	فاصله‌بندی
+	Keyboard Shortcuts	میان‌برهای صفحه‌کلید
+	Keyboard Shortcuts…	میان‌برهای صفحه‌کلید…
+	Keywords	کلیدواژه‌ها
+	Kind	نوع
+	Korean	کره‌ای
+	Lab	Lab
+	Label	برچسب
+	Labels	برچسب‌ها
+	Landscape	افقی
+	Language	زبان
+	Language Options	گزینه‌های زبان
+@id	language.name	فارسی
+	Language:	زبان:
+	Large	بزرگ
+	Lasso	کمند
+	Lasso Tool	ابزار کمند
+	Last	آخر
+	Last commit	آخرین کامیت
+	Later	بعداً
+	Layer	لایه
+	Layers	لایه‌ها
+	Layout	چیدمان
+	Layout:	چیدمان:
+	Leading	فاصلهٔ خط
+	Left	چپ
+	Left Diagonal	مورب چپ
+	Left to Right	چپ به راست
+	Left:	چپ:
+	Legal	Legal
+	Length	طول
+	Length:	طول:
+	Lens Flare	تابش عدسی
+	Less	کمتر
+	Letter	Letter
+	Level	سطح
+	Level 1	سطح ۱
+	Level 2	سطح ۲
+	Level 3	سطح ۳
+	Level 4	سطح ۴
+	Levels	سطوح
+	Levels…	سطوح…
+	Libraries	کتابخانه‌ها
+	Library	کتابخانه
+	Light	روشن
+	Light Blue	آبی روشن
+	Light Direction	جهت نور
+	Light Gray	خاکستری روشن
+	Light gray	خاکستری روشن
+	Light Intensity	شدت نور
+	Light Theme	پوستهٔ روشن
+	Light Type	نوع نور
+	Lighten	روشن‌کردن
+	Lighter Color	رنگ روشن‌تر
+	Lighting	نورپردازی
+	Lighting Effects	جلوه‌های نورپردازی
+	Lightness	روشنی
+	Line	خط
+	Line delta	دلتای خط
+	Line spacing	فاصلهٔ خط
+	Linear	خطی
+	Linear Burn	سوزاندن خطی
+	Linear Gradient	گرادیان خطی
+	Linear Light	نور خطی
+	Lines	خطوط
+	Lines +/−	خطوط +/−
+	Lines added	خطوط افزوده‌شده
+	Lines deleted	خطوط حذف‌شده
+	Link	پیوند
+	Links	پیوندها
+	List	فهرست
+	List View	نمای فهرست
+	List view	نمای فهرست
+	Location	مکان
+	Location:	مکان:
+	Lock	قفل
+	Lock Guides	قفل راهنماها
+	Lock Slices	قفل برش‌ها
+	Locked	قفل‌شده
+	Long Lines	خطوط بلند
+	Long Strokes	ضربه‌های بلند
+	Low	کم
+	lowercase	حروف کوچک
+	Luminance	درخشندگی
+	Luminosity	درخشندگی
+	Magenta	ارغوانی
+	Magic Wand Tool	ابزار عصای جادویی
+	Magnification	بزرگ‌نمایی
+	Margins	حاشیه‌ها
+	Mask	ماسک
+	Masks	ماسک‌ها
+	Matte	مات
+	Maximize	بیشینه‌سازی
+	Maximum	بیشینه
+	Measure	اندازه‌گیری
+	Median	میانه
+	Medium	متوسط
+	Medium Dots	نقطه‌های متوسط
+	Medium Gray	خاکستری متوسط
+	Medium Lines	خطوط متوسط
+	Merge	ادغام
+	Merge Cells	ادغام خانه‌ها
+	Merge Layers	ادغام لایه‌ها
+	Merged PRs	PRهای ادغام‌شده
+	Mesh	مش
+	Message:	پیام:
+	Metadata	فراداده
+	Method	روش
+	Method:	روش:
+	Mezzotint	مِزوتیپ
+	Mezzotint…	مِزوتیپ…
+	Middle	میانه
+	Midpoint	نقطهٔ میانین
+	Midtones	میان‌لایه‌ها
+	Millimeters	میلی‌متر
+	Minimize	کمینه‌سازی
+	Minimum	کمینه
+	Mirror	آینه
+	Missing	گم‌شده
+	Mobile	موبایل
+	Mode	حالت
+	Mode:	حالت:
+	Model	مدل
+	Models	مدل‌ها
+	Modern	مدرن
+	Modified	تغییر‌یافته
+	Modify	ویرایش
+	Monitor RGB	RGB نمایشگر
+	Mono	تَک
+	Monochrome	تَکرنگ
+	More	بیشتر
+	Mosaic	موزاییک
+	Mosaic Tiles	کاشی‌های موزاییک
+	Motion	حرکت
+	Move	جابه‌جایی
+	Move Down	جابه‌جایی به پایین
+	Move Panel	جابه‌جایی پنل
+	Move Up	جابه‌جایی به بالا
+	Multiply	ضرب
+	Name	نام
+	Name (A–Z)	نام (الف–ی)
+	Name:	نام:
+	Navigation	ناوبری
+	Navigator	ناوبر
+	Neon Glow	درخشش نئون
+	Never	هرگز
+	New	جدید
+	New Document	سند جدید
+	New document	سند جدید
+	New from Template	جدید از قالب
+	New Group	گروه جدید
+	New Guide	راهنمای جدید
+	New Layer	لایهٔ جدید
+	New Layer…	لایهٔ جدید…
+	New Style…	سبک جدید…
+	New Swatch…	نمونه‌رنگ جدید…
+	New Window	پنجرهٔ جدید
+	New Workspace	فضای کار جدید
+	New Workspace…	فضای کار جدید…
+	New…	جدید…
+	Next	بعدی
+	Next Appearance Mode	حالت ظاهر بعدی
+	Next Change	تغییر بعدی
+	Next Page	صفحهٔ بعدی
+	Next page	صفحهٔ بعدی
+	No	نه
+	No Color	بدون رنگ
+	No Dither	بدون بازآمیزی
+	No Document	بدون سند
+	No document	بدون سند
+	No document open	هیچ سندی باز نیست
+	No limit	بدون محدودیت
+	No matches.	مطابقتی نیست.
+	No matching commands	فرمان مطابقتی نیست
+	No recent files	فایل اخیری نیست
+	No results	نتیجهای نیست
+	No Selection	بدون انتخاب
+	No selection	بدون انتخاب
+	Noise	نویز
+	Nonbreaking Space	فاصلهٔ نشکستنی
+	None	هیچ
+	Normal	عادی
+	Not available	در دسترس نیست
+	NTSC Colors	رنگ‌های NTSC
+	Number	شماره
+	Object	شیء
+	Octagon	هشت‌ضلعی
+	Odd Fields	میدان‌های فرد
+	Odd pages only	فقط صفحه‌های فرد
+	Off	خاموش
+	Offline	آفلاین
+	Offset	افست
+	Offset:	افست:
+	OK	تأیید
+	Omit	حذف
+	On	روشن
+	Only Web Colors	فقط رنگ‌های وب
+	Opacity	کدری
+	Opacity:	کدری:
+	Open	باز کردن
+	Open link	باز کردن پیوند
+	Open Recent	باز کردن اخیر
+	OpenType	OpenType
+	Open…	باز کردن…
+	Optimized	بهینه‌شده
+	Options	گزینه‌ها
+	Options…	گزینه‌ها…
+	Orange	نارنجی
+	Ordinals	اعداد ترتیبی
+	Orientation	جهت‌گیری
+	Orientation:	جهت‌گیری:
+	Original	اصلی
+	Other	دیگر
+	Outer Glow…	درخشش بیرونی…
+	Outline	خط دور
+	Output	خروجی
+	Output:	خروجی:
+	Outside	بیرون
+	Oval	بیضوی
+	Overlap:	هم‌پوشانی:
+	Overlay	رویه
+	Package…	بسته‌بندی…
+	Page	صفحه
+	Page {page} of {pages}	صفحهٔ {page} از {pages}
+	Pages	صفحه‌ها
+	Painting	نقاشی
+	Panel	پنل
+	Panel menu	منوی پنل
+	Panel Options…	گزینه‌های پنل…
+	Panels	پنل‌ها
+	Paper	کاغذ
+	Paragraph	پاراگراف
+	Paragraph Styles	سبک‌های پاراگراف
+	Password	گذرواژه
+	Paste	چسباندن
+	Paste Special	چسباندن ویژه
+	Patchwork	تکه‌دوزی
+	Path	مسیر
+	Path:	مسیر:
+	Paths	مسیرها
+	Pattern	الگو
+	Pattern Type	نوع الگو
+	Pause	مکث
+	Pen	قلم
+	Pen Tool	ابزار قلم
+	Pencil	مداد
+	Pencil Tool	ابزار مداد
+	Pentagon	پنج‌ضلعی
+	Percent	درصد
+	Percentage	درصد
+	Performance	کارایی
+	Perimeter	محیط
+	Perspective	پرسپکتیو
+	Photo	عکس
+	Photocopy	فتوکپی
+	Picas	پیکا
+	Pin Light	نور سنجاقی
+	Pink	صورتی
+	Pixel	پیکسل
+	Pixelate	پیکسلی‌سازی
+	Pixels	پیکسل‌ها
+	Play	پخش
+	Plug-ins	افزونه‌ها
+	Point	نقطه
+	Pointillize	نقطه‌چین‌سازی
+	Pointillize…	نقطه‌چین‌سازی…
+	Points	نقطه‌ها
+	Polygon	چندضلعی
+	Polygon Tool	ابزار چندضلعی
+	Polyline	چندخطی
+	Portrait	عمودی
+	Portuguese	پرتغالی
+	Position	موقعیت
+	Position:	موقعیت:
+	Postcard	کارت‌پستال
+	Poster	پوستر
+	Poster Edges	لبه‌های پوستری
+	Posterization	پوستری‌سازی
+	Posterize	پوستری‌سازی
+	Preferences	تنظیمات
+	Preferences…	تنظیمات…
+	Prefix	پیشوند
+	Preserve	حفظ
+	Preserve Luminosity	حفظ درخشندگی
+	Preset	پیش‌تنظیم
+	Preset Manager	مدیر پیش‌تنظیم‌ها
+	Preset:	پیش‌تنظیم:
+	Presets	پیش‌تنظیم‌ها
+	Presets:	پیش‌تنظیم‌ها:
+	Press keys…	کلیدها را بزنید…
+	Pressure	فشار
+	Preview	پیش‌نمایش
+	Previous	پیشین
+	Previous Change	تغییر پیشین
+	Previous Page	صفحهٔ پیشین
+	Previous page	صفحهٔ پیشین
+	Print	چاپ
+	Printer	چاپگر
+	Printer:	چاپگر:
+	Printing	چاپ
+	Print…	چاپ…
+	Profile	نمایه
+	Progressive	تدریجی
+	Proof Setup	راه‌اندازی اثبات
+	Properties	ویژگی‌ها
+	Protect	محافظت
+	PRs	PRها
+	Public Domain	مالکیت عمومی
+	Punctuation	نشانه‌گذاری
+	Purple	بنفش
+	Pyramid	هرم
+	Quality	کیفیت
+	Quick Actions	اقدامات سریع
+	Radial	شعاعی
+	Radial Blur	محوی شعاعی
+	Radial Blur…	محوی شعاعی…
+	Radial Gradient	گرادیان شعاعی
+	Radius	شعاع
+	Radius:	شعاع:
+	Random	تصادفی
+	Range	محدوده
+	Range:	محدوده:
+	Rasterize	رستری‌سازی
+	Ratio	نسبت
+	Rays	پرتوها
+	Ready	آماده
+	Real name	نام واقعی
+	Recent	اخیر
+	Recent Colors	رنگ‌های اخیر
+	Recent Files	فایل‌های اخیر
+	Recover	بازیابی
+	Rectangle	مستطیل
+	Rectangle Tool	ابزار مستطیل
+	Rectangular	مستطیلی
+	Red	قرمز
+	Redo	ازنو
+	Reduce Noise	کاهش نویز
+	Refine	پالایش
+	Reflected	بازتابی
+	Refresh	بازخوانی
+	Regular	معمولی
+	Relative	نسبی
+	Relative Colorimetric	رنگ‌سنجی نسبی
+	Relaxed	آسوده
+	Relief	برجسته‌نمای
+	Reload	بارگذاری دوباره
+	Remove	حذف
+	Remove Background	حذف پس‌زمینه
+	Remove from favorites	حذف از برگزیده‌ها
+	Rename	تغییر نام
+	Rename Group…	تغییر نام گروه…
+	Rename Style	تغییر نام سبک
+	Rename…	تغییر نام…
+	Repeat	تکرار
+	Replace	جایگزینی
+	Replace:	جایگزینی:
+	Reply	پاسخ
+	Report	گزارش
+	Report an Issue…	گزارش مشکل…
+	Reselect	انتخاب دوباره
+	Reset	بازنشانی
+	Reset Preferences	بازنشانی تنظیمات
+	Reset…	بازنشانی…
+	Resize panel window	تغییر اندازهٔ پنجرهٔ پنل
+	Resize panels	تغییر اندازهٔ پنل‌ها
+	Resolution	تفکیک‌پذیری
+	Resolution:	تفکیک‌پذیری:
+	Restore	بازیابی
+	Result	نتیجه
+	Resume	ادامه
+	Reveal in Finder	نمایش در Finder
+	Reverse	معکوس‌کردن
+	Reverse the order	معکوس‌کردن ترتیب
+	Revert	بازگرداندن
+	Review	مرور
+	RGB	RGB
+	RGB Color	رنگ RGB
+	RGB:	RGB:
+	Right	راست
+	Right Diagonal	مورب راست
+	Right:	راست:
+	Rotate	چرخش
+	Rotate:	چرخش:
+	Rotation	چرخش
+	Rotation:	چرخش:
+	Rounded Rectangle	مستطیل گرد
+	Roundness	گردی
+	Roundness:	گردی:
+	Rows	سطرها
+	Ruler	خط‌کش
+	Rulers	خط‌کش‌ها
+	Rulers & Grids	خط‌کش‌ها و شبکه‌ها
+	Russian	روسی
+	Sample Size	اندازهٔ نمونه
+	Sandstone	ماسه‌سنگ
+	Saturation	اشباع
+	Save	ذخیره
+	Save a Copy	ذخیرهٔ نسخه
+	Save a Copy…	ذخیرهٔ نسخه…
+	Save As	ذخیره به‌عنوان
+	Save as PDF	ذخیره به‌عنوان PDF
+	Save as Template	ذخیره به‌عنوان قالب
+	Save as Template…	ذخیره به‌عنوان قالب…
+	Save As…	ذخیره به‌عنوان…
+	Save Preset…	ذخیرهٔ پیش‌تنظیم…
+	Save Selection	ذخیرهٔ انتخاب
+	Save Selection…	ذخیرهٔ انتخاب…
+	Saved	ذخیره‌شده
+	Save…	ذخیره…
+	Scale	مقیاس
+	Scale:	مقیاس:
+	Scaling	مقیاس‌بندی
+	Scratch Disks	دیسک‌های موقت
+	Scratch Disks…	دیسک‌های موقت…
+	Screen	صفحهٔ نمایش
+	Screen Mode	حالت صفحهٔ نمایش
+	Scripts	اسکریپت‌ها
+	Search	جست‌وجو
+	Security	امنیت
+	Segments	قطعه‌ها
+	Select	انتخاب
+	Select All	انتخاب همه
+	Select Objects	انتخاب اشیا
+	Select:	انتخاب:
+	Selected pages	صفحه‌های انتخاب‌شده
+	Selection	انتخاب
+	Selection Tool	ابزار انتخاب
+	Selective	گزینشی
+	Send Backward	فرستادن به عقب
+	Send to Back	فرستادن به پشت
+	Sensitivity	حساسیت
+	Sent to {printer}	فرستاده شد به {printer}
+	Services	سرویس‌ها
+	Set	تعیین
+	Set as Default	تعیین به‌عنوان پیش‌فرض
+	Set:	تعیین:
+	Settings	تنظیمات
+	Settings:	تنظیمات:
+	Settings…	تنظیمات…
+	Shadow	سایه
+	Shadows	سایه‌ها
+	Shape	شکل
+	Shape Effects	جلوه‌های شکل
+	Shape:	شکل:
+	Shapes	شکل‌ها
+	Share	اشتراک
+	Sharpen	وضوح
+	Sharpness	وضوح
+	Shift	Shift
+	Short Lines	خطوط کوتاه
+	Short Strokes	ضربه‌های کوتاه
+	Shortcut	میان‌بر
+	Shortcuts	میان‌برها
+	Show	نمایش
+	Show All	نمایش همه
+	Show Grid	نمایش شبکه
+	Show Guides	نمایش راهنماها
+	Show in Folder	نمایش در پوشه
+	Show Mask	نمایش ماسک
+	Show Mesh	نمایش مش
+	Show Rulers	نمایش خط‌کش‌ها
+	Show rulers	نمایش خط‌کش‌ها
+	Show Tool Tips	نمایش نکته‌های ابزار
+	Show:	نمایش:
+	Sides:	ضلع‌ها:
+	Simplify	ساده‌سازی
+	Size	اندازه
+	Size:	اندازه:
+	Sketch	طرح
+	Skew	اریب
+	Slice	برش
+	Slice Options	گزینه‌های برش
+	Slice Options…	گزینه‌های برش…
+	Slice Tool	ابزار برش
+	Slices	برش‌ها
+	Small	کوچک
+	Small Caps	حروف بزرگ کوچک
+	Smart Blur	محوی هوشمند
+	Smart Blur…	محوی هوشمند…
+	Smart Guides	راهنماهای هوشمند
+	Smart quotes	گیومه‌های هوشمند
+	Smoothness	نرمی
+	Snap to Grid	چسبیدن به شبکه
+	Soft	نرم
+	Soft Light	نور نرم
+	Soften	نرم‌کردن
+	Softness	نرمی
+	Solarize	خورشیدی‌سازی
+	Sort	مرتب‌سازی
+	Sort by	مرتب‌سازی بر پایهٔ
+	Source	منبع
+	Source code on GitHub	کد منبع در GitHub
+	Spaces	فاصله‌ها
+	Spacing	فاصله‌گذاری
+	Spacing:	فاصله‌گذاری:
+	Spanish	اسپانیایی
+	Spatter	پاشیدن
+	Special	ویژه
+	Speckle	لکه‌افشانی
+	Speed	سرعت
+	Spelling	املا
+	Spherize	کره‌ای‌سازی
+	Split	تقسیم
+	Spot Color	رنگ نقطه‌ای
+	Spray Radius	شعاع پاشش
+	Square	مربع
+	Square Size	اندازهٔ مربع
+	sRGB IEC61966-2.1	sRGB IEC61966-2.1
+	Stacked	انباشته
+	Stained Glass	شیشهٔ رنگی
+	Stamp	مهر
+	Standard	استاندارد
+	Standard Ligatures	لیگاتورهای استاندارد
+	Star	ستاره
+	Start at:	شروع از:
+	Statistics	آمار
+	Status	وضعیت
+	Status Bar	نوار وضعیت
+	Stippled	نقطه‌نقطه
+	Stop	توقف
+	Strength	قدرت
+	Stretch	کشش
+	Strikethrough	خط‌خورده
+	Stroke	ضربه
+	Stroke Color	رنگ ضربه
+	Stroke Length	طول ضربه
+	Stroke Options	گزینه‌های ضربه
+	Stroke:	ضربه:
+	Studio	Studio
+	Style	سبک
+	Style:	سبک:
+	Styles	سبک‌ها
+	Stylize	سبک‌سازی
+	Subdivisions	زیربخش‌ها
+	Subject	موضوع
+	Subscript	زیرنویس
+	Subset	زیرمجموعه
+	Subtitle	زیرعنوان
+	Subtract	تفریق
+	Sumi-e	سومی‌ئه
+	Summary	خلاصه
+	Superscript	بالانویس
+	Swatches	نمونه‌رنگ‌ها
+	Symbol	نماد
+	Symbols	نمادها
+	Sync with system	همگام‌سازی با سیستم
+	System	سیستم
+	Tab	تب
+	Table	جدول
+	Table style	سبک جدول
+	Tables	جدول‌ها
+	Tabloid	Tabloid
+	Tabs	تب‌ها
+	Taper	باریک‌شدگی
+	Target	هدف
+	Target:	هدف:
+	Temperature	دمای رنگ
+	Templates	قالب‌ها
+	Text	متن
+	Text color	رنگ متن
+	Text:	متن:
+	Texture	بافت
+	The passwords don't match.	گذرواژه‌ها مطابقت ندارند.
+	Theme	پوسته
+	Thickness	ضخامت
+	This document has no bookmarks.	این سند هیچ نشانکی ندارد.
+	Threshold	آستانه
+	Thumbnails	تصاویر بندانگشتی
+	Tile	کاشی
+	Tile Size	اندازهٔ کاشی
+	Tilt	کجی
+	Time	زمان
+	Timecode	کد زمان
+	Timeline	خط زمان
+	Tint	ته‌رنگ
+	Tint Color	رنگ ته‌رنگ
+	Title	عنوان
+	To	به
+	Tolerance	تلورانس
+	Tolerance:	تلورانس:
+	Tool	ابزار
+	Toolbars	نوارابزارها
+	Tools	ابزارها
+	Top	بالا
+	Top Left	بالا چپ
+	Top Right	بالا راست
+	Top:	بالا:
+	Total	مجموع
+	Total:	مجموع:
+	Tracking	فاصله‌گذاری حروف
+	Transform	تبدیل
+	Translate	انتقال
+	Transparency	شفافیت
+	Transparent	شفاف
+	Trap…	تله…
+	Triangle	مثلث
+	Turbulent	آشفته
+	Twirl	چرخش‌پیچ
+	Twist	پیچش
+	Type	نوع
+	Type Tool	ابزار متن
+	Type:	نوع:
+	Typewriter	ماشین‌تحریر
+	Type…	نوع…
+	Typing	تایپ
+	Underline	زیرخط
+	Undo	واگرد
+	Undo {action}	واگرد {action}
+	Ungroup	لغو گروه
+	Uniform	یکنواخت
+	Union	اجتماع
+	Units	واحدها
+	Unknown	ناشناخته
+	Unlock	بازکردن قفل
+	Unsaved changes	تغییرات ذخیره‌نشده
+	Unsharp Mask	ماسک وضوح
+	Untitled	بی‌نام
+	Up	بالا
+	Update	به‌روزرسانی
+	Updates	به‌روزرسانی‌ها
+	UPPERCASE	حروف بزرگ
+	Use Default	استفاده از پیش‌فرض
+	User	کاربر
+	Username	نام کاربری
+	Value	مقدار
+	Value:	مقدار:
+	Variables	متغیرها
+	Version	نسخه
+	Version {version}	نسخهٔ {version}
+	Vertical	عمودی
+	Vertical Alignment	تراز عمودی
+	Vertical Type Tool	ابزار متن عمودی
+	Vertically	عمودی
+	Very High	بسیار زیاد
+	Vibrance	زنده‌رنگی
+	Video	ویدیو
+	View	نما
+	Violet	بنفشه‌ای
+	Visibility	نمایانی
+	Vivid Light	نور زنده
+	Voice	صدا
+	W:	W:
+	Warning	هشدار
+	Warnings	هشدارها
+	Warp	کج‌نمایی
+	Watermark	واترمارک
+	Wave	موج
+	Wave…	موج…
+	Web	وب
+	Website	وبگاه
+	Weight	وزن
+	Wet	خیس
+	White	سفید
+	White Intensity	شدت سفید
+	White Is High	سفید زیاد است
+	Whites	سفیدها
+	Width	عرض
+	Width and Height	عرض و ارتفاع
+	Width:	عرض:
+	Window	پنجره
+	Windows	پنجره‌ها
+	Words	واژه‌ها
+	Working CMYK	CMYK کاری
+	Workspace	فضای کار
+	Workspaces	فضاهای کار
+	X	X
+	Y	Y
+	Yellow	زرد
+	Yes	بله
+	yesterday	دیروز
+	Your changes will be lost if you don't save them.	اگر تغییرات خود را ذخیره نکنید از دست می‌روند.
+	Zoom	بزرگ‌نمایی
+	Zoom In	بزرگ‌نمایی
+	Zoom in	بزرگ‌نمایی
+	Zoom Out	کوچک‌نمایی
+	Zoom out	کوچک‌نمایی
+	Zoom Tool	ابزار بزرگ‌نمایی
+@plural	{n} byte|{n} bytes	{n} بایت|{n} بایت
+@plural	{n} commit|{n} commits	{n} کامیت|{n} کامیت
+	{n} files	{n} فایل
+	{n} h ago	{n} ساعت پیش
+@plural	{n} item|{n} items	{n} مورد|{n} مورد
+@plural	{n} Layer|{n} Layers	{n} لایه|{n} لایه
+	{n} min ago	{n} دقیقه پیش
+@plural	{n} step|{n} steps	{n} گام|{n} گام
+	−Bin	−سطل
+	● Recording	● در حال ضبط

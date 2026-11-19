@@ -4,7 +4,7 @@
 # English source strings; see nomorals/i18n/PARITY.md.
 
 Welcome to **{group}**!	Добро пожаловать в **{group}**!
-{count} member	@plural	{count} участник	{count} участника	{count} участников	{count} участника
+{count} member	@plural	{count} участник	{count} участника	{count} участников
 Answer recorded. 👍	Ответ записан. 👍
 Couldn't record that answer.	Не удалось записать этот ответ.
 Left the group.	Вы покинули группу.

@@ -1,0 +1,1102 @@
+# Svenska (sv) interface catalog for every Crafting App.
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   @plural  English `one|other`; the translation lists this language's plural forms, `|`-separated.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary. No other product's localisation, string table or translated UI was
+# consulted or copied; add entries the same way.
+
+	% of all commits	% av alla commits
+	(Custom)	(Anpassad)
+	(none)	(ingen)
+	16 bit	16 bitar
+	24 bit	24 bitar
+	24 bits/pixel	24 bitar/pixel
+	32 bit	32 bitar
+	32 bits/pixel	32 bitar/pixel
+	8 bit	8 bitar
+	About	Om
+	Absolute	Absolut
+	Absolute Colorimetric	Absolut kolorimetrisk
+	Accented Edges	Accentuerade kanter
+	Accessibility	Tillgänglighet
+	Accurate	Exakt
+	Actions	Åtgärder
+	Activate Panel	Aktivera panel
+	Actual Size	Verklig storlek
+	Adaptive	Adaptiv
+	Add	Lägg till
+	Add a comment	Lägg till en kommentar
+	Add Guide	Lägg till stödlinje
+	Add to Dictionary	Lägg till i ordlistan
+	Add to Swatches	Lägg till i färgrutor
+	Adjust	Bildjustering
+	Advanced	Avancerat
+	Align	Justera
+	Align center	Centrera
+	Align Left	Vänsterjustera
+	Align left	Justera vänster
+	Align Right	Högerjustera
+	Align right	Justera höger
+	Align Text	Justera text
+	Align to Selection	Justera mot markering
+	Alignment	Justering
+	Alignment:	Justering:
+	All	Alla
+	All Caps	Versaler
+	All Categories	Alla kategorier
+	All files	Alla filer
+	All Layers	Alla lager
+	All pages	Alla sidor
+	All Slices	Alla skivor
+	Alt	Alt
+	Amount	Antal
+	Amount:	Antal:
+	Angle	Vinkel
+	Angle:	Vinkel:
+	Angular	Vinkelmått
+	Animation	Animering
+	Anti-Alias	Kantutjämning
+	Anti-alias	Kantutjämning
+	Appearance	Utseende
+theme	Appearance	Utseende
+	Apply	Använd
+	Apply Character Style	Använd teckenstil
+	Apply Data Set	Använd datauppsättning
+	Apply to:	Använd på:
+	Arc	Båge
+	Area	Ytdiagram
+	Arrange	Ordna
+	Arrow	Pil
+	Arrows	Pilar
+	Artboard	Rityta
+	Artboards	Ritytor
+	ArtCraft Website	ArtCrafts webbplats
+	ArtCraft website	ArtCrafts webbplats
+	Artistic	Konstnärligt
+	Ascending	Stigande
+	Aspect Ratio	Bildförhållande
+	Assign	Tilldela
+	Assign Profile…	Tilldela profil…
+	Author	Författare
+	Author:	Författare:
+	Auto	Auto
+	Auto ({percent}%)	Automatisk ({percent} %)
+	Auto Color	Autofärg
+	Automatic	Automatisk
+	Automatically	Automatiskt
+	Average	Medelvärde
+	Background Contents	Bakgrundsinnehåll
+	Backspace	Backspace
+	Balance	Balans
+	Bar	Lodstreck
+	Baseline	Baseline
+	Baseline Shift	Baslinjeförskjutning
+	Basic	Grundläggande
+	Basic Latin	Grundläggande latin
+	Batch	Batch
+	Batch…	Batch…
+	Bend:	Böjning:
+	Bicubic	Bikubisk
+	Binary assets added	Tillagda binärfiler
+	Binary assets removed	Borttagna binärfiler
+	Bitmap	Bitmapp
+	Black	Svart
+	Black & White	Svartvitt
+	Black Intensity	Svartintensitet
+	Blending Mode	Blandningsläge
+	Block	Block
+	Blocks	Block
+	Blue	Blå
+	Blur	Oskärpa
+	Bold	Fet
+	Border Thickness	Kanttjocklek
+	Borders	Kantlinjer
+	Both sides	Båda sidor
+	Bottom	Nedtill
+	Bottom Left	Nere till vänster
+	Bottom Right	Nere till höger
+	Bottom:	Nederkant:
+	Break Link	Bryt länk
+	Brick	Tegel
+	Brightness	Ljusstyrka
+	Bring Forward	Flytta framåt
+	Bring to Front	Flytta längst fram
+	Brown	Brun
+	Browse…	Bläddra…
+	Brush Strokes	Penseldrag
+	Brushes	Penslar
+	Bullet	Punkt
+	Burlap	Säckväv
+	Cancel	Avbryt
+	Canvas	Arbetsyta
+	Caption	Bildtext
+	Cascade	Överlappande
+	Category	Kategori
+	Cell Size	Cellstorlek
+	Center	Center
+	Center X	Centrum X
+	Center Y	Centrum Y
+	Centered	Centrerad
+	Centimeters	Centimeter
+	Chamfer	Fasa
+	Change	Ändra
+	Change All	Ändra alla
+	Change Case	Ändra skiftläge
+	Change Panel Layout	Ändra panellayout
+	Channel	Kanal
+	Character	Tecken
+	Character Styles	Teckenstilar
+	Characters	Tecken
+	Check Spelling…	Kontrollera stavning…
+	Choose…	Välj…
+	Circle	Cirkel
+	City	Ort
+	Classic	Klassisk
+	Clear	Rensa
+	Clear All	Rensa allt
+	Clear Guides	Rensa stödlinjer
+	Clear History	Rensa historik
+	Clear Recent Files	Rensa senaste filer
+	Clipboard	Urklipp
+	Clipping Mask	Klippmask
+	Close	Stäng
+	Close All	Stäng alla
+	Close Panel	Stäng panel
+	Cmd	Cmd
+	CMYK Color	CMYK-färg
+	CMYK:	CMYK:
+	Coarse Dots	Grova punkter
+	Collapse	Komprimera
+	Collate	Sortera kopior
+	Color	Färg
+	Color Burn	Färgefterbelysning
+	Color Dodge	Färgskuggning
+	Color Management	Färghantering
+	Color Mode	Färgläge
+	Color Picker	Färgväljare
+	Color Settings	Färginställningar
+	Color Settings…	Färginställningar…
+	Color Space	Färgrymd
+	Color Swatches	Färgprover
+	Color Table	Färgtabell
+	Color:	Färg:
+	Colorize	Färglägg
+	Colors	Färger
+	Colors:	Färger:
+	Column width	Kolumnbredd
+	Columns	Kolumner
+	Columns:	Kolumner:
+	Combine	Kombinera
+	Command	Kommando
+	Commands:	Kommandon:
+	Comment	Kommentar
+	Comments	Kommentarer
+	Commits	Commits
+	Community	Gemenskap
+	Company	Företag
+	Compare	Jämför
+	Comparison	Jämförelse
+	Composite	Komposit
+	Compression	Komprimering
+	Cone	Kon
+	Contains	Innehåller
+	Continue	Fortsätt
+	Contrast	Kontrast
+	Contributors	Bidragsgivare
+	Convert	Konvertera
+	Convert to Shape	Konvertera till form
+	Convert to sRGB	Konvertera till sRGB
+	Copies	Kopior
+	Copies:	Kopior:
+	Copy	Kopiera
+	Copyright	Upphovsrätt
+	Copyrighted	Upphovsrättsskyddad
+	Corner	Hörn
+	Corners	Hörn
+@msg	Couldn't open {name}: {e}	Kunde inte öppna {name}: {e}
+	Country	Land
+	Crack Brightness	Sprickornas ljusstyrka
+	Crack Depth	Sprickdjup
+	Crack Spacing	Sprickavstånd
+	Create	Skapa
+	Create Clipping Mask	Skapa klippmask
+	Crop	Beskär
+	Cross	Kryss
+	Crosshatch	Korsskraffering
+	Crystallize	Kristallisera
+	Crystallize…	Kristallisera…
+	Ctrl	Ctrl
+	Current	Aktuell
+	Current page	Aktuell sida
+	Curvature	Krökning
+	Curves…	Kurvor…
+	Custom	Anpassad
+	Customize…	Anpassa…
+	Cut	Klipp ut
+	Cyan	Cyan
+	Dark	Mörkt
+	Dark Gray	Mörkgrå
+	Dark Strokes	Mörka penseldrag
+	Darken	Mörkare
+	Darkness	Mörkhet
+	Dashed	Streckad
+	Data	Data
+	Data Sets	Datauppsättningar
+	Date and Time	Datum och tid
+	Date format	Datumformat
+	Dates	Datum
+	De-Interlace	Avfläta
+	Decrease Font Size	Minska teckenstorleken
+	Default	Standard
+	Delete	Ta bort
+	Delete Brush	Radera pensel
+	Delete Group	Radera grupp
+	Delete Layer	Radera lager
+	Delete Style	Radera stil
+	Delete Workspace	Radera arbetsmiljö
+	Deleted	Borttaget
+	Depth	Djup
+	Descending	Fallande
+	Description	Beskrivning
+	Description:	Beskrivning:
+	Deselect	Avmarkera
+	Deselect All	Avmarkera allt
+	Destination:	Destination:
+	Diagonal	Diagonal
+	Diameter	Diameter
+	Diameter:	Diameter:
+	Diamond	Romb
+	Difference	Differens
+	Diffuse Glow	Diffus glöd
+	Diffusion	Diffusion
+	Digits	Siffror
+	Dimensions	Dimensioner
+	Direct Selection Tool	Direktmarkeringsverktyg
+	Direction Balance	Riktningsbalans
+	Direction:	Riktning:
+	Discard	Släng
+	Discord	Discord
+	Discretionary Ligatures	Valfria ligaturer
+	Display	Visning
+	Display name	Visningsnamn
+	Distance	Avstånd
+	Distort	Förvräng
+	Distortion	Distorsion
+	Distribute	Fördela
+	Divide	Dividera
+	Dock Panel	Docka panel
+	Document	Dokument
+	Document Title	Dokumenttitel
+	Documents	Dokument
+	Don't Save	Spara inte
+	Done	Klart
+	Dot	Punkt
+	Dots	Punkter
+	Dotted	Prickad
+	Double-click	Dubbelklick
+	Down	Nedåt
+	Download	Hämta
+	Draft	Utkast
+	Draw	Rita
+	Drop Shadow	Släppskugga
+	Drop Shadow…	Släppskugga…
+	Duplicate	Duplicera
+	Duplicate Layer	Duplicera lager
+	Duplication	Duplicering
+	Dutch	Nederländska
+	Dynamic	Dynamisk
+	Edge	Kant
+	Edge Brightness	Kantljusstyrka
+	Edge Intensity	Kantintensitet
+	Edge Simplicity	Kantförenkling
+	Edge Thickness	Kanttjocklek
+	Edge Width	Kantbredd
+	Edit	Redigera
+	Edit Contents	Redigera innehåll
+	Edit Original	Redigera original
+	Edit Toolbar	Redigera verktygsfält
+	Editing	Redigering
+	Edit…	Redigera…
+	Effect	Effekt
+	Effects	Effekter
+	Elevation	Höjdläge
+	Eliminate	Eliminera
+	Ellipse	Ellips
+	Ellipse Tool	Ellipsverktyg
+	Ellipsis	Ellips
+	Em Dash	Långt tankstreck
+	Em Space	Helfyrkant
+	Embed	Bädda in
+	Emboss	Relief
+	En Dash	Tankstreck
+	En Space	Halvfyrkant
+	Endpoint	Ändpunkt
+	Enlarged	Förstorad
+	Enter	Enter
+	Entire Font	Hela teckensnittet
+	Envelope DL	Kuvert DL
+	Erase	Radera
+	Eraser	Suddgummi
+	Eraser Tool	Suddgummiverktyg
+	Error	Fel
+	Even Fields	Jämna fält
+	Even pages only	Bara jämna sidor
+	Exact	Exakt
+	Example: {sample}	Exempel: {sample}
+	Exclusion	Uteslutning
+	Exit	Avsluta
+	Expand	Expandera
+	Export	Exportera
+	Export As	Exportera som
+	Export As…	Exportera som…
+	Export PDF	Exportera PDF
+	Exported {path}	Exporterade {path}
+	Export…	Exportera…
+	Expression	Uttryck
+	Eyedropper	Pipett
+	Eyedropper Tool	Pipettverktyg
+	Favorites	Favoriter
+	Feather	Fjädring
+	Field	Fält
+	Field properties	Fältegenskaper
+	Fields	Fält
+	Fields:	Fält:
+	File	Arkiv
+	File Handling	Filhantering
+	File Info…	Filinformation…
+@id	file.close	Stäng
+	Files	Filer
+	Fill	Fyllning
+	Fill:	Fyllning:
+	Filter	Filter
+	Find	Sök
+	Find and Replace	Sök och ersätt
+	Find Next	Sök nästa
+	Find:	Sök:
+	Fine Dots	Fina punkter
+	Finish	Slutför
+	First	Första
+	First commit	Första commit
+	Fit	Anpassa
+	Fit in View	Anpassa till vyn
+	Fixed	Fast
+	Flatten	Platta till
+	Flip	Vänd
+	Flip Horizontal	Vänd vågrätt
+	Flip Vertical	Vänd lodrätt
+	Focus	Fokus
+	Folder	Mapp
+	Font	Typsnitt
+	Font Size	Teckenstorlek
+	Font:	Typsnitt:
+	Fonts	Typsnitt
+	Format	Format
+	Format:	Format:
+	Fractions	Bråk
+	Free	Fri
+	Free Transform	Fri transformering
+	French	Franska
+	Frequency	Frekvens
+	From	Från
+	Frosted	Frostat
+	Full Screen	Helskärm
+	Full Screen Mode	Helskärmsläge
+	Functions	Funktioner
+	Gamma	Gamma
+	Gamut Warning	Färgomfångsvarning
+	Gaussian Blur	Gaussisk oskärpa
+	Gaussian Blur…	Gaussisk oskärpa…
+	General	Allmänt
+	Geometry	Geometri
+	German	Tyska
+	Glass	Glas
+	Global	Global
+	Glow	Glöd
+	Glow Brightness	Skenets ljusstyrka
+	Glow Size	Skenets storlek
+	Glyphs	Glyfer
+	Good	Bra
+	Gradient	Gradient
+	Gradient Tool	Gradientverktyg
+	Gradients	Gradienter
+	Grain	Korn
+	Grain Type	Korntyp
+	Graininess	Kornighet
+	Grainy Dots	Korniga punkter
+	Graphic	Grafik
+	Graphics	Grafik
+	Gray	Grå
+	Gray Gamma 2.2	Grå gamma 2.2
+	Grayscale	Gråskala
+	Green	Grön
+	Grid	Rutnät
+	Grid Size:	Rutnätsstorlek:
+	Gridline every	Stödlinje var
+	Group	Gruppera
+	Group with	Gruppera med
+	Groups	Grupper
+	Grout Width	Fogbredd
+	Guides	Stödlinjer
+	Halftone Pattern	Rastermönster
+	Hand	Hand
+	Hand Tool	Handverktyg
+	Hard	Hård
+	Hard Light	Hårt ljus
+	Headings	Rubriker
+	Heart	Hjärta
+	Height	Höjd
+	Height:	Höjd:
+	Help	Hjälp
+	Hexagon	Hexagon
+	Hidden	Dold
+	Hidden text	Dold text
+	Hide	Dölj
+	Hide All	Dölj alla
+	Hide Grid	Dölj rutnät
+	Hide Others	Göm övriga
+	High	Hög
+	High Resolution	Hög upplösning
+	High resolution	Hög upplösning
+	Highlight Area	Högdagerområde
+	Hindi	Hindi
+	History	Historik
+	Hollow	Ihålig
+	Home	Start
+	Horizontal	Vågrät
+	Hue	Nyans
+	Hue Shift	Nyansförskjutning
+	Hue/Saturation…	Nyans/mättnad…
+	Hyphenation	Avstavning
+	Ignore	Ignorera
+	Ignore All	Ignorera alla
+	Image	Bild
+	Image Size	Bildstorlek
+	Images	Bilder
+	Import	Importera
+	Import…	Importera…
+	Inches	Tum
+	Increase Font Size	Öka teckenstorleken
+	Index	Register
+	Inflate	Uppblåst
+	Info	Info
+	Inner Glow…	Inre glöd…
+	Insert	Infoga
+	Inside	Inuti
+	Inspect Document	Inspektera dokumentet
+	Install Plug-in	Installera plugin
+	Install Plug-in…	Installera plugin…
+	Intensity	Intensitet
+	Interface	Gränssnitt
+	Interface Language	Gränssnittsspråk
+	Interface language	Gränssnittsspråk
+	Interface Theme	Gränssnittstema
+	Interlaced	Sammanflätad
+	Interpolation	Interpolering
+	Intersect	Skärning
+	Intersection	Snitt
+	Invert	Invertera
+	Invert Mask	Invertera mask
+	Isolate	Isolera
+	Italian	Italienska
+	Italic	Kursiv
+	Japanese	Japanska
+	Join	Foga samman
+	Join our Discord	Gå med i vår Discord
+	Join the ArtCraft Discord…	Gå med i ArtCrafts Discord…
+	Join us on Discord	Gå med i ArtCrafts community på Discord
+	Justification	Justering
+	Justify	Marginaljustera
+	Keep:	Behåll:
+	Keyboard Shortcuts	Kortkommandon
+	Keyboard Shortcuts…	Kortkommandon…
+	Keywords	Nyckelord
+	Kind	Typ
+	Korean	Koreanska
+	Lab	Lab
+	Labels	Etiketter
+	Landscape	Liggande
+	Language	Språk
+	Language Options	Språkalternativ
+@id	language.name	Svenska
+	Language:	Språk:
+	Large	Stor
+	Lasso	Lasso
+	Lasso Tool	Lassoverktyg
+	Last	Senaste
+	Last commit	Senaste commit
+	Layer	Lager
+	Layers	Lager
+	Layout	Layout
+	Layout:	Layout:
+	Leading	Radavstånd
+	Left	Vänster
+	Left Diagonal	Vänster diagonal
+	Left to Right	Vänster till höger
+	Left:	Vänster:
+	Legal	Legal
+	Length	Längd
+	Length:	Längd:
+	Less	Mindre
+	Letter	Brev
+	Level 1	Nivå 1
+	Level 2	Nivå 2
+	Level 3	Nivå 3
+	Level 4	Nivå 4
+	Levels	Nivåer
+	Levels…	Nivåer…
+	Libraries	Bibliotek
+	Library	Bibliotek
+	Light	Ljust
+	Light Blue	Ljusblå
+	Light Direction	Ljusriktning
+	Light Gray	Ljusgrå
+	Light Intensity	Ljusintensitet
+	Lighten	Ljusare
+	Lighting	Belysning
+	Lightness	Ljushet
+	Line	Linje
+	Line delta	Radskillnad
+	Line spacing	Radavstånd
+	Linear	Linjär
+	Linear Gradient	Linjär gradient
+	Lines	Linjer
+	Lines +/−	Rader +/−
+	Lines added	Tillagda rader
+	Lines deleted	Borttagna rader
+	Link	Länk
+	Links	Länkar
+	List	Lista
+	List View	Listvy
+	Location	Placering
+	Location:	Plats:
+	Lock	Lås
+	Lock Guides	Lås stödlinjer
+	Lock Slices	Lås skivor
+	Locked	Låst
+	Long Lines	Långa linjer
+	Long Strokes	Långa streck
+	Low	Låg
+	lowercase	gemener
+	Luminosity	Luminositet
+	Magenta	Magenta
+	Magic Wand Tool	Verktyget Trollstav
+	Margins	Marginaler
+	Mask	Maskera
+	Matte	Matte
+	Maximize	Maximera
+	Maximum	Maximum
+	Measure	Mät upp
+	Medium	Medel
+	Medium Dots	Medelstora punkter
+	Medium Gray	Mellangrå
+	Medium Lines	Medellånga linjer
+	Merge	Sammanfoga
+	Merge Cells	Sammanfoga celler
+	Merge Layers	Sammanfoga lager
+	Merged PRs	Sammanslagna PR:er
+	Mesh	Nät
+	Message:	Meddelande:
+	Method	Metod
+	Method:	Metod:
+	Mezzotint	Mezzotint
+	Mezzotint…	Mezzotint…
+	Middle	I mitten
+	Midpoint	Mittpunkt
+	Millimeters	Millimeter
+	Minimize	Minimera
+	Minimum	Minimum
+	Mirror	Spegel
+	Missing	Saknas
+	Mobile	Mobil
+	Mode:	Läge:
+	Model	Modell
+	Models	Modeller
+	Modern	Modern
+	Modified	Ändrad
+	Modify	Ändra
+	Monitor RGB	Bildskärms-RGB
+	Mono	Mono
+	Monochrome	Monokrom
+	More	Mer
+	Mosaic Tiles	Mosaikplattor
+	Move	Flytta
+	Move Down	Flytta ned
+	Move Panel	Flytta panel
+	Move Up	Flytta upp
+	Multiply	Multiplicera
+	Name	Namn
+	Name (A–Z)	Namn (A–Ö)
+	Name:	Namn:
+	Navigation	Navigering
+	Navigator	Navigator
+	Neon Glow	Neonsken
+	New	Ny
+	New Document	Nytt dokument
+	New document	Nytt dokument
+	New from Template	Ny från mall
+	New Group	Ny grupp
+	New Guide	Ny stödlinje
+	New Layer	Nytt lager
+	New Layer…	Nytt lager…
+	New Style…	Ny stil…
+	New Swatch…	Ny färgruta…
+	New Window	Nytt fönster
+	New Workspace	Ny arbetsyta
+	New Workspace…	Ny arbetsyta…
+	New…	Ny…
+	Next	Nästa
+	Next Change	Nästa ändring
+	Next Page	Nästa sida
+	Next page	Nästa sida
+	No	Nej
+	No Color	Ingen färg
+	No Dither	Ingen rastrering
+	No Document	Inget dokument
+	No document	Inget dokument
+	No document open	Inget dokument är öppet
+	No limit	Ingen gräns
+	No matches.	Inga träffar.
+	No results	Inga resultat
+	No Selection	Ingen markering
+	No selection	Ingen markering
+	Noise	Brus
+	Nonbreaking Space	Hårt blanksteg
+	None	Ingen
+	Normal	Normal
+	Not available	Inte tillgängligt
+	NTSC Colors	NTSC-färger
+	Number	Nummer
+	Object	Objekt
+	Odd Fields	Udda fält
+	Odd pages only	Bara udda sidor
+	Off	Av
+	Offset	Förskjutning
+	Offset:	Förskjutning:
+	OK	OK
+	Omit	Utelämna
+	On	På
+	Only Web Colors	Endast webbfärger
+	Opacity	Opacitet
+	Opacity:	Opacitet:
+	Open	Öppna
+	Open…	Öppna…
+	Optimized	Optimerad
+	Options	Alternativ
+	Options…	Alternativ…
+	Orange	Orange
+	Ordinals	Ordningstal
+	Orientation	Orientering
+	Orientation:	Orientering:
+	Original	Original
+	Other	Annat
+	Outer Glow…	Yttre glöd…
+	Outline	Disposition
+	Output	Utgång
+	Output:	Utgång:
+	Outside	Utanför
+	Oval	Oval
+	Overlap:	Överlappning:
+	Overlay	Överlägg
+	Package…	Paketera…
+	Page	Sida
+	Page {page} of {pages}	Sida {page} av {pages}
+	Pages	Sidor
+	Panel menu	Panelmeny
+	Panel Options…	Panelalternativ…
+	Panels	Paneler
+	Paper	Papper
+	Paragraph	Stycke
+	Paragraph Styles	Styckestilar
+	Password	Lösenord
+	Paste	Klistra in
+	Paste Special	Klistra in special
+	Patchwork	Lapptäcke
+	Path	Bana
+	Path:	Bana:
+	Paths	Banor
+	Pattern	Mönster
+	Pattern Type	Mönstertyp
+	Pause	Pausa
+	Pen	Penna
+	Pen Tool	Pennverktyg
+	Pencil	Blyertspenna
+	Pencil Tool	Blyertsverktyg
+	Percent	Procent
+	Performance	Prestanda
+	Perspective	Perspektiv
+	Picas	Pica
+	Pink	Rosa
+	Pixel	Pixel
+	Pixelate	Pixla
+	Pixels	Pixlar
+	Play	Spela upp
+	Plug-ins	Insticksprogram
+	Point	Punkt
+	Pointillize	Pointillisera
+	Pointillize…	Pointillisera…
+	Points	Punkter
+	Polygon	Polygon
+	Polygon Tool	Polygonverktyg
+	Polyline	Polylinje
+	Portrait	Stående
+	Portuguese	Portugisiska
+	Position	Position
+	Position:	Position:
+	Postcard	Vykort
+	Poster Edges	Affischkanter
+	Posterization	Posterisering
+	Preferences	Inställningar
+	Preferences…	Inställningar…
+	Preserve	Bevara
+	Preset:	Förinställning:
+	Presets	Förinställningar
+	Presets:	Förinställningar:
+	Press keys…	Tryck på tangenter…
+	Pressure	Tryck
+	Preview	Förhandsvisning
+	Previous	Föregående
+	Previous Change	Föregående ändring
+	Previous Page	Föregående sida
+	Previous page	Föregående sida
+	Print	Skriv ut
+	Printer	Skrivare
+	Printer:	Skrivare:
+	Printing	Utskrift
+	Print…	Skriv ut…
+	Progressive	Progressiv
+	Proof Setup	Provtrycksinställningar
+	Properties	Egenskaper
+	Protect	Skydda
+	PRs	PR:er
+	Public Domain	Allmän egendom
+	Punctuation	Skiljetecken
+	Purple	Lila
+	Pyramid	Pyramid
+	Quality	Kvalitet
+	Quick Actions	Snabbåtgärder
+	Radial	Radiell
+	Radial Blur	Radiell oskärpa
+	Radial Blur…	Radiell oskärpa…
+	Radial Gradient	Radiell gradient
+	Radius	Radie
+	Radius:	Radie:
+	Random	Slumpmässig
+	Range:	Omfång:
+	Rasterize	Rastrera
+	Ratio	Kvot
+	Rays	Strålar
+	Ready	Klar
+	Real name	Riktigt namn
+	Recent	Senaste
+	Recent Colors	Senaste färger
+	Recent Files	Senaste filer
+	Recover	Återställ
+	Rectangle	Rektangel
+	Rectangle Tool	Rektangelverktyg
+	Rectangular	Rektangulär
+	Red	Röd
+	Redo	Gör om
+	Refresh	Uppdatera
+	Regular	Normal
+	Relative	Relativ
+	Relative Colorimetric	Relativ kolorimetrisk
+	Relaxed	Luftig
+	Relief	Relief
+	Reload	Läs in igen
+	Remove	Ta bort
+	Remove Background	Ta bort bakgrund
+	Rename	Byt namn
+	Rename Group…	Byt namn på grupp…
+	Rename Style	Byt namn på stil
+	Rename…	Byt namn…
+	Repeat	Upprepa
+	Replace	Ersätt
+	Replace:	Ersätt:
+	Reply	Svara
+	Report	Rapport
+	Reselect	Markera igen
+	Reset	Återställ
+	Reset Preferences	Återställ inställningar
+	Reset…	Återställ…
+	Resize panel window	Ändra storlek på panelfönster
+	Resize panels	Ändra storlek på paneler
+	Resolution:	Upplösning:
+	Restore	Återställ
+	Result	Resultat
+	Reverse	Vänd riktning
+	Reverse the order	Vänd på ordningen
+	Revert	Återgå
+	Review	Granska
+	RGB	RGB
+	RGB Color	RGB-färg
+	RGB:	RGB:
+	Right	Höger
+	Right Diagonal	Höger diagonal
+	Right:	Höger:
+	Rotate	Rotera
+	Rotation	Rotation
+	Rotation:	Rotation:
+	Rounded Rectangle	Rundad rektangel
+	Roundness:	Rundhet:
+	Ruler	Linjal
+	Rulers	Linjaler
+	Rulers & Grids	Linjaler och rutnät
+	Russian	Ryska
+	Sandstone	Sandsten
+	Saturation	Mättnad
+	Save	Spara
+	Save a Copy	Spara en kopia
+	Save a Copy…	Spara en kopia…
+	Save As	Spara som
+	Save as Template	Spara som mall
+	Save as Template…	Spara som mall…
+	Save As…	Spara som…
+	Save Preset…	Spara förinställning…
+	Save Selection	Spara markering
+	Save Selection…	Spara markering…
+	Saved	Sparat
+	Save…	Spara…
+	Scale	Skala
+	Scale:	Skala:
+	Scaling	Skalning
+	Scratch Disks	Arbetsdiskar
+	Screen	Skärm
+	Screen Mode	Skärmläge
+	Scripts	Skript
+	Search	Sök
+	Security	Säkerhet
+	Segments	Segment
+	Select	Markera
+	Select All	Markera allt
+	Select Objects	Markera objekt
+	Select:	Markera:
+	Selected pages	Valda sidor
+	Selection	Markering
+	Selection Tool	Markeringsverktyg
+	Selective	Selektiv
+	Send Backward	Flytta bakåt
+	Send to Back	Flytta längst bak
+	Services	Tjänster
+	Set	Ange
+	Set as Default	Ange som standard
+	Set:	Uppsättning:
+	Settings	Inställningar
+	Settings…	Inställningar…
+	Shadow	Skugga
+	Shape	Form
+	Shape Effects	Figureffekter
+	Shape:	Form:
+	Shapes	Former
+	Share	Dela
+	Sharpen	Skärpa
+	Sharpness	Skärpa
+	Shift	Shift
+	Short Lines	Korta linjer
+	Short Strokes	Korta streck
+	Shortcut	Kortkommando
+	Shortcuts	Kortkommandon
+	Show	Visa
+	Show All	Visa alla
+	Show Grid	Visa rutnät
+	Show Guides	Visa stödlinjer
+	Show in Folder	Visa i mapp
+	Show Mesh	Visa nät
+	Show Rulers	Visa linjaler
+	Show rulers	Visa linjaler
+	Show Tool Tips	Visa verktygstips
+	Show:	Visa:
+	Sides:	Sidor:
+	Simplify	Förenkla
+	Size	Storlek
+	Size:	Storlek:
+	Sketch	Skiss
+	Skew	Skevning
+	Slice	Skiva
+	Slice Options	Skivalternativ
+	Slice Options…	Skivalternativ…
+	Slice Tool	Skivverktyg
+	Slices	Skivor
+	Small	Liten
+	Small Caps	Kapitäler
+	Smart Blur	Smart oskärpa
+	Smart Blur…	Smart oskärpa…
+	Smart Guides	Smarta stödlinjer
+	Smoothness	Mjukhet
+	Snap to Grid	Fäst mot rutnät
+	Soft	Mjuk
+	Soft Light	Mjukt ljus
+	Softness	Mjukhet
+	Sort	Sortera
+	Sort by	Sortera efter
+	Source code on GitHub	Källkod på GitHub
+	Spaces	Blanksteg
+	Spacing	Avstånd
+	Spacing:	Avstånd:
+	Spanish	Spanska
+	Spatter	Stänk
+	Special	Special
+	Speckle	Fläckar
+	Speed	Hastighet
+	Spelling	Stavning
+	Split	Dela
+	Spot Color	Dekorfärg
+	Spray Radius	Sprutradie
+	Square	Fyrkant
+	Square Size	Kvadratstorlek
+	sRGB IEC61966-2.1	sRGB IEC61966-2.1
+	Stacked	Staplad
+	Stained Glass	Målat glas
+	Standard	Standard
+	Standard Ligatures	Standardligaturer
+	Star	Stjärna
+	Start at:	Börja på:
+	Statistics	Statistik
+	Status	Status
+	Status Bar	Statusfält
+	Stippled	Punkterad
+	Stop	Stoppa
+	Strength	Styrka
+	Stretch	Sträck
+	Strikethrough	Genomstruken
+	Stroke	Kontur
+	Stroke Color	Konturfärg
+	Stroke Length	Penseldragslängd
+	Stroke Options	Konturalternativ
+	Stroke:	Kontur:
+	Studio	Studio
+	Style	Stil
+	Style:	Stil:
+	Styles	Stilar
+	Stylize	Stilisera
+	Subdivisions	Underindelningar
+	Subject	Ämne
+	Subscript	Nedsänkt
+	Subset	Delmängd
+	Subtitle	Underrubrik
+	Subtract	Subtrahera
+	Sumi-e	Sumi-e
+	Summary	Sammanfattning
+	Superscript	Upphöjd
+	Swatches	Färgrutor
+	Symbol	Symbol
+	Symbols	Symboler
+	System	Enligt systemet
+	Tab	Tabb
+	Table	Tabell
+	Table style	Tabellstil
+	Tables	Tabeller
+	Tabloid	Tabloid
+	Tabs	Tabbstopp
+	Taper	Avsmalning
+	Target	Mål
+	Target:	Mål:
+	Temperature	Temperatur
+	Templates	Mallar
+	Text	Text
+	Text:	Text:
+	Texture	Textur
+	The passwords don't match.	Lösenorden stämmer inte överens.
+	Thickness	Tjocklek
+	This document has no bookmarks.	Det här dokumentet har inga bokmärken.
+	Threshold	Tröskel
+	Tile	Sida vid sida
+	Tile Size	Rutstorlek
+	Time	Tid
+	Tint	Färgton
+	Title	Titel
+	To	Till
+	Tolerance	Tolerans
+	Tolerance:	Tolerans:
+	Tool	Verktyg
+	Toolbars	Verktygsfält
+	Tools	Verktyg
+	Top	Upptill
+	Top Left	Uppe till vänster
+	Top Right	Uppe till höger
+	Top:	Överkant:
+	Total	Totalt
+	Total:	Totalt:
+	Tracking	Spärrning
+	Transform	Transformera
+	Translate	Översätt
+	Transparency	Genomskinlighet
+	Transparent	Transparent
+	Trap…	Överfyllning…
+	Triangle	Triangel
+	Twirl	Virvel
+	Twist	Vridning
+	Type	Typ
+	Type Tool	Textverktyg
+	Type:	Typ:
+	Type…	Text…
+	Typing	Skrivning
+	Underline	Understruken
+	Undo	Ångra
+	Undo {action}	Ångra {action}
+	Ungroup	Dela upp grupp
+	Uniform	Enhetlig
+	Union	Union
+	Units	Enheter
+	Unknown	Okänd
+	Unlock	Lås upp
+	Unsharp Mask	Oskarp mask
+	Untitled	Namnlös
+	Up	Uppåt
+	Update	Uppdatera
+	UPPERCASE	VERSALER
+	Use Default	Använd standard
+	User	Användare
+	Username	Användarnamn
+	Value	Värde
+	Value:	Värde:
+	Variables	Variabler
+	Version	Version
+	Version {version}	Version {version}
+	Vertical	Lodrät
+	Vertical Alignment	Lodrät justering
+	Vertical Type Tool	Vertikalt textverktyg
+	Very High	Mycket hög
+	Video	Video
+	View	Visa
+	Violet	Violett
+	Visibility	Synlighet
+	Voice	Röst
+	W:	B:
+	Warnings	Varningar
+	Warp	Förvräng
+	Watermark	Vattenstämpel
+	Wave	Vågig
+	Wave…	Våg…
+	Website	Webbplats
+	Weight	Tjocklek
+	White	Vit
+	White Intensity	Vitintensitet
+	Width	Bredd
+	Width and Height	Bredd och höjd
+	Width:	Bredd:
+	Window	Fönster
+	Windows	Windows
+	Words	Ord
+	Working CMYK	Arbets-CMYK
+	Workspace	Arbetsyta
+	X	X
+	Y	Y
+	Yellow	Gul
+	Yes	Ja
+	Your changes will be lost if you don't save them.	Dina ändringar går förlorade om du inte sparar dem.
+	Zoom	Zoom
+	Zoom In	Zooma in
+	Zoom Out	Zooma ut
+	Zoom Tool	Zoomverktyg
+@plural	{n} commit|{n} commits	{n} commit|{n} commits
+@plural	{n} item|{n} items	{n} objekt|{n} objekt
+@plural	{n} Layer|{n} Layers	{n} lager|{n} lager
+@plural	{n} step|{n} steps	{n} steg|{n} steg
+	−Bin	−Bin
+	● Recording	● Inspelning

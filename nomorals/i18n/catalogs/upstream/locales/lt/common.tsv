@@ -1,0 +1,409 @@
+# Lietuvių (lt) interface catalog for every Crafting App.
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   @plural  English `one|other`; the translation lists this language's plural forms, `|`-separated.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary. No other product's localisation, string table or translated UI was
+# consulted or copied; add entries the same way.
+
+	% of all commits	Visų pakeitimų įrašų dalis (%)
+	(none)	(nėra)
+	1 file	1 failas
+	About	Apie programą
+	Accessibility	Prieinamumas
+	Actions	Veiksmai
+	Active	Aktyvi
+	Actual Size	Faktinis dydis
+	Add	Pridėti
+	Add a comment	Pridėti komentarą
+	Advanced	Išplėstiniai
+	Align	Lygiuoti
+	Align left	Lygiuoti kairėje
+	Align right	Lygiuoti dešinėje
+	Alignment:	Lygiuotė:
+	All	Visi
+	All pages	Visi puslapiai
+	Always	Visada
+	Angle	Kampas
+	Animation effects	Animacijos efektai
+	Any	Bet kuris
+	Appearance	Išvaizda
+theme	Appearance	Išvaizda
+	Application	Programa
+	Apply	Taikyti
+	Area	Plotas
+	Arrow	Rodyklė
+	ArtCraft website	„ArtCraft“ svetainė
+	Author	Autorius
+	Auto	Automatiškai
+	Auto ({percent}%)	Automatiškai ({percent} %)
+	Automatically	Automatiškai
+	Available	Prieinama
+	Background	Fonas
+	Binary assets added	Pridėti dvejetainiai ištekliai
+	Binary assets removed	Pašalinti dvejetainiai ištekliai
+	Black	Juoda
+	Black and white	Nespalvota
+	Blue	Mėlyna
+	Bold	Pusjuodis
+	Both	Abu
+	Both sides	Abi pusės
+	Bottom	Apačia
+	Bottom:	Apačia:
+	Browse…	Naršyti…
+	Calculate	Skaičiavimas
+	Cancel	Atšaukti
+	Category:	Kategorija:
+	Center	Centruoti
+	Characters	Simboliai
+	Check for updates	Tikrinti, ar yra naujinimų
+	Choose…	Pasirinkti…
+	Circle	Apskritimas
+	Clear	Išvalyti
+	Clear All	Išvalyti viską
+	Clear Recent Files	Išvalyti paskiausiai naudotų failų sąrašą
+	Clipboard	Iškarpinė
+	Close	Užverti
+	Close (Esc)	Užverti (Esc)
+	Collapse	Suskleisti
+	Collate	Rūšiuoti komplektais
+	Color	Spalva
+	Color:	Spalva:
+	Colour	Spalva
+	Combine	Sujungti
+	Command	Komanda
+	Comment	Komentaras
+	Comments	Komentarai
+	Commits	Pakeitimų įrašai
+	Company	Įmonė
+	Compare	Palyginti
+	Compatibility	Suderinamumas
+	Compression	Glaudinimas
+	Continue	Tęsti
+	Contributors	Bendraautoriai
+	Convert	Konvertuoti
+	Copies:	Kopijų skaičius:
+	Copy	Kopijuoti
+	Couldn't open {name}: {e}	Nepavyko atverti {name}: {e}
+	Create	Kurti
+	Cross	Kryželis
+	Current page	Dabartinis puslapis
+	Custom	Pasirinktinis
+	Cut	Iškirpti
+	Dark	Tamsi
+	Dark gray	Tamsiai pilka
+	Dashed	Brūkšninis
+	Date	Data
+	Date format	Datos formatas
+	Dates	Datos
+	Default	Numatytasis
+	Delete	Naikinti
+	Deleted	Pašalinta
+	Description	Aprašas
+	Description:	Aprašas:
+	Details	Išsami informacija
+	Diamond	Rombas
+	Direction:	Kryptis:
+	Discard	Atmesti
+	Dismiss	Atmesti
+	Display name	Rodomas vardas
+	Distance	Atstumas
+	Distribute	Paskirstyti
+	Document	Dokumentas
+	Document Title	Dokumento pavadinimas
+	Done	Atlikta
+	Dot	Taškas
+	Double-click	Dukart spustelėti
+	Download	Atsisiųsti
+	Draw	Brėžti
+	Duplicate	Dubliuoti
+	Duplicate…	Dubliuoti…
+	Dynamic	Dinaminė
+	Edit	Redaguoti
+	Editing	Redaguoti
+	Edit…	Redaguoti…
+	Endpoint	Galinis taškas
+	Erase	Trinti
+	Eraser	Trintukas
+	Error	Klaida
+	Even pages only	Tik lyginiai puslapiai
+	Example: {sample}	Pavyzdys: {sample}
+	Expand	Išskleisti
+	Export	Eksportuoti
+	Export to	Eksportuoti į
+	Exported to {path}	Eksportuota į {path}
+	Export…	Eksportuoti…
+	Extract	Išskirti
+	Field	Laukas
+	Field properties	Lauko savybės
+	Fields	Laukai
+	File	Failas
+	File Name	Failo pavadinimas
+	Fill	Pildyti
+	Find…	Ieškoti…
+	First	Pirmas
+	First commit	Pirmas pakeitimų įrašas
+	Fit	Pritaikyti
+	Flatten	Suplokštinti
+	Flip Horizontal	Apversti horizontaliai
+	Flip Vertical	Apversti vertikaliai
+	Folder	Aplankas
+	Font	Šriftas
+	Font size	Šrifto dydis
+	Font Size:	Šrifto dydis:
+	Font:	Šriftas:
+	Fonts	Šriftai
+	Format	Formatas
+	Format:	Formatas:
+	From	Nuo
+	Full Screen	Visas ekranas
+	General	Bendrieji
+	Graphic	Grafika
+	Gray	Pilka
+	Green	Žalia
+	Grid view	Tinklelio rodinys
+	Headings	Antraštės
+	Height	Aukštis
+	Height:	Aukštis:
+	Help	Žinynas
+	Hidden text	Paslėptas tekstas
+	High	Didelis
+	High Resolution	Didelė raiška
+	High resolution	Didelė raiška
+	Home	Pradžia
+	Horizontal	Horizontaliai
+	Horizontal scale	Horizontalusis mastelis
+	Horizontally	Horizontaliai
+	Icon	Piktograma
+	Image	Paveikslėlis
+	Images	Paveikslėliai
+	Import	Importuoti
+	Index	Indeksas
+	Insert	Įterpti
+	Interface language	Sąsajos kalba
+	Intersection	Sankirta
+	Invert	Invertuoti
+	Italic	Kursyvas
+	Join our Discord	Prisijunkite prie mūsų „Discord“ serverio
+	Join the ArtCraft Discord	Prisijungti prie „ArtCraft“ „Discord“ serverio
+	just now	ką tik
+	Justify	Abipusė lygiuotė
+	Keywords	Raktažodžiai
+	Label	Žyma
+	Labels	Žymos
+	Landscape	Gulsčias
+	Language	Kalba
+@id	language.name	Lietuvių
+	Last	Paskutinis
+	Last commit	Paskutinis pakeitimų įrašas
+	Later	Vėliau
+	Layers	Sluoksniai
+	Left	Kairė
+	Left:	Kairėje:
+	Light	Šviesi
+	Light gray	Šviesiai pilka
+	Line	Linija
+	Line delta	Eilučių pokytis
+	Line spacing	Eilučių intervalas
+	Lines +/−	Eilutės +/−
+	Lines added	Pridėtos eilutės
+	Lines deleted	Pašalintos eilutės
+	Link	Saitas
+	List	Sąrašas
+	List view	Sąrašo rodinys
+	Location	Vieta
+	Locked	Užrakinta
+	Low	Mažas
+	Magnification	Didinimas
+	Margins	Paraštės
+	Maximize	Išdidinti
+	Maximum	Didžiausia reikšmė
+	Measure	Matuoti
+	Medium	Vidutinė
+	Merged PRs	Sujungtos pakeitimų užklausos
+	Metadata	Metaduomenys
+	Midpoint	Vidurio taškas
+	Minimize	Sumažinti
+	Minimum	Mažiausia reikšmė
+	Mobile	Mobilusis
+	Model	Modelis
+	Models	Modeliai
+	Modified	Pakeista
+	More	Daugiau
+	Move	Perkelti
+	Name	Pavadinimas
+	Name (A–Z)	Vardas (A–Z)
+	Name:	Pavadinimas:
+	Never	Niekada
+	Next	Pirmyn
+	Next page	Kitas puslapis
+	No	Ne
+	No limit	Neribojama
+	No matches.	Atitikmenų nėra.
+	No recent files	Nėra paskiausiai naudotų failų
+	No results	Rezultatų nėra
+	None	Nėra
+	Number	Skaičius
+	Odd pages only	Tik nelyginiai puslapiai
+	Off	Išjungta
+	OK	Gerai
+	On	Įjungta
+	Opacity	Nepermatomumas
+	Opacity:	Nepermatomumas:
+	Open	Atverti
+	Open link	Atverti saitą
+	Open Recent	Atverti paskiausiai naudotus failus
+	Open…	Atverti…
+	Options	Parinktys
+	Options…	Parinktys…
+	Orange	Oranžinė
+	Orientation:	Padėtis:
+	Original	Pradinis
+	Outline	Kontūras
+	Output	Išvestis
+	Oval	Ovalas
+	Overlap:	Persidengimas:
+	Page	Puslapis
+	Pages	Puslapiai
+	Panels	Skydeliai
+	Password	Slaptažodis
+	Paste	Įdėti
+	Path	Kelias
+	Paths	Keliai
+	Pattern	Šablonas
+	Percentage	Procentai
+	Perimeter	Perimetras
+	Photo	Nuotrauka
+	Pink	Rožinė
+	Polygon	Daugiakampis
+	Polyline	Laužtė
+	Portrait	Stačias
+	Position	Padėtis
+	Poster	Plakatas
+	Preferences	Nuostatos
+	Preferences…	Nuostatos…
+	Prefix	Priešdėlis
+	Preview	Peržiūra
+	Previous	Ankstesnis
+	Previous page	Ankstesnis puslapis
+	Print	Spausdinti
+	Printer:	Spausdintuvas:
+	Printing	Spausdinimas
+	Print…	Spausdinti…
+	Protect	Apsaugoti
+	PRs	Pakeitimų užklausos
+	Purple	Violetinė
+	Quality	Kokybė
+	Ready	Parengta
+	Real name	Tikras vardas
+	Recent	Paskiausiai naudoti
+	Recover	Atkurti
+	Rectangle	Stačiakampis
+	Red	Raudona
+	Redo	Pakartoti
+	Refresh	Atnaujinti
+	Reload	Įkelti iš naujo
+	Remove	Pašalinti
+	Rename	Pervadinti
+	Replace	Pakeisti
+	Reply	Atsakyti
+	Report	Ataskaita
+	Resize panel window	Keisti skydelio lango dydį
+	Resize panels	Keisti skydelių dydį
+	Resolution	Raiška
+	Resolution:	Raiška:
+	Restore	Atkurti
+	Reveal in Finder	Rodyti „Finder“
+	Reverse the order	Apversti tvarką
+	Revert	Grąžinti įrašytą versiją
+	Review	Peržiūrėti
+	Right	Dešinė
+	Rotate	Pasukti
+	Rotate:	Pasukimas:
+	Rotation	Pasukimas
+	Rotation:	Pasukimas:
+	Rows	Eilutės
+	Save	Įrašyti
+	Save as PDF	Įrašyti kaip PDF
+	Scripts	Scenarijai
+	Search	Ieškoti
+	Security	Sauga
+	Select All	Pažymėti viską
+	Selected pages	Pasirinkti puslapiai
+	Selection	Pasirinkimas
+	Sensitivity	Jautrumas
+	Sent to {printer}	Išsiųsta į {printer}
+	Settings	Nuostatos
+	Show	Rodyti
+	Show:	Rodyti:
+	Size	Dydis
+	Sort	Rūšiuoti
+	Sort by	Rūšiuoti pagal
+	Source	Šaltinis
+	Special	Specialusis
+	Split	Skaidyti
+	Square	Kvadratas
+	Stamp	Antspaudas
+	Standard	Standartinis
+	Star	Žvaigždė
+	Status	Būsena
+	Strikethrough	Perbraukti
+	Style	Stilius
+	Subject	Tema
+	Subset	Poaibis
+	Summary	Suvestinė
+	System	Pagal sistemą
+	Table	Lentelė
+	Tables	Lentelės
+	Text	Tekstas
+	The passwords don't match.	Slaptažodžiai nesutampa.
+	Theme	Tema
+	Thickness	Storis
+	This document has no bookmarks.	Šiame dokumente nėra žymelių.
+	Thumbnails	Miniatiūros
+	Time	Laikas
+	Title	Pavadinimas
+	Tool	Įrankis
+	Tools	Įrankiai
+	Top	Viršus
+	Total	Iš viso
+	Translate	Versti
+	Type	Tipas
+	Typewriter	Teksto įvedimas
+	Underline	Pabraukti
+	Undo	Anuliuoti
+	Undo {action}	Atšaukti {action}
+	Units	Vienetai
+	Unknown	Nežinoma
+	Unlock	Atrakinti
+	Up	Aukštyn
+	Update	Atnaujinti
+	Username	Naudotojo vardas
+	Value:	Reikšmė:
+	Version	Versija
+	Vertical	Vertikaliai
+	Vertically	Vertikaliai
+	View	Rodinys
+	Warning	Įspėjimas
+	Warnings	Įspėjimai
+	Watermark	Vandenženklis
+	Width	Plotis
+	Width:	Plotis:
+	Words	Žodžiai
+	Yellow	Geltona
+	Yes	Taip
+	yesterday	vakar
+	Your changes will be lost if you don't save them.	Jei pakeitimų neįrašysite, jie bus prarasti.
+	Zoom	Mastelis
+	Zoom in	Priartinti
+	Zoom out	Nutolinti
+@plural	{n} byte|{n} bytes	{n} baitas|{n} baitai|{n} baitų
+	{n} files	Failų: {n}
+	{n} h ago	Prieš {n} val.
+	{n} min ago	Prieš {n} min.
+	−Bin	−Dvej.

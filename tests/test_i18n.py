@@ -69,7 +69,15 @@ def test_plural_category(locale, count, category):
 
 def test_plural_category_sets():
     assert plural_categories("ar") == ("zero", "one", "two", "few", "many", "other")
-    assert plural_categories("ru") == ("one", "few", "many", "other")
+    # Russian/Polish have THREE forms, not four: "other" is a
+    # decimals-only category there, so whole numbers 0..1000 never
+    # reach it — the counts craft-i18n's checker expects, and the
+    # counts the real ru/pl catalogs list. The old four-form
+    # assertion was factually wrong (and ru.tsv carried a duplicated
+    # fourth form because of it).
+    assert plural_categories("ru") == ("one", "few", "many")
+    assert plural_categories("pl") == ("one", "few", "many")
+    assert plural_categories("tr") == ("one", "other")
     assert plural_categories("ja") == ("other",)
     assert plural_categories("qq") == ("other",)  # unlisted → visible default
 

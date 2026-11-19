@@ -1,0 +1,71 @@
+# Machine-checked parity for the craft-i18n port.
+#
+# Every case runs against the vendored catalog tree
+# (nomorals/i18n/catalogs/upstream/locales/) through
+# nomorals/i18n/parity.py run_case. A missing fixture = fail,
+# never skip. Real rows from the upstream clone
+# (craft-i18n, c199dc45):
+#
+#   fr common: Open -> Ouvrir, Save -> Enregistrer
+#   de common: Open -> Offnen, Save -> Speichern
+#   fr @plural {n} byte|{n} bytes -> {n} octet|{n} octets
+#   de @plural {n} commit|{n} commits -> {n} Commit|{n} Commits
+#   fr @msg Couldn't open {name}: {e}
+#         -> Impossible d'ouvrir {name}: {e}
+#
+# de has no bytes row: the de-AT plural case uses the commit row
+# (de-AT falls back to de, which serves it).
+
+[[cases]]
+id = "lookup-fr-open"
+op = "lookup"
+source = "Open"
+locale = "fr"
+expect = "Ouvrir"
+
+[[cases]]
+id = "fallback-de-at-open"
+op = "fallback"
+source = "Open"
+locale = "de-AT"
+expect = "Öffnen"
+
+[[cases]]
+id = "plural-fr-bytes-2"
+op = "plural"
+source = "{n} byte|{n} bytes"
+locale = "fr"
+count = 2
+expect = "2 octets"
+
+[[cases]]
+id = "plural-fallback-de-at-commit-1"
+op = "plural_fallback"
+source = "{n} commit|{n} commits"
+locale = "de-AT"
+count = 1
+expect = "1 Commit"
+
+[[cases]]
+id = "placeholder-mismatch-fr-open-error"
+op = "placeholder_mismatch"
+source = "Couldn't open {name}: {e}"
+locale = "fr"
+
+[[cases]]
+id = "checker-finding-empty-translation"
+op = "checker_finding"
+text = "\tSave\t\n"
+locale = "fr"
+kind = "empty_translation"
+
+[[cases]]
+id = "tool-call-translate-fr-open"
+op = "tool_call"
+expect_contains = "Ouvrir"
+
+[cases.args]
+action = "i18n"
+op = "translate"
+key = "Open"
+locale = "fr"

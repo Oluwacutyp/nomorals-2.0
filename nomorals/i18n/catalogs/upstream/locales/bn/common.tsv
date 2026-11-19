@@ -1,0 +1,1293 @@
+# বাংলা (bn) interface catalog for every Crafting App.
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   @plural  English `one|other`; the translation lists this language's plural forms, `|`-separated.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary. No other product's localisation, string table or translated UI was
+# consulted or copied; add entries the same way.
+
+@id	language.name	বাংলা
+	% of all commits	সকল কমিটের %
+	(Custom)	(কাস্টম)
+	(none)	(কিছুই না)
+	1 file	১ ফাইল
+	16 bit	১৬ বিট
+	24 bit	২৪ বিট
+	24 bits/pixel	২৪ বিট/পিক্সেল
+	32 bit	৩২ বিট
+	32 bits/pixel	৩২ বিট/পিক্সেল
+	8 bit	৮ বিট
+	About	সম্পর্কে
+	Absolute	পরম
+	Absolute Colorimetric	অ্যাবসলিউট কালারমেট্রিক
+	Accented Edges	তীক্ষ্ণ প্রান্ত
+	Accessibility	অ্যাক্সেস
+	Accurate	সঠিক
+	Actions	অ্যাকশন
+	Activate Panel	প্যানেল সক্রিয়
+	Active	সক্রিয়
+	Actual Size	প্রকৃত আকার
+	Adaptive	মানানসই
+	Add	যোগ
+	Add a comment	মন্তব্য যোগ
+	Add Guide	গাইড যোগ
+	Add to Dictionary	অভিধানে যোগ
+	Add to favorites	প্রিয়তে যোগ
+	Add to Swatches	সোয়াচে যোগ
+	Adjust	সমন্বয়
+	Adjustments	সমন্বয়
+	Advanced	উন্নত
+	Align	সারিবদ্ধ
+	Align center	মাঝে
+	Align Left	বামে
+	Align left	বামে
+	Align Right	ডানে
+	Align right	ডানে
+	Align Text	টেক্সট অ্যালাইন
+	Align to Selection	নির্বাচনে অ্যালাইন
+	Alignment	অ্যালাইনমেন্ট
+	Alignment:	অ্যালাইনমেন্ট:
+	All	সব
+	All Caps	সব বড় হাতের
+	All Categories	সব বিভাগ
+	All files	সকল ফাইল
+	All Layers	সকল স্তর
+	All pages	সব পৃষ্ঠা
+	All Slices	সব স্লাইস
+	Alpha	আলফা
+	Alt	অল্ট
+	Always	সবসময়
+	Amount	পরিমাণ
+	Amount:	পরিমাণ:
+	Angle	কোণ
+	Angle:	কোণ:
+	Angular	কৌণিক
+	Animation	অ্যানিমেশন
+	Animation effects	অ্যানিমেশন প্রভাব
+	Anti-Alias	অ্যান্টি-অ্যালিয়াস
+	Anti-alias	অ্যান্টি-অ্যালিয়াস
+	Any	যেকোনো
+	Appearance	দৃশ্যরূপ
+theme	Appearance	দৃশ্যরূপ
+	Appearance Settings…	দৃশ্যরূপ সেটিংস…
+	Application	অ্যাপ্লিকেশন
+	Apply	প্রয়োগ
+	Apply Character Style	অক্ষর শৈলী প্রয়োগ
+	Apply Data Set	ডেটা সেট প্রয়োগ
+	Apply to:	প্রয়োগ:
+	Arc	চাপ
+	Area	এলাকা
+	Arrange	সাজান
+	Arrow	তীর
+	Arrows	তীর
+	Artboard	আর্টবোর্ড
+	Artboards	আর্টবোর্ড
+	ArtCraft	আর্টক্রাফট
+	ArtCraft Website	আর্টক্রাফট ওয়েবসাইট
+	ArtCraft website	আর্টক্রাফট ওয়েবসাইট
+	Artistic	শৈল্পিক
+	Ascending	উর্ধ্বক্রম
+	Aspect Ratio	অনুপাত
+	Assign	বরাদ্দ
+	Assign Profile…	প্রোফাইল বরাদ্দ…
+	Audio	অডিও
+	Author	লেখক
+	Author:	লেখক:
+	Auto	অটো
+	Auto ({percent}%)	অটো ({percent}%)
+	Auto Color	অটো রঙ
+	Automate	স্বয়ংক্রিয়
+	Automatic	স্বয়ংক্রিয়
+	Automatically	স্বয়ংক্রিয়ভাবে
+	Available	উপলব্ধ
+	Average	গড়
+	Background	পটভূমি
+	Background Color	পটভূমির রঙ
+	Background Contents	পটভূমি উপাদান
+	Backspace	ব্যাকস্পেস
+	Balance	ভারসাম্য
+	Bar	বার
+	Baseline	বেসলাইন
+	Baseline Shift	বেসলাইন শিফট
+	Basic	প্রাথমিক
+	Basic Latin	মৌলিক ল্যাটিন
+	Batch	ব্যাচ
+	Batch…	ব্যাচ…
+	Bend:	বাঁক:
+	Bicubic	বাইকিউবিক
+	Binary assets added	বাইনারি অ্যাসেট যোগ হয়েছে
+	Binary assets removed	বাইনারি অ্যাসেট মুছে ফেলা হয়েছে
+	Bitmap	বিটম্যাপ
+	Black	কালো
+	Black & White	সাদা-কালো
+	Black and white	সাদা-কালো
+	Black Intensity	কালো তীব্রতা
+	Blacks	কালো
+	Blend Mode	ব্লেন্ড মোড
+	Blending Mode	ব্লেন্ডিং মোড
+	Block	ব্লক
+	Blocks	ব্লক
+	Blue	নীল
+	Blur	ব্লার
+	Blur Angle	ব্লার কোণ
+	Bold	বোল্ড
+	Border	বর্ডার
+	Border Thickness	বর্ডার বেধ
+	Borders	বর্ডার
+	Both	উভয়
+	Both sides	উভয় পাশ
+	Bottom	নিচে
+	Bottom Left	নিচের বামে
+	Bottom Right	নিচের ডানে
+	Bottom:	নিচে:
+	Break Link	লিঙ্ক বিচ্ছিন্ন
+	Brick	ইট
+	Brightness	উজ্জ্বলতা
+	Bring Forward	সামনে আনুন
+	Bring to Front	সবার সামনে
+	Brown	বাদামী
+	Browse	ব্রাউজ
+	Browse…	ব্রাউজ…
+	Brush Size	ব্রাশের আকার
+	Brush Strokes	ব্রাশ স্ট্রোক
+	Brushes	ব্রাশ
+	Bulge	স্ফীতি
+	Bullet	বুলেট
+	Burlap	চট
+	Calculate	গণনা
+	Cancel	বাতিল
+	Canvas	ক্যানভাস
+	Caption	ক্যাপশন
+	Cascade	ক্যাসকেড
+	Case Sensitive	কেস সংবেদনশীল
+	Category	বিভাগ
+	Category:	বিভাগ:
+	Cell Size	ঘরের আকার
+	Center	মাঝে
+	Center X	কেন্দ্র X
+	Center Y	কেন্দ্র Y
+	Centered	কেন্দ্রীভূত
+	Centimeters	সেন্টিমিটার
+	Chamfer	চ্যাম্ফার
+	Change	পরিবর্তন
+	Change All	সব পরিবর্তন
+	Change Case	কেস বদল
+	Change Panel Layout	প্যানেল লেআউট পরিবর্তন
+	Channel	চ্যানেল
+	Channel Mixer	চ্যানেল মিক্সার
+	Channels	চ্যানেল
+	Character	অক্ষর
+	Character Styles	অক্ষর শৈলী
+	Characters	অক্ষর
+	Check for Updates	আপডেট চেক
+	Check for updates	আপডেট চেক
+	Check Spelling…	বানান পরীক্ষা…
+	Checkerboard	চেকারবোর্ড
+	Choose…	বাছাই…
+	Circle	বৃত্ত
+	City	শহর
+	Clarity	স্পষ্টতা
+	Classic	ক্লাসিক
+	Clear	মুছুন
+	Clear All	সব মুছুন
+	Clear Guides	গাইড মুছুন
+	Clear History	ইতিহাস মুছুন
+	Clear Recent Files	সাম্প্রতিক মুছুন
+	Clipboard	ক্লিপবোর্ড
+	Clipping Mask	ক্লিপিং মাস্ক
+	Clone	ক্লোন
+	Close	বন্ধ
+	Close (Esc)	বন্ধ (Esc)
+	Close All	সব বন্ধ
+	Close Panel	প্যানেল বন্ধ
+	Cmd	কমান্ড
+	CMYK Color	CMYK রঙ
+	CMYK:	CMYK:
+	Coarse Dots	মোটা বিন্দু
+	Collapse	সংকোচন
+	Collate	বিন্যস্ত
+	Color	রঙ
+	Color Balance	রঙের ব্যালেন্স
+	Color Burn	কালার বার্ন
+	Color Dodge	কালার ডজ
+	Color Management	কালার ম্যানেজমেন্ট
+	Color Mode	কালার মোড
+	Color Picker	কালার পিকার
+	Color Settings	কালার সেটিংস
+	Color Settings…	কালার সেটিংস…
+	Color Space	কালার স্পেস
+	Color Swatches	কালার সোয়াচ
+	Color Table	কালার টেবিল
+	Color:	রঙ:
+	Colorize	রঙিন
+	Colors	রঙ
+	Colors:	রঙ:
+	Color…	রঙ…
+	Colour	রঙ
+	Column width	কলাম প্রস্থ
+	Columns	কলাম
+	Columns:	কলাম:
+	Combine	একত্রিত
+	Command	কমান্ড
+	Commands:	কমান্ড:
+	Comment	মন্তব্য
+	Comments	মন্তব্য
+	Commits	কমিট
+	Community	কমিউনিটি
+	Company	প্রতিষ্ঠান
+	Compare	তুলনা
+	Comparison	তুলনা
+	Compatibility	সঙ্গতি
+	Composite	যৌগিক
+	Compression	সংকোচন
+	Cone	কোণক
+	Contains	ধারণ করে
+	Continue	চালিয়ে যান
+	Contrast	বৈসাদৃশ্য
+	Contributors	অবদানকারী
+	Convert	রূপান্তর
+	Convert to Shape	আকারে রূপান্তর
+	Convert to sRGB	sRGB-তে রূপান্তর
+	Copies	কপি
+	Copies:	কপি:
+	Copy	কপি
+	Copyright	কপিরাইট
+	Copyrighted	কপিরাইটযুক্ত
+	Corner	কোণা
+	Corners	কোণা
+	Correction	সংশোধন
+	Couldn't open {name}: {e}	{name} খোলা যায়নি: {e}
+@msg	Couldn't open {name}: {e}	{name} খোলা যায়নি: {e}
+	Country	দেশ
+	Crack Brightness	ফাটল উজ্জ্বলতা
+	Crack Depth	ফাটল গভীরতা
+	Crack Spacing	ফাটল ব্যবধান
+	Create	তৈরি
+	Create Clipping Mask	ক্লিপিং মাস্ক তৈরি
+	Crop	ক্রপ
+	Cross	ক্রস
+	Crosshatch	ক্রসহ্যাচ
+	Crystallize	ক্রিস্টালাইজ
+	Crystallize…	ক্রিস্টালাইজ…
+	Ctrl	Ctrl
+	Current	বর্তমান
+	Current page	বর্তমান পৃষ্ঠা
+	Current Time	বর্তমান সময়
+	Curvature	বক্রতা
+	Curve	বক্ররেখা
+	Curves	কার্ভ
+	Curves…	কার্ভ…
+	Custom	কাস্টম
+	Customize…	কাস্টমাইজ…
+	Cut	কাট
+	Cyan	সায়ান
+	Dark	গাঢ়
+	Dark Gray	গাঢ় ধূসর
+	Dark gray	গাঢ় ধূসর
+	Dark Strokes	গাঢ় স্ট্রোক
+	Dark Theme	ডার্ক থিম
+	Darken	গাঢ় করুন
+	Darkness	অন্ধকার
+	Dashed	ড্যাশড
+	Data	ডেটা
+	Data Sets	ডেটা সেট
+	Date	তারিখ
+	Date and Time	তারিখ ও সময়
+	Date Created	তৈরির তারিখ
+	Date format	তারিখ বিন্যাস
+	Dates	তারিখ
+	De-Interlace	ডি-ইন্টারলেস
+	Decrease Font Size	ফন্ট ছোট
+	Default	ডিফল্ট
+	Delete	মুছুন
+	Delete Brush	ব্রাশ মুছুন
+	Delete Group	গ্রুপ মুছুন
+	Delete Layer	স্তর মুছুন
+	Delete Mask	মাস্ক মুছুন
+	Delete Style	শৈলী মুছুন
+	Delete Workspace	ওয়ার্কস্পেস মুছুন
+	Deleted	মুছে ফেলা হয়েছে
+	Delete…	মুছুন…
+	Depth	গভীরতা
+	Desaturate	ডিস্যাচুরেট
+	Descending	নিম্নক্রম
+	Description	বিবরণ
+	Description:	বিবরণ:
+	Deselect	ডি-সিলেক্ট
+	Deselect All	সব আনসিলেক্ট
+	Destination	গন্তব্য
+	Destination:	গন্তব্য:
+	Details	বিবরণ
+	Diagonal	তির্যক
+	Diameter	ব্যাস
+	Diameter:	ব্যাস:
+	Diamond	হীরক
+	Difference	পার্থক্য
+	Diffuse Glow	ডিফিউজ গ্লো
+	Diffusion	ব্যাপন
+	Digits	অঙ্ক
+	Dimensions	মাত্রা
+	Direct Selection Tool	সরাসরি নির্বাচন টুল
+	Direction	দিক
+	Direction Balance	দিক ভারসাম্য
+	Direction:	দিক:
+	Discard	বাতিল
+	Discord	ডিসকর্ড
+	Discretionary Ligatures	ঐচ্ছিক যুক্তাক্ষর
+	Dismiss	খারিজ
+	Display	ডিসপ্লে
+	Display name	প্রদর্শন নাম
+	Distance	দূরত্ব
+	Distort	বিকৃত
+	Distortion	বিকৃতি
+	Distribute	বণ্টন
+	Divide	ভাগ
+	Dock Panel	ডক প্যানেল
+	Document	নথি
+	Document Title	নথির নাম
+	Documents	নথি
+	Don't Save	সংরক্ষণ নয়
+	Done	সম্পন্ন
+	Dot	বিন্দু
+	Dots	বিন্দু
+	Dotted	ডটেড
+	Double-click	ডাবল ক্লিক
+	Down	নিচে
+	Download	ডাউনলোড
+	Draft	খসড়া
+	Draw	আঁকুন
+	Drop Shadow	ড্রপ শ্যাডো
+	Drop Shadow…	ড্রপ শ্যাডো…
+	Duplicate	প্রতিলিপি
+	Duplicate Layer	স্তর প্রতিলিপি
+	Duplicate…	প্রতিলিপি…
+	Duplication	প্রতিলিপি
+	Duration	সময়কাল
+	Dutch	ডাচ
+	Dynamic	ডাইনামিক
+	Dynamics	ডাইনামিক্স
+	Edge	প্রান্ত
+	Edge Brightness	প্রান্ত উজ্জ্বলতা
+	Edge Intensity	প্রান্ত তীব্রতা
+	Edge Only	শুধু প্রান্ত
+	Edge Simplicity	প্রান্ত সরলতা
+	Edge Thickness	প্রান্ত বেধ
+	Edge Width	প্রান্ত প্রস্থ
+	Edit	সম্পাদনা
+	Edit Contents	বিষয়বস্তু সম্পাদনা
+	Edit Original	মূল সম্পাদনা
+	Edit Toolbar	টুলবার সম্পাদনা
+	Editing	সম্পাদনা
+	Edit…	সম্পাদনা…
+	Effect	প্রভাব
+	Effects	প্রভাব
+	Elevation	উচ্চতা
+	Eliminate	বর্জন
+	Ellipse	উপবৃত্ত
+	Ellipse Tool	উপবৃত্ত টুল
+	Ellipsis	উপবৃত্তাকার
+	Em Dash	এম ড্যাশ
+	Em Space	এম স্পেস
+	Embed	এমবেড
+	Emboss	এমবস
+	En Dash	এন ড্যাশ
+	En Space	এন স্পেস
+	Enable	সক্ষম
+	Endpoint	শেষবিন্দু
+	Enlarged	বর্ধিত
+	Enter	এন্টার
+	Entire Font	সম্পূর্ণ ফন্ট
+	Envelope DL	খাম DL
+	Erase	মুছুন
+	Eraser	ইরেজার
+	Eraser Tool	ইরেজার টুল
+	Error	ত্রুটি
+	Even Fields	জোড় ক্ষেত্র
+	Even pages only	শুধু জোড় পৃষ্ঠা
+	Exact	হুবহু
+	Example: {sample}	উদাহরণ: {sample}
+	Exclusion	বর্জন
+	Exit	প্রস্থান
+	Expand	প্রসারিত
+	Export	রপ্তানি
+	Export As	রপ্তানি করুন
+	Export As…	রপ্তানি করুন…
+	Export Options	রপ্তানি বিকল্প
+	Export PDF	পিডিএফ রপ্তানি
+	Export to	রপ্তানি গন্তব্য
+	Exported to {path}	{path}-এ রপ্তানি হয়েছে
+	Exported {path}	{path} রপ্তানি হয়েছে
+	Export…	রপ্তানি…
+	Exposure	এক্সপোজার
+	Expression	অভিব্যক্তি
+	Extract	নিষ্কাশন
+	Eyedropper	আইড্রপার
+	Eyedropper Tool	আইড্রপার টুল
+	Faded Film	ফেইডেড ফিল্ম
+	Fast	দ্রুত
+	Favorites	প্রিয়
+	Feather	ফেদার
+	Field	ক্ষেত্র
+	Field properties	ক্ষেত্রের বৈশিষ্ট্য
+	Fields	ক্ষেত্র
+	Fields:	ক্ষেত্র:
+	File	ফাইল
+	File Format	ফাইল ফরম্যাট
+	File Handling	ফাইল হ্যান্ডলিং
+	File Info…	ফাইল তথ্য…
+	File Name	ফাইলের নাম
+	File Size	ফাইলের আকার
+@id	file.close	ফাইল বন্ধ
+	Files	ফাইল
+	Fill	পূরণ
+	Fill:	পূরণ:
+	Filter	ফিল্টার
+	Find	খুঁজুন
+	Find and Replace	খুঁজুন ও প্রতিস্থাপন
+	Find Next	পরবর্তী খুঁজুন
+	Find:	খুঁজুন:
+	Find…	খুঁজুন…
+	Fine Dots	সূক্ষ্ম বিন্দু
+	Finish	সমাপ্ত
+	First	প্রথম
+	First commit	প্রথম কমিট
+	Fit	ফিট
+	Fit in View	ভিউতে ফিট
+	Fixed	স্থির
+	Flash	ফ্ল্যাশ
+	Flatten	ফ্ল্যাটেন
+	Flip	উল্টান
+	Flip Horizontal	অনুভূমিক উল্টান
+	Flip Vertical	উল্লম্ব উল্টান
+	Focus	ফোকাস
+	Folder	ফোল্ডার
+	Font	ফন্ট
+	Font Size	ফন্ট সাইজ
+	Font size	ফন্ট সাইজ
+	Font Size:	ফন্ট সাইজ:
+	Font:	ফন্ট:
+	Fonts	ফন্ট
+	Format	ফরম্যাট
+	Format:	ফরম্যাট:
+	Fractions	ভগ্নাংশ
+	Frame	ফ্রেম
+	Free	মুক্ত
+	Free Transform	মুক্ত রূপান্তর
+	French	ফরাসি
+	Frequency	কম্পাঙ্ক
+	From	হতে
+	Frosted	ফ্রস্টেড
+	Full	পূর্ণ
+	Full Screen	পূর্ণ পর্দা
+	Full Screen Mode	পূর্ণ পর্দা মোড
+	Functions	ফাংশন
+	Gamma	গামা
+	Gamma Correction	গামা সংশোধন
+	Gamut Warning	গ্যামাট সতর্কতা
+	Gaussian Blur	গসিয়ান ব্লার
+	Gaussian Blur…	গসিয়ান ব্লার…
+	General	সাধারণ
+	General…	সাধারণ…
+	Generate	উৎপন্ন
+	Geometry	জ্যামিতি
+	German	জার্মান
+	GitHub	গিটহাব
+	Glass	কাঁচ
+	Global	গ্লোবাল
+	Glow	দীপ্তি
+	Glow Brightness	দীপ্তি উজ্জ্বলতা
+	Glow Size	দীপ্তির আকার
+	Glyphs	গ্লিফ
+	Good	ভালো
+	Gradient	গ্রেডিয়েন্ট
+	Gradient Tool	গ্রেডিয়েন্ট টুল
+	Gradients	গ্রেডিয়েন্ট
+	Grain	গ্রেইন
+	Grain Type	গ্রেইনের ধরন
+	Graininess	দানাভাব
+	Grainy Dots	দানাযুক্ত বিন্দু
+	Graphic	গ্রাফিক
+	Graphics	গ্রাফিক্স
+	Gray	ধূসর
+	Gray Gamma 2.2	ধূসর গামা ২.২
+	Grayscale	গ্রেস্কেল
+	Green	সবুজ
+	Grid	গ্রিড
+	Grid Size:	গ্রিড আকার:
+	Grid view	গ্রিড ভিউ
+	Gridline every	গ্রিডরেখা প্রতি
+	Group	গ্রুপ
+	Group with	গ্রুপভুক্ত করুন
+	Groups	গ্রুপ
+	Grout Width	গ্রাউট প্রস্থ
+	Guides	গাইড
+	Halftone Pattern	হাফটোন প্যাটার্ন
+	Hand	হাত
+	Hand Tool	হ্যান্ড টুল
+	Hard	কঠিন
+	Hard Light	হার্ড লাইট
+	Hard Mix	হার্ড মিক্স
+	Headings	শিরোনাম
+	Heart	হৃদয়
+	Height	উচ্চতা
+	Height:	উচ্চতা:
+	Help	সহায়তা
+	Hexagon	ষড়ভুজ
+	Hidden	লুকানো
+	Hidden text	লুকানো টেক্সট
+	Hide	লুকান
+	Hide All	সব লুকান
+	Hide Grid	গ্রিড লুকান
+	Hide Others	অন্যগুলো লুকান
+	High	উচ্চ
+	High Pass	হাই পাস
+	High Resolution	উচ্চ রেজোলিউশন
+	High resolution	উচ্চ রেজোলিউশন
+	Highlight Area	হাইলাইট এলাকা
+	Highlights	হাইলাইট
+	Hindi	হিন্দি
+	Histogram	হিস্টোগ্রাম
+	History	ইতিহাস
+	Hollow	ফাঁপা
+	Home	হোম
+	Horizontal	অনুভূমিক
+	Horizontal scale	অনুভূমিক স্কেল
+	Horizontally	অনুভূমিকভাবে
+	Hue	হিউ
+	Hue Shift	হিউ শিফট
+	Hue/Saturation…	হিউ/স্যাচুরেশন…
+	Hyphenation	হাইফেনেশন
+	Icon	আইকন
+	Ignore	উপেক্ষা
+	Ignore All	সব উপেক্ষা
+	Image	ছবি
+	Image Size	ছবির আকার
+	Images	ছবি
+	Import	আমদানি
+	Import…	আমদানি…
+	Inches	ইঞ্চি
+	Increase Font Size	ফন্ট বড়
+	Index	সূচক
+	Inflate	স্ফীত
+	Info	তথ্য
+	Inner Glow…	অভ্যন্তরীণ গ্লো…
+	Input:	ইনপুট:
+	Insert	ঢোকান
+	Inside	ভেতরে
+	Inspect Document	নথি পরিদর্শন
+	Install Plug-in	প্লাগইন ইনস্টল
+	Install Plug-in…	প্লাগইন ইনস্টল…
+	Intensity	তীব্রতা
+	Interface	ইন্টারফেস
+	Interface Language	ইন্টারফেস ভাষা
+	Interface language	ইন্টারফেস ভাষা
+	Interface Theme	ইন্টারফেস থিম
+	Interlaced	ইন্টারলেসড
+	Interpolation	ইন্টারপোলেশন
+	Intersect	ছেদ
+	Intersection	ছেদবিন্দু
+	Invert	বিপরীত
+	Invert Mask	মাস্ক বিপরীত
+	Isolate	বিচ্ছিন্ন
+	Italian	ইতালীয়
+	Italic	তির্যক
+	Japanese	জাপানি
+	Join	যুক্ত হন
+	Join our Discord	আমাদের ডিসকর্ডে যোগ দিন
+	Join the ArtCraft Discord	আর্টক্রাফট ডিসকর্ডে যোগ দিন
+	Join the ArtCraft Discord…	আর্টক্রাফট ডিসকর্ডে যোগ দিন…
+	Join us on Discord	ডিসকর্ডে আমাদের সাথে যোগ দিন
+	just now	এইমাত্র
+	Justification	ন্যায্যকরণ
+	Justify	উভয়পাশে সাজান
+	Keep:	রাখুন:
+	Kerning	কার্নিং
+	Keyboard Shortcuts	কীবোর্ড শর্টকাট
+	Keyboard Shortcuts…	কীবোর্ড শর্টকাট…
+	Keywords	কীওয়ার্ড
+	Kind	ধরন
+	Korean	কোরিয়ান
+	Lab	ল্যাব
+	Label	লেবেল
+	Labels	লেবেল
+	Landscape	ল্যান্ডস্কেপ
+	Language	ভাষা
+	Language Options	ভাষা বিকল্প
+	Language:	ভাষা:
+	Large	বড়
+	Lasso	ল্যাসো
+	Lasso Tool	ল্যাসো টুল
+	Last	শেষ
+	Last commit	শেষ কমিট
+	Later	পরে
+	Layer	স্তর
+	Layers	স্তর
+	Layout	লেআউট
+	Layout:	লেআউট:
+	Leading	লিডিং
+	Left	বামে
+	Left Diagonal	বাম তির্যক
+	Left to Right	বাম থেকে ডান
+	Left:	বামে:
+	Legal	লিগ্যাল
+	Length	দৈর্ঘ্য
+	Length:	দৈর্ঘ্য:
+	Lens Flare	লেন্স ফ্লেয়ার
+	Less	কম
+	Letter	লেটার
+	Level	স্তর
+	Level 1	লেভেল ১
+	Level 2	লেভেল ২
+	Level 3	লেভেল ৩
+	Level 4	লেভেল ৪
+	Levels	লেভেলস
+	Levels…	লেভেলস…
+	Libraries	লাইব্রেরি
+	Library	লাইব্রেরি
+	Light	হালকা
+	Light Blue	হালকা নীল
+	Light Direction	আলোর দিক
+	Light Gray	হালকা ধূসর
+	Light gray	হালকা ধূসর
+	Light Intensity	আলোর তীব্রতা
+	Light Theme	লাইট থিম
+	Light Type	আলোর ধরন
+	Lighten	হালকা করুন
+	Lighter Color	হালকা রঙ
+	Lighting	আলোকসজ্জা
+	Lighting Effects	লাইটিং প্রভাব
+	Lightness	উজ্জ্বলতা
+	Line	রেখা
+	Line delta	লাইন ডেল্টা
+	Line spacing	লাইন ব্যবধান
+	Linear	রৈখিক
+	Linear Burn	লিনিয়ার বার্ন
+	Linear Gradient	রৈখিক গ্রেডিয়েন্ট
+	Linear Light	লিনিয়ার লাইট
+	Lines	রেখা
+	Lines +/−	রেখা +/−
+	Lines added	যোগ করা লাইন
+	Lines deleted	মুছে ফেলা লাইন
+	Link	লিঙ্ক
+	Links	লিঙ্ক
+	List	তালিকা
+	List View	তালিকা ভিউ
+	List view	তালিকা ভিউ
+	Location	অবস্থান
+	Location:	অবস্থান:
+	Lock	লক
+	Lock Guides	গাইড লক
+	Lock Slices	স্লাইস লক
+	Locked	লক করা
+	Long Lines	দীর্ঘ লাইন
+	Long Strokes	দীর্ঘ স্ট্রোক
+	Low	কম
+	lowercase	ছোট হাতের
+	Luminance	লুমিন্যান্স
+	Luminosity	উজ্জ্বলতা
+	Magenta	ম্যাজেন্টা
+	Magic Wand Tool	ম্যাজিক ওয়ান্ড টুল
+	Magnification	বিবর্ধন
+	Margins	মার্জিন
+	Mask	মাস্ক
+	Masks	মাস্ক
+	Matte	ম্যাট
+	Maximize	সর্বোচ্চ
+	Maximum	সর্বোচ্চ
+	Measure	পরিমাপ
+	Median	মধ্যমা
+	Medium	মাঝারি
+	Medium Dots	মাঝারি বিন্দু
+	Medium Gray	মাঝারি ধূসর
+	Medium Lines	মাঝারি রেখা
+	Merge	একত্রিত
+	Merge Cells	ঘর একত্রিত
+	Merge Layers	স্তর একত্রিত
+	Merged PRs	মার্জ করা PR
+	Mesh	মেশ
+	Message:	বার্তা:
+	Metadata	মেটাডেটা
+	Method	পদ্ধতি
+	Method:	পদ্ধতি:
+	Mezzotint	মেজোতিন্ত
+	Mezzotint…	মেজোতিন্ত…
+	Middle	মাঝে
+	Midpoint	মধ্যবিন্দু
+	Midtones	মিডটোন
+	Millimeters	মিলিমিটার
+	Minimize	ন্যূনতম
+	Minimum	ন্যূনতম
+	Mirror	মিরর
+	Missing	অনুপস্থিত
+	Mobile	মোবাইল
+	Mode	মোড
+	Mode:	মোড:
+	Model	মডেল
+	Models	মডেল
+	Modern	আধুনিক
+	Modified	পরিবর্তিত
+	Modify	পরিবর্তন
+	Monitor RGB	মনিটর RGB
+	Mono	মনো
+	Monochrome	মনোক্রোম
+	More	আরও
+	Mosaic	মোজাইক
+	Mosaic Tiles	মোজাইক টাইলস
+	Motion	গতি
+	Move	সরান
+	Move Down	নিচে সরান
+	Move Panel	প্যানেল সরান
+	Move Up	উপরে সরান
+	Multiply	গুণ
+	Name	নাম
+	Name (A–Z)	নাম (A–Z)
+	Name:	নাম:
+	Navigation	নেভিগেশন
+	Navigator	নেভিগেটর
+	Neon Glow	নিয়ন গ্লো
+	Never	কখনই না
+	New	নতুন
+	New Document	নতুন নথি
+	New document	নতুন নথি
+	New from Template	টেমপ্লেট হতে নতুন
+	New Group	নতুন গ্রুপ
+	New Guide	নতুন গাইড
+	New Layer	নতুন স্তর
+	New Layer…	নতুন স্তর…
+	New Style…	নতুন শৈলী…
+	New Swatch…	নতুন সোয়াচ…
+	New Window	নতুন উইন্ডো
+	New Workspace	নতুন ওয়ার্কস্পেস
+	New Workspace…	নতুন ওয়ার্কস্পেস…
+	New…	নতুন…
+	Next	পরের
+	Next Appearance Mode	পরের দৃশ্যরূপ মোড
+	Next Change	পরের পরিবর্তন
+	Next Page	পরের পৃষ্ঠা
+	Next page	পরের পৃষ্ঠা
+	No	না
+	No Color	কোনো রঙ নেই
+	No Dither	কোনো ডিদার নেই
+	No Document	কোনো নথি নেই
+	No document	কোনো নথি নেই
+	No document open	খোলা নথি নেই
+	No limit	সীমাহীন
+	No matches.	কোনো মিল নেই।
+	No matching commands	কোনো কমান্ড মেলেনি
+	No recent files	সাম্প্রতিক ফাইল নেই
+	No results	ফলাফল নেই
+	No Selection	নির্বাচন নেই
+	No selection	নির্বাচন নেই
+	Noise	নয়েজ
+	Nonbreaking Space	অভঙ্গুর স্পেস
+	None	কোনটিই নয়
+	Normal	স্বাভাবিক
+	Not available	উপলব্ধ নয়
+	NTSC Colors	NTSC রঙ
+	Number	সংখ্যা
+	Object	অবজেক্ট
+	Octagon	অষ্টভুজ
+	Odd Fields	বিজোড় ক্ষেত্র
+	Odd pages only	শুধু বিজোড় পৃষ্ঠা
+	Off	বন্ধ
+	Offline	অফলাইন
+	Offset	অফসেট
+	Offset:	অফসেট:
+	OK	ঠিক আছে
+	Omit	বাদ দিন
+	On	চালু
+	Only Web Colors	শুধু ওয়েব রঙ
+	Opacity	অস্বচ্ছতা
+	Opacity:	অস্বচ্ছতা:
+	Open	খুলুন
+	Open link	লিঙ্ক খুলুন
+	Open Recent	সাম্প্রতিক খুলুন
+	OpenType	ওপেনটাইপ
+	Open…	খুলুন…
+	Optimized	অপ্টিমাইজড
+	Options	বিকল্প
+	Options…	বিকল্প…
+	Orange	কমলা
+	Ordinals	ক্রমবাচক
+	Orientation	অভিযোজন
+	Orientation:	অভিযোজন:
+	Original	আসল
+	Other	অন্যান্য
+	Outer Glow…	বাইরের গ্লো…
+	Outline	আউটলাইন
+	Output	আউটপুট
+	Output:	আউটপুট:
+	Outside	বাইরে
+	Oval	ডিম্বাকৃতি
+	Overlap:	ওভারল্যাপ:
+	Overlay	ওভারলে
+	Package…	প্যাকেজ…
+	Page	পৃষ্ঠা
+	Page {page} of {pages}	{page}/{pages} পৃষ্ঠা
+	Pages	পৃষ্ঠা
+	Painting	পেইন্টিং
+	Panel	প্যানেল
+	Panel menu	প্যানেল মেনু
+	Panel Options…	প্যানেল বিকল্প…
+	Panels	প্যানেল
+	Paper	কাগজ
+	Paragraph	অনুচ্ছেদ
+	Paragraph Styles	অনুচ্ছেদ শৈলী
+	Password	পাসওয়ার্ড
+	Paste	পেস্ট
+	Paste Special	বিশেষ পেস্ট
+	Patchwork	প্যাচওয়ার্ক
+	Path	পাথ
+	Path:	পাথ:
+	Paths	পাথ
+	Pattern	প্যাটার্ন
+	Pattern Type	প্যাটার্ন ধরন
+	Pause	বিরতি
+	Pen	পেন
+	Pen Tool	পেন টুল
+	Pencil	পেন্সিল
+	Pencil Tool	পেন্সিল টুল
+	Pentagon	পঞ্চভুজ
+	Percent	শতাংশ
+	Percentage	শতাংশ
+	Performance	কর্মক্ষমতা
+	Perimeter	পরিসীমা
+	Perspective	দৃষ্টিকোণ
+	Photo	ছবি
+	Photocopy	ফটোকপি
+	Picas	পিকাস
+	Pin Light	পিন লাইট
+	Pink	গোলাপী
+	Pixel	পিক্সেল
+	Pixelate	পিক্সেলেট
+	Pixels	পিক্সেল
+	Play	প্লে
+	Plug-ins	প্লাগইন
+	Point	বিন্দু
+	Pointillize	পয়েন্টিলাইজ
+	Pointillize…	পয়েন্টিলাইজ…
+	Points	বিন্দু
+	Polygon	বহুভুজ
+	Polygon Tool	বহুভুজ টুল
+	Polyline	পলিলাইন
+	Portrait	পোর্ট্রেট
+	Portuguese	পর্তুগিজ
+	Position	অবস্থান
+	Position:	অবস্থান:
+	Postcard	পোস্টকার্ড
+	Poster	পোস্টার
+	Poster Edges	পোস্টার প্রান্ত
+	Posterization	পোস্টারাইজেশন
+	Posterize	পোস্টারাইজ
+	Preferences	পছন্দ
+	Preferences…	পছন্দ…
+	Prefix	উপসর্গ
+	Preserve	সংরক্ষণ
+	Preserve Luminosity	উজ্জ্বলতা অক্ষুণ্ন রাখুন
+	Preset	প্রিসেট
+	Preset Manager	প্রিসেট ম্যানেজার
+	Preset:	প্রিসেট:
+	Presets	প্রিসেট
+	Presets:	প্রিসেট:
+	Press keys…	কী চাপুন…
+	Pressure	চাপ
+	Preview	প্রিভিউ
+	Previous	আগের
+	Previous Change	আগের পরিবর্তন
+	Previous Page	আগের পৃষ্ঠা
+	Previous page	আগের পৃষ্ঠা
+	Print	প্রিন্ট
+	Printer	প্রিন্টার
+	Printer:	প্রিন্টার:
+	Printing	প্রিন্টিং
+	Print…	প্রিন্ট…
+	Profile	প্রোফাইল
+	Progressive	প্রগতিশীল
+	Proof Setup	প্রুফ সেটআপ
+	Properties	বৈশিষ্ট্য
+	Protect	সুরক্ষা
+	PRs	PR
+	Public Domain	পাবলিক ডোমেইন
+	Punctuation	যতিচিহ্ন
+	Purple	বেগুনি
+	Pyramid	পিরামিড
+	Quality	মান
+	Quick Actions	দ্রুত অ্যাকশন
+	Radial	রেডিয়াল
+	Radial Blur	রেডিয়াল ব্লার
+	Radial Blur…	রেডিয়াল ব্লার…
+	Radial Gradient	রেডিয়াল গ্রেডিয়েন্ট
+	Radius	ব্যাসার্ধ
+	Radius:	ব্যাসার্ধ:
+	Random	এলোমেলো
+	Range	সীমা
+	Range:	সীমা:
+	Rasterize	র‌্যাস্টারাইজ
+	Ratio	অনুপাত
+	Rays	রশ্মি
+	Ready	প্রস্তুত
+	Real name	আসল নাম
+	Recent	সাম্প্রতিক
+	Recent Colors	সাম্প্রতিক রঙ
+	Recent Files	সাম্প্রতিক ফাইল
+	Recover	পুনরুদ্ধার
+	Rectangle	আয়তক্ষেত্র
+	Rectangle Tool	আয়তক্ষেত্র টুল
+	Rectangular	আয়তাকার
+	Red	লাল
+	Redo	রিডু
+	Reduce Noise	নয়েজ কমান
+	Refine	পরিমার্জন
+	Reflected	প্রতিফলিত
+	Refresh	রিফ্রেশ
+	Regular	নিয়মিত
+	Relative	আপেক্ষিক
+	Relative Colorimetric	রিলেটিভ কালারমেট্রিক
+	Relaxed	শিথিল
+	Relief	রিলিফ
+	Reload	পুনরায় লোড
+	Remove	সরান
+	Remove Background	পটভূমি সরান
+	Remove from favorites	প্রিয় হতে সরান
+	Rename	নাম বদল
+	Rename Group…	গ্রুপ নাম বদল…
+	Rename Style	শৈলী নাম বদল
+	Rename…	নাম বদল…
+	Repeat	পুনরাবৃত্তি
+	Replace	প্রতিস্থাপন
+	Replace:	প্রতিস্থাপন:
+	Reply	উত্তর
+	Report	রিপোর্ট
+	Report an Issue…	সমস্যা জানান…
+	Reselect	পুনরায় নির্বাচন
+	Reset	রিসেট
+	Reset Preferences	পছন্দ রিসেট
+	Reset…	রিসেট…
+	Resize panel window	প্যানেল আকার বদল
+	Resize panels	প্যানেল আকার বদল
+	Resolution	রেজোলিউশন
+	Resolution:	রেজোলিউশন:
+	Restore	পুনরুদ্ধার
+	Result	ফলাফল
+	Resume	পুনরায় শুরু
+	Reveal in Finder	ফাইন্ডারে দেখান
+	Reverse	বিপরীত
+	Reverse the order	ক্রম উল্টান
+	Revert	পূর্বাবস্থা
+	Review	পর্যালোচনা
+	RGB	RGB
+	RGB Color	RGB রঙ
+	RGB:	RGB:
+	Right	ডানে
+	Right Diagonal	ডান তির্যক
+	Right:	ডানে:
+	Rotate	ঘোরান
+	Rotate:	ঘোরান:
+	Rotation	ঘূর্ণন
+	Rotation:	ঘূর্ণন:
+	Rounded Rectangle	গোলাকার আয়তক্ষেত্র
+	Roundness	গোলাকার ভাব
+	Roundness:	গোলাকার ভাব:
+	Rows	সারি
+	Ruler	রুলার
+	Rulers	রুলার
+	Rulers & Grids	রুলার ও গ্রিড
+	Russian	রুশ
+	Sample Size	নমুনার আকার
+	Sandstone	বেলেপাথর
+	Saturation	স্যাচুরেশন
+	Save	সংরক্ষণ
+	Save a Copy	কপি সংরক্ষণ
+	Save a Copy…	কপি সংরক্ষণ…
+	Save As	নতুন নামে
+	Save as PDF	পিডিএফ সংরক্ষণ
+	Save as Template	টেমপ্লেট হিসেবে সংরক্ষণ
+	Save as Template…	টেমপ্লেট হিসেবে সংরক্ষণ…
+	Save As…	নতুন নামে…
+	Save Preset…	প্রিসেট সংরক্ষণ…
+	Save Selection	নির্বাচন সংরক্ষণ
+	Save Selection…	নির্বাচন সংরক্ষণ…
+	Saved	সংরক্ষিত
+	Save…	সংরক্ষণ…
+	Scale	স্কেল
+	Scale:	স্কেল:
+	Scaling	স্কেলিং
+	Scratch Disks	স্ক্র্যাচ ডিস্ক
+	Scratch Disks…	স্ক্র্যাচ ডিস্ক…
+	Screen	পর্দা
+	Screen Mode	স্ক্রিন মোড
+	Scripts	স্ক্রিপ্ট
+	Search	খুঁজুন
+	Security	নিরাপত্তা
+	Segments	অংশ
+	Select	নির্বাচন
+	Select All	সব নির্বাচন
+	Select Objects	অবজেক্ট নির্বাচন
+	Select:	নির্বাচন:
+	Selected pages	নির্বাচিত পৃষ্ঠা
+	Selection	নির্বাচন
+	Selection Tool	সিলেকশন টুল
+	Selective	নির্বাচনী
+	Send Backward	একধাপ পেছনে
+	Send to Back	সবার পেছনে
+	Sensitivity	সংবেদনশীলতা
+	Sent to {printer}	{printer}-এ পাঠানো হয়েছে
+	Services	পরিষেবা
+	Set	সেট
+	Set as Default	ডিফল্ট করুন
+	Set:	সেট:
+	Settings	সেটিংস
+	Settings:	সেটিংস:
+	Settings…	সেটিংস…
+	Shadow	ছায়া
+	Shadows	ছায়া
+	Shape	আকার
+	Shape Effects	আকার প্রভাব
+	Shape:	আকার:
+	Shapes	আকার
+	Share	শেয়ার
+	Sharpen	শার্পেন
+	Sharpness	তীক্ষ্ণতা
+	Shift	শিফট
+	Short Lines	ছোট লাইন
+	Short Strokes	ছোট স্ট্রোক
+	Shortcut	শর্টকাট
+	Shortcuts	শর্টকাট
+	Show	দেখান
+	Show All	সব দেখান
+	Show Grid	গ্রিড দেখান
+	Show Guides	গাইড দেখান
+	Show in Folder	ফোল্ডারে দেখান
+	Show Mask	মাস্ক দেখান
+	Show Mesh	মেশ দেখান
+	Show Rulers	রুলার দেখান
+	Show rulers	রুলার দেখান
+	Show Tool Tips	টুলটিপ দেখান
+	Show:	দেখান:
+	Sides:	পার্শ্ব:
+	Simplify	সরলীকরণ
+	Size	আকার
+	Size:	আকার:
+	Sketch	স্কেচ
+	Skew	তির্যক
+	Slice	স্লাইস
+	Slice Options	স্লাইস বিকল্প
+	Slice Options…	স্লাইস বিকল্প…
+	Slice Tool	স্লাইস টুল
+	Slices	স্লাইস
+	Small	ছোট
+	Small Caps	স্মল ক্যাপস
+	Smart Blur	স্মার্ট ব্লার
+	Smart Blur…	স্মার্ট ব্লার…
+	Smart Guides	স্মার্ট গাইড
+	Smart quotes	স্মার্ট উদ্ধৃতি
+	Smoothness	মসৃণতা
+	Snap to Grid	গ্রিডে স্ন্যাপ
+	Soft	নরম
+	Soft Light	সফট লাইট
+	Soften	নরম করুন
+	Softness	নমনীয়তা
+	Solarize	সোলারাইজ
+	Sort	সাজান
+	Sort by	ক্রমানুসার
+	Source	উৎস
+	Source code on GitHub	গিটহাবে সোর্স কোড
+	Spaces	স্পেস
+	Spacing	ব্যবধান
+	Spacing:	ব্যবধান:
+	Spanish	স্পেনীয়
+	Spatter	স্প্যাটার
+	Special	বিশেষ
+	Speckle	স্পেকল
+	Speed	গতি
+	Spelling	বানান
+	Spherize	গোলাকার
+	Split	বিভাজন
+	Spot Color	স্পট রঙ
+	Spray Radius	স্প্রে ব্যাসার্ধ
+	Square	বর্গক্ষেত্র
+	Square Size	বর্গাকার সাইজ
+	sRGB IEC61966-2.1	sRGB IEC61966-2.1
+	Stacked	স্তূপীকৃত
+	Stained Glass	স্টেইন্ড গ্লাস
+	Stamp	স্ট্যাম্প
+	Standard	মানসম্মত
+	Standard Ligatures	স্ট্যান্ডার্ড যুক্তাক্ষর
+	Star	তারা
+	Start at:	শুরু:
+	Statistics	পরিসংখ্যান
+	Status	অবস্থা
+	Status Bar	স্ট্যাটাস বার
+	Stippled	বিন্দুযুক্ত
+	Stop	থামান
+	Strength	শক্তি
+	Stretch	প্রসারিত
+	Strikethrough	মাঝখান দিয়ে কাটা
+	Stroke	স্ট্রোক
+	Stroke Color	স্ট্রোক রঙ
+	Stroke Length	স্ট্রোক দৈর্ঘ্য
+	Stroke Options	স্ট্রোক বিকল্প
+	Stroke:	স্ট্রোক:
+	Studio	স্টুডিও
+	Style	শৈলী
+	Style:	শৈলী:
+	Styles	শৈলী
+	Stylize	স্টাইলাইজ
+	Subdivisions	উপবিভাগ
+	Subject	বিষয়
+	Subscript	সাবস্ক্রিপ্ট
+	Subset	সাবসেট
+	Subtitle	উপশিরোনাম
+	Subtract	বিয়োগ
+	Sumi-e	সুমি-ই
+	Summary	সারসংক্ষেপ
+	Superscript	সুপারস্ক্রিপ্ট
+	Swatches	সোয়াচ
+	Symbol	প্রতীক
+	Symbols	প্রতীক
+	Sync with system	সিস্টেমের সাথে সিঙ্ক
+	System	সিস্টেম
+	Tab	ট্যাব
+	Table	টেবিল
+	Table style	টেবিল শৈলী
+	Tables	টেবিল
+	Tabloid	ট্যাব্লয়েড
+	Tabs	ট্যাব
+	Taper	টেপার
+	Target	লক্ষ্য
+	Target:	লক্ষ্য:
+	Temperature	তাপমাত্রা
+	Templates	টেমপ্লেট
+	Text	টেক্সট
+	Text color	টেক্সট রঙ
+	Text:	টেক্সট:
+	Texture	টেক্সচার
+	The passwords don't match.	পাসওয়ার্ড মিলছে না।
+	Theme	থিম
+	Thickness	পুরুত্ব
+	This document has no bookmarks.	এই নথিতে কোনো বুকমার্ক নেই।
+	Threshold	সীমা
+	Thumbnails	থাম্বনেইল
+	Tile	টাইল
+	Tile Size	টাইল আকার
+	Tilt	কাত
+	Time	সময়
+	Timecode	টাইমকোড
+	Timeline	টাইমলাইন
+	Tint	টিন্ট
+	Tint Color	টিন্ট রঙ
+	Title	শিরোনাম
+	To	প্রতি
+	Tolerance	সহনশীলতা
+	Tolerance:	সহনশীলতা:
+	Tool	টুল
+	Toolbars	টুলবার
+	Tools	টুলস
+	Top	উপরে
+	Top Left	উপরের বামে
+	Top Right	উপরের ডানে
+	Top:	উপরে:
+	Total	মোট
+	Total:	মোট:
+	Tracking	ট্র্যাকিং
+	Transform	রূপান্তর
+	Translate	অনুবাদ
+	Transparency	স্বচ্ছতা
+	Transparent	স্বচ্ছ
+	Trap…	ট্র্যাপ…
+	Triangle	ত্রিভুজ
+	Turbulent	উত্তাল
+	Twirl	টুইর্ল
+	Twist	টুইস্ট
+	Type	টাইপ
+	Type Tool	টাইপ টুল
+	Type:	টাইপ:
+	Typewriter	টাইপরাইটার
+	Type…	টাইপ…
+	Typing	টাইপিং
+	Underline	নিম্নরেখা
+	Undo	আনডু
+	Undo {action}	আনডু {action}
+	Ungroup	আনগ্রুপ
+	Uniform	সমরূপ
+	Union	মিলন
+	Units	একক
+	Unknown	অজানা
+	Unlock	আনলক
+	Unsaved changes	অসংরক্ষিত পরিবর্তন
+	Unsharp Mask	আনশার্প মাস্ক
+	Untitled	শিরোনামহীন
+	Up	উপরে
+	Update	আপডেট
+	Updates	আপডেট
+	UPPERCASE	বড় হাতের
+	Use Default	ডিফল্ট ব্যবহার
+	User	ব্যবহারকারী
+	Username	ব্যবহারকারীর নাম
+	Value	মান
+	Value:	মান:
+	Variables	চলক
+	Version	সংস্করণ
+	Version {version}	সংস্করণ {version}
+	Vertical	উল্লম্ব
+	Vertical Alignment	উল্লম্ব অ্যালাইনমেন্ট
+	Vertical Type Tool	উল্লম্ব টাইপ টুল
+	Vertically	উল্লম্বভাবে
+	Very High	খুব বেশি
+	Vibrance	ভাইব্রেন্স
+	Video	ভিডিও
+	View	প্রদর্শন
+	Violet	বেগুনী
+	Visibility	দৃশ্যমানতা
+	Vivid Light	উজ্জ্বল আলো
+	Voice	কণ্ঠ
+	W:	প্রস্থ:
+	Warning	সতর্কতা
+	Warnings	সতর্কতা
+	Warp	ওয়ার্প
+	Watermark	জলছাপ
+	Wave	তরঙ্গ
+	Wave…	তরঙ্গ…
+	Web	ওয়েব
+	Website	ওয়েবসাইট
+	Weight	ওজন
+	Wet	ভেজা
+	White	সাদা
+	White Intensity	সাদা তীব্রতা
+	White Is High	সাদা বেশি
+	Whites	সাদা
+	Width	প্রস্থ
+	Width and Height	প্রস্থ ও উচ্চতা
+	Width:	প্রস্থ:
+	Window	উইন্ডো
+	Windows	উইন্ডো
+	Words	শব্দ
+	Working CMYK	ওয়ার্কিং CMYK
+	Workspace	ওয়ার্কস্পেস
+	Workspaces	ওয়ার্কস্পেস
+	X	X
+	Y	Y
+	Yellow	হলুদ
+	Yes	হ্যাঁ
+	yesterday	গতকাল
+	Your changes will be lost if you don't save them.	সংরক্ষণ না করলে পরিবর্তন মুছে যাবে।
+	Zoom	জুম
+	Zoom In	জুম ইন
+	Zoom in	জুম ইন
+	Zoom Out	জুম আউট
+	Zoom out	জুম আউট
+	Zoom Tool	জুম টুল
+@plural	{n} commit|{n} commits	{n}টি কমিট|{n}টি কমিট
+	{n} files	{n}টি ফাইল
+	{n} h ago	{n} ঘণ্টা আগে
+@plural	{n} item|{n} items	{n}টি আইটেম|{n}টি আইটেম
+@plural	{n} Layer|{n} Layers	{n}টি স্তর|{n}টি স্তর
+	{n} min ago	{n} মিনিট আগে
+@plural	{n} step|{n} steps	{n}টি ধাপ|{n}টি ধাপ
+	−Bin	−বিন
+	● Recording	● রেকর্ডিং

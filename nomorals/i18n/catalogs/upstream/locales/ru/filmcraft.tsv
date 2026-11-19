@@ -1,0 +1,327 @@
+# Русский (ru) interface catalog for FilmCraft.
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   @plural  English `one|other`; the translation lists this language's plural forms, `|`-separated.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary. No other product's localisation, string table or translated UI was
+# consulted or copied; add entries the same way.
+
+	About FilmCraft	О FilmCraft
+	Add Audio Submix Track	Добавить дорожку подмикширования звука
+	Add Caption at Playhead	Добавить субтитр в позиции курсора воспроизведения
+	Add Chapter Marker…	Добавить маркер главы…
+	Add Edit	Добавить склейку
+	Add Edit to All Tracks	Добавить склейку на все дорожки
+	Add Flash Cue Marker…	Добавить маркер Flash Cue…
+	Add Frame Hold	Добавить стоп-кадр
+	Add Guide…	Добавить направляющую…
+	Add Marker	Добавить маркер
+	Add New Caption Track…	Добавить новую дорожку субтитров…
+	Add Range Marker	Добавить маркер диапазона
+	Add Range Marker to In and Out	Добавить маркер диапазона между точками входа и выхода
+	Add Tracks…	Добавить дорожки…
+	Adjustment Layer…	Корректирующий слой…
+	Align to Video Frame	Выровнять по видеокадру
+	Align to Video Frame as Group	Выровнять как группу по видеокадру
+	All Panels	Все панели
+	Appearance	Оформление
+	Appearance…	Оформление…
+	Apply Audio Transition	Применить аудиопереход
+	Apply Default Transitions to Selection	Применить переходы по умолчанию к выделению
+	Apply Video Transition	Применить видеопереход
+	Assembly	Сборка
+	Attach Proxies…	Прикрепить прокси…
+	Audio Channels…	Аудиоканалы…
+	Audio Clip Mixer	Микшер аудиоклипов
+	Audio Gain…	Усиление звука…
+	Audio Hardware…	Аудиооборудование…
+	Audio In	Вход аудио
+	Audio Meters	Индикаторы звука
+	Audio Options	Параметры аудио
+	Audio Out	Выход аудио
+	Audio Track Mixer	Микшер аудиодорожек
+	Audio Waveform	Форма звуковой волны
+	Auto Save…	Автосохранение…
+	Automate to Sequence…	Автоматизировать в эпизод…
+	Bars and Tone…	Цветные полосы и тон…
+	Baseline	Baseline
+	Bin	Подборка
+	Bin From Selection	Подборка из выделения
+	Binary assets added	Binary assets added
+	Black Video…	Черное видео…
+	Bottom	По нижнему краю
+	Breakout to Mono	Разбить на моно
+	Bring Forward	Переместить вперед
+	Bring to Front	Переместить на передний план
+	Brush Strokes	Brush Strokes
+	Captions	Субтитры
+	Captions and Graphics	Субтитры и графика
+	Captions…	Субтитры…
+	Caribbean	Карибский
+	Center Horizontally	По центру по горизонтали
+	Center Vertically	По центру по вертикали
+	Cerulean	Лазурный
+	Clear Guides	Очистить направляющие
+	Clear In	Снять точку входа
+	Clear In and Out	Снять точки входа и выхода
+	Clear Markers	Удалить маркеры
+	Clear Out	Снять точку выхода
+	Clear Selected Marker	Удалить выбранный маркер
+	Clip	Клип
+	Close All Other Projects	Закрыть все остальные проекты
+	Close All Projects	Закрыть все проекты
+	Close Gap	Удалить пробел
+	Close Project	Закрыть проект
+	Color Management…	Управление цветом…
+	Color Matte…	Цветная подложка…
+	Comparison View	Режим сравнения
+	Composite Video	Составное видео
+	Consolidate Duplicates	Объединить дубликаты
+	Copy Paste Includes Sequence Markers	Копирование и вставка включают маркеры эпизода
+	Create Captions from Transcript…	Создать субтитры из расшифровки…
+	Create Multi-Camera Source Sequence…	Создать многокамерный исходный эпизод…
+	Create Proxies…	Создать прокси…
+	Custom	Custom
+	Dark	Темный
+	Darkest	Самый темный
+	Delete Render Files	Удалить файлы рендеринга
+	Delete Render Files In to Out	Удалить файлы рендеринга между точками входа и выхода
+	Delete Tracks…	Удалить дорожки…
+	Delete Transcript	Удалить расшифровку
+	Demo Footage	Демонстрационные материалы
+	Demo Project	Демо-проект
+	Deselect All	Отменить выделение
+	Detach Proxies	Отсоединить прокси
+	Display Mode	Режим отображения
+	Distribute Horizontally	Распределить по горизонтали
+	Distribute Space Horizontally	Распределить интервалы по горизонтали
+	Distribute Space Vertically	Распределить интервалы по вертикали
+	Distribute Vertically	Распределить по вертикали
+	Dock Panel	Dock Panel
+	Dynamic Audio Waveforms	Динамические формы звуковой волны
+	Edge Thickness	Edge Thickness
+	Edit	Правка
+	Edit Offline…	Редактировать автономный клип…
+	Edit Subclip…	Редактировать субклип…
+	Editing	Монтаж
+	Edit…	Edit…
+	Effect Controls	Элементы управления эффектами
+	Emboss	Emboss
+	Enable Remix	Включить ремикс
+	Essential Graphics	Основные графические элементы
+	Essential Sound	Основной звук
+	Events	События
+	Export As Motion Graphics Template…	Экспортировать как шаблон анимированной графики…
+	Extract Audio	Извлечь аудио
+	Field Options…	Параметры полей…
+	File…	Файл…
+	Fill frame	Заполнить кадр
+	FilmCraft Help…	Справка FilmCraft…
+	FilmCraft on getartcraft.com	FilmCraft на getartcraft.com
+	FilmCraft on GitHub	FilmCraft на GitHub
+	Fit to frame	Вписать в кадр
+	Flatten	Свести
+	Focus	Focus
+	Forest	Лесной
+	Frame Blending	Смешение кадров
+	Frame Hold Options…	Параметры стоп-кадра…
+	Frame Sampling	Выборка кадров
+	From Bin	Из подборки
+	From file…	Из файла…
+	From Source Monitor	Из монитора источника
+	From Source Monitor, Match Frame	Из монитора источника, сопоставление кадров
+	Full	Полное
+	Generate Audio Waveform	Сгенерировать форму звуковой волны
+	Get Media File Properties for	Свойства медиафайла для
+	Glow Brightness	Glow Brightness
+	Go to Gap	Перейти к промежутку
+	Go to In	Перейти к точке входа
+	Go to Next Caption Segment	Перейти к следующему сегменту субтитров
+	Go to Next Marker	Перейти к следующему маркеру
+	Go to Out	Перейти к точке выхода
+	Go to Previous Caption Segment	Перейти к предыдущему сегменту субтитров
+	Go to Previous Marker	Перейти к предыдущему маркеру
+	Go to Split	Перейти к раздельной точке
+	Graphics and Titles	Графика и титры
+	Graphics…	Графика…
+	Green	Зеленый
+	Guide Templates	Шаблоны направляющих
+	Hard	Hard
+	Hide All Caption Tracks	Скрыть все дорожки субтитров
+	High Quality Playback	Высокое качество воспроизведения
+	Home	Home
+	Import From	Импортировать из
+	Import from Media Browser	Импортировать из медиабраузера
+	Import Image Sequence…	Импортировать последовательность изображений…
+	Info	Инфо
+	Ingest Settings…	Параметры инжеста…
+	Insert	Вставить
+	Insert Frame Hold Segment	Вставить сегмент стоп-кадра
+	Install Motion Graphics Template…	Установить шаблон анимированной графики…
+	Interpret Footage…	Интерпретировать материал…
+	Join the ArtCraft Discord…	Присоединиться к ArtCraft Discord…
+	Join us on Discord	Join us on Discord
+	Labels	Labels
+	Labels…	Метки…
+	Lavender	Лавандовый
+	Learning	Обучение
+	Left	По левому краю
+	Lift	Поднять
+	Light	Светлый
+	Line delta	Line delta
+	Link	Связать
+	Link Media…	Привязать медиаданные…
+	Linked Selection	Связанное выделение
+	Lock Guides	Закрепить направляющие
+	Lumetri Color	Цвет Lumetri
+	Lumetri Scopes	Видеографика Lumetri
+	Make Offline…	Сделать автономным…
+	Make Subclip…	Создать субклип…
+	Make Subsequence	Создать вложенный эпизод
+	Manage Guides…	Управление направляющими…
+	Mark Clip	Пометить клип
+	Mark In	Отметить точку входа
+	Mark Out	Отметить точку выхода
+	Mark Selection	Пометить выделение
+	Mark Split	Отметить раздельную точку
+	Markers	Маркеры
+	Match Frame	Сопоставить кадр
+	Media Analysis & Transcription…	Анализ медиа и расшифровка…
+	Media Browser	Медиабраузер
+	Media Cache…	Кэш медиаданных…
+	Media…	Медиа…
+	Memory…	Память…
+	Merge Clips…	Объединить клипы…
+	Motion Graphics Template…	Шаблон анимированной графики…
+	Multi-Camera	Мультикамера
+	Multi-Camera View	Мультикамерный режим
+	Nest…	Вложить…
+	New Project Panel	Новая панель проекта
+	Next in Sequence	Следующий в эпизоде
+	Next in Track	Следующий на дорожке
+	Normalize Mix Track…	Нормализовать мастер-дорожку…
+	Offline File…	Автономный файл…
+	Open Project…	Открыть проект…
+	Optical Flow	Оптический поток
+	Overwrite	Перезаписать
+	Paste Attributes…	Вставить атрибуты…
+	Paste Insert	Вставить со сдвигом
+	Paused Resolution	Разрешение на паузе
+	Playback Resolution	Разрешение воспроизведения
+	Playback…	Воспроизведение…
+	Plugins…	Плагины…
+	Preview	Preview
+	Previous in Sequence	Предыдущий в эпизоде
+	Previous in Track	Предыдущий на дорожке
+	Program	Программа
+	Progress	Прогресс
+	Project	Проект
+	Project Manager…	Диспетчер проектов…
+	Project Notes	Заметки проекта
+	Project Settings	Настройки проекта
+	Project…	Проект…
+	Purple	Пурпурный
+	Ratio	Ratio
+	Reconnect Full Resolution Media…	Переподключить медиаданные полного разрешения…
+	Recover	Recover
+	Recover Unsaved Changes…	Восстановить несохраненные изменения…
+	Redo	Повторить
+	Reference Monitor	Контрольный монитор
+	Remix	Ремикс
+	Remix Properties…	Свойства ремикса…
+	Remove Attributes…	Удалить атрибуты…
+	Remove Filler Words	Удалить слова-паразиты
+	Remove Pauses	Удалить паузы
+	Remove Unused	Удалить неиспользуемые
+	Render Audio	Рендеринг аудио
+	Render Effects In to Out	Рендеринг эффектов от точки входа до точки выхода
+	Render In to Out	Рендеринг от точки входа до точки выхода
+	Render Selection	Рендеринг выделения
+	Replace Fonts in Projects…	Заменить шрифты в проектах…
+	Replace With Clip	Заменить клипом
+	Reset All Parameters	Сбросить все параметры
+	Reset Duration	Сбросить длительность
+	Reset to Saved Layout	Сбросить к сохраненному макету
+	Restore Captions from Source Clip	Восстановить субтитры из исходного клипа
+	Reveal Log Files…	Показать файлы журнала…
+	Reverse Match Frame	Обратное сопоставление кадра
+	Revert	Вернуть к сохраненному
+	Revert Remix	Отменить ремикс
+	Right	По правому краю
+	Ripple Delete	Удаление со сдвигом
+	Ripple Delete Head Frame	Удалить начало со сдвигом
+	Ripple Sequence Markers	Сдвигать маркеры эпизода
+	Rose	Розовый
+	Safe Margins	Безопасные поля
+	Save All	Сохранить все
+	Save Guides as Template…	Сохранить направляющие как шаблон…
+	Scale to Frame Size	Масштабировать по размеру кадра
+	Scene Edit Detection…	Обнаружение склеек сцен…
+	Search Bin	Поисковая подборка
+	Select All	Выделить все
+	Select All Matching	Выделить все совпадающие
+	Select Label Group	Выделить группу по метке
+	Select Next Graphic	Выбрать следующий графический элемент
+	Select Next Layer	Выбрать следующий слой
+	Select Previous Graphic	Выбрать предыдущий графический элемент
+	Select Previous Layer	Выбрать предыдущий слой
+	Selection as FilmCraft Project…	Выделение как проект FilmCraft…
+	Selection Follows Playhead	Выделение следует за курсором воспроизведения
+	Selection…	Выделение…
+	Send to Back	Переместить на задний план
+	Sequence	Эпизод
+	Sequence From Clip	Эпизод из клипа
+	Sequence Settings…	Настройки эпизода…
+	Sequence…	Эпизод…
+	Settings	Параметры
+	Show Active Caption Tracks Only	Показать только активные дорожки субтитров
+	Show All Caption Tracks	Показать все дорожки субтитров
+	Show All Marker Colors	Показать все цвета маркеров
+	Show Through Edits	Показать сквозные склейки
+	Simplify Sequence…	Упростить эпизод…
+	Skew	Skew
+	Snap in Program Monitor	Привязка в программном мониторе
+	Snap in Timeline	Привязка на таймлайне
+	Soft	Soft
+	Source Settings…	Настройки источника…
+	Speed/Duration…	Скорость/Длительность…
+	Split	Split
+	Standard	Standard
+	Strength	Strength
+	Stroke Color	Stroke Color
+	Synchronize…	Синхронизировать…
+	System Compatibility Report…	Отчет о совместимости системы…
+	Tan	Рыжевато-коричневый
+	Teal	Бирюзовый
+	Thickness	Thickness
+	Time Interpolation	Интерполяция времени
+	Timecode	Тайм-код
+	Timecode…	Тайм-код…
+	Timeline	Таймлайн
+	Timeline…	Таймлайн…
+	Title	Title
+	Toggle Proxies	Переключить прокси
+	Top	По верхнему краю
+	Transcribe Sequence…	Транскрибировать эпизод…
+	Transcribe…	Транскрибировать…
+	Transcript	Расшифровка
+	Transparent Video…	Прозрачное видео…
+	Trim Edit	Режим подрезки
+	Trim…	Подрезка…
+	Universal Counting Leader…	Универсальный ракорд…
+	Update Metadata…	Обновить метаданные…
+	Upgrade Caption to Graphic	Преобразовать субтитр в графику
+	Upgrade to Source Graphic	Преобразовать в исходную графику
+	Vertical Text	Вертикальный текст
+	Video and Audio Waveform Split	Раздельное отображение видео и аудиоволны
+	Video In	Вход видео
+	Video Options	Параметры видео
+	Video Out	Выход видео
+	View	Просмотр
+	Yellow	Желтый
+	Zoom to Sequence	Масштабировать по размеру эпизода

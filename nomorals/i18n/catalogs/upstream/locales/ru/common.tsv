@@ -1,0 +1,1300 @@
+# Русский (ru) interface catalog for every Crafting App.
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   @plural  English `one|other`; the translation lists this language's plural forms, `|`-separated.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary. No other product's localisation, string table or translated UI was
+# consulted or copied; add entries the same way.
+
+	% of all commits	% всех коммитов
+	(Custom)	(Настраиваемая)
+	(none)	(нет)
+	1 file	1 файл
+	16 bit	16 бит
+	24 bit	24 бита
+	24 bits/pixel	24 бит/пиксел
+	32 bit	32 бита
+	32 bits/pixel	32 бит/пиксел
+	8 bit	8 бит
+	About	О программе
+	Absolute	Абсолютно
+	Absolute Colorimetric	Абсолютный колориметрический
+	Accented Edges	Акцент на краях
+	Accessibility	Специальные возможности
+	Accurate	Точный
+	Actions	Действия
+	Activate Panel	Активировать панель
+	Active	Активна
+	Actual Size	Реальный размер
+	Adaptive	Адаптивный
+	Add	Добавить
+	Add a comment	Добавить комментарий
+	Add Guide	Добавить направляющую
+	Add to Dictionary	Добавить в словарь
+	Add to favorites	Добавить в избранное
+	Add to Swatches	Добавить в образцы
+	Adjust	Настройка
+	Adjustments	Коррекция
+	Advanced	Дополнительно
+	Align	Выровнять
+	Align center	Выровнять по центру
+	Align Left	По левому краю
+	Align left	Выровнять по левому краю
+	Align Right	По правому краю
+	Align right	Выровнять по правому краю
+	Align Text	Выравнивание текста
+	Align to Selection	Выровнять по выделению
+	Alignment	Выравнивание
+	Alignment:	Выравнивание:
+	All	Все
+	All Caps	Все прописные
+	All Categories	Все категории
+	All files	Все файлы
+	All Layers	Все слои
+	All pages	Все страницы
+	All Slices	Все фрагменты
+	Alpha	Альфа
+	Alt	Alt
+	Always	Всегда
+	Amount	Количество
+	Amount:	Количество:
+	Angle	Угол
+	Angle:	Угол:
+	Angular	Угловой
+	Animation	Анимация
+	Animation effects	Эффекты анимации
+	Anti-Alias	Сглаживание
+	Anti-alias	Сглаживание
+	Any	Любое
+	Appearance	Внешний вид
+theme	Appearance	Оформление
+	Appearance Settings…	Настройки оформления…
+	Application	Приложение
+	Apply	Применить
+	Apply Character Style	Применить стиль символа
+	Apply Data Set	Применить набор данных
+	Apply to:	Применить к:
+	Arc	Дуга
+	Area	Площадь
+	Arrange	Упорядочить
+	Arrow	Стрелка
+	Arrows	Стрелки
+	Artboard	Монтажная область
+	Artboards	Монтажные области
+	ArtCraft	ArtCraft
+	ArtCraft Website	Веб-сайт ArtCraft
+	ArtCraft website	Веб-сайт ArtCraft
+	Artistic	Художественные
+	Ascending	По возрастанию
+	Aspect Ratio	Соотношение сторон
+	Assign	Назначить
+	Assign Profile…	Назначить профиль…
+	Audio	Аудио
+	Author	Автор
+	Author:	Автор:
+	Auto	Авто
+	Auto ({percent}%)	Авто ({percent}%)
+	Auto Color	Автоцвет
+	Automate	Автоматизация
+	Automatic	Автоматически
+	Automatically	Автоматически
+	Available	Доступно
+	Average	Усреднить
+	Background	Фон
+	Background Color	Цвет фона
+	Background Contents	Содержимое фона
+	Backspace	Backspace
+	Balance	Баланс
+	Bar	Черта
+	Baseline	Базовая линия
+	Baseline Shift	Смещение базовой линии
+	Basic	Базовый
+	Basic Latin	Основная латиница
+	Batch	Пакет
+	Batch…	Пакетная обработка…
+	Bend:	Изгиб:
+	Bicubic	Бикубическая
+	Binary assets added	Добавлены двоичные ресурсы
+	Binary assets removed	Удалённые бинарные ресурсы
+	Bitmap	Растровое изображение
+	Black	Чёрный
+	Black & White	Чёрно-белое
+	Black and white	Чёрно-белый
+	Black Intensity	Интенсивность чёрного
+	Blacks	Чёрный
+	Blend Mode	Режим наложения
+	Blending Mode	Режим наложения
+	Block	Квадрат
+	Blocks	Блоки
+	Blue	Синий
+	Blur	Размытие
+	Blur Angle	Угол размытия
+	Bold	Полужирный
+	Border	Граница
+	Border Thickness	Толщина границ
+	Borders	Границы
+	Both	Оба
+	Both sides	С обеих сторон
+	Bottom	Снизу
+	Bottom Left	Снизу слева
+	Bottom Right	Снизу справа
+	Bottom:	Снизу:
+	Break Link	Разорвать связь
+	Brick	Кирпич
+	Brightness	Яркость
+	Bring Forward	Переместить вперёд
+	Bring to Front	На передний план
+	Brown	Коричневый
+	Browse	Обзор
+	Browse…	Обзор…
+	Brush Size	Размер кисти
+	Brush Strokes	Мазки кисти
+	Brushes	Кисти
+	Bulge	Выпуклость
+	Bullet	Маркер
+	Burlap	Мешковина
+	Calculate	Вычислить
+	Cancel	Отмена
+	Canvas	Холст
+	Caption	Подпись
+	Cascade	Каскад
+	Case Sensitive	С учётом регистра
+	Category	Категория
+	Category:	Категория:
+	Cell Size	Размер ячейки
+	Center	По центру
+	Center X	Центр X
+	Center Y	Центр Y
+	Centered	По центру
+	Centimeters	Сантиметры
+	Chamfer	Фаска
+	Change	Изменить
+	Change All	Изменить все
+	Change Case	Изменить регистр
+	Change Panel Layout	Изменить расположение панелей
+	Channel	Канал
+	Channel Mixer	Микширование каналов
+	Channels	Каналы
+	Character	Символ
+	Character Styles	Стили символов
+	Characters	Знаки
+	Check for Updates	Проверить обновления
+	Check for updates	Проверить обновления
+	Check Spelling…	Проверить орфографию…
+	Checkerboard	Шахматная доска
+	Choose…	Выбрать…
+	Circle	Круг
+	City	Город
+	Clarity	Чёткость
+	Classic	Классический
+	Clear	Очистить
+	Clear All	Очистить всё
+	Clear Guides	Удалить направляющие
+	Clear History	Очистить историю
+	Clear Recent Files	Очистить список недавних файлов
+	Clipboard	Буфер обмена
+	Clipping Mask	Маска обрезки
+	Clone	Клонировать
+	Close	Закрыть
+	Close (Esc)	Закрыть (Esc)
+	Close All	Закрыть все
+	Close Panel	Закрыть панель
+	Cmd	Cmd
+	CMYK Color	Цвет CMYK
+	CMYK:	CMYK:
+	Coarse Dots	Крупные точки
+	Collapse	Свернуть
+	Collate	Разобрать по копиям
+	Color	Цвет
+	Color Balance	Цветовой баланс
+	Color Burn	Затемнение основы
+	Color Dodge	Осветление основы
+	Color Management	Управление цветом
+	Color Mode	Цветовой режим
+	Color Picker	Палитра цветов
+	Color Settings	Настройки цвета
+	Color Settings…	Настройки цвета…
+	Color Space	Цветовое пространство
+	Color Swatches	Цветовые образцы
+	Color Table	Цветовая таблица
+	Color:	Цвет:
+	Colorize	Тонировать
+	Colors	Цвета
+	Colors:	Цвета:
+	Color…	Цвет…
+	Colour	Цвет
+	Column width	Ширина колонки
+	Columns	Столбцы
+	Columns:	Столбцы:
+	Combine	Объединить
+	Command	Команда
+	Commands:	Команды:
+	Comment	Комментарий
+	Comments	Комментарии
+	Commits	Коммиты
+	Community	Сообщество
+	Company	Организация
+	Compare	Сравнить
+	Comparison	Сравнение
+	Compatibility	Совместимость
+	Composite	Составной
+	Compression	Сжатие
+	Cone	Конус
+	Contains	Содержит
+	Continue	Продолжить
+	Contrast	Контраст
+	Contributors	Участники
+	Convert	Преобразовать
+	Convert to Shape	Преобразовать в фигуру
+	Convert to sRGB	Преобразовать в sRGB
+	Copies	Копии
+	Copies:	Копии:
+	Copy	Копировать
+	Copyright	Copyright
+	Copyrighted	Охраняется авторским правом
+	Corner	Угол
+	Corners	Углы
+	Correction	Коррекция
+	Couldn't open {name}: {e}	Не удалось открыть {name}: {e}
+@msg	Couldn't open {name}: {e}	Не удалось открыть {name}: {e}
+	Country	Страна
+	Crack Brightness	Яркость трещин
+	Crack Depth	Глубина трещин
+	Crack Spacing	Интервал трещин
+	Create	Создать
+	Create Clipping Mask	Создать маску обрезки
+	Crop	Обрезать
+	Cross	Крестик
+	Crosshatch	Перекрёстная штриховка
+	Crystallize	Кристаллизация
+	Crystallize…	Кристаллизация…
+	Ctrl	Ctrl
+	Current	Текущий
+	Current page	Текущая страница
+	Current Time	Текущее время
+	Curvature	Кривизна
+	Curve	Кривая
+	Curves	Кривые
+	Curves…	Кривые…
+	Custom	Другая
+	Customize…	Настроить…
+	Cut	Вырезать
+	Cyan	Голубой
+	Dark	Тёмная
+	Dark Gray	Тёмно-серый
+	Dark gray	Тёмно-серая
+	Dark Strokes	Тёмные мазки
+	Dark Theme	Тёмная тема
+	Darken	Замена тёмным
+	Darkness	Затемнение
+	Dashed	Штриховой
+	Data	Данные
+	Data Sets	Наборы данных
+	Date	Дата
+	Date and Time	Дата и время
+	Date Created	Дата создания
+	Date format	Формат даты
+	Dates	Даты
+	De-Interlace	Устранение чересстрочности
+	Decrease Font Size	Уменьшить размер шрифта
+	Default	По умолчанию
+	Delete	Удалить
+	Delete Brush	Удалить кисть
+	Delete Group	Удалить группу
+	Delete Layer	Удалить слой
+	Delete Mask	Удалить маску
+	Delete Style	Удалить стиль
+	Delete Workspace	Удалить рабочую среду
+	Deleted	Удалено
+	Delete…	Удалить…
+	Depth	Глубина
+	Desaturate	Обесцветить
+	Descending	По убыванию
+	Description	Описание
+	Description:	Описание:
+	Deselect	Отменить выделение
+	Deselect All	Снять выделение со всего
+	Destination	Назначение
+	Destination:	Назначение:
+	Details	Подробности
+	Diagonal	Диагональная
+	Diameter	Диаметр
+	Diameter:	Диаметр:
+	Diamond	Ромб
+	Difference	Разница
+	Diffuse Glow	Рассеянное свечение
+	Diffusion	Диффузионный
+	Digits	Цифры
+	Dimensions	Размеры
+	Direct Selection Tool	Инструмент «Прямое выделение»
+	Direction	Направление
+	Direction Balance	Баланс направления
+	Direction:	Направление:
+	Discard	Отменить
+	Discord	Discord
+	Discretionary Ligatures	Дискреционные лигатуры
+	Dismiss	Закрыть
+	Display	Отображение
+	Display name	Отображаемое имя
+	Distance	Расстояние
+	Distort	Искажение
+	Distortion	Искажение
+	Distribute	Распределить
+	Divide	Разделить
+	Dock Panel	Прикрепить панель
+	Document	Документ
+	Document Title	Название документа
+	Documents	Документы
+	Don't Save	Не сохранять
+	Done	Готово
+	Dot	Точка
+	Dots	Точки
+	Dotted	Пунктирная
+	Double-click	Двойной щелчок
+	Down	Вниз
+	Download	Скачать
+	Draft	Черновое
+	Draw	Рисование
+	Drop Shadow	Тень
+	Drop Shadow…	Тень…
+	Duplicate	Дублировать
+	Duplicate Layer	Дублировать слой
+	Duplicate…	Дублировать…
+	Duplication	Дублированием
+	Duration	Длительность
+	Dutch	Нидерландский
+	Dynamic	Динамический
+	Dynamics	Динамика
+	Edge	Край
+	Edge Brightness	Яркость края
+	Edge Intensity	Интенсивность краёв
+	Edge Only	Только края
+	Edge Simplicity	Простота краёв
+	Edge Thickness	Толщина краёв
+	Edge Width	Ширина края
+	Edit	Редактирование
+	Edit Contents	Редактировать содержимое
+	Edit Original	Редактировать оригинал
+	Edit Toolbar	Редактировать панель инструментов
+	Editing	Редактирование
+	Edit…	Изменить…
+	Effect	Эффект
+	Effects	Эффекты
+	Elevation	Уровень
+	Eliminate	Удалить
+	Ellipse	Эллипс
+	Ellipse Tool	Инструмент «Эллипс»
+	Ellipsis	Многоточие
+	Em Dash	Длинное тире
+	Em Space	Круглая шпация
+	Embed	Внедрить
+	Emboss	Приподнятый
+	En Dash	Среднее тире
+	En Space	Полукруглая шпация
+	Enable	Включить
+	Endpoint	Конечная точка
+	Enlarged	Укрупнённое
+	Enter	Enter
+	Entire Font	Весь шрифт
+	Envelope DL	Конверт DL
+	Erase	Стереть
+	Eraser	Ластик
+	Eraser Tool	Инструмент «Ластик»
+	Error	Ошибка
+	Even Fields	Чётные поля
+	Even pages only	Только чётные страницы
+	Exact	Точно
+	Example: {sample}	Пример: {sample}
+	Exclusion	Исключение
+	Exit	Выйти
+	Expand	Развернуть
+	Export	Экспорт
+	Export As	Экспортировать как
+	Export As…	Экспортировать как…
+	Export Options	Параметры экспорта
+	Export PDF	Экспортировать PDF
+	Export to	Экспортировать в
+	Exported to {path}	Экспортировано в {path}
+	Exported {path}	Экспортировано: {path}
+	Export…	Экспортировать…
+	Exposure	Экспозиция
+	Expression	Выражение
+	Extract	Извлечь
+	Eyedropper	Пипетка
+	Eyedropper Tool	Инструмент «Пипетка»
+	Faded Film	Выцветшая плёнка
+	Fast	Быстро
+	Favorites	Избранное
+	Feather	Растушёвка
+	Field	Поле
+	Field properties	Свойства поля
+	Fields	Поля
+	Fields:	Поля:
+	File	Файл
+	File Format	Формат файла
+	File Handling	Работа с файлами
+	File Info…	Сведения о файле…
+	File Name	Имя файла
+	File Size	Размер файла
+@id	file.close	Закрыть
+	Files	Файлы
+	Fill	Заливка
+	Fill:	Заливка:
+	Filter	Фильтр
+	Find	Найти
+	Find and Replace	Найти и заменить
+	Find Next	Найти далее
+	Find:	Найти:
+	Find…	Найти…
+	Fine Dots	Мелкие точки
+	Finish	Завершение
+	First	Первый
+	First commit	Первый коммит
+	Fit	По размеру
+	Fit in View	Вписать в вид
+	Fixed	Фиксированный
+	Flash	Вспышка
+	Flatten	Объединить
+	Flip	Отразить
+	Flip Horizontal	Отразить слева направо
+	Flip Vertical	Отразить сверху вниз
+	Focus	Фокус
+	Folder	Папка
+	Font	Шрифт
+	Font Size	Размер шрифта
+	Font size	Размер шрифта
+	Font Size:	Кегль:
+	Font:	Шрифт:
+	Fonts	Шрифты
+	Format	Формат
+	Format:	Формат:
+	Fractions	Дроби
+	Free	Свободный
+	Free Transform	Свободное трансформирование
+	French	Французский
+	Frequency	Частота
+	From	С
+	Frosted	Матовое
+	Full	Полная
+	Full Screen	Во весь экран
+	Full Screen Mode	Полноэкранный режим
+	Functions	Функции
+	Gamma	Гамма
+	Gamma Correction	Гамма-коррекция
+	Gamut Warning	Предупреждение о цветовом охвате
+	Gaussian Blur	Размытие по Гауссу
+	Gaussian Blur…	Размытие по Гауссу…
+	General	Общие
+	General…	Общие…
+	Generate	Генерировать
+	Geometry	Геометрия
+	German	Немецкий
+	GitHub	GitHub
+	Glass	Стекло
+	Global	Глобальный
+	Glow	Свечение
+	Glow Brightness	Яркость свечения
+	Glow Size	Размер свечения
+	Glyphs	Глифы
+	Good	Хорошее
+	Gradient	Градиент
+	Gradient Tool	Инструмент «Градиент»
+	Gradients	Градиенты
+	Grain	Зерно
+	Grain Type	Тип зерна
+	Graininess	Зернистость
+	Grainy Dots	Зернистые точки
+	Graphic	Графический объект
+	Graphics	Графика
+	Gray	Серый
+	Gray Gamma 2.2	Серый гамма 2.2
+	Grayscale	Оттенки серого
+	Green	Зелёный
+	Grid	Сетка
+	Grid Size:	Размер сетки:
+	Grid view	Вид сеткой
+	Gridline every	Линия сетки каждые
+	Group	Сгруппировать
+	Group with	Сгруппировать с
+	Groups	Группы
+	Grout Width	Ширина швов
+	Guides	Направляющие
+	Halftone Pattern	Полутоновый узор
+	Hand	Рука
+	Hand Tool	Инструмент «Рука»
+	Hard	Строгий
+	Hard Light	Жёсткий свет
+	Hard Mix	Жёсткое смешивание
+	Headings	Заголовки
+	Heart	Сердце
+	Height	Высота
+	Height:	Высота:
+	Help	Справка
+	Hexagon	Шестиугольник
+	Hidden	Скрытые
+	Hidden text	Скрытый текст
+	Hide	Скрыть
+	Hide All	Скрыть все
+	Hide Grid	Скрыть сетку
+	Hide Others	Скрыть остальные
+	High	Высокая
+	High Pass	Фильтр высоких частот
+	High Resolution	Высокое разрешение
+	High resolution	Высокое разрешение
+	Highlight Area	Область светов
+	Highlights	Света
+	Hindi	Хинди
+	Histogram	Гистограмма
+	History	История
+	Hollow	Полый
+	Home	Главная
+	Horizontal	Горизонтально
+	Horizontal scale	Горизонтальный масштаб
+	Horizontally	По горизонтали
+	Hue	Оттенок
+	Hue Shift	Сдвиг тона
+	Hue/Saturation…	Оттенок/насыщенность…
+	Hyphenation	Расстановка переносов
+	Icon	Значок
+	Ignore	Игнорировать
+	Ignore All	Пропустить все
+	Image	Изображение
+	Image Size	Размер изображения
+	Images	Изображения
+	Import	Импорт
+	Import…	Импорт…
+	Inches	Дюймы
+	Increase Font Size	Увеличить размер шрифта
+	Index	Предметный указатель
+	Inflate	Раздувание
+	Info	Информация
+	Inner Glow…	Внутреннее свечение…
+	Input:	Вход:
+	Insert	Вставка
+	Inside	Внутри
+	Inspect Document	Проверить документ
+	Install Plug-in	Установить модуль
+	Install Plug-in…	Установить модуль…
+	Intensity	Интенсивность
+	Interface	Интерфейс
+	Interface Language	Язык интерфейса
+	Interface language	Язык интерфейса
+	Interface Theme	Тема интерфейса
+	Interlaced	Чересстрочный
+	Interpolation	Интерполяцией
+	Intersect	Пересечение
+	Intersection	Пересечение
+	Invert	Инверсия
+	Invert Mask	Инвертировать маску
+	Isolate	Изолировать
+	Italian	Итальянский
+	Italic	Курсив
+	Japanese	Японский
+	Join	Соединить
+	Join our Discord	Присоединяйтесь к нашему Discord
+	Join the ArtCraft Discord	Присоединяйтесь к Discord ArtCraft
+	Join the ArtCraft Discord…	Discord сообщества ArtCraft…
+	Join us on Discord	Мы в Discord
+	just now	только что
+	Justification	Выключка
+	Justify	По ширине
+	Keep:	Сохранять:
+	Kerning	Кернинг
+	Keyboard Shortcuts	Комбинации клавиш
+	Keyboard Shortcuts…	Сочетания клавиш…
+	Keywords	Ключевые слова
+	Kind	Тип
+	Korean	Корейский
+	Lab	Lab
+	Label	Метка
+	Labels	Наклейки
+	Landscape	Альбомная
+	Language	Язык
+	Language Options	Параметры языка
+@id	language.name	Русский
+	Language:	Язык:
+	Large	Большой
+	Lasso	Лассо
+	Lasso Tool	Инструмент «Лассо»
+	Last	Последний
+	Last commit	Последний коммит
+	Later	Позже
+	Layer	Слой
+	Layers	Слои
+	Layout	Макет
+	Layout:	Макет:
+	Leading	Интерлиньяж
+	Left	Слева
+	Left Diagonal	Диагональ влево
+	Left to Right	Слева направо
+	Left:	Слева:
+	Legal	Legal
+	Length	Длина
+	Length:	Длина:
+	Lens Flare	Блик объектива
+	Less	Меньше
+	Letter	Letter
+	Level	Уровень
+	Level 1	Уровень 1
+	Level 2	Уровень 2
+	Level 3	Уровень 3
+	Level 4	Уровень 4
+	Levels	Уровни
+	Levels…	Уровни…
+	Libraries	Библиотеки
+	Library	Библиотека
+	Light	Светлая
+	Light Blue	Голубой
+	Light Direction	Направление света
+	Light Gray	Светло-серый
+	Light gray	Светло-серая
+	Light Intensity	Интенсивность света
+	Light Theme	Светлая тема
+	Light Type	Тип источника света
+	Lighten	Замена светлым
+	Lighter Color	Замена светлым
+	Lighting	Освещение
+	Lighting Effects	Эффекты освещения
+	Lightness	Светлота
+	Line	Линия
+	Line delta	Разница строк
+	Line spacing	Межстрочный интервал
+	Linear	Линейный
+	Linear Burn	Линейный затемнитель
+	Linear Gradient	Линейный градиент
+	Linear Light	Линейный свет
+	Lines	Линии
+	Lines +/−	Строки +/−
+	Lines added	Добавлено строк
+	Lines deleted	Удалено строк
+	Link	Ссылка
+	Links	Связи
+	List	Список
+	List View	Список
+	List view	Вид списком
+	Location	Расположение
+	Location:	Расположение:
+	Lock	Заблокировать
+	Lock Guides	Заблокировать направляющие
+	Lock Slices	Заблокировать фрагменты
+	Locked	Заблокированные
+	Long Lines	Длинные линии
+	Long Strokes	Длинные штрихи
+	Low	Низкая
+	lowercase	строчные
+	Luminance	Яркость
+	Luminosity	Яркость
+	Magenta	Пурпурный
+	Magic Wand Tool	Инструмент «Волшебная палочка»
+	Magnification	Масштаб
+	Margins	Поля
+	Mask	Маска
+	Masks	Маски
+	Matte	Мат
+	Maximize	Развернуть
+	Maximum	Максимум
+	Measure	Измерить
+	Median	Медиана
+	Medium	Средняя
+	Medium Dots	Средние точки
+	Medium Gray	Средне-серый
+	Medium Lines	Средние линии
+	Merge	Объединить
+	Merge Cells	Объединить ячейки
+	Merge Layers	Объединить слои
+	Merged PRs	Принятые PR
+	Mesh	Сетка
+	Message:	Сообщение:
+	Metadata	Метаданные
+	Method	Метод
+	Method:	Метод:
+	Mezzotint	Меццо-тинто
+	Mezzotint…	Меццо-тинто…
+	Middle	По центру
+	Midpoint	Средняя точка
+	Midtones	Полутона
+	Millimeters	Миллиметры
+	Minimize	Свернуть
+	Minimum	Минимум
+	Mirror	Зеркало
+	Missing	Отсутствует
+	Mobile	Мобильные
+	Mode	Режим
+	Mode:	Режим:
+	Model	Модель
+	Models	Модели
+	Modern	Современная
+	Modified	Изменено
+	Modify	Изменить
+	Monitor RGB	RGB монитора
+	Mono	Моно
+	Monochrome	Монохром
+	More	Больше
+	Mosaic	Мозаика
+	Mosaic Tiles	Мозаичные фрагменты
+	Motion	Motion
+	Move	Переместить
+	Move Down	Переместить вниз
+	Move Panel	Переместить панель
+	Move Up	Переместить вверх
+	Multiply	Умножение
+	Name	Имя
+	Name (A–Z)	Имя (А–Я)
+	Name:	Имя:
+	Navigation	Навигация
+	Navigator	Навигатор
+	Neon Glow	Неоновое свечение
+	Never	Никогда
+	New	Создать
+	New Document	Новый документ
+	New document	Новый документ
+	New from Template	Создать из шаблона
+	New Group	Новая группа
+	New Guide	Новая направляющая
+	New Layer	Новый слой
+	New Layer…	Новый слой…
+	New Style…	Новый стиль…
+	New Swatch…	Новый образец…
+	New Window	Новое окно
+	New Workspace	Новая рабочая среда
+	New Workspace…	Новая рабочая среда…
+	New…	Создать…
+	Next	Далее
+	Next Appearance Mode	Следующий режим оформления
+	Next Change	Следующее изменение
+	Next Page	Следующая страница
+	Next page	Следующая страница
+	No	Нет
+	No Color	Без цвета
+	No Dither	Без дизеринга
+	No Document	Нет документа
+	No document	Нет документа
+	No document open	Документ не открыт
+	No limit	Без ограничения
+	No matches.	Совпадений нет.
+	No matching commands	Нет подходящих команд
+	No recent files	Нет недавних файлов
+	No results	Ничего не найдено
+	No Selection	Нет выделения
+	No selection	Нет выделения
+	Noise	Шум
+	Nonbreaking Space	Неразрывный пробел
+	None	Нет
+	Normal	Обычный
+	Not available	Недоступно
+	NTSC Colors	Цвета NTSC
+	Number	Количество
+	Object	Объект
+	Octagon	Восьмиугольник
+	Odd Fields	Нечётные поля
+	Odd pages only	Только нечётные страницы
+	Off	Выключено
+	Offline	Офлайн
+	Offset	Смещение
+	Offset:	Смещение:
+	OK	ОК
+	Omit	Пропустить
+	On	Включено
+	Only Web Colors	Только web-цвета
+	Opacity	Непрозрачность
+	Opacity:	Непрозрачность:
+	Open	Открыть
+	Open link	Открыть ссылку
+	Open Recent	Открыть недавние
+	OpenType	OpenType
+	Open…	Открыть…
+	Optimized	Оптимизировано
+	Options	Параметры
+	Options…	Параметры…
+	Orange	Оранжевая
+	Ordinals	Порядковые числительные
+	Orientation	Ориентация
+	Orientation:	Ориентация:
+	Original	Оригинал
+	Other	Другое
+	Outer Glow…	Внешнее свечение…
+	Outline	Контур
+	Output	Вывод
+	Output:	Вывод:
+	Outside	Снаружи
+	Oval	Овал
+	Overlap:	Перекрытие:
+	Overlay	Перекрытие
+	Package…	Упаковать…
+	Page	Страница
+	Page {page} of {pages}	Страница {page} из {pages}
+	Pages	Страницы
+	Painting	Живопись
+	Panel	Панель
+	Panel menu	Меню панели
+	Panel Options…	Параметры панели…
+	Panels	Панели
+	Paper	Бумага
+	Paragraph	Абзац
+	Paragraph Styles	Стили абзацев
+	Password	Пароль
+	Paste	Вставить
+	Paste Special	Специальная вставка
+	Patchwork	Цветная плитка
+	Path	Контур
+	Path:	Контур:
+	Paths	Контуры
+	Pattern	Узор
+	Pattern Type	Тип узора
+	Pause	Пауза
+	Pen	Перо
+	Pen Tool	Инструмент «Перо»
+	Pencil	Карандаш
+	Pencil Tool	Инструмент «Карандаш»
+	Pentagon	Пятиугольник
+	Percent	Проценты
+	Percentage	Процент
+	Performance	Производительность
+	Perimeter	Периметр
+	Perspective	Перспектива
+	Photo	Фото
+	Photocopy	Копировальный аппарат
+	Picas	Пики
+	Pin Light	Точечный свет
+	Pink	Розовый
+	Pixel	Пиксельный
+	Pixelate	Пикселизация
+	Pixels	Пиксели
+	Play	Воспроизвести
+	Plug-ins	Модули
+	Point	Точка
+	Pointillize	Пуантилизм
+	Pointillize…	Пуантилизм…
+	Points	Пункты
+	Polygon	Многоугольник
+	Polygon Tool	Инструмент «Многоугольник»
+	Polyline	Полилиния
+	Portrait	Книжная
+	Portuguese	Португальский
+	Position	Положение
+	Position:	Положение:
+	Postcard	Открытка
+	Poster	Постер
+	Poster Edges	Края плаката
+	Posterization	Постеризация
+	Posterize	Постеризация
+	Preferences	Настройки
+	Preferences…	Настройки…
+	Prefix	Префикс
+	Preserve	Сохранять
+	Preserve Luminosity	Сохранять светлоту
+	Preset	Набор
+	Preset Manager	Управление наборами
+	Preset:	Набор:
+	Presets	Наборы
+	Presets:	Наборы:
+	Press keys…	Нажмите клавиши…
+	Pressure	Нажим
+	Preview	Предварительный просмотр
+	Previous	Назад
+	Previous Change	Предыдущее изменение
+	Previous Page	Предыдущая страница
+	Previous page	Предыдущая страница
+	Print	Печать
+	Printer	Принтер
+	Printer:	Принтер:
+	Printing	Печать
+	Print…	Печать…
+	Profile	Профиль
+	Progressive	Прогрессивный
+	Proof Setup	Настройка цветопробы
+	Properties	Свойства
+	Protect	Защита
+	PRs	PR
+	Public Domain	Общественное достояние
+	Punctuation	Пунктуация
+	Purple	Фиолетовая
+	Pyramid	Пирамида
+	Quality	Качество
+	Quick Actions	Быстрые действия
+	Radial	Радиальный
+	Radial Blur	Радиальное размытие
+	Radial Blur…	Радиальное размытие…
+	Radial Gradient	Радиальный градиент
+	Radius	Радиус
+	Radius:	Радиус:
+	Random	Случайно
+	Range	Диапазон
+	Range:	Диапазон:
+	Rasterize	Растеризовать
+	Ratio	Пропорционально
+	Rays	Лучи
+	Ready	Готово
+	Real name	Настоящее имя
+	Recent	Последние
+	Recent Colors	Последние цвета
+	Recent Files	Последние файлы
+	Recover	Восстановить
+	Rectangle	Прямоугольник
+	Rectangle Tool	Инструмент «Прямоугольник»
+	Rectangular	Прямоугольная
+	Red	Красный
+	Redo	Вернуть
+	Reduce Noise	Уменьшить шум
+	Refine	Уточнение
+	Reflected	Зеркальный
+	Refresh	Обновить
+	Regular	Обычный
+	Relative	Относительно
+	Relative Colorimetric	Относительный колориметрический
+	Relaxed	Свободный
+	Relief	Рельеф
+	Reload	Перезагрузить
+	Remove	Удалить
+	Remove Background	Удалить фон
+	Remove from favorites	Удалить из избранного
+	Rename	Переименовать
+	Rename Group…	Переименовать группу…
+	Rename Style	Переименовать стиль
+	Rename…	Переименовать…
+	Repeat	Повторить
+	Replace	Заменить
+	Replace:	Заменить:
+	Reply	Ответить
+	Report	Отчёт
+	Report an Issue…	Сообщить о проблеме…
+	Reselect	Выделить снова
+	Reset	Сбросить
+	Reset Preferences	Сбросить настройки
+	Reset…	Сбросить…
+	Resize panel window	Изменить размер окна панели
+	Resize panels	Изменить размер панелей
+	Resolution	Разрешение
+	Resolution:	Разрешение:
+	Restore	Восстановить
+	Result	Результат
+	Resume	Продолжить
+	Reveal in Finder	Показать в Finder
+	Reverse	Обратить
+	Reverse the order	Обратный порядок
+	Revert	Восстановить
+	Review	Рецензирование
+	RGB	RGB
+	RGB Color	Цвет RGB
+	RGB:	RGB:
+	Right	Справа
+	Right Diagonal	Диагональ вправо
+	Right:	Справа:
+	Rotate	Повернуть
+	Rotate:	Поворот:
+	Rotation	Поворот
+	Rotation:	Поворот:
+	Rounded Rectangle	Скруглённый прямоугольник
+	Roundness	Круглость
+	Roundness:	Округлость:
+	Rows	Строки
+	Ruler	Линейка
+	Rulers	Линейки
+	Rulers & Grids	Линейки и сетки
+	Russian	Русский
+	Sample Size	Размер образца
+	Sandstone	Песчаник
+	Saturation	Насыщенность
+	Save	Сохранить
+	Save a Copy	Сохранить копию
+	Save a Copy…	Сохранить копию…
+	Save As	Сохранить как
+	Save as PDF	Сохранить как PDF
+	Save as Template	Сохранить как шаблон
+	Save as Template…	Сохранить как шаблон…
+	Save As…	Сохранить как…
+	Save Preset…	Сохранить набор…
+	Save Selection	Сохранить выделение
+	Save Selection…	Сохранить выделение…
+	Saved	Сохранено
+	Save…	Сохранить…
+	Scale	Масштаб
+	Scale:	Масштаб:
+	Scaling	Масштабирование
+	Scratch Disks	Рабочие диски
+	Scratch Disks…	Рабочие диски…
+	Screen	Растр
+	Screen Mode	Режим экрана
+	Scripts	Сценарии
+	Search	Поиск
+	Security	Безопасность
+	Segments	Сегменты
+	Select	Выделение
+	Select All	Выделить всё
+	Select Objects	Выделить объекты
+	Select:	Выделить:
+	Selected pages	Выбранные страницы
+	Selection	Выделение
+	Selection Tool	Инструмент «Выделение»
+	Selective	Выборочный
+	Send Backward	Переместить назад
+	Send to Back	На задний план
+	Sensitivity	Чувствительность
+	Sent to {printer}	Отправлено на {printer}
+	Services	Службы
+	Set	Установить
+	Set as Default	Установить по умолчанию
+	Set:	Набор:
+	Settings	Настройки
+	Settings:	Наборы:
+	Settings…	Параметры…
+	Shadow	Тень
+	Shadows	Тени
+	Shape	Фигура
+	Shape Effects	Эффекты формы
+	Shape:	Форма:
+	Shapes	Фигуры
+	Share	Поделиться
+	Sharpen	Резкость
+	Sharpness	Резкость
+	Shift	Shift
+	Short Lines	Короткие линии
+	Short Strokes	Короткие штрихи
+	Shortcut	Сочетание клавиш
+	Shortcuts	Сочетания клавиш
+	Show	Показать
+	Show All	Показать всё
+	Show Grid	Показать сетку
+	Show Guides	Показать направляющие
+	Show in Folder	Показать в папке
+	Show Mask	Показать маску
+	Show Mesh	Показать сетку
+	Show Rulers	Показать линейки
+	Show rulers	Показать линейки
+	Show Tool Tips	Показывать подсказки
+	Show:	Показать:
+	Sides:	Стороны:
+	Simplify	Упростить
+	Size	Размер
+	Size:	Размер:
+	Sketch	Эскиз
+	Skew	Скос
+	Slice	Фрагмент
+	Slice Options	Параметры фрагмента
+	Slice Options…	Параметры фрагмента…
+	Slice Tool	Инструмент «Фрагмент»
+	Slices	Фрагменты
+	Small	Малый
+	Small Caps	Капитель
+	Smart Blur	Умное размытие
+	Smart Blur…	Умное размытие…
+	Smart Guides	Умные направляющие
+	Smart quotes	Типографские кавычки
+	Smoothness	Сглаживание
+	Snap to Grid	Привязать к сетке
+	Soft	Мягкий
+	Soft Light	Мягкий свет
+	Soften	Смягчить
+	Softness	Мягкость
+	Solarize	Соляризация
+	Sort	Сортировка
+	Sort by	Сортировать по
+	Source	Источник
+	Source code on GitHub	Исходный код на GitHub
+	Spaces	Пробелы
+	Spacing	Интервал
+	Spacing:	Интервал:
+	Spanish	Испанский
+	Spatter	Разбрызгивание
+	Special	Специальный
+	Speckle	Крапинки
+	Speed	Скорость
+	Spelling	Орфография
+	Spherize	Сферизация
+	Split	Разделить
+	Spot Color	Плашечный цвет
+	Spray Radius	Радиус распыления
+	Square	Квадрат
+	Square Size	Размер квадратов
+	sRGB IEC61966-2.1	sRGB IEC61966-2.1
+	Stacked	Стопкой
+	Stained Glass	Витраж
+	Stamp	Штамп
+	Standard	Обычные
+	Standard Ligatures	Стандартные лигатуры
+	Star	Звезда
+	Start at:	Начать с:
+	Statistics	Статистика
+	Status	Состояние
+	Status Bar	Строка состояния
+	Stippled	Пунктир
+	Stop	Стоп
+	Strength	Сила
+	Stretch	Растянуть
+	Strikethrough	Зачёркнутый
+	Stroke	Обводка
+	Stroke Color	Цвет обводки
+	Stroke Length	Длина мазка
+	Stroke Options	Параметры обводки
+	Stroke:	Обводка:
+	Studio	Studio
+	Style	Стиль
+	Style:	Стиль:
+	Styles	Стили
+	Stylize	Стилизация
+	Subdivisions	Подразделения
+	Subject	Тема
+	Subscript	Подстрочный
+	Subset	Подмножество
+	Subtitle	Подзаголовок
+	Subtract	Вычесть
+	Sumi-e	Суми-э
+	Summary	Сводка
+	Superscript	Надстрочный
+	Swatches	Образцы
+	Symbol	Символ
+	Symbols	Символы
+	Sync with system	Синхронизировать с системой
+	System	Системные
+	Tab	Табуляция
+	Table	Таблица
+	Table style	Стиль таблицы
+	Tables	Таблицы
+	Tabloid	Tabloid
+	Tabs	Табуляции
+	Taper	Сужение
+	Target	Объект
+	Target:	Объект:
+	Temperature	Температура
+	Templates	Шаблоны
+	Text	Текст
+	Text color	Цвет текста
+	Text:	Текст:
+	Texture	Текстура
+	The passwords don't match.	Пароли не совпадают.
+	Theme	Тема
+	Thickness	Толщина
+	This document has no bookmarks.	В этом документе нет закладки.
+	Threshold	Порог
+	Thumbnails	Миниатюры
+	Tile	Плитка
+	Tile Size	Размер фрагментов
+	Tilt	Наклон
+	Time	Время
+	Timecode	Таймкод
+	Timeline	Шкала времени
+	Tint	Оттенок
+	Tint Color	Цвет оттенка
+	Title	Заголовок
+	Tolerance	Допуск
+	Tolerance:	Допуск:
+	Tool	Инструмент
+	Toolbars	Панели инструментов
+	Tools	Инструменты
+	Top	Сверху
+	Top Left	Сверху слева
+	Top Right	Сверху справа
+	Top:	Сверху:
+	Total	Всего
+	Total:	Всего:
+	Tracking	Трекинг
+	Transform	Трансформировать
+	Translate	Перевести
+	Transparency	Прозрачность
+	Transparent	Прозрачный
+	Trap…	Треппинг…
+	Triangle	Треугольник
+	Turbulent	Турбулентный
+	Twirl	Закручивание
+	Twist	Закручивание
+	Type	Тип
+	Type Tool	Инструмент «Текст»
+	Type:	Тип:
+	Typewriter	Печатная машинка
+	Type…	Текст…
+	Typing	Ввод текста
+	Underline	Подчёркнутый
+	Undo	Отменить
+	Undo {action}	Отменить: {action}
+	Ungroup	Разгруппировать
+	Uniform	Равномерный
+	Union	Объединение
+	Units	Единицы
+	Unknown	Неизвестно
+	Unlock	Разблокировать
+	Unsaved changes	Несохранённые изменения
+	Unsharp Mask	Нерезкая маска
+	Untitled	Без названия
+	Up	Вверх
+	Update	Обновить
+	Updates	Обновления
+	UPPERCASE	ПРОПИСНЫЕ
+	Use Default	Использовать по умолчанию
+	User	Пользователь
+	Username	Имя пользователя
+	Value	Значение
+	Value:	Значение:
+	Variables	Переменные
+	Version	Версия
+	Version {version}	Версия {version}
+	Vertical	Вертикально
+	Vertical Alignment	Вертикальное выравнивание
+	Vertical Type Tool	Инструмент «Вертикальный текст»
+	Vertically	По вертикали
+	Very High	Очень высокая
+	Vibrance	Вибрация
+	Video	Видео
+	View	Вид
+	Violet	Фиолетовый
+	Visibility	Видимость
+	Vivid Light	Яркий свет
+	Voice	Голос
+	W:	Ш:
+	Warning	Предупреждение
+	Warnings	Предупреждения
+	Warp	Деформация
+	Watermark	Подложка
+	Wave	Волна
+	Wave…	Волна…
+	Web	Web
+	Website	Веб-сайт
+	Weight	Толщина
+	Wet	Влага
+	White	Белый
+	White Intensity	Интенсивность белого
+	White Is High	Белые области выше
+	Whites	Белые
+	Width	Ширина
+	Width and Height	Ширина и высота
+	Width:	Ширина:
+	Window	Окно
+	Windows	Windows
+	Words	Слова
+	Working CMYK	Рабочий CMYK
+	Workspace	Рабочая среда
+	Workspaces	Рабочие среды
+	X	X
+	Y	Y
+	Yellow	Жёлтый
+	Yes	Да
+	yesterday	вчера
+	Your changes will be lost if you don't save them.	Если не сохранить, изменения будут потеряны.
+	Zoom	Масштаб
+	Zoom In	Увеличить
+	Zoom in	Увеличить
+	Zoom Out	Уменьшить
+	Zoom out	Уменьшить
+	Zoom Tool	Инструмент «Масштаб»
+unit	{n} B	{n} Б
+@plural	{n} commit|{n} commits	{n} коммит|{n} коммита|{n} коммитов
+	{n} files	{n} файлов
+unit	{n} GB	{n} ГБ
+unit	{n} GiB	{n} ГиБ
+	{n} h ago	{n} ч назад
+@plural	{n} item|{n} items	{n} элемент|{n} элемента|{n} элементов
+unit	{n} KB	{n} КБ
+unit	{n} KiB	{n} КиБ
+@plural	{n} Layer|{n} Layers	{n} слой|{n} слоя|{n} слоёв
+unit	{n} MB	{n} МБ
+unit	{n} MiB	{n} МиБ
+	{n} min ago	{n} мин назад
+@plural	{n} step|{n} steps	{n} шаг|{n} шага|{n} шагов
+unit	{n} TB	{n} ТБ
+unit	{n} TiB	{n} ТиБ
+	−Bin	−двоич.
+	● Recording	● Запись

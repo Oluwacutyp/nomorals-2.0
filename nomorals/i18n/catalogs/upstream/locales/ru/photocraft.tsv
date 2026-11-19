@@ -1,0 +1,2451 @@
+# Русский (ru) interface catalog for PhotoCraft.
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   @plural  English `one|other`; the translation lists this language's plural forms, `|`-separated.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary. No other product's localisation, string table or translated UI was
+# consulted or copied; add entries the same way.
+
+	% of all commits	% от всех коммитов
+	(No neutral color exists for {mode} mode.)	(Для режима «{mode}» нет нейтрального цвета.)
+	(none)	(none)
+	(print to the printer)	(печать на принтере)
+	+ Add variable	+ Добавить переменную
+	0 turns this threshold off; SVG groups nested deeper than 100 levels are always rasterized.	0 отключает этот порог; группы SVG с вложенностью более 100 уровней всегда растрируются.
+	10 fps	10 кадр/с
+	100%	100%
+	101 by 101 Average	Среднее 101 × 101
+	11 by 11 Average	Среднее 11 × 11
+	12 Columns	12 столбцов
+	125%	125%
+	15 fps	15 кадр/с
+	150%	150%
+	16 Bits/Channel	16 бит/канал
+	175%	175%
+	180°	180°
+	2-up Horizontal	Два по горизонтали
+	2-up Vertical	Два по вертикали
+	200%	200%
+	24 fps	24 кадр/с
+	25 fps	25 кадр/с
+	250%	250%
+	3 by 3 Average	Среднее 3 × 3
+	3 x 3	3 × 3
+	3-up Horizontal	Три по горизонтали
+	3-up Stacked	То же с накоплением
+	3-up Vertical	Три по вертикали
+	30 fps	30 кадр/с
+	30 frames @ 30 fps	30 кадров при 30 кадр/с
+	300%	300%
+	31 by 31 Average	Среднее 31 × 31
+	32 bit (float)	32 бит (float)
+	32 Bits/Channel	32 бита/канал
+	32-bit Preview Options…	Параметры предпросмотра 32 бит…
+	3D	3D
+	3D LUT File	Файл 3D LUT
+	4 x 4	4 × 4
+	4-up	Четыре
+	5 by 5 Average	Среднее 5 × 5
+	5 Columns, 3 Rows	5 столбцов, 3 строки
+	5 x 5	5 × 5
+	50% Gray	50% серого
+	51 by 51 Average	Среднее 51 × 51
+	6-up	Шесть
+	75%	75%
+	8 Bits/Channel	8 бит/канал
+	8 Columns	8 столбцов
+	80%	80%
+	85%	85%
+	90%	90%
+	90° Clockwise	90° по часовой стрелке
+	90° Counter Clockwise	90° против часовой стрелке
+	95%	95%
+	@{login}: {prs} PRs, {commits} commits, +{added} / −{deleted} lines (Δ {delta}), +{binAdded} / −{binDeleted} binary assets, {first} – {last}	@{login}: PR: {prs}, коммиты: {commits}, строки +{added} / −{deleted} (Δ {delta}), двоичные файлы +{binAdded} / −{binDeleted}, {first} – {last}
+	A brush preset with this name already exists	Набор параметров кисти с таким именем уже существует
+	A save to {name} is still running; try again when it finishes	Сохранение в {name} ещё выполняется; повторите попытку после его завершения
+	About PhotoCraft	О программе PhotoCraft
+	Absolute	Абсолютный
+	Accept and Go to Conflict	Принять и перейти к конфликту
+	Accurate	Точно
+	ACES	ACES
+	Action	Операция
+	Action playback stopped	Воспроизведение операции остановлено
+	Actions	Операции
+	Actual Color	Фактический цвет
+	Adaptive Wide Angle	Адаптивный широкий угол
+	Adaptive Wide Angle isn't open	Адаптивный широкий угол не открыт
+	Adaptive Wide Angle…	Адаптивный широкий угол…
+	Add a layer style	Добавить стиль слоя
+	Add a mask  (from the selection; {key} inverts)	Добавить маску  (из выделения; {key} инвертирует)
+	Add an adjustment	Добавить коррекцию
+	Add Anchor Point Tool	Добавить узел
+	Add beauty precomp from the AOVs	Добавить предкомпозит красоты из AOV
+	Add disk	Добавить диск
+	Add Layer Above to Selection	Добавить слой выше к выбору
+	Add Layer Below to Selection	Добавить слой ниже к выбору
+	Add Layer Mask	Добавить маску слоя
+	Add Mask to Selection	Добавить маску к выделению
+	Add New Artboard	Добавить монтажную область
+	Add Noise…	Добавить шум…
+	Add Open Files	Добавить открытые файлы
+	Add pair	Добавить пару
+	Add Pins	Добавить булавки
+	Add Shortcut	Добавить комбинацию
+	Add Stop	Добавить ограничитель
+	Add to	Добавить к
+	Add to Sample	Добавить к выборке
+	Add to selection  ({key})	Добавить к выделению  ({key})
+	Add Vector Mask	Добавить векторную маску
+	Add vector mask	Добавить векторную маску
+	Additional plugins folder	Дополнительная папка плагинов
+	Adds the current gradient to the Gradients panel	Добавляет текущий градиент на панель «Градиенты»
+	Adjust for Zoom	Учитывать масштаб
+	Adjustment	Корректирующий
+	Adjustment Layer	Корректирующий слой
+	Adjustment Preview	Предпросмотр коррекции
+	Adjustment visible	Коррекция видима
+	Adobe	Adobe
+	Adobe Every-line Composer	Абзацная компоновка Adobe
+	Adobe rgb	Adobe RGB
+	Adobe RGB (1998)	Adobe RGB (1998)
+	Adobe RGB (1998) compatible	Совместим с Adobe RGB (1998)
+	Adobe Single-line Composer	Построчная компоновка Adobe
+	Advanced Blending	Дополнительные параметры наложения
+	Advanced Controls	Дополнительное управление
+	Adwaita	Adwaita
+	Adwaita dark	Тёмная Adwaita
+	Adwaita Dark Theme	Тёмная тема Adwaita
+	Adwaita Light Theme	Светлая тема Adwaita
+	After (X)	После (X)
+	Again	Снова
+	AI Integrations…	Интеграции ИИ…
+	Airbrush: keeps depositing paint while the pointer rests.	Аэрограф: продолжает наносить краску, пока курсор неподвижен.
+	Align	Выравнивание
+	Align and Distribute	Выровнять и распределить
+	Align and distribute	Выровнять и распределить
+	Align horizontal centers	Выровнять центры по горизонтали
+	Align left edges	Выровнять по левому краю
+	Align right edges	Выровнять по правому краю
+	Align with layer	По слою
+	Align {what}	Выровнять: {what}
+	Aligned	Выровнено
+	All	Всё
+	All Layers No Adjustments	Все слои без коррекции
+	All shortcuts reset to PhotoCraft defaults.	Все комбинации клавиш сброшены к стандартным PhotoCraft.
+	All User Slices	Все пользовательские фрагменты
+	Allow agent control	Разрешить управление агентами
+	Allow Continue	Разрешить продолжение
+	Allow scripts to connect	Разрешить подключение сценариев
+	Alt-click to define a source point to clone from	Alt+щелчок, чтобы задать точку-источник клонирования
+	Alt-click went to the desktop, which moves windows with Alt-drag. Set its window-move key to Super, or latch Alt in Window › Modifier Keys.	Alt+щелчок перехватило окружение рабочего стола: оно перемещает окна через Alt+перетаскивание. Назначьте для перемещения окон клавишу Super или зафиксируйте Alt в меню Окно › Клавиши-модификаторы.
+	Alternates for Current Selection	Варианты для текущего выделения
+	Alternative	Альтернативный
+	Always create smart objects when placing	Всегда создавать смарт-объекты при помещении
+	Always Show Overlay	Всегда показывать перекрытие
+	Always use pressure for opacity	Всегда использовать нажим для непрозрачности
+	Always use pressure for size	Всегда использовать нажим для размера
+	Amount	Эффект
+cameraRaw	Amount	Интенсивность
+	Amount:	Эффект:
+	Analysis	Анализ
+	Anamorphic 2:1 (2)	Анаморф 2:1 (2)
+	Anchor:	Привязка:
+	Angle Gradient	Угловой градиент
+	Angle Jitter	Колебание угла
+	Animated zoom	Анимированное масштабирование
+	Answer the unsaved-changes prompt first	Сначала ответьте на запрос о несохранённых изменениях
+	Anti-aliased	Сглаживание
+	Anti-aliasing method	Метод сглаживания
+	Aperture	Диафрагма
+	Appearance (Layer Style)	Внешний вид (стиль слоя)
+	Appearance Mode	Режим оформления
+	Apple RGB	Apple RGB
+	Applies at next launch.	Применится при следующем запуске.
+	Apply At Canvas Bounds	Применить эффект на границах холста
+	Apply auto tone	Применять автотон
+	Apply Data Set…	Применить набор данных…
+	Apply Image…	Внешний канал…
+	Apply Layer Comp	Применить вариант слоя
+	Apply Layer Mask	Применить маску слоя
+	Apply mask to layer before removing?	Применить маску к слою перед удалением?
+	Apply next selected layer comp	Применить следующий выбранный вариант
+	Apply Per Tip	На каждый отпечаток
+	Apply previous selected layer comp	Применить предыдущий выбранный вариант
+	Apply the pen's tilt and rotation to the tip shape	Применять наклон и поворот пера к форме отпечатка
+	Apply the removal ({key})	Применить удаление ({key})
+	Apply Vanishing Point ({key})	Применить точку схода ({key})
+	Aqua	Голубой
+cameraRaw	Aqua	Голубые
+	Arbitrary…	Другой угол…
+	Arch	Арочная
+	Art & Illustration	Искусство и иллюстрация
+	Art History Brush	Кисть истории искусств
+	Artboard Background Color	Цвет фона монтажной области
+	Artboard from Group…	Монтажная область из группы…
+	Artboard from Layers…	Монтажная область из слоёв…
+	Artboard Guides	Направляющие монтажной области
+	Artboard Tool	Монтажная область (инструмент)
+	Artboards to Files…	Монтажные области в файлы…
+	Artboards to PDF…	Монтажные области в PDF…
+	Artboard…	Монтажная область…
+	ArtCraft Website	Сайт ArtCraft
+	Artist	Автор
+	Ask	Спрашивать
+	Ask before saving layered tiff	Спрашивать перед сохранением многослойного TIFF
+	Ask Before Saving Saved Embedded	Спрашивать перед сохранением встроенного
+	Ask When Pasting	Спрашивать при вставке
+	Assign working space	Назначить рабочее пространство
+	Attempt to Automatically Align Source Images	Попытаться автоматически выровнять исходные изображения
+	Auto Add/Delete	Автодобавление/удаление
+	Auto Adjust Opacity	Автоматически настраивать непрозрачность
+	Auto Center Preview	Автоматически центрировать просмотр
+	Auto Clean Brush	Автоочистка кисти
+	Auto collapse icon panels	Автоматически сворачивать панели-значки
+	Auto Contrast	Автоконтраст
+	Auto Erase	Автостирание
+	Auto Hide	Автоскрытие
+	Auto Hide Notifications	Автоскрытие уведомлений
+	Auto show hidden panels	Автоматически показывать скрытые панели
+	Auto show home screen	Автоматически показывать домашний экран
+	Auto Show Overlay	Показывать перекрытие автоматически
+	Auto Tone	Автотон
+	Auto-Align Layers…	Автовыравнивание слоёв…
+	Auto-Blend Layers…	Автосмешивание слоёв…
+	Auto-Hide	Автоскрытие
+	Auto-Leading	Автоинтерлиньяж
+	Auto-leading %	Автоинтерлиньяж %
+	Auto-Select:	Автовыбор:
+	Automatic (recommended)	Автоматически (рекомендуется)
+	Automatic uses GPU acceleration when available and falls back to CPU rendering on errors.	Автоматический режим использует GPU, когда он доступен, и переходит на CPU при ошибках.
+	Automatically Create First Snapshot	Автоматически создавать первый снимок
+	Automatically Create New Snapshot When Saving	Автоматически создавать снимок при сохранении
+	Automatically level near-horizontal line segments	Автоматически выравнивать почти горизонтальные отрезки
+	Automatically straighten and level	Автоматически выпрямить и выровнять
+	Automatically straighten near-vertical line segments	Автоматически выравнивать почти вертикальные отрезки
+	Autosave	Автосохранение
+	Autosave minutes	Интервал автосохранения (мин)
+	Average	Среднее
+	Avoid Widows/Orphans	Избегать висячих строк
+	Background (Default)	Фон (по умолчанию)
+	Background Eraser	Фоновый ластик
+	Background Eraser Tool	Фоновый ластик
+	Background From Layer	Фон из слоя
+	Background from Layer	Фон из слоя
+	Baseline Shift	Смещение по базовой линии
+	Basic	Основные
+	Beep when done	Звуковой сигнал по завершении
+	Before (Y)	До (Y)
+	Begin recording	Начать запись
+	Bevel	Скошенные
+	Bevel & Emboss	Тиснение
+	Bevel & Emboss…	Тиснение…
+	Bicubic (smooth gradients)	Бикубическая (плавные градиенты)
+	Bicubic automatic	Автоматическая бикубическая
+	Bicubic sharper	Бикубическая с повышением резкости
+	Bicubic Sharper (reduction)	Бикубическая, чётче (уменьшение)
+	Bicubic smoother	Бикубическая со сглаживанием
+	Bicubic Smoother (enlargement)	Бикубическая, глаже (увеличение)
+	Bilinear	Билинейная
+	Binary assets added	Добавлено двоичных файлов
+	Binary assets removed	Удалено двоичных файлов
+	Bit depth	Разрядность
+	Bitmap	Битовый формат
+	Bitmap…	Битовый формат…
+	Black	Плотный
+fontWeight	Black	Сверхжирный (Black)
+	Black & White…	Чёрно-белое…
+	Black Matte	На чёрном фоне
+	Black Point Compensation	Компенсация чёрной точки
+	Black, White	Чёрный, белый
+cameraRaw	Blacks	Чёрные
+	BLANK DOCUMENT PRESETS ({n})	НАБОРЫ ПУСТЫХ ДОКУМЕНТОВ ({n})
+	Blend	Смешивание
+	Blend If	Изображение если
+	Blend If:	Изображение если:
+	Blend RGB Colors Using Gamma 1.0	Смешивать цвета RGB с гаммой 1.0
+	Blending	Наложение
+cameraRaw	Blending	Смешивание
+	Blending Options	Параметры наложения
+	Blending Options…	Параметры наложения…
+cameraRaw	Blue	Синие
+	Blue, Red, Yellow	Синий, красный, жёлтый
+	Blur Gallery	Галерея размытия
+	Blur More	Дополнительное размытие
+	Blur Tool	Размытие
+fontWeight	Bold	Жирный
+	Bold Italic	Полужирный курсив
+	Border…	Граница…
+	Both Axes	По обеим осям
+	Bottom Edges	Нижние края
+	Bottom Left	Нижний левый
+	Bottom Right	Нижний правый
+	Box Blur…	Размытие по рамке…
+	Breeze dark	Breeze тёмная
+	Breeze Dark Theme	Тёмная тема Breeze
+	Breeze light	Breeze светлая
+	Breeze Light Theme	Светлая тема Breeze
+	Brightness Jitter	Колебание яркости
+	Brightness/Contrast	Яркость/Контраст
+	Brightness/Contrast…	Яркость/Контраст…
+	Bring the selected pin forward	Переместить выбранную булавку вперёд
+	Browser storage is unavailable; brushes are session-only. Keep this tab open to retain them.	Хранилище браузера недоступно; кисти действуют только в этом сеансе. Не закрывайте эту вкладку, чтобы сохранить их.
+	Brush	Кисть
+	Brush Name	Имя кисти
+	Brush name	Имя кисти
+	Brush picker	Выбор кисти
+	Brush Pose	Положение кисти
+	Brush preset changes are not saved: {error}	Изменения наборов кистей не сохранены: {error}
+	Brush Preset Options	Параметры наборов кистей
+	Brush Preset picker	Выбор набора кистей
+	Brush Preview	Предпросмотр кисти
+	Brush preview color	Цвет предпросмотра кисти
+	Brush Projection	Проекция кисти
+	Brush Reconstruct Options	Параметры восстановления кисти
+	Brush Settings	Настройки кисти
+	Brush Stroke	Мазок кисти
+	Brush Tip	Отпечаток кисти
+	Brush Tip Shape	Форма отпечатка
+	Brush Tool	Кисть
+	Brush Tool Options	Параметры кисти
+	Build-up	Наслоение
+	Bundle Arrow-Key Nudges	Объединять сдвиги стрелками
+	Burn	Затемнитель
+	Burn Tool	Затемнитель
+	Butt / Flat	Плоские
+	Button Mode	Режим кнопок
+	Button Mode On	Режим кнопок включён
+	Byline	Автор
+	Byline Title	Должность автора
+	Cache Level:	Уровень кэша:
+	Cache levels	Уровни кэша
+	Cache tile size	Размер блока кэша
+	Calculations…	Вычисления…
+	Camera Calibration	Калибровка камеры
+	Camera Data	Данные камеры
+	Camera Make	Производитель камеры
+	Camera Model	Модель камеры
+	Camera Raw ({name})	Camera Raw ({name})
+	Camera Raw Defaults	Значения Camera Raw по умолчанию
+	Camera Raw Filter ({layer})	Фильтр Camera Raw ({layer})
+	Camera Raw Filter…	Фильтр Camera Raw…
+	Camera Raw isn't open	Camera Raw не открыт
+	Camera Raw…	Camera Raw…
+	Cancel (Esc)	Отмена (Esc)
+	Cancel any current edits (Esc)	Отменить все текущие правки (Esc)
+	Cancel current crop operation  (Esc)	Отменить текущее кадрирование  (Esc)
+	Cancel opening	Отменить открытие
+	Cancel transform (Esc)	Отменить трансформацию (Esc)
+	Cancel warp (Esc)	Отменить деформацию (Esc)
+	Cancelled opening {name}	Открытие {name} отменено
+	Cancelled {label}	{label}: отменено
+	Canvas border	Рамка холста
+	Canvas color	Цвет холста
+	Canvas custom color	Свой цвет холста
+	Canvas extension color:	Цвет расширения холста:
+	Canvas Guides	Направляющие холста
+	Canvas rotation	Вращение холста
+	Canvas Size…	Размер холста…
+	Caps	Концы
+	Caption Credits	Авторство подписи
+	Capture	Снять
+	Capture Brush Size in Preset	Сохранить размер кисти в наборе
+	Capture Comp	Зафиксировать вариант
+	Capture the visibility, position and style of every layer with + below, then switch between versions.	Зафиксируйте видимость, положение и стиль каждого слоя кнопкой + ниже, затем переключайтесь между версиями.
+	Cascade	Каскадом
+	Catch-up on Stroke End	Догонять в конце мазка
+	Center Columns	Центрировать столбцы
+	Center Crop Marks	Центральные метки кадрирования
+	Center text	Выравнивание по центру
+	Centre the gradient (offset 0, 0)	Центрировать градиент (смещение 0, 0)
+	Chalk & Charcoal	Мел и уголь
+	Change Panel Group	Изменить группу панелей
+	Change Screen Mode  (F)	Сменить режим экрана  (F)
+	Change To:	Изменить на:
+	Changes undone.	Изменения отменены.
+	Channel Color	Цвет канала
+	Channel Mixer…	Микширование каналов…
+	Channel:	Канал:
+	Channels:	Каналы:
+	Character Panel	Панель «Символ»
+	Character Styles Panel	Панель «Стили символов»
+	Charcoal	Уголь
+	Check All Layers	Проверить все слои
+	Check Spelling	Проверка орфографии
+	Check Spelling…	Проверка орфографии…
+	Chisel Hard	Жесткая огранка
+	Chisel Soft	Мягкая огранка
+	Choose a format that keeps it, such as Photoshop (PSD), or save a copy.	Выберите формат, который сохранит все, например Photoshop (PSD), или сохраните копию.
+	Choose a gradient file (.grd).	Выберите файл градиентов (.grd).
+	Choose a new shortcut for this command, or leave it without one.	Выберите новую комбинацию для этой команды или оставьте её без комбинации.
+	Choose Stack Mode:	Выберите режим стопки:
+	Chrome	Хром
+	CIE RGB	CIE RGB
+	Circularity	Круглость
+	Classic	Классическая
+	Classic Theme	Классическая тема
+	Clear Brush Controls	Очистить параметры кисти
+	Clear Brush Strokes	Очистить мазки кисти
+	Clear Canvas Guides	Удалить направляющие холста
+	Clear Existing Guides	Удалить существующие направляющие
+	Clear Layer Style	Очистить стиль слоя
+	Clear Override	Сбросить переопределение
+	Clear Samples	Очистить выборку
+	Clear Selected Artboard Guides	Удалить направляющие выбранной области
+	Clear Selected Guides	Удалить выбранные направляющие
+	Clear Slices	Удалить фрагменты
+	Clear Smart Filters	Очистить смарт-фильтры
+	Click a red pupil to neutralize it	Щёлкните по красному зрачку, чтобы убрать блик
+	Click a segment to add an anchor point · {alt}-click an anchor to delete it	Щёлкните сегмент, чтобы добавить узел · {alt}-щелчок по узлу удаляет его
+	Click an anchor point to delete it · {alt}-click a segment to add one	Щёлкните узел, чтобы удалить его · {alt}-щелчок по сегменту добавляет узел
+	Click the first point or press {key} to close · Esc cancels	Щёлкните первую точку или нажмите {key}, чтобы замкнуть · Esc отменяет
+	Click the first point or press {key} to close · {del} removes a point · Esc cancels	Щёлкните первую точку или нажмите {key}, чтобы замкнуть · {del} удаляет точку · Esc отменяет
+	Click the image to add a pin; drag a pin to move it, or its ring to change its blur. Delete removes the selected pin.	Щелкните изображение, чтобы добавить булавку; перетащите булавку, чтобы переместить ее, или ее кольцо, чтобы изменить размытие. Delete удаляет выбранную булавку.
+	Click to add a point · drag off or {key}-click or Delete to remove	Щёлкните, чтобы добавить точку · уведите или {key}-клик, либо Delete — удалить
+	Click to add a point, right-click to remove	Щёлкните, чтобы добавить точку; щелчок правой кнопкой удаляет её
+	Click to add text	Щёлкните, чтобы добавить текст
+	Click to apply, {key}-click to clear overrides, double-click for Style Options	Щёлкните, чтобы применить · {key}-клик сбрасывает переопределения · двойной клик — параметры стиля
+	Click to edit the gradient	Щёлкните, чтобы изменить градиент
+	Click to fill similar colours	Щёлкните, чтобы залить похожие цвета
+	Click to pick · Esc to cancel	Щелчок — выбрать · Esc — отменить
+	Click to place · Alt-click or drag off-canvas to remove	Щёлкните, чтобы разместить · Alt-щелчок или перетаскивание за пределы холста для удаления
+	Click to restore the current colour	Щёлкните, чтобы восстановить текущий цвет
+	Click to sample the foreground colour  ·  {key}-click for background	Клик — взять основной цвет  ·  {key}-клик — фоновый цвет
+	Click to zoom in  ·  {key}-click to zoom out  ·  drag right/left to zoom in/out	Щелчок увеличивает  ·  {key}-щелчок уменьшает  ·  перетаскивание вправо/влево увеличивает/уменьшает
+	Click with the Note tool to add a note.	Щёлкните инструментом «Заметки», чтобы добавить заметку.
+	Click, then move along an edge · click to fasten a point · {alt}-click for a straight segment · double-click to close	Щёлкните и ведите вдоль края · щелчок закрепляет точку · {alt}-щелчок — прямой отрезок · двойной щелчок замыкает
+	Click: corner · Drag: smooth · Click first point: close · {key} finish · Esc cancel	Клик: угол · перетаскивание: гладкая · клик по первой точке: замкнуть · {key} завершить · Esc отмена
+	Click: corner · Drag: smooth · {alt}-drag: break handle · Click or drag first point: close · {key} finish · Esc cancel	Клик: угол · перетаскивание: гладкая · {alt}+перетаскивание: разбить маркер · клик или перетаскивание первой точки: замкнуть · {key} завершить · Esc отмена
+	Click: select anchor · Drag: move anchor, handle or segment · {shift}-click: add · {alt}-click: whole subpath	Щелчок: выбрать узел · Перетаскивание: переместить узел, маркер или сегмент · {shift}-щелчок: добавить · {alt}-щелчок: весь подконтур
+	Click: smooth point · Double-click: corner · Drag a point: move · Click first point: close · {key} finish	Клик: гладкая точка · двойной клик: угол · перетаскивание точки: переместить · клик по первой точке: замкнуть · {key} завершить
+	Clip Thumbnails to Layer Bounds	Обрезать миниатюры по границам слоя
+	Clip thumbnails to layer bounds	Обрезать миниатюры по границам слоя
+	Clip to layer below	Обтравить по нижнему слою
+	Clipped	Обтравочная
+	Clipping Path	Обтравочный контур
+	Clone Source	Источник клонирования
+	Clone source {n} ({key}-click with Clone Stamp to set)	Источник клонирования {n} ({key}-клик штампом, чтобы задать)
+	Clone Stamp	Штамп
+	Clone Stamp Tool	Штамп
+	Close Others	Закрыть остальные
+	Close Style Options	Закрыть параметры стиля
+	Close Tab Group	Закрыть группу вкладок
+	Clouds	Облака
+	CMYK Color	CMYK
+	Coated CMYK	Мелованная бумага CMYK
+	Coerce to sRGB	Приводить к sRGB
+	Collapse All Groups	Свернуть все группы
+	Collapse group  ({key}-click: all groups)	Свернуть группу  ({key}-клик: все группы)
+	Collapse Panel Group	Свернуть группу панелей
+	Color & Swatches	Цвет и образцы
+	Color Adaptation	Адаптация цвета
+	Color Balance…	Цветовой баланс…
+	Color Blindness — Deuteranopia-type	Цветовая слепота — дейтеранопия
+	Color Blindness — Protanopia-type	Цветовая слепота — протанопия
+	Color Burn (Paint.NET)	Затемнение основы (Paint.NET)
+	Color Decontaminate…	Удаление цветового ореола…
+	Color Detail	Цветовая детализация
+cameraRaw	Color Detail	Детализация цвета
+	Color Dodge (Paint.NET)	Осветление основы (Paint.NET)
+	Color Dynamics	Динамика цвета
+	Color Grading	Цветокоррекция
+cameraRaw	Color Grading	Цветовое тонирование
+	Color Halftone…	Цветные полутона…
+	Color indicates	Цвет обозначает
+	Color Indicates:	Цветом обозначены:
+	Color Lookup	Калибровка цвета
+	Color Lookup Tables…	Таблицы перекодировки цвета…
+	Color Lookup…	Калибровка цвета…
+	Color Management Policies	Правила управления цветом
+	Color Mixer	Смеситель цветов
+	Color Noise Reduction	Цветовое шумоподавление
+	Color Overlay	Наложение цвета
+	Color Overlay…	Наложение цвета…
+	Color picker	Пипетка
+	Color Picker (Crop Shield Color)	Палитра цветов (Цвет экрана кадрирования)
+	Color Picker (Fill Color)	Палитра цветов (Цвет заливки)
+	Color Picker (Layer Style Color)	Палитра цветов (цвет стиля слоя)
+	Color Picker (Solid Color)	Выбор цвета (сплошной цвет)
+	Color Picker (Stroke Color)	Палитра цветов (Цвет обводки)
+	Color Picker (Text Color)	Палитра цветов (Цвет текста)
+	Color Picker ({name})	Палитра цветов ({name})
+	Color Priority	Приоритет цвета
+	Color Profile	Цветовой профиль
+	Color Range	Цветовой диапазон
+	Color Range preview	Предпросмотр цветового диапазона
+	Color Range…	Цветовой диапазон…
+	Color Replacement	Замена цвета
+	Color Replacement Tool	Инструмент «Замена цвета»
+	Color space	Цветовое пространство
+	Color Table…	Цветовая таблица…
+	Color to Alpha…	Цвет в альфа-канал…
+	ColorMatch RGB	ColorMatch RGB
+	ColorSync	ColorSync
+	Combine Shapes	Комбинировать фигуры
+	command or shortcut	команда или комбинация клавиш
+	Commit any current edits ({key})	Принять все текущие правки ({key})
+	Commit current crop operation  ({key})	Принять текущее кадрирование  ({key})
+	Commit Perspective Warp ({key})	Принять перспективную деформацию ({key})
+	Commit Puppet Warp ({key})	Принять кукольную деформацию ({key})
+	Commit transform ({key})	Принять трансформацию ({key})
+	Commit warp ({key})	Принять деформацию ({key})
+	Company	Компания
+	Compare	Compare
+	Compose	Компоновка
+	Concise	Кратко
+	Condensed	Узкий
+	Conditional Mode Change…	Условная смена режима…
+	Cone (Inverted)	Конус (инвертированный)
+	Cone - Inverted	Конус - инвертированный
+	Consolidate All to Tabs	Объединить всё во вкладки
+	Constant	Константа
+	Constrain proportions	Сохранить пропорции
+	Constraints ({n})	Ограничения ({n})
+	Contact Sheet II	Контактный лист II
+	Contact Sheet II…	Контактный лист II…
+	Content-Aware	С учётом содержимого
+	Content-Aware Fill	Заливка с учётом содержимого
+	Content-Aware Fill…	Заливка с учётом содержимого…
+	Content-Aware Move	Перемещение с учётом содержимого
+	Content-Aware Move Tool	Перемещение с учётом содержимого
+	Content-Aware Scale	Масштабирование с учётом содержимого
+	Contents:	Содержимое:
+	Contextual Alternates	Контекстные варианты
+	Contiguous	Смежные пикселы
+	Contour	Контур
+	Contour Editor	Редактор контура
+	Contract	Сжать
+	Contract…	Сжать…
+	Contributors: {contributors} · Commits: {commits}	Участники: {contributors} · Коммиты: {commits}
+	Control port	Порт управления
+	Control:	Управление:
+	Conté Crayon	Восковой карандаш
+	Convert for Smart Filters	Преобразовать для смарт-фильтров
+	Convert Frames > Video Layers	Кадры → видеослои
+	Convert Point Tool	Преобразование узла
+	Convert to Embedded	Преобразовать во встроенный
+	Convert to Grayscale	Преобразовать в градации серого
+	Convert to Layers	Преобразовать в слои
+	Convert to Linked…	Преобразовать в связанный…
+	Convert to Paragraph Text	Преобразовать в блочный текст
+	Convert to Point Text	Преобразовать в точечный текст
+	Convert to Profile…	Преобразовать в профиль…
+	Convert to Smart Object	Преобразовать в смарт-объект
+	Convert to srgb	Преобразовывать в sRGB
+	Convert to the working space ({profile})	Преобразовать в рабочее пространство ({profile})
+	Copper	Медь
+	Copy Layer Style	Скопировать стиль слоя
+	Copy Merged	Скопировать сведённое
+	Copy Texture to Other Tools	Скопировать текстуру в другие инструменты
+	Copyright	Авторские права
+	Copyright and Contact Info	Авторские права и контактная информация
+	Copyright Info URL	URL сведений об авторских правах
+	Copyright Status	Статус авторских прав
+	Corner Crop Marks	Угловые метки кадрирования
+	Corner radius	Радиус скругления
+	Could not complete the Free Transform command because the layer is locked.	Не удалось выполнить команду «Свободное трансформирование», потому что слой заблокирован.
+	Could not open	Не удалось открыть
+	Could not use the move tool because the layer is locked.	Не удалось использовать инструмент «Перемещение», потому что слой заблокирован.
+	Couldn't place {name}: {error}	Не удалось поместить {name}: {error}
+	Count	Счёт
+	Count Jitter	Колебание счёта
+	Count Tool	Счёт
+	Count: {n}	Счёт: {n}
+	Cove - Deep	Бухта - глубокая
+	Cove - Shallow	Бухта - мелкая
+	CPU (no GPU acceleration)	ЦП (без ускорения GPU)
+	CPU / Compatibility	CPU / Совместимость
+	Create a new count group	Создать новую группу счёта
+	Create a new document or open an existing file.	Создайте новый документ или откройте существующий файл.
+	Create a new elliptical frame	Создать эллиптическую рамку
+	Create a new group	Создать новую группу
+	Create a new layer	Создать новый слой
+	Create a new rectangular frame	Создать прямоугольную рамку
+	Create Clipping Mask	Создать обтравочную маску
+	Create Date	Дата создания
+	Create Droplet	Создать модуль-дроплет
+	Create Droplet…	Создать модуль-дроплет…
+	Create Ellipse	Создать эллипс
+	Create Layer	Создать слой
+	Create Multiple Picture Packages	Создать несколько фото-комплектов
+	Create new action	Создать новую операцию
+	Create new brush from these settings	Создать новую кисть из этих параметров
+	Create new channel	Создать новый канал
+	Create new count group	Создать новую группу счёта
+	Create new document from current state	Создать новый документ из текущего состояния
+	Create new fill or adjustment layer	Создать новый слой-заливку или корректирующий слой
+	Create new gradient	Создать новый градиент
+	Create new group	Создать новую группу
+	Create new layer	Создать новый слой
+	Create new layer comp	Создать новый вариант слоя
+	Create new path	Создать новый контур
+	Create new pattern from the selection	Создать новый паттерн из выделения
+	Create new set	Создать новый набор
+	Create new shape from the current path	Создать новую фигуру из текущего контура
+	Create new snapshot	Создать новый снимок
+	Create new style (from the selected type)	Создать стиль (из выделенного текста)
+	Create new style from the selected layer	Создать стиль из выделенного слоя
+	Create new swatch	Создать новый образец
+	Create new tool preset	Создать новый набор инструментов
+	Create Plane	Создать плоскость
+	Create Polygon	Создать многоугольник
+	Create Rectangle	Создать прямоугольник
+	Create Smart Object after Loading Layers	Создать смарт-объект после загрузки слоёв
+	Create Snapshot	Создать снимок
+	Create Texture	Создать текстуру
+	Create Triangle	Создать треугольник
+	Create Video Timeline	Создать видео-шкалу
+	Create Work Path	Создать контур
+	Credit	Авторство
+	Crisp	Чёткий
+	Crop	Рамка
+	Crop and Straighten Photos	Кадрировать и выровнять фотографии
+	Crop Factor	Коэффициент кадрирования
+	Crop Shield color	Цвет экрана кадрирования
+	Crop Tool	Рамка
+	current	текущая
+	Current & Below	Текущий и ниже
+	Current & Below No Adjustments	Текущий и ниже без коррекции
+	Current Layer	Текущий слой
+	Current Path	Текущий контур
+	Current Size	Текущий размер
+	Current Tool	Текущий инструмент
+	Current Tool Only	Только текущий инструмент
+	Cursors	Курсоры
+	Cursors…	Курсоры…
+	Curvature Pen Tool	Перо кривизны
+	Curve Fit:	Точность кривой:
+	Custom	Свой
+	Custom background color	Свой цвет фона
+	Custom dark	Тёмная своя
+	Custom light	Светлая своя
+	Custom Pattern:	Свой узор:
+	Custom Pixel Aspect Ratio…	Своё пиксельное соотношение…
+	Custom Shape Tool	Произвольная фигура
+	Custom Shapes	Свои фигуры
+	Custom…	Свой…
+	Cyan  ·  Red	Голубой  ·  Красный
+	Cycle Orientation	Сменить ориентацию
+	Cycle Overlay	Сменить перекрытие
+	Cycle Screen Mode	Переключить режим экрана
+	D1/DV NTSC (0.91)	D1/DV NTSC (0.91)
+	D1/DV NTSC Widescreen (1.21)	D1/DV NTSC широкий (1.21)
+	D1/DV PAL (1.09)	D1/DV PAL (1.09)
+	D1/DV PAL Widescreen (1.46)	D1/DV PAL широкий (1.46)
+	Darken Amount	Степень затемнения
+	Darken Interface	Сделать интерфейс темнее
+	Darker Color	Замена тёмным
+	Darks	Тёмные
+cameraRaw	Darks	Тёмные тона
+	Dash	Штрих
+	Dash / gap lengths × stroke width	Длины штриха / пробела × ширина обводки
+	Dash offset	Смещение штрихов
+	Dashed	Штриховая
+	Dashed line	Штриховая линия
+	Dashed lines	Пунктирные линии
+	Data Sets as Files…	Наборы данных в файлы…
+	Data Sets…	Наборы данных…
+cameraData	Date Taken	Дата съёмки
+	DateTime Original	Дата и время съёмки
+	De-Interlace…	Устранить чересстрочность…
+	Decontaminate	Очистить
+	Decrease Brush Hardness	Уменьшить жёсткость кисти
+	Decrease Brush Size	Уменьшить размер кисти
+	Default colours (D)	Цвета по умолчанию (D)
+	Default Features	Возможности по умолчанию
+	Default PhotoCraft Size	Размер PhotoCraft по умолчанию
+	Default printer	Принтер по умолчанию
+	Default restored.	Значения по умолчанию восстановлены.
+	Defaults restored.	Значения по умолчанию восстановлены.
+	Define	Определить
+	Define at least one variable first.	Сначала определите хотя бы одну переменную.
+	Define Brush Preset…	Определить кисть…
+	Define Custom Shape…	Определить свою фигуру…
+	Define Pattern…	Определить паттерн…
+	Define…	Определить…
+	Defringe…	Убрать кайму…
+	Dehaze	Устранение дымки
+	Delete All Empty Layers	Удалить все пустые слои
+	Delete Anchor Point Tool	Удалить узел
+	Delete and Fill Selection	Удалить и залить выделение
+	Delete count group	Удалить группу счёта
+	Delete Crop Preset…	Удалить набор параметров кадрирования…
+	Delete Cropped Pixels	Удалить отсечённые пикселы
+	Delete current channel	Удалить текущий канал
+	Delete current state	Удалить текущее состояние
+	Delete effect layer	Удалить слой эффекта
+	Delete Filter Mask	Удалить маску фильтра
+	Delete Frame	Удалить кадр
+	Delete layer	Удалить слой
+	Delete layer comp	Удалить вариант слоя
+	Delete Layer Mask	Удалить маску слоя
+	Delete layer ‘{name}’?	Удалить слой «{name}»?
+	Delete layer?	Удалить слой?
+	Delete Layers	Удалить слои
+	Delete Layer…	Удалить слой…
+	Delete note	Удалить заметку
+	Delete Path	Удалить контур
+	Delete Pins	Удалить булавки
+	Delete Preset…	Удалить набор…
+	Delete selected measurements	Удалить выбранные измерения
+	Delete Shortcut	Удалить комбинацию
+	Delete Smart Filters	Удалить смарт-фильтры
+	Delete Snapshot	Удалить снимок
+	Delete style	Удалить стиль
+	Delete the vector mask?	Удалить векторную маску?
+	Delete this set	Удалить этот набор
+	Delete Timeline	Удалить шкалу времени
+	Delete Tool Preset	Удалить набор
+	Delete tool preset	Удалить набор инструментов
+	Delete Vector Mask	Удалить векторную маску
+	Delete Workspace…	Удалить рабочую среду…
+	Delete {count} layers? {names}	Удалить слои ({count})? {names}
+	Density	Плотность
+	Density:	Плотность:
+	Depth Jitter	Колебание глубины
+	Desaturate Monitor Colors By	Снизить насыщенность цветов монитора на
+	Deselect Layers	Отменить выделение слоёв
+	Despeckle	Убрать пятна
+	Detail	Детализация
+	Detailed	Подробно
+	Detect Faces	Распознавать лица
+	Developing {name}	Обработка {name}
+	Diagonal (Descending)	Диагональ (нисходящая)
+	Diamond Gradient	Ромбовидный градиент
+	Difference Clouds	Облака с наложением
+	Diffuse…	Диффузия…
+	Dimensions:	Габариты:
+	Direct Selection Tool	Выделение узла
+	Direction of Stroke	Направление мазка
+	DirectX 12	DirectX 12
+	Disable Filter Mask	Отключить маску фильтра
+	Disable Layer Mask	Отключить маску слоя
+	Disable Smart Filters	Отключить смарт-фильтры
+	Discard Layers and Save a Copy	Удалить слои и сохранить копию
+	Discard the embedded profile (don't color manage)	Не использовать встроенный профиль (без управления цветом)
+	Discontiguous	Несмежные пикселы
+	Discretionary Ligatures	Дополнительные лигатуры
+	Disks	Диски
+	Displace…	Смещение…
+	Display	Display
+	Display P3	Display P3
+	Display p3	Display P3
+	Display Text	Показывать текст
+	Dissolve	Растворение
+	Dither	Дизеринг
+	Divide…	Деление…
+	Do you want to save the changes you made to “{name}” before closing?	Сохранить изменения в документе «{name}» перед закрытием?
+	Do you want to save the changes you made to “{name}” before quitting?	Сохранить изменения в документе «{name}» перед выходом?
+	Doc: {flat}/{layered}	Док: {flat}/{layered}
+	Doc: {w} × {h} px	Док: {w} × {h} px
+	Dock Panel	Закрепить панель
+	Document Bounds	Границы документа
+	Document Dimensions	Габариты документа
+	Document Profile	Профиль документа
+	Document Size	Размер документа
+	Dodge	Осветлитель
+	Dodge Tool	Осветлитель
+	Dodge/Burn	Осветление/Затемнение
+	Domed	Купол
+	Domed (Inverted)	Купол (инвертированный)
+	Don't also tick Mirror Image in Print Settings…: the two flips cancel out.	Не включайте также зеркальное отражение в параметрах печати: два отражения отменяют друг друга.
+	Don't Import	Не импортировать
+	Don't show again	Больше не показывать
+	Double click layer mask launches select and mask	Двойной клик по маске слоя открывает «Выделение и маска»
+	Drag (lasso) or click points (polygonal) · {add} add · {sub} subtract	Перетащите (лассо) или щёлкайте точки (многоугольное) · {add} добавить · {sub} вычесть
+	Drag a box or click four corners · drag the corners onto the edges of a skewed shape · {commit} commits · Esc cancels	Растяните рамку или щёлкните четыре угла · перетащите углы на края наклонной фигуры · {commit} применяет · Esc отменяет
+	Drag a crop box · drag inside to move · edges resize ({ratio} ratio, {centre} centre) · Space moves while drawing · arrows nudge · X swaps orientation · {commit} commits · Esc cancels	Выделите рамку кадрирования · перетащите внутри для перемещения · края меняют размер ({ratio} пропорции, {centre} центр) · Space двигает при рисовании · стрелки сдвигают · X меняет ориентацию · {commit} применить · Esc отмена
+	Drag a rectangle around the object	Обведите объект прямоугольником
+	Drag around the centre to rotate the view  ·  Shift constrains to 15°	Перетащите вокруг центра, чтобы повернуть вид  ·  Shift фиксирует шаг 15°
+	Drag on the image to add a constraint; Shift for horizontal/vertical; right-click to delete.	Перетащите по изображению, чтобы добавить ограничение; Shift — горизонталь/вертикаль; правый клик — удалить.
+	Drag or click polygon points · hold Alt during lasso for straight segments · {add} add · {sub} before drawing subtracts	Перетащите или щёлкайте точки многоугольника · удерживайте Alt во время лассо для прямых отрезков · {add} добавить · {sub} перед рисованием вычитает
+	Drag the arrow to set the angle, the dots to set the roundness	Перетащите стрелку, чтобы задать угол, и точки — круглость
+	Drag the handles on the outline to resize and turn it, the square to round its corners, and the dots inside to set where the blur starts.	Перетаскивайте маркеры на контуре, чтобы изменить размер и повернуть его, квадрат — чтобы скруглить углы, а точки внутри — чтобы задать, где начинается размытие.
+	Drag the handles on the outline to resize and turn it; the ring sets the blur angle.	Перетаскивайте маркеры на контуре, чтобы изменить размер и повернуть его; кольцо задает угол размытия.
+	Drag the pin to move the band, or its ring to change its blur. Drag the solid lines to widen the sharp band, the dashed lines to set the transition, and the dots to turn it.	Перетащите булавку, чтобы сдвинуть полосу, или ее кольцо, чтобы изменить размытие. Сплошные линии расширяют резкую полосу, пунктирные задают переход, а точки поворачивают ее.
+	Drag to draw a gradient	Перетащите, чтобы нарисовать градиент
+	Drag to draw the curve · {key}-click draws a straight line	Перетащите, чтобы нарисовать кривую · {key}-щелчок рисует прямую линию
+	Drag to move the active layer	Перетащите, чтобы переместить активный слой
+	Drag to move the active shape's path or the Work Path	Перетащите, чтобы переместить контур активной фигуры или рабочий контур
+	Drag to move the layer	Перетащите, чтобы переместить слой
+	Drag to pan  ·  hold Space with any tool	Перетащите для панорамирования  ·  удерживайте Space с любым инструментом
+	Drag to pan · Scroll to zoom · Double-click to fit	Перетаскивание — перемещение · Колесо — масштаб · Двойной щелчок — вписать
+	Drag: draw freehand · {alt}-click: straight segment · Release on the start point: close	Перетаскивание: рисовать от руки · {alt}-щелчок: прямой сегмент · отпустить на начальной точке: замкнуть
+	Draw to modify the curve	Рисовать кривую
+	Draw with the Pen tool (P) or make a work path from a selection.	Нарисуйте пером (P) или создайте рабочий контур из выделения.
+	Drop an image or PSD anywhere to open it.	Перетащите изображение или PSD в любое место окна, чтобы открыть.
+	Drop shadow	Тень
+	Dual Axis	Две оси
+	Dual Brush	Двойная кисть
+	Duotone	Дуотон
+	Duotone…	Дуотон…
+	Duplicate Frame	Дублировать кадр
+	Duplicate Layer	Дубликат слоя
+	Duplicate Layer Comp	Дублировать вариант слоя
+	Duplicate Layers…	Дублировать слои…
+	Duplicate Layer…	Дублировать слой…
+	Duplicate Path	Дублировать контур
+	Duplicate style	Дублировать стиль
+	Duplicated selection name	Имя дублированного выделения
+	Dust & Scratches…	Пыль и царапины…
+	DVCPRO HD 1080/HDV 1080 (1.5)	DVCPRO HD 1080/HDV 1080 (1.5)
+	Dynamic color sliders	Динамические цветовые ползунки
+	East asian	Восточноазиатская
+	East Asian Features	Восточноазиатские возможности
+	Edit in Quick Mask Mode	Быстрая маска
+	Edit in Quick Mask Mode  (Q)	Быстрая маска  (Q)
+	Edit in Standard Mode  (Q)	Стандартный режим  (Q)
+	Edit Pins	Правка булавок
+	Edit Plane	Править плоскость
+	Edit points to modify the curve	Изменять кривую по точкам
+	Edit Selected Guides	Изменить выбранные направляющие
+	Edit Toolbar…	Настроить панель инструментов…
+	Edit Type	Редактировать текст
+	Edit › Keyboard Shortcuts › Reset All to Defaults undoes an import.	Редактирование › Сочетания клавиш › «Сбросить всё к значениям по умолчанию» отменяет импорт.
+	Edit › Paste	Редактирование › Вставить
+	Edits that change the whole document, such as a layer's blend mode, opacity or visibility, redraw all of it.	Правки, затрагивающие весь документ, например режим наложения, непрозрачность или видимость слоя, перерисовывают его целиком.
+	Edit…	Edit…
+	Effect cache mb	Кэш эффектов (МБ)
+	Efficiency	Эффективность
+	Efficiency: 100%	Эффективность: 100%
+	Ellipse Tool	Овал
+	Elliptical Marquee Tool	Овальная область
+	Email	Эл. почта
+	Embed Color Profile	Встроить цветовой профиль
+	Embed profiles	Встраивать профили
+	Embedded Profile Mismatch	Несовпадение встроенного профиля
+	Emboss…	Тиснение…
+	Emulsion Down	Эмульсией вниз
+	Enable airbrush-style build-up effects	Включить эффекты наслоения в стиле аэрографа
+	Enable animations	Включить анимацию
+	Enable Crop Shield	Включить экран кадрирования
+	Enable flick panning	Быстрое панорамирование щелчком
+	Enable floating document window docking	Стыковка плавающих окон документов
+	Enable Layer Mask	Включить маску слоя
+	Enable narrow options bar	Узкая панель параметров
+	Enable Smart Filters	Включить смарт-фильтры
+	Enable Timeline Quick Config	Быстрая настройка шкалы времени
+	Enable Vector Mask	Включить векторную маску
+	Enable {name}	Включить {name}
+	Enabled	Включено
+	Enhance Edge	Улучшить край
+	Enhanced Controls	Расширенное управление
+	Enhanced Controls…	Расширенное управление…
+	Enter a name for the brush preset	Введите имя набора параметров кисти
+	Enter a name for the crop preset	Введите имя набора параметров кадрирования
+	Enter description…	Введите описание…
+	Entropy	Энтропия
+	Equalize	Выравнивание
+	Erase	Стирание
+	Eraser Tool	Ластик
+	Error File	Файл ошибок
+	Errors	Ошибки
+	Esc to cancel	Esc — отмена
+	Essentials	Основные
+	Exclude Overlapping Shapes	Исключить пересечения фигур
+	Excluded Area	Исключённая область
+	EXIF	EXIF
+	EXIF Version	Версия EXIF
+	Exit	Выход
+	Expand All Groups	Развернуть все группы
+	Expand Detection Area	Расширить область обнаружения
+	Expand group  ({key}-click: all groups)	Развернуть группу  ({key}-клик: все группы)
+	Expand Panel Group	Развернуть группу панелей
+	Expand…	Расширить…
+	Expansion:	Расширение:
+	Export clipboard	Экспортировать буфер обмена
+	Export Contents…	Экспортировать содержимое…
+	Export Preferences…	Экспорт настроек…
+	Export Presets	Экспортировать наборы
+	Export selected measurements (CSV)	Экспортировать выбранные измерения (CSV)
+	Export Swatches for Exchange…	Экспортировать образцы для обмена…
+	Export Swatches…	Экспортировать образцы…
+	Export/Import Presets…	Экспорт/импорт наборов…
+@plural	Exported {n} swatch to {file}|Exported {n} swatches to {file}	Экспортирован {n} образец в {file}|Экспортированы {n} образца в {file}|Экспортировано {n} образцов в {file}
+cameraData	Exposure	Выдержка
+	Exposure and Gamma	Экспозиция и гамма
+	Exposure Program	Программа экспозиции
+	Exposure:	Экспозиция:
+	Exposure…	Экспозиция…
+	Extend	Расширение
+	Extensions	Расширения
+	Extra Bold	Особо плотный
+	Extra Large	Очень крупный
+	Extra large	Очень крупный
+	Extra Light	Особо светлый
+fontWeight	ExtraBold	Сверхжирный
+fontWeight	ExtraLight	Сверхтонкий
+	Extras	Вспомогательные элементы
+	Extrude…	Экструзия…
+	Eyedropper Tool	Пипетка
+	Eyedroppers:	Пипетки:
+	F	Число f
+	F cycles the views; hold X to see the image	F переключает виды; удерживайте X, чтобы увидеть изображение
+cameraData	F-Stop	Диафрагма
+	Facet	Фацет
+	Factor:	Коэффициент:
+	Fade steps	Шаги затухания
+	Fade…	Ослабить…
+	Faux Bold	Псевдополужирный
+	Faux Italic	Псевдокурсив
+	Feather…	Растушёвка…
+	Fewer Points	Меньше точек
+	Fibers…	Волокна…
+	Field Blur…	Размытие по полю…
+	File Handling	Обработка файлов
+	File Handling…	Обработка файлов…
+	File Naming	Именование файлов
+	File path	Путь к файлу
+	File Settings	Параметры файла
+	Fill color	Цвет заливки
+	Fill Content	Содержимое заливки
+	Fill Layer	Слой-заливка
+	Fill Light	Подсветка
+	Fill new type layers with placeholder	Заполнять новые текстовые слои условным текстом
+	Fill Path	Залить контур
+	Fill Screen	Заполнить экран
+	Fill Settings	Параметры заливки
+	Fill with {mode}-neutral color (50% gray)	Залить нейтральным цветом режима «{mode}» (50% серого)
+	Fill with {mode}-neutral color (black)	Залить нейтральным цветом режима «{mode}» (черный)
+	Fill with {mode}-neutral color (white)	Залить нейтральным цветом режима «{mode}» (белый)
+	Fill…	Выполнить заливку…
+	Film & Video	Кино и видео
+	Filter for adjustment layers	Фильтр корректирующих слоёв
+	Filter for pixel layers	Фильтр пиксельных слоёв
+	Filter for shape layers	Фильтр слоёв-фигур
+	Filter for smart objects	Фильтр смарт-объектов
+	Filter for type layers	Фильтр текстовых слоёв
+	Filter Gallery…	Галерея фильтров…
+	Filter:	Фильтр:
+	Find and Replace Text…	Найти и заменить текст…
+	Find Edges	Выделение краёв
+	Find Layers	Найти слои
+	Finger Painting	Рисование пальцем
+	First Color Readout	Первая цветовая проба
+	First Line Indent	Отступ первой строки
+	Fish	Рыба
+	Fisheye	Рыбий глаз
+	Fit Artboard on Screen	Монтажная область по экрану
+	Fit Image…	Подогнать изображение…
+	Fit Layer(s) on Screen	Слой (слои) по экрану
+	Fit on Screen	По размеру экрана
+	Fit Screen	По размеру экрана
+	Fix the red plane first: its corners must form a convex quad	Сначала исправьте красную плоскость: ее углы должны образовывать выпуклый четырехугольник
+	Fixed Ratio	Заданные пропорции
+	Fixed Size	Заданный размер
+	Flag	Флаг
+	Flame…	Пламя…
+	Flatten All Layer Effects	Свести все эффекты слоя
+	Flatten All Masks	Свести все маски
+	Flatten Frames Into Clips	Свести кадры в клипы
+	Flatten Frames Into Layers	Свести кадры в слои
+	Flatten Image	Выполнить сведение
+	Flip	Отражение
+	Flip Canvas Horizontal	Отразить холст по горизонтали
+	Flip Canvas Vertical	Отразить холст по вертикали
+	Flip Horizontal	Отразить по горизонтали
+	Flip Vertical	Отразить по вертикали
+	Flip X	Отразить по X
+	Flip X Jitter	Колебание отражения по X
+	Flip Y	Отразить по Y
+	Flip Y Jitter	Колебание отражения по Y
+	Float All in Windows	Все окна отдельно
+	Float in Window	Отдельное окно
+	Float Panel	Сделать панель плавающей
+	Floating point	С плавающей точкой
+	Flow	Нажим
+	Flow Jitter	Колебание нажима
+	Focal Length	Фокусное расстояние
+cameraData	Focal Length	Фокусное расстояние
+cameraData	Focal Length (35 mm)	Фокусное расстояние (35 мм)
+	Focal Length35mm	Фокусное расстояние (35 мм)
+	Focus	Focus
+	Focus Area…	Область фокусировки…
+	Follows only edges this close to the pointer ([ and ] change it)	Следует только за краями на таком расстоянии от указателя ([ и ] меняют его)
+	Font preview	Предпросмотр шрифтов
+	Font Preview Size	Размер предпросмотра шрифтов
+	Foreground	Передний план
+	Foreground Color	Основной цвет
+	Foreground to Background	От основного к фоновому
+	Foreground/Background Jitter	Колебание основного/фонового
+	Fragment	Фрагмент
+	Frame Duration	Длительность кадра
+	Frame from Layers	Кадр из слоёв
+	Frame from Layers…	Кадр из слоёв…
+	Frame Sync	Синхронизация кадров
+	Frame Tool	Рамка
+	Free	Свободное
+	Free Transform a Copy	Свободное трансформирование копии
+	Free Transform is still being applied; try again when it has finished.	Свободное трансформирование ещё применяется; повторите попытку, когда оно завершится.
+	Freeform Pen Tool	Свободное перо
+	Freeze Lasso: drag to freeze an area, Alt-drag to thaw it (L)	Лассо заморозки: перетащите, чтобы заморозить область; Alt+перетаскивание размораживает (L)
+	From Center	От центра
+	From Transparency	Из прозрачности
+	Front Image	Изображение переднего плана
+	Fuchsia	Фуксия
+	Full Screen	Full Screen
+	Full Screen Mode	Весь экран
+	Full Screen Mode With Menu Bar	Весь экран с панелью меню
+	Full size tip	Весь диаметр кисти
+	Full Spherical	Полная сфера
+	Full-resolution preview unavailable	Полноразмерный предпросмотр недоступен
+	Fuzziness:	Нечёткость:
+	Gamma:	Гамма:
+	Gamut Warning	Предупреждение о выходе за охват
+	Gamut warning color	Цвет предупреждения об охвате
+	Gamut warning opacity	Непрозрачность предупреждения об охвате
+	Gap	Пробел
+	Gaussian	Гауссова
+	General	Основные
+	General Blend	Общие параметры наложения
+	Generator enabled	Генератор включён
+	Gif	GIF
+	Global	Глобальное
+cameraRaw	Global	Общее
+	Global Light…	Глобальный свет…
+	Gloss Contour	Контур глянца
+	Glossy	Глянцевая
+	Glow Color	Цвет свечения
+	Glyph	Глиф
+	Glyph Scaling	Масштабирование глифов
+	Glyphs Panel	Панель «Глифы»
+	Go to Layer	Перейти к слою
+	Golden Ratio	Золотое сечение
+	Golden Spiral	Золотая спираль
+	GPS	GPS
+	GPU	GPU
+	GPU acceleration could not continue. Your documents are unchanged.	Ускорение GPU остановлено. Документы не изменены.
+	GPU Backend	Бэкенд GPU
+	GPU backend	Бэкенд GPU
+	GPU Memory (MB, 0 = Automatic)	Память GPU (МБ, 0 = автоматически)
+	GPU memory budget: {budget}	Бюджет памяти GPU: {budget}
+	GPU Memory Full	Память GPU заполнена
+	Grab bag	Списком
+	Gradient Editor	Редактор градиентов
+	Gradient Map	Градиентная карта
+	Gradient Map…	Градиентная карта…
+	Gradient Overlay	Наложение градиента
+	Gradient Overlay…	Наложение градиента…
+	Gradient picker	Выбор градиента
+	Gradient Preset Options	Параметры наборов градиентов
+	Gradient stops	Точки градиента
+	Gradient Tool	Градиент
+	Gradient…	Градиент…
+	Graphic and Web	Графика и web
+	Graphic and web	Графика и web
+	Graphic Pen	Графитный карандаш
+	Gray Value (Maximum)	Уровень серого (максимум)
+	Gray Value (Mean)	Уровень серого (среднее)
+	Gray Value (Median)	Уровень серого (медиана)
+	Gray Value (Minimum)	Уровень серого (минимум)
+	Gray:	Серый:
+	Grayscale	Градации серого
+	Grayscale Slider	Ползунок градаций серого
+cameraRaw	Green	Зелёные
+	Grid color	Цвет сетки
+	Grid colors	Цвета сетки
+	Grid size	Размер сетки
+	Grid style	Стиль сетки
+	Grid unit	Единица сетки
+	Grid:	Сетка:
+	Gridline every	Линии сетки через
+	Group	Группа
+	Group from Layers…	Группа из слоёв…
+	Group Layer	Группа
+	Group Layers	Сгруппировать слои
+	Group name	Имя группы
+	Group · {n} layer	Группа · {n} слой
+@plural	Group · {n} layer|Group · {n} layers	Группа · {n} слой|Группа · {n} слоя|Группа · {n} слоёв
+	Group…	Группировать…
+	Grow	Смежные пикселы
+	Guide color	Цвет направляющих
+	Guide style	Стиль направляющих
+	Guides, Grid & Slices	Направляющие, сетка и фрагменты
+	Guides, Grid & Slices…	Направляющие, сетка и фрагменты…
+	Gutter	Интервал
+	H	В
+	Half Round	Полукруг
+	Hand Tool	Рука
+	Hanging Punctuation	Висячая пунктуация
+	Hard	Жёсткая
+	Hardness	Жёсткость
+	Hardness:	Жёсткость:
+	HDR Toning…	HDR-тонирование…
+	HDTV (Rec. 709)	HDTV (Rec. 709)
+	HDV 1080/DVCPRO HD 720 (1.33)	HDV 1080/DVCPRO HD 720 (1.33)
+	Heal	Восстановление
+	Heal Auto	Автовосстановление
+	Heal Color	Цвет восстановления
+	Heal Off	Восстановление выкл
+	Heal On	Восстановление вкл
+	Healing	Восстановление
+	Healing Brush	Восстанавливающая кисть
+	Healing Brush Tool	Восстанавливающая кисть
+	Hidden Layers	Скрытые слои
+	Hide All Effects	Скрыть все эффекты
+	Hide Auto Slices	Скрыть автофрагменты
+	Hide Layers	Скрыть слои
+	Hide Properties	Скрыть свойства
+	Hide Selection	Скрыть выделение
+	Hide the layer's effects  ({key}-click: all layers)	Скрыть эффекты слоя  ({key}-клик: все слои)
+	High Pass…	Цветовой контраст…
+	Higher values follow only edges that contrast sharply with their surroundings	Чем выше значение, тем только более контрастные края учитываются
+	Highlight Clipping Warning (O)	Предупреждение о клиппинге светов (O)
+	Highlight Compression	Сжатие светов
+	Highlight Priority	Приоритет светов
+	Histories	История
+	History Brush	Кисть истории
+	History Brush Tool	Кисть истории
+	History Log	Журнал истории
+	History Log…	Журнал истории…
+	History states	Состояния истории
+	Hold Alt while drawing for straight segments	Удерживайте Alt при рисовании для прямых отрезков
+	Home	Домой
+	Horizontal	Горизонтальная
+	Horizontal Centers	Центры по горизонтали
+	Horizontal Type Mask Tool	Горизонтальный текст-маска
+	Horizontal Type Tool	Горизонтальный текст
+	How often fastening points are placed by themselves	Как часто точки привязки ставятся автоматически
+	HSB Color	HSB
+	HSB/HSL	HSB/HSL
+	HSL/Grayscale	HSL/Градации серого
+	Hue	Цветовой тон
+cameraRaw	Hue	Тон
+	Hue Jitter	Колебание цветового тона
+	Hue/Saturation	Цветовой тон/Насыщенность
+	Hue/Saturation…	Цветовой тон/Насыщенность…
+	Huge	Огромный
+	Humidity	Влажность
+	Hyphenate	Переносить по слогам
+	ICO is limited to 256 × 256 pixels	ICO ограничен размером 256 × 256 пикселей
+	Ignore	Пропустить
+	Ignore exif profile tag	Игнорировать цветовой профиль EXIF
+	Image Assets	Ресурсы изображений
+	image file path	путь к файлу изображения
+	Image interpolation	Интерполяция изображения
+	Image previews	Предпросмотр изображений
+	Image Processor…	Обработчик изображений…
+	Image Rotation	Вращение изображения
+	Image Size:	Размер изображения:
+	Image Size…	Размер изображения…
+	Import .GRD	Импортировать .GRD
+	Import Brush from Image…	Импортировать кисть из изображения…
+	Import brushes (.abr)	Импортировать кисти (.abr)
+	Import Brushes…	Импортировать кисти…
+	Import Brushes… (.abr or image)	Импортировать кисти… (.abr или изображение)
+	Import keyboard shortcuts?	Импортировать сочетания клавиш?
+	Import Presets	Импортировать наборы
+	Import Shortcuts…	Импортировать сочетания клавиш…
+	Import Swatches…	Импортировать образцы…
+	Imported	Импортирован
+@plural	Imported {n} brush from {group}|Imported {n} brushes from {group}	Импортирована {n} кисть из {group}|Импортированы {n} кисти из {group}|Импортировано {n} кистей из {group}
+	Imported {n} shortcuts from {file}. Click OK to keep them.	Импортировано сочетаний: {n} из {file}. Нажмите OK, чтобы сохранить их.
+@plural	Imported {n} swatch from {file}|Imported {n} swatches from {file}	Импортирован {n} образец из {file}|Импортированы {n} образца из {file}|Импортировано {n} образцов из {file}
+	Import…	Импортировать…
+	Impressionist	Импрессионист
+	In	Начало
+	Include All Subfolders	Включить все вложенные папки
+	Include Color	Включить цвет
+	Include ICC Profile	Включить профиль ICC
+	Include in playback	Включить в воспроизведение
+	Include Tool Settings	Включить настройки инструмента
+	Including layers will increase file size.	Включение слоёв увеличит размер файла.
+	Increase Brush Hardness	Увеличить жёсткость кисти
+	Increase Brush Size	Увеличить размер кисти
+	Indent First	Отступ первой строки
+	Indent Left	Отступ слева
+	Indent Right	Отступ справа
+	Indexed Color	Индексированный цвет
+	Indexed Color…	Индексированный цвет…
+	Indicates	Обозначает
+	Indigo	Индиго
+	Industry Standard	Отраслевой стандарт
+	Info Options…	Параметры информации…
+	Initial Direction of Stroke	Начальное направление мазка
+	Ink Characteristics	Характеристики краски
+	Inner Glow	Внутреннее свечение
+	Inner Shadow	Внутренняя тень
+	Inner Shadow…	Внутренняя тень…
+	Insert Blank Frame	Вставить пустой кадр
+	Insert Stop…	Вставить остановку…
+	Install Plug-in…	Установить плагин…
+	Integer	Целое число
+	Integrated Density	Интегральная плотность
+	Integrations	Интеграции
+	Integrations…	Интеграции…
+	Interface…	Интерфейс…
+	Interlaced	Чересстрочная
+	Internet Standard RGB	Стандартный RGB для Интернета
+	Interpolation	Интерполяция
+	Interpolation:	Интерполяция:
+	Interpret Footage…	Интерпретировать материал…
+	Intersect Mask with Selection	Пересечь маску с выделением
+	Intersect Shape Areas	Пересечь области фигур
+	Intersect with	Пересечь с
+	Intersect with selection  ({key})	Пересечь с выделением  ({key})
+	Invalid delete command	Недопустимая команда удаления
+	Invalid guide layout	Недопустимый макет направляющих
+	Invalid {mode} profile	Недопустимый профиль {mode}
+	Inverse	Инверсия
+	Inverse Selection	Инвертировать выделение
+	Invert All	Инвертировать всё
+	Invert has no settings.	У «Инверсии» нет параметров.
+	Invert…	Инверсия…
+	Iris Blur…	Диафрагменное размытие…
+	ISO	ISO
+	ISO Speed	Чувствительность ISO
+cameraData	ISO Speed	Светочувствительность ISO
+	Isolate Layers	Изолировать слои
+fontWeight	Italic	Курсив
+	Its layers need {needed} of GPU memory; the budget leaves them {budget}.	Слоям нужно {needed} памяти GPU; бюджет оставляет им {budget}.
+	Jpeg quality	Качество JPEG
+	Jpg	JPEG
+	Justify all	Выключка по ширине, все строки
+	Justify last centered	Выключка по ширине, последняя по центру
+	Justify last left	Выключка по ширине, последняя влево
+	Justify last right	Выключка по ширине, последняя вправо
+	Keep proportions	Сохранять пропорции
+	Keep this tab open to retain your brushes.	Не закрывайте эту вкладку, чтобы сохранить кисти.
+	Keep Using CPU	Продолжить с CPU
+	Keep view in sync	Держать обзор синхронным
+	Keyboard Shortcuts and Menus	Комбинации клавиш и меню
+	Keyboard shortcuts imported	Сочетания клавиш импортированы
+	Keyboard Shortcuts…	Комбинации клавиш…
+	Kind	Вид
+	Knockout	Просвечивание
+	Kurtosis	Эксцесс
+	Lab Color	Lab
+	Label Size	Размер подписей
+	Labels	Подписи
+	Lanczos (sharp)	Lanczos (резкая)
+	Language Options	Языковые параметры
+	Large	Крупный
+	Large document: redrawing on the CPU	Большой документ: перерисовка на CPU
+	Large tabs	Крупные вкладки
+	Lasso around an area, then drag the selection	Обведите область лассо, затем перетащите выделение
+	Lasso Tool	Лассо
+	Last Document State	Состояние последнего документа
+	Last Filter	Последний фильтр
+	Last Modified	Дата изменения
+	Layer Comp	Вариант слоя
+	Layer Comps	Варианты слоя
+	Layer Comps to Files…	Варианты слоя в файлы…
+	Layer Content Options…	Параметры содержимого слоя…
+	Layer deleted, but confirmation preference could not be saved: {error}	Слой удалён, но не удалось сохранить настройку подтверждения: {error}
+	Layer Edges	Границы слоя
+	Layer From Background…	Слой из фона…
+	Layer from Background…	Слой из фона…
+	Layer Mask	Маска слоя
+	Layer Style	Стиль слоя
+	Layer via Copy	Скопировать на новый слой
+	Layer via Cut	Вырезать на новый слой
+	Layers to Files…	Слои в файлы…
+	Layer…	Слой…
+	Leave as is (don't color manage)	Оставить как есть (без управления цветом)
+	Leave empty for automatic size	Оставьте пустым для автоматического размера
+	Left	Левый
+	Left align text	Выравнивание по левому краю
+	Left Edges	Левые края
+	Legacy compositing	Устаревшая компоновка
+	Legacy Macintosh RGB	Устаревший RGB Macintosh
+	Lens	Объектив
+cameraData	Lens	Объектив
+	Lens Blur…	Размытие при малой глубине…
+	Lens Corrections	Коррекция объектива
+	Lens Correction…	Коррекция дисторсии…
+	Lens Flare…	Блик от объектива…
+	Lens Info	Сведения об объективе
+	Letter Spacing	Межбуквенные интервалы
+	Ligature	Лигатура
+	Light	Светлый
+cameraRaw	Light	Свет
+fontWeight	Light	Лёгкий
+	Light Blue	Светло-синий
+	Light Intensity	Light Intensity
+	Light Red	Светло-красный
+	Light Source	Источник света
+	Lighten Interface	Сделать интерфейс светлее
+	Lighting Effects…	Эффекты освещения…
+	Lightness	Яркость
+	Lights	Света
+cameraRaw	Lights	Светлые тона
+	Limit Playback	Ограничить воспроизведение
+	Limits:	Пределы:
+	Line Tool	Линия
+	Linear Dodge (Add)	Линейный осветлитель (добавить)
+	Link	Link
+	Link Layer Mask	Связать маску слоя
+	Link Layers	Связать слои
+	Link layers	Связать слои
+	Link radii	Связать радиусы
+	Link the mask to the layer	Связать маску со слоем
+	Link Vector Mask	Связать векторную маску
+	Link width and height	Связать ширину и высоту
+	Link with Layer	Связать со слоем
+	Linux display server	Дисплейный сервер Linux
+	Liquify is not open	Пластичность не открыта
+	Liquify…	Пластичность…
+	Load	Загрузка
+	Load 3D LUT…	Загрузить 3D LUT…
+	Load a keyboard shortcut set saved as .kys	Загрузить набор сочетаний клавиш, сохранённый как .kys
+	Load Actions…	Загрузить операции…
+	Load channel as selection	Загрузить канал как выделение
+	Load Default Type Styles	Загрузить стили текста по умолчанию
+	Load Files into Stack…	Загрузить файлы в стопку…
+	Load Selection	Загрузить выделение
+	Load Selection…	Загрузить выделенную область…
+	Load settings from a Camera Raw .xmp file	Загрузить настройки из файла Camera Raw .xmp
+	Load Settings…	Загрузить настройки…
+	Loaded Camera Raw settings from {file}	Настройки Camera Raw загружены из {file}
+	Loaded Camera Raw settings from {file} ({n} not supported)	Настройки Camera Raw загружены из {file} (не поддерживается: {n})
+@plural	Loaded {n} action from {file}|Loaded {n} actions from {file}	Загружена {n} операция из {file}|Загружены {n} операции из {file}|Загружено {n} операций из {file}
+	Loading fonts…	Загрузка шрифтов…
+	Load…	Загрузить…
+	Localize Color Clusters	Локализовать цветовые кластеры
+	Localized Color Clusters	Локализовать цветовые кластеры
+	Location	Место
+	Lock	Закрепить
+	Lock all	Закрепить все
+	Lock image pixels	Сохранить цвета пикселов
+	Lock layer	Закрепить слой
+	Lock Layers…	Заблокировать слои…
+	Lock position	Закрепить положение
+	Lock transparent pixels	Сохранить прозрачность пикселов
+	Lock Workspace	Заблокировать рабочую среду
+	Lock:	Закрепить:
+	Lock: keep these settings when picking another preset	Заблокировать: сохранить эти параметры при выборе другого набора
+	Locked	Locked
+	Log Errors To File	Записывать ошибки в файл
+	Logical Length:	Логическая длина:
+	Logical Units:	Логические единицы:
+	Loop	Цикл
+	Lossless	Без потерь
+	Low resolution previews	Превью в низком разрешении
+	Low-Latency Drawing (vsync off, applies at next launch)	Рисование с малой задержкой (без вертикальной синхронизации, после перезапуска)
+	Lowercase extension	Расширение в нижнем регистре
+	Luminance Detail	Световая детализация
+cameraRaw	Luminance Detail	Детализация яркости
+	Luminance Smoothness	Световая сглаженность
+	Mac Crisp	Mac чёткий
+	Mac LCD	Mac LCD
+	Mac OS	Mac OS
+	Mac Sharp	Mac резкий
+	Mac Smooth	Mac плавный
+	Mac Strong	Mac жирный
+cameraRaw	Magenta	Пурпурные
+	Magenta  ·  Green	Пурпурный  ·  Зелёный
+	Magic Eraser Tool	Волшебный ластик
+	Magic Wand Tool	Волшебная палочка
+	Magnetic Lasso	Магнитное лассо
+	Magnetic Lasso Tool	Магнитное лассо
+	Maintain aspect ratio	Сохранить соотношение сторон
+	Make	Производитель
+cameraData	Make	Производитель
+	Make Default	Сделать по умолчанию
+	Make Landscape	Сделать альбомной
+	Make Portrait	Сделать книжной
+	Make Selection	Создать выделение
+	Make Work Path	Создать рабочий контур
+	Manage submitted jobs in the system print queue	Управляйте отправленными заданиями в системной очереди печати
+	Marching Ants	Бегущие муравьи
+	Margin	Поля
+	Marker Size	Размер маркеров
+	Marquee	Область
+	Mask All	Маскировать всё
+	Mask All Objects	Маскировать все объекты
+	Mask Options	Параметры маски
+	Masked Areas	Маскированные области
+	Masking	Маскирование
+	Master	Общий
+	Match All	Согласовать всё
+	Match Canvas	Как у холста
+	Match Color…	Подбор цвета…
+	Match Location	Согласовать положение
+	Match Rotation	Согласовать поворот
+	Match Zoom	Согласовать масштаб
+	Matte	Маска
+	Matting	Удаление ореола
+	Maximize psd compatibility	Максимальная совместимость PSD
+	Maximum…	Максимум…
+	Mean	Среднее
+	Mean:	Среднее:
+	Measurement Log	Журнал измерений
+	Median:	Медиана:
+	Median…	Медиана…
+	Medium	Средний
+fontWeight	Medium	Средний
+	Medium Blue	Средне-синий
+	Medium gray	Средне-серая
+	Memory usage mb	Память (МБ)
+	Menus	Меню
+	Menus…	Меню…
+	Merge Down	Выполнить сведение
+	Merge Group	Объединить группу
+	Merge Shape Components	Объединить компоненты фигуры
+	Merge to HDR Pro…	Объединить в HDR Pro…
+	Merge Visible	Свести видимые
+	Mesh Size	Размер сетки
+	Metal	Metal
+	Metering Mode	Режим замера
+	Mezzotint…	Меццотинто…
+	Middle Eastern & South Asian Composer	Компоновка для Ближнего Востока и Южной Азии
+	Middle Eastern Features	Ближневосточные возможности
+	Midtones from:	Полутона от:
+	Midtones to:	Полутона до:
+	Migrate Presets	Перенести наборы
+	Minimalistic	Минимализм
+	Minimum Depth	Минимальная глубина
+	Minimum Diameter	Минимальный диаметр
+	Minimum Roundness	Минимальная круглость
+	Minimum…	Минимум…
+	Mirror	Отражение
+	Missing delete command	Отсутствует команда удаления
+	Missing glyph protection	Защита от отсутствующих глифов
+	Missing Profiles: Ask When Opening	Отсутствующие профили: спрашивать при открытии
+	Miter	Острые
+	Miter limit	Предел острого угла
+	Mix	Смешивание
+	Mix Jitter	Колебание смешивания
+	Mixer Brush	Смешивающая кисть
+	Mixer Brush Tool	Инструмент «Смешивающая кисть»
+cameraData	Model	Модель
+	Modern	Современный
+	modified	изменён
+	Modifier Keys	Клавиши-модификаторы
+	Modify	Модифицировать
+	Modify Date	Дата изменения
+	Monitor RGB	Монитор RGB
+	More documents	Ещё документы
+	More panels	Ещё панели
+	More Points	Больше точек
+	Mosaic…	Мозаика…
+	Motion Blur…	Размытие в движении…
+	Mouse Controls	Управление мышью
+	Mouse Coordinates	Координаты курсора
+	Move	Перемещение
+	Move effect layer down	Переместить слой эффекта вниз
+	Move effect layer up	Переместить слой эффекта вверх
+	Move Group Down	Переместить группу вниз
+	Move Group Up	Переместить группу вверх
+	Move to	Переместить в
+	Move Tool	Перемещение
+	Multichannel	Многоканальный
+	name	имя
+	Native file drag-and-drop is not supported on Wayland yet. Use File › Open, or copy the image in your file manager and paste it with {paste}.	Нативное перетаскивание файлов в Wayland пока не поддерживается. Откройте файл через Файл › Открыть или скопируйте изображение в файловом менеджере и вставьте его с помощью {paste}.
+	Native file drag-and-drop is unavailable	Нативное перетаскивание файлов в Wayland недоступно
+	Nearest Neighbor	По ближайшим соседям
+	Nearest neighbor	По ближайшим соседям
+	Nearest Neighbor (hard edges)	По ближайшим соседям (жёсткие края)
+	Negation	Отрицание
+	Never Show Overlay	Никогда не показывать перекрытие
+	new	новый
+	New Adjustment Layer	Новый корректирующий слой
+	New Blank Video Layer	Новый пустой видеослой
+	New Brush	Новая кисть
+	New Brush Preset…	Новый набор параметров кисти…
+	New Channel	Новый канал
+	New channel only	Только новый канал
+	New Crop Preset…	Новый набор параметров кадрирования…
+	New Document With Mask	Новый документ с маской
+	New effect layer	Новый слой эффекта
+	New Fill Layer	Новый слой-заливка
+	New from Clipboard	Создать из буфера обмена
+	New Guide Layout…	Схема направляющих…
+	New Guides From Shape	Направляющие из фигуры
+	New Guide…	Новая направляющая…
+	New Layer Based Slice	Новый фрагмент по слою
+	New Layer Comp	Новый вариант слоя
+	New Layer from Brush	Новый слой из кисти
+	New Layer With Mask	Новый слой с маской
+	New Path	Новый контур
+	New Selection	Новое выделение
+	New selection	Новое выделение
+	New Set…	Новый набор…
+	New Shape Layer	Новый слой-фигура
+	New Size	Новый размер
+	New Smart Object via Copy	Новый смарт-объект копированием
+	New Snapshot	Новый снимок
+	New Swatch Group…	Новая группа образцов…
+	New Tool Preset	Новый набор
+	New Type Layer	Новый текстовый слой
+	New Video Group	Новая видеогруппа
+	New Video Layer	Новый видеослой
+	New Video Layer from File…	Новый видеослой из файла…
+	New Window for Document	Новое окно документа
+	Newspaper	Газетная бумага
+	Next Document	Следующий документ
+	Next frame	Следующий кадр
+	Next note	Следующая заметка
+	Next Theme	Следующая тема
+	No author	Нет автора
+	No brush presets	Нет наборов кистей
+	No character style	Нет стиля символов
+	No Color Management	Без управления цветом
+	No contributor data was built into this copy.	В эту копию не встроены данные об участниках.
+	No Layer Comps	Нет вариантов слоя
+	No matching settings	Нет подходящих настроек
+	No model credits were built into this copy.	В эту копию не встроены сведения о моделях.
+	No object found there — drag a rectangle around it	Объект не найден — обведите его прямоугольником
+	No path to make a selection from: draw one with the Pen tool or select one in the Paths panel.	Нет контура для создания выделения: нарисуйте его инструментом «Перо» или выберите на панели «Контуры».
+	No patterns	Нет узоров
+	No pin selected	Булавка не выбрана
+	No presets for the current tool.	Нет наборов для текущего инструмента.
+	No presets of this type.	Нет наборов этого типа.
+	No properties	Нет свойств
+	No saved presets yet.	Сохранённых наборов пока нет.
+	No Spelling Suggestions	Нет вариантов написания
+	No subject found — try a rectangle around the object	Объект не найден — попробуйте прямоугольник вокруг объекта
+	No subject found — try Object Selection or the Lasso	Объект не найден — попробуйте «Выделение объектов» или «Лассо»
+	No tool presets.	Нет наборов инструментов.
+	Noise Reduction	Шумоподавление
+	Nonlinear History	Нелинейная история
+	Normal	Обычная
+	Normal tip	Контур кисти (50%)
+	Not a web colour: click for the nearest web colour	Не веб-цвет: щёлкните, чтобы выбрать ближайший веб-цвет
+	Not in Dictionary:	Нет в словаре:
+	Note Paper	Бумага в клетку
+	Note Tool	Заметки
+	Note tool	Заметки
+	Notes	Заметки
+	Notes…	Заметки…
+	Notification Duration (seconds)	Длительность уведомления (секунды)
+	Now drag the selection onto another area	Теперь перетащите выделение на другую область
+	NTSC (1953)	NTSC (1953)
+	Nudge Bundle Pause (ms)	Пауза объединения сдвигов (мс)
+	Object Finder	Поиск объектов
+	Object Name / Title	Имя объекта / заголовок
+	Object Selection found nothing there — try a tighter rectangle	Выделение объектов ничего здесь не нашло — попробуйте более узкий прямоугольник
+	Object Selection Tool	Выделение объектов
+	Off	Выкл
+	Off: the speed of the pointer sets the spacing	Выкл: скорость курсора задаёт интервалы
+	Offset…	Сдвиг…
+	Oil Paint…	Масляная живопись…
+	OK	OK
+	Oldstyle	Старостильные цифры
+	On Black	На черном
+	On Layers	На слоях
+	On White	На белом
+	Onion Skin	Калька
+	Opacity Jitter	Колебание непрозрачности
+	Opacity Mask	Маска непрозрачности
+	Opacity Threshold	Порог непрозрачности
+	Open a document to define variables.	Откройте документ, чтобы определить переменные.
+	Open a document to select a colour range.	Откройте документ, чтобы выбрать цветовой диапазон.
+	Open a document to use the timeline.	Откройте документ, чтобы работать со шкалой времени.
+	Open as smart object	Открывать как смарт-объект
+	Open As…	Открыть как…
+	Open color-less EXR as ACEScg	Открывать EXR без цветового профиля как ACEScg
+	Open documents as tabs	Открывать документы во вкладках
+	Open EXR Parts…	Открыть части EXR…
+	Open in camera raw	Открывать в Camera Raw
+	Open paths use centered strokes	Открытые контуры используют обводку по центру
+	open source	открытый исходный код
+	Opened {name}	Открыто: {name}
+	OpenGL	OpenGL
+	Opening {name}	Открытие {name}
+	Opening {name}…	Открытие {name}…
+	Opening…	Открытие…
+	Operation	Операция
+	Optimized	Оптимизированный
+	Option-click to define a source point to clone from	Option-клик, чтобы задать точку источника клонирования
+	Or set Preferences › Performance › Linux display server to X11: PhotoCraft then always starts under XWayland.	Или выберите в Настройки › Производительность › Дисплейный сервер Linux значение X11: PhotoCraft будет всегда запускаться в XWayland.
+cameraRaw	Orange	Оранжевые
+	Ornaments	Орнаменты
+	Other…	Другой…
+	Out	Конец
+	Out of gamut for printing: click for the nearest printable colour	Вне цветового охвата печати: щёлкните, чтобы выбрать ближайший печатаемый цвет
+	Outer Glow	Внешнее свечение
+	Output Channel:	Выходной канал:
+	Output Levels:	Выходные уровни:
+	Output Settings	Параметры вывода
+	Output To	Вывод в
+	Output:	Выход:
+	Oval	Oval
+	Overlay Color	Цвет наложения
+	Overlay Opacity	Непрозрачность наложения
+	Override Action "Save" Commands	Переопределить команды «Сохранить» в операции
+	Override Pressure	Переопределить нажим
+	Override Rotation	Переопределить поворот
+	Override Tilt	Переопределить наклон
+	Overscroll	Прокрутка за пределы холста
+	Paint Bucket Tool	Заливка
+	Paint over hair or fur on the image; Alt paints the other mode	Рисуйте по волосам или шерсти на изображении; Alt рисует в другом режиме
+	Paint Overlay	Перекрытие краской
+	PAL/SECAM	PAL/SECAM
+	Panel locations are saved in the workspace. Keyboard shortcuts, menus and toolbar are optional.	Расположение панелей сохраняется в рабочей среде. Комбинации клавиш, меню и панель инструментов — по желанию.
+	Paper Height	Высота бумаги
+	Paper Width	Ширина бумаги
+	Paragraph Panel	Панель «Абзац»
+	Paragraph Styles Panel	Панель «Стили абзацев»
+	Pass Through	Пропустить
+	Paste in Place	Вставить на место
+	Paste Into	Вставить в
+	Paste Layer Style	Вставить стиль слоя
+	Paste Lorem Ipsum	Вставить условный текст
+	Paste Outside	Вставить наружу
+	Patch	Заплатка
+	Patch Tool	Заплатка
+	Patch:	Заплатка:
+	Path Blur…	Размытие по контуру…
+	Path Selection Tool	Выделение контура
+	Path to Illustrator…	Контур в Illustrator…
+	Paths to Illustrator…	Контуры в Illustrator…
+	Pattern Overlay	Наложение узора
+	Pattern Overlay…	Наложение узора…
+	Pattern Preview	Предпросмотр паттерна
+	Pattern Size	Размер паттерна
+	Pattern Stamp	Узорный штамп
+	Pattern Stamp Tool	Инструмент узорный штамп
+	Patterns	Паттерны
+	Pattern…	Паттерн…
+	PDF Presentation…	Презентация PDF…
+	Pen Pressure	Нажим пера
+	Pen Tilt	Наклон пера
+	Pen Tool	Перо
+	Pencil Tool	Карандаш
+	Perceptual	Перцепционный
+	Performance…	Производительность…
+	Perspective Crop	Рамка с перспективой
+	Perspective Crop Tool	Кадрирование перспективы
+	Perspective Warp	Перспективная деформация
+	Perspective Warp is not active	Перспективная деформация не активна
+	Perspective Warp: draw planes along the image's perspective, then switch to Warp	Перспективная деформация: нарисуйте плоскости по перспективе изображения, затем переключитесь на деформацию
+	Phone	Телефон
+	Photo (2 × 3 in)	Фото (2 × 3 дюйма)
+	Photo (4 × 6 in)	Фото (4 × 6 дюйма)
+	Photo (5 × 7 in)	Фото (5 × 7 дюйма)
+	Photo (8 × 10 in)	Фото (8 × 10 дюймов)
+	Photo Filter	Фотофильтр
+	Photo Filter…	Фотофильтр…
+	PhotoCraft	PhotoCraft
+	PhotoCraft Defaults	Стандартные PhotoCraft
+	PhotoCraft found your keyboard shortcut set {set} from another image editor on this computer: {n} of its shortcuts differ from PhotoCraft's. Import it?	PhotoCraft нашёл на этом компьютере ваш набор сочетаний клавиш {set} из другого графического редактора: сочетаний, отличных от PhotoCraft: {n}. Импортировать его?
+	PhotoCraft is using the CPU image compositor. The window may still use your graphics adapter.	PhotoCraft обрабатывает изображения на CPU. Окно может продолжать использовать графический адаптер.
+	PhotoCraft Manages Colors	PhotoCraft управляет цветами
+	PhotoCraft on GitHub	PhotoCraft на GitHub
+	PhotoCraft Website	Сайт PhotoCraft
+	PhotoCraft website	Сайт PhotoCraft
+	PhotoCraft — an open-source, native image editor written in Rust.	PhotoCraft — открытый нативный графический редактор на Rust.
+	PhotoCraft — Screen Color Picker	PhotoCraft — Пипетка цвета экрана
+	Photography	Фотография
+	Photomerge…	Фотослияние…
+	Pick a screen pixel or press Esc to cancel	Выберите пиксель на экране или нажмите Esc для отмены
+	Pick screen color	Выбрать цвет на экране
+	Picture Frame…	Рамка…
+	Picture Package…	Фото-комплект…
+	Pin Depth:	Глубина булавки:
+	Pinch…	Сжатие…
+	Pixel Art	Пиксель-арт
+	Pixel Art Preview	Предпросмотр пиксель-арта
+	Pixel Aspect Ratio	Пиксельное соотношение сторон
+	Pixel Aspect Ratio Correction	Коррекция пиксельного соотношения
+	Pixel Grid	Пиксельная сетка
+	Pixel Layer	Пиксельный слой
+	Pixel Length:	Длина в пикселах:
+	Pixel Replacement	Замена пикселов
+	Pixelate	Оформление пикселями
+	Pixels	Пикселы
+	Pixels/Centimeter	Пикселов/см
+	Pixels/Inch	Пикселов/дюйм
+	Pixels:	Пикселы:
+	Place Embedded…	Поместить встроенный…
+	Place Linked…	Поместить связанный…
+	Place Scale Marker…	Шкала масштаба…
+	Plaster	Гипс
+	Play Once	Однократно
+	Play selection	Воспроизвести выбранное
+@plural	Played {n} step|Played {n} steps	Воспроизведён {n} шаг|Воспроизведены {n} шага|Воспроизведено {n} шагов
+	Plug-ins	Плагины
+	Plug-ins…	Плагины…
+	Png	PNG
+	Point Sample	Точечная выборка
+	Point size	Размер пункта
+	Polar Coordinates…	Полярные координаты…
+	Polygon Tool	Многоугольник
+	Polygonal Lasso Tool	Многоугольное лассо
+	Position and Size	Положение и размер
+	Posterize…	Постеризация…
+	PostScript (72 points/inch)	PostScript (72 пункта/дюйм)
+	Precise	Точный
+	Presentation	Представление
+	Preserve Details	Сохранять детали
+	Preserve details	Сохранять детали
+	Preserve Transparency	Сохранить прозрачность
+	PRESET DETAILS	ПАРАМЕТРЫ НАБОРА
+	Preset Manager…	Управление наборами…
+	Preset Name	Имя набора
+	Preset Name:	Имя набора:
+	Preset Type	Тип набора
+	Pressure curve	Кривая нажима
+	Pressure for Opacity	Нажим для непрозрачности
+	Pressure for Size	Нажим для размера
+	Prevent auto-nesting in and out of Artboards and Frames	Запретить автоматическое вложение в монтажные области и кадры и извлечение из них
+	Preview	Просмотр
+	Previous Document	Предыдущий документ
+	Previous frame	Предыдущий кадр
+	Previous note	Предыдущая заметка
+	Print One Copy	Печать одной копии
+	Print resolution	Разрешение при печати
+	Print Resolution:	Разрешение печати:
+	Print Settings…	Параметры печати…
+	Print Size	Размер при печати
+	Printer Manages Colors	Принтер управляет цветами
+	Printer Setup	Настройка принтера
+	Printing Marks	Печатные метки
+	Pro	Pro
+	Pro (Light Gray)	Pro (светло-серая)
+	Pro (Light)	Pro (светлая)
+	Pro light	Светлая Pro
+	Pro light gray	Светло-серая Pro
+	Pro Light Gray Theme	Светло-серая тема Pro
+	Pro Light Theme	Светлая тема Pro
+	Pro Medium	Pro Medium
+	Pro medium	Средняя Pro
+	Pro Medium Gray Theme	Средне-серая тема Pro
+	Pro photo	ProPhoto
+	Pro Theme	Тема Pro
+	Profile Mismatches: Ask When Opening	Несовпадение профилей: спрашивать при открытии
+	Progressive	Прогрессивная
+	Promote	Повысить
+	Proof Colors	Цветопроба
+	ProPhoto	ProPhoto
+	ProPhoto RGB	ProPhoto RGB
+	Protect Detail	Защищать детали
+	Protect Foreground Color	Защитить основной цвет
+	Protect skin tones	Защищать тона кожи
+	Protect Texture	Защита текстуры
+	Protect Tones	Защищать тона
+	Protect:	Защитить:
+	Province / State	Область / штат
+	Proximity Match	Совпадение по близости
+	Pulled String Mode	Режим натянутой нити
+	Pupil Size	Размер зрачка
+	Puppet Warp	Кукольная деформация
+	Puppet Warp is not active	Кукольная деформация не активна
+	Purge	Очистить
+	Purity	Чистота цвета
+cameraRaw	Purple	Фиолетовые
+	Put this command's shortcuts back as they were	Вернуть комбинации этой команды
+	Quick Export As PNG	Быстрый экспорт в PNG
+	Quick Export as PNG	Быстрый экспорт в PNG
+	Quick export format	Формат быстрого экспорта
+	Quick export location	Расположение быстрого экспорта
+	Quick Mask	Быстрая маска
+	Quick Selection	Быстрое выделение
+	Quick Selection found nothing there	Быстрое выделение ничего здесь не нашло
+	Quick Selection Tool	Быстрое выделение
+	Quick Sync	Быстрая синхронизация
+	Radial Blur	Radial Blur
+	Rasterize	Растрировать
+	Rasterize Layer	Растрировать слой
+	Rasterize Layer Style	Растрировать стиль слоя
+	Rasterize Layers	Растрировать слои
+	Rasterize Shape	Растрировать фигуру
+	Rasterize svg groups deeper than	Растеризовать группы SVG глубже этого уровня
+	Rasterize Type	Растрировать текст
+	Rasterize Type Layer	Растрировать текстовый слой
+	Rate	Скорость
+	Raw Data	Необработанные данные
+	Raw Defaults…	Значения RAW по умолчанию…
+	Reading…	Чтение…
+	Recent	Недавние
+	Recent file count	Число недавних файлов
+	Recent files	Недавние файлы
+	Recent fonts	Недавние шрифты
+	Recent Items	Недавние
+	Recently Used	Недавно использованные
+	Reconstruct	Восстановление
+	Record Measurements	Записать измерения
+	Record ● a sequence of edits, then play ▶ it on any document.	Запишите ● последовательность правок, затем воспроизведите ▶ её на любом документе.
+	Recover on launch	Восстановление при запуске
+	Recovery	Восстановление
+	Rectangle Tool	Прямоугольник
+	Rectangular Marquee Tool	Прямоугольная область
+cameraRaw	Red	Красные
+	Red Eye	Красные глаза
+	Red Eye Tool	Инструмент «Красные глаза»
+	Redefine style by current selection	Переопределить стиль по текущему выделению
+	Redo	Повторить
+	Redrawing	Перерисовка
+	Reduce Noise…	Уменьшить шум…
+	Reference point location	Положение опорной точки
+	Refine Edge	Уточнить край
+	Refine Edge Brush (R)	Кисть уточнения края (R)
+	Refine Strokes	Штрихи уточнения
+	Reflect	Отражение
+	Reflected Gradient	Зеркальный градиент
+	Registration Marks	Кресты приводки
+fontWeight	Regular	Обычный
+	Relative	Относительное
+	Release Clipping Mask	Отменить обтравочную маску
+	Relight…	Переосвещение…
+	Relink to File…	Повторно связать с файлом…
+	Reload Frame	Перезагрузить кадр
+	Remember this choice for future images	Запомнить этот выбор для следующих изображений
+	Remember to turn off the printer's own colour management in Print Settings…	Не забудьте отключить управление цветом самого принтера в параметрах печати…
+	Remember workspace changes	Запоминать изменения рабочей среды
+	Remove after each stroke	Удалять после каждого штриха
+	Remove All Pins	Удалить все булавки
+	Remove Black Matte	Удалить чёрный ореол
+	Remove from Recent	Удалить из недавних
+	Remove pair	Удалить пару
+	Remove Planes	Удалить плоскости
+	Remove stop	Удалить ограничитель
+	Remove Tool	Инструмент «Удаление»
+	Remove variable	Удалить переменную
+	Remove Warp Split	Удалить разделение деформации
+	Remove White Matte	Удалить белый ореол
+	Remove {name} from Recent	Удалить {name} из недавних
+	Rename Brush…	Переименовать кисть…
+	Rename Layer	Переименовать слой
+	Rename Layer Comp	Переименовать вариант слоя
+	Rename Layer…	Переименовать слой…
+	Rename Tool Preset…	Переименовать набор…
+	Render	Рендеринг
+	Render Video…	Экспорт видео…
+	Rendering Mode	Режим отрисовки
+	Rendering mode	Режим отрисовки
+	Repeat	Повтор
+	Replace All Missing Fonts	Заменить все отсутствующие шрифты
+	Replace Color…	Замена цвета…
+	Replace Contents…	Заменить содержимое…
+	Replace Footage…	Заменить материал…
+	Replace it with this document, or cancel and use File › Save As to keep both.	Замените его этим документом или отмените и используйте Файл › Сохранить как, чтобы сохранить оба.
+	Replace Swatches…	Заменить образцы…
+	Resample	Изменить разрешение
+	Reselect	Повторить выделение
+	Reset	Сброс
+	Reset All Locked Settings	Сбросить все заблокированные параметры
+	Reset All to Defaults	Сбросить всё к значениям по умолчанию
+	Reset All Tools	Сбросить все инструменты
+	Reset all tools to their default settings?	Сбросить все инструменты к настройкам по умолчанию?
+	Reset GPU Backend	Сбросить GPU-бэкенд
+	Reset Section	Сбросить раздел
+	Reset Swatches	Восстановить образцы
+	Reset the brush to the defaults	Сбросить кисть к значениям по умолчанию
+	Reset to Default	Сбросить к значению по умолчанию
+	Reset to defaults	Сбросить к значениям по умолчанию
+	Reset Tool	Сбросить инструмент
+	Reset Transform	Сбросить трансформацию
+	Reset View	Сбросить вид
+	Reset Workspace	Сбросить рабочую среду
+	Resize image during place	Масштабировать изображение при помещении
+	Resolution: {dpi} pixels/inch	Разрешение: {dpi} пикс./дюйм
+	Resolve Missing Fonts…	Устранить отсутствующие шрифты…
+	Response curve	Кривая отклика
+	Restore	Свернуть в окно
+	Restore All	Восстановить всё
+	Restore All Frames	Восстановить все кадры
+	Restore Defaults	Восстановить по умолчанию
+	Restore Frame	Восстановить кадр
+	Restore last viewed comp	Восстановить последний просмотренный вариант
+	Restore Original Edge	Восстановить исходный край
+	Restore original size	Восстановить исходный размер
+	Restrictive (Web)	Ограниченная (Web)
+	Reticulation	Ретикуляция
+	Retry GPU	Повторить GPU
+	Retry GPU requires a restart. Save your work first.	Для повтора GPU нужен перезапуск. Сначала сохраните работу.
+	Retry saving presets	Повторить сохранение наборов
+	Reveal All	Показать всё
+	Reveal Selection	Показать выделение
+	Revert “{name}” to the last saved version? Your changes will be lost.	Вернуть «{name}» к последней сохранённой версии? Изменения будут потеряны.
+	RGB Color	RGB
+	Right	Правый
+	Right align text	Выравнивание по правому краю
+	Right click with painting tools	Правая кнопка с инструментами рисования
+	Right Edges	Правые края
+	Rigid	Жёсткая
+	Ring	Кольцо
+	Ring - Double	Кольцо - двойное
+	Ripple…	Рябь…
+	Rise	Подъём
+	Rolling Slope - Descending	Волнистый склон - нисходящий
+	Roman	Обычный
+	Roman Hanging Punctuation	Висячая пунктуация (римская)
+	Rotate 180°	Повернуть на 180°
+	Rotate 90° Clockwise	Повернуть на 90° по часовой стрелке
+	Rotate 90° Counter Clockwise	Повернуть на 90° против часовой стрелки
+	Rotate Auto	Автоповорот
+	Rotate Fixed	Фиксированный поворот
+	Rotate View	Поворот обзора
+	Rotate View Tool	Инструмент поворота вида
+	Rotate view with trackpad	Поворот обзора трекпадом
+	Rotation Adaptation	Адаптация поворота
+	Roughness	Шероховатость
+cameraRaw	Roughness	Неровность
+	Round	Круглые
+	Rounded Steps	Скруглённые ступени
+	Roundness Jitter	Колебание круглости
+	Roundness:	Круглость:
+	Rule of Thirds	Правило третей
+	Ruler Tool	Линейка
+	Ruler Units	Единицы линеек
+	Rulers & Grids	Линейки и сетка
+	Same folder	Та же папка
+	Sample a pixel anywhere on the screen	Выберите пиксель в любом месте экрана
+	Sample All Layers	По всем слоям
+	Sample Size:	Размер выборки:
+	Sample:	Выборка:
+	Sample: foreground colour	Выборка: основной цвет
+	Sampler	Цветометр
+	Sampling Area	Область выборки
+	Sampling Area Options	Параметры области выборки
+	Sampling Area Overlay	Наложение области выборки
+	Sampling Brush Tool	Кисть области выборки
+	Sampling: Background Swatch	Выборка: фоновый образец
+	Sampling: Continuous	Выборка: непрерывная
+	Sampling: Once	Выборка: однократная
+	Satin	Глянец
+	Satin…	Глянец…
+	Saturate	Насыщенность
+	Saturation Jitter	Колебание насыщенности
+	Save a list of these shortcuts as a web page	Сохранить список этих комбинаций как веб-страницу
+	Save Actions…	Сохранить операции…
+	Save As Preset	Сохранить как набор
+	Save cancelled	Сохранение отменено
+	Save Default Type Styles	Сохранить стили текста по умолчанию
+	Save failed: {error}	Не удалось сохранить: {error}
+	Save for Web (Legacy)…	Сохранить для Web (устаревшее)…
+	Save HTML and Images	Сохранить HTML и изображения
+	Save in background	Сохранять в фоне
+	Save selection as channel	Сохранить выделение как канал
+	Save Selection…	Сохранить выделенную область…
+	Save Settings…	Сохранить настройки…
+	Save Set…	Сохранить набор…
+	Save the changes to this set	Сохранить изменения в этом наборе
+	Save these settings as a Camera Raw .xmp file	Сохранить эти настройки в файл Camera Raw .xmp
+	Save these shortcuts as a .kys file	Сохранить эти комбинации как файл .kys
+	Save these shortcuts as a new set	Сохранить эти комбинации как новый набор
+@plural	Saved for Web: {n} file|Saved for Web: {n} files	Сохранено для Web: {n} файл|Сохранено для Web: {n} файла|Сохранено для Web: {n} файлов
+	Saved Multichannel	Saved Multichannel
+	Saved {name}	Сохранено: {name}
+@plural	Saved {n} action to {file}|Saved {n} actions to {file}	Сохранена {n} операция в {file}|Сохранены {n} операции в {file}|Сохранено {n} операций в {file}
+	Saving brush presets… Keep this tab open until saving finishes.	Сохранение наборов кистей… Не закрывайте эту вкладку, пока сохранение не завершится.
+	Saving {name}	Сохранение {name}
+	Saving {percent}	Сохранение {percent}
+	Sawtooth 1	Пила 1
+	Scale Effects…	Масштабировать эффекты…
+	Scale Factor	Коэффициент масштаба
+	Scale Horizontally	Масштаб по горизонтали
+	Scale or rotate the moved area, then press {key}	Масштабируйте или поверните перемещённую область, затем нажмите {key}
+	Scale to Fit Media	Масштабировать под носитель
+	Scale Units	Единицы масштаба
+	Scale Vertically	Масштаб по вертикали
+	Scatter	Рассеивание
+	Scattering	Рассеивание
+	Scope	Область
+	Scratch disks	Рабочие диски
+	Scratch Sizes	Размеры рабочего диска
+	Scratch: {size}	Рабочий диск: {size}
+	Screen	Экран
+	Screen resolution	Разрешение экрана
+	Script Events Manager…	Диспетчер событий сценариев…
+	Scroll to zoom	Колесо — изменить масштаб
+	Scrubby slider acceleration	Ускорение ползунков перетаскиванием
+	Scrubby Zoom	Масштаб перетаскиванием
+	Seafoam	Морская пена
+	Search Brushes	Поиск кистей
+	Search commands, tools and panels…	Поиск команд, инструментов и панелей…
+	Search fonts	Поиск шрифтов
+	Search settings…	Поиск настроек…
+	Search…	Найти…
+	Second Color Readout	Вторая цветовая проба
+	Select a type layer or click into text to insert glyphs	Выберите текстовый слой или щёлкните в текст, чтобы вставить глифы
+	Select a type layer to edit its character and paragraph settings.	Выберите текстовый слой, чтобы изменить параметры символов и абзацев.
+	Select All Layers	Выбрать все слои
+	Select an action first	Сначала выберите операцию
+	Select and Mask…	Выделение и маска…
+	Select Bottom Layer	Выбрать нижний слой
+	Select Data Points…	Выбрать точки данных…
+	Select Folder…	Выбрать папку…
+	Select Inverse	Инвертировать выделение
+	Select Layer Above	Выбрать слой выше
+	Select Layer Below	Выбрать слой ниже
+	Select Linked Layers	Выбрать связанные слои
+	Select Plane	Выбрать плоскость
+	Select Similar Colors	Выделить похожие цвета
+	Select Subject	Выбрать объект
+	Select text to apply a character style	Выделите текст, чтобы применить стиль символов
+	Select the crop presets to delete	Выберите наборы параметров кадрирования для удаления
+	Select the crop presets to delete:	Выберите наборы параметров кадрирования для удаления:
+	Select Top Layer	Выбрать верхний слой
+	Select:	Выбрать:
+	Selected	Выбранные
+	Selected Areas	Выделенные области
+	Selected Artboards	Выбранные монтажные области
+	Selection Edges	Границы выделения
+	Selection Preview:	Просмотр выделения:
+	Selections	Выделения
+	Selective Color	Выборочная коррекция цвета
+	Selective Color…	Выборочная коррекция цвета…
+	Semi Bold	Полужирный
+fontWeight	SemiBold	Полужирный
+	Send the selected pin backward	Переместить выбранную булавку назад
+	Sessions only	Только сеансы
+	Set additional Crop options	Задать дополнительные параметры кадрирования
+	Set additional smoothing options	Дополнительные параметры сглаживания
+	Set background color	Цвет фона
+	Set Black Point	Задать точку чёрного
+	Set deleted.	Набор удалён.
+	Set foreground color	Основной цвет
+	Set GPU Memory in Preferences › Performance to what your graphics card can hold, at most 3/8 of its memory. Automatic follows Memory Usage, within a quarter of this computer's memory and 3/8 of the card's, and doesn't count the document against a card whose memory is known. The status bar shows GPU Memory Full while they don't fit.	Задайте «Память GPU» в разделе Настройки › Производительность по объёму, который вмещает ваша видеокарта, не больше 3/8 её памяти. «Автоматически» следует параметру «Память», в пределах четверти памяти этого компьютера и 3/8 памяти видеокарты, и не учитывает документ на видеокарте с известным объёмом памяти. Пока слои не помещаются, в строке состояния показано «Память GPU заполнена».
+	Set horizontal skew	Задать наклон по горизонтали
+	set in Print Settings…	задаётся в параметрах печати…
+	Set Measurement Scale…	Задать масштаб измерений…
+	set name	имя набора
+	Set Neutral Gray Point	Задать нейтральную серую точку
+	Set New Snapshot as Default	Сделать новый снимок стандартным
+	Set painting symmetry options	Настроить параметры симметричного рисования
+	Set saved.	Набор сохранён.
+	Set shape fill type	Тип заливки фигуры
+	Set shape stroke type	Тип обводки фигуры
+	Set Start Timecode…	Задать стартовый таймкод…
+	Set the overlay options for the Crop tool	Задать параметры перекрытия для инструмента «Рамка»
+	Set the text color	Цвет текста
+	Set vertical skew	Задать наклон по вертикали
+	Set White Point	Задать точку белого
+	Settings	Наборы
+	Shadow Clipping Warning (U)	Предупреждение о клиппинге теней (U)
+	Shadows/Highlights…	Тени/Света…
+	Shape Blur…	Размытие по фигуре…
+	Shape Dynamics	Динамика формы
+	Shape Layer	Слой-фигура
+	Shape:	Фигура:
+	Sharp	Резкий
+	Sharpen Edges	Резкость на краях
+	Sharpen for	Резкость для
+	Sharpen More	Более резкое
+	Sharpen Tool	Резкость
+	Sharpening	Резкость
+	Shear…	Искривление…
+	Shell Lower	Панцирь снизу
+	Shell Upper	Панцирь сверху
+	Shift Edge	Сместить край
+	shortcut	комбинация
+	Shortcut removed.	Комбинация клавиш удалена.
+	Show All Menu Items	Показать все пункты меню
+	Show Altered Video	Показать изменённое видео
+	Show Backdrop	Показать фон
+	Show bounding box when dragging layer	Показывать рамку при перетаскивании слоя
+	Show canvas dots	Показывать точки холста
+	Show channels in color	Показывать каналы в цвете
+	Show Cropped Area	Показать отсекаемую область
+	Show crosshair in brush tip	Перекрестье в контуре кисти
+	Show dialog during playback	Показывать диалог при воспроизведении
+	Show Edge	Показать край
+	Show extension panels	Показывать панели расширений
+	Show Extras Options…	Параметры вспомогательных элементов…
+	Show font names in english	Названия шрифтов латиницей
+	Show highlight on rollover	Показывать подсветку при наведении
+	Show home recent files	Показывать недавние файлы на домашнем экране
+	Show in Explorer	Показать в Проводнике
+	Show Lab Color Readouts	Показывать значения Lab
+	Show menu colors	Цвета пунктов меню
+	Show New Snapshot Dialog by Default	По умолчанию показывать диалог нового снимка
+	Show only crosshair while painting	Только перекрестье при рисовании
+	Show or hide the Notes panel	Показать или скрыть панель «Заметки»
+	Show Original	Показать исходное
+	Show Overlay	Показать наложение
+	Show Red at 3 o'clock	Красный в положении «3 часа»
+	Show Sampling Area	Показать область выборки
+	Show Sampling Ring	Показать кольцо выборки
+	Show Selected Region	Показать выделенную область
+	Show Skin Tone Indicator	Показывать ориентир тона кожи
+	Show slice numbers	Показывать номера фрагментов
+	Show the layer mask as an overlay	Показать маску слоя как наложение
+	Show the layer's effects  ({key}-click: all layers)	Показать эффекты слоя  ({key}-клик: все слои)
+	Show tooltips	Показывать подсказки
+	Show Transform Controls	Показать управляющие элементы трансформации
+	Show transformation values	Показывать значения трансформации
+	Show Vectorscope	Показывать вектороскоп
+	Show/Hide All Panels	Показать/скрыть все панели
+	Show/Hide Panels	Показать/скрыть панели
+	Shutter Speed	Выдержка
+	Sides	Стороны
+	Similar	Похожие
+	Simulate Pressure	Имитировать нажим
+	Single Column Marquee Tool	Область (вертикальная строка)
+	Single Row Marquee Tool	Область (горизонтальная строка)
+	Single Word Justification	Выключка одного слова
+	Size Jitter	Колебание размера
+	Skew	Наклон
+	Skewness	Асимметрия
+	Sky	Небо
+	Slant	Наклон
+	Slice color	Цвет фрагмента
+	Slice Select Tool	Выделение фрагмента
+	Slice Tool	Фрагмент
+	Slices are locked (View › Lock Slices)	Фрагменты заблокированы (Просмотр › Заблокировать фрагменты)
+	Slices From Guides	Фрагменты по направляющим
+	Small	Мелкий
+	Smart Filter	Смарт-фильтр
+	Smart Filters	Смарт-фильтры
+	Smart guide color	Цвет умных направляющих
+	Smart Object	Смарт-объект
+	Smart Object Layer	Смарт-объект
+	Smart Objects	Смарт-объекты
+	Smart Radius	Умный радиус
+	Smart Sharpen…	Умная резкость…
+	Smooth	Плавный
+curves	Smooth	Сгладить
+	Smooth the curve values	Сгладить значения кривой
+	Smoothing	Сглаживание
+	Smoothness	Smoothness
+	Smooth…	Сглаживание…
+	SMPTE C	SMPTE C
+	Smudge	Палец
+	Smudge Tool	Палец
+	Snap	Привязка
+	Snap To	Привязать к
+	Snap to Origin	Привязать к началу координат
+	Snap vector tools and transforms to pixel grid	Выравнивать векторные инструменты и трансформации по пиксельной сетке
+	Snapshot 1	Снимок 1
+	Snapshots	Снимки
+	Soft	Мягкая
+	Soft dark	Мягкая тёмная
+	Soft Dark Theme	Мягкая тёмная тема
+	Soft light	Мягкая светлая
+	Soft Light Theme	Мягкая светлая тема
+	Software	Программа
+	Solarized dark	Solarized тёмная
+	Solarized Dark Theme	Тёмная тема Solarized
+	Solid	Сплошная
+	Solid Color…	Однотонный цвет…
+	Solidity:	Плотность:
+	Some brush presets could not be loaded	Не удалось загрузить некоторые наборы кистей
+	Sort By Name	Сортировать по имени
+	Source Files	Исходные файлы
+	Source: not set ({key}-click with Clone Stamp)	Источник: не задан ({key}-клик штампом)
+	Space After	Интервал после абзаца
+	Space Before	Интервал перед абзацем
+	Spacing	Интервалы
+	Spacing:	Интервалы:
+	Spell check complete.	Проверка орфографии завершена.
+	Spherize…	Сферизация…
+	Spin Blur…	Размытие вращением…
+	Split at Playhead	Разделить по индикатору текущего времени
+	Split Toning	Разделение тонирования
+	Split Warp Crosswise	Разделить деформацию поперёк
+	Split Warp Horizontally	Разделить деформацию по горизонтали
+	Split Warp Vertically	Разделить деформацию по вертикали
+	Split:	Разделение:
+	Sponge	Губка
+	Sponge Tool	Губка
+	Spot Channel	Цветовой канал
+	Spot Color	Цветовой (spot) канал
+	Spot Healing	Точечное восстановление
+	Spot Healing Brush	Точечная восстанавливающая кисть
+	Spot Healing Brush Tool	Точечная восстанавливающая кисть
+	Spot:	Sepia:
+	Squeeze	Сжатие
+	Srgb	sRGB
+	sRGB	sRGB
+	Stack Mode	Режим стопки
+	Stamp Down	Штамп вниз
+	Stamp Visible	Штамп видимых
+	Standard	Стандартный
+	Standard Deviation	Стандартное отклонение
+	Standard Screen Mode	Стандартный режим экрана
+	Star ratio	Коэффициент звезды
+	Star Ratio:	Коэффициент звезды:
+	Starting serial	Начальный порядковый номер
+	Statistics…	Статистика…
+	Status Information	Служебная информация
+	Std Dev:	Станд. откл.:
+	Step Backward	Шаг назад
+	Step Forward	Шаг вперёд
+	Step {step} is waiting for its dialog	Шаг {step} ожидает своего диалога
+	Stop For Errors	Останавливаться при ошибках
+	Stop playing/recording	Остановить воспроизведение/запись
+	Straighten	Выпрямить
+	Straighten Layer	Выпрямить слой
+	Straighten the image by drawing a line on it	Выровнять изображение, нарисовав на нем линию
+	Strength:	Интенсивность:
+	Stroke Catch-up	Догонять мазком
+	Stroke Color	Stroke Color
+	Stroke color	Цвет обводки
+	Stroke Path	Обвести контур
+	Stroke Path…	Обвести контур…
+	Strokes to remove: {n} (Enter applies, Esc cancels)	Штрихов к удалению: {n} (Enter применяет, Esc отменяет)
+	Stroke…	Обвести…
+	Strong	Жирный
+	Structure:	Структура:
+	Studio Light	Studio Light
+	Studio light	Светлая Studio
+	Studio Light Theme	Светлая тема Studio
+	Studio Theme	Тема Studio
+	Style Options	Параметры стиля
+	Style Options…	Параметры стиля…
+	Style {name} saved	Стиль {name} сохранён
+	Style: Normal	Стиль: Обычный
+	Stylistic Alternates	Стилистические варианты
+	Stylus Wheel	Колесо пера
+	Subdivisions	Подделения
+	Subject	Объект
+	Subject Distance	Расстояние до объекта
+	Subtract from	Вычесть из
+	Subtract from Sample	Вычесть из выборки
+	Subtract from selection  ({key})	Вычесть из выделения  ({key})
+	Subtract Front Shape	Вычесть переднюю фигуру
+	Subtract Mask from Selection	Вычесть маску из выделения
+	Suggestions:	Варианты:
+	Summarize…	Сводка…
+	Summation	Суммирование
+	Supplemental Categories	Дополнительные категории
+	Surface Blur…	Размытие по поверхности…
+	Swap colours (X)	Поменять цвета (X)
+	Swaps height and width	Меняет местами высоту и ширину
+	Swash	Инициальные и финальные
+	Switch between free transform and warp modes	Переключение между свободным трансформированием и деформаци
+	Switch theme	Сменить тему
+	Switched to CPU rendering	Включена отрисовка на CPU
+	Symmetry Off	Без симметрии
+	System	Системная
+	System Info…	Информация о системе…
+	System title bar	Системная строка заголовка
+	Take the shortcut from the other command and select it	Снять комбинацию с другой команды и выбрать её
+	Targa Options	Параметры Targa
+	Target Path	Целевой контур
+	Target:	Цель:
+	Technique	Метод
+	Technology Previews	Предпросмотр технологий
+	Tetrahedral	Тетраэдрическая
+	Text engine	Текстовый движок
+	Text file	Текстовый файл
+	Text Position:	Положение текста:
+	Text Replacement	Замена текста
+	Texture Each Tip	Текстура на каждый отпечаток
+	The document is closed	Документ закрыт
+	The document or selected layers changed. Please request deletion again.	Документ или выбранные слои изменились. Повторите запрос на удаление.
+	The document “{name}” does not have an embedded {mode} profile.	В документе «{name}» нет встроенного профиля {mode}.
+	The document “{name}” has an embedded color profile that does not match the current {mode} working space.	Встроенный цветовой профиль документа «{name}» не совпадает с текущим рабочим пространством {mode}.
+	The GPU compositor wasn't used: {reason}	Компоновщик GPU не использовался: {reason}
+	The gradient the Gradient tool paints with	Градиент, которым рисует инструмент «Градиент»
+	The keyboard shortcut set was not imported: {error}	Набор сочетаний клавиш не импортирован: {error}
+	The layer or its mask changed. Drag the mask onto the Trash again.	Слой или его маска изменились. Перетащите маску в корзину ещё раз.
+	The layers need {needed} of GPU memory and may hold {budget}, so edits that redraw the whole document do it on the CPU. Click to set GPU Memory.	Слоям нужно {needed} памяти GPU, а занимать они могут {budget}, поэтому правки, перерисовывающие весь документ, выполняются на CPU. Нажмите, чтобы задать «Память GPU».
+	The transform couldn't be applied.	Не удалось применить трансформирование.
+	There are too many sets: delete one first.	Слишком много наборов: сначала удалите один.
+	There is no crop size or ratio to save	Нет размера или соотношения сторон кадрирования для сохранения
+	These settings aren't available in PhotoCraft yet.	Эти параметры пока недоступны в PhotoCraft.
+	Thickness	Thickness
+	Thin	Тонкий
+fontWeight	Thin	Тонкий
+	This document's layers need {needed} but may hold {budget}: whole-document redraws use the CPU	Слоям этого документа нужно {needed}, но занимать они могут {budget}: весь документ перерисовывается на CPU
+	This document's layers: {needed} of {budget} for layers	Слои этого документа: {needed} из {budget} для слоёв
+	This redraw took {seconds} s on the CPU.	Эта перерисовка на CPU заняла {seconds} с.
+	Threshold Level	Уровень порога
+	Threshold…	Порог…
+	Thumbnail size (smallest: list)	Размер миниатюр (минимальный: список)
+	TIFF Options	Параметры TIFF
+	Tile	Мозаикой
+	Tile All Horizontally	Все окна по горизонтали
+	Tile All Vertically	Все окна по вертикали
+	Tiles…	Плитки…
+	Tilt Scale	Масштаб наклона
+	Tilt X	Наклон X
+	Tilt Y	Наклон Y
+	Tilt-Shift…	Наклон-сдвиг…
+	Timing	Тайминг
+	Tiny	Мелкий
+	Title	Title
+	Titling Alternates	Титульные варианты
+	To drop files, start PhotoCraft under XWayland: `{command}`	Чтобы перетаскивать файлы, запустите PhotoCraft в XWayland: `{command}`
+	Toggle count group visibility	Вкл/выкл видимость группы счёта
+	Toggle Last State	Переключить последнее состояние
+	Toggle reference point	Вкл/выкл опорную точку
+	Toggle text orientation	Переключить ориентацию текста
+	Toggle visibility	Вкл/выкл видимость
+	Tone Curve	Тоновая кривая
+	Tone Histogram	Тональная гистограмма
+	Tone:	Тон:
+	Tool Presets	Наборы инструментов
+	Toolbar	Панель инструментов
+	Toolbar…	Панель инструментов…
+	Tools…	Инструменты…
+	Top Edges	Верхние края
+	Top Left	Верхний левый
+	Top Right	Верхний правый
+	Torn Edges	Рваные края
+	Total Ink	Суммарное покрытие
+	Touch gestures	Жесты касания
+	Trace Contour…	Обводка контуров…
+	Traditional (72.27 points/inch)	Традиционный (72,27 пункта/дюйм)
+	Transfer	Передача
+	Transform	Трансформирование
+	Transform Again on a Copy	Дублировать и снова трансформировать
+	Transform On Drop	Трансформировать при отпускании
+	Transform Selection	Трансформировать выделение
+	Transform Symmetry	Трансформировать симметрию
+	Transmission Reference	Ссылка на передачу
+	Transparency & Gamut	Прозрачность и цветовой охват
+	Transparency & Gamut…	Прозрачность и цветовой охват…
+	Transparency Threshold	Порог прозрачности
+	Trap…	Приводка…
+	Tree…	Дерево…
+	Triangle Tool	Треугольник
+	Trilinear	Трилинейная
+	Trim…	Обрезать…
+	Turn the prompt back on with Ask On Mismatch in Edit › Color Settings.	Снова включить вопрос можно параметром Ask On Mismatch в Редактирование › Настройки цвета.
+	Twirl…	Скручивание…
+	Twist	Скручивание
+	Type	Текст
+	Type Layer	Текстовый слой
+	Type Styles	Стили текста
+	Type units	Единицы текста
+	Type:	Текст:
+	UI font size	Размер шрифта интерфейса
+	UI scale	Масштаб интерфейса
+	Ultra Bold	Ультраплотный
+	Ultra Light	Ультрасветлый
+	Unavailable in this color mode	Недоступно в этом цветовом режиме
+	Uncoated CMYK	Немелованная бумага CMYK
+	Undo Changes	Отменить изменения
+	Ungroup	Ungroup
+	Ungroup Layers	Разгруппировать слои
+	Unite Shapes	Объединить фигуры
+	Units & Rulers	Единицы и линейки
+	Units & Rulers…	Единицы и линейки…
+	Unix	Unix
+	Unlink Layer Mask	Отвязать маску слоя
+	Unlink the mask from the layer	Отвязать маску от слоя
+	Unlock: picking a preset replaces these settings	Разблокировать: выбор набора заменит эти параметры
+	Unnamed {mode} profile	Безымянный профиль {mode}
+	Unsharp Mask	Unsharp Mask
+	Unsharp Mask…	Нерезкое маскирование…
+	Untagged {mode}	Без профиля ({mode})
+	Untitled	Без имени
+	Untitled-1	Без имени-1
+	Update All Modified Content	Обновить всё изменённое содержимое
+	Update All Text Layers	Обновить все текстовые слои
+	Update Layer Comp	Обновить вариант слоя
+	Update layer comp (visibility, position and appearance)	Обновить вариант (видимость, положение и внешний вид)
+	Update Modified Content	Обновить изменённое содержимое
+	Update the current brush with these settings	Обновить текущую кисть этими параметрами
+@plural	Updated {n} linked smart object changed on disk|Updated {n} linked smart objects changed on disk	Обновлён {n} связанный смарт-объект, изменённый на диске|Обновлены {n} связанных смарт-объекта, изменённых на диске|Обновлено {n} связанных смарт-объектов, изменённых на диске
+	Urgency	Срочность
+	URLs	URL-адреса
+	Use additional plugins folder	Использовать доп. папку плагинов
+	Use Classic Mode	Использовать классический режим
+	Use esc to commit	Завершать по Esc
+	Use File › Open, or paste a copied image with {paste}.	Выберите Файл › Открыть или вставьте скопированное изображение с помощью {paste}.
+	Use finite lengths and a positive pattern total	Используйте конечные длины и положительную сумму шаблона
+	Use Global Light	Использовать глобальный свет
+	Use gpu	Использовать GPU
+	Use Legacy	Старая версия
+	Use legacy free transform	Старое свободное трансформирование
+	Use Measurement Scale	Использовать масштаб измерений
+	Use Previous Layer to Create Clipping Mask	Использовать предыдущий слой для создания обтравочной маски
+	Use shift key for tool switch	Shift для смены инструмента
+	Use tablet pressure	Нажим планшета
+	Use tablet pressure to change pen width	Использовать нажим планшета для изменения ширины пера
+	Use the embedded profile ({profile})	Использовать встроенный профиль ({profile})
+	Use:	Использовать:
+	Uses the foreground and background colours.	Использует основной цвет и цвет фона.
+	Vanishing Point is not active	Точка схода не активна
+	Vanishing Point: click four corners to create a plane	Точка схода: щелкните четыре угла, чтобы создать плоскость
+	Vanishing Point…	Точка схода…
+	Variable Data Sets…	Наборы данных переменных…
+	Variables bind a layer's visibility, text or pixels to a named data slot.	Переменные связывают видимость, текст или пикселы слоя с именованным слотом данных.
+	Variance	Дисперсия
+	Vary round brush hardness on hud	Менять жёсткость кисти на HUD
+	Vector Mask	Векторная маска
+	Vector Mask from Current Path	Векторная маска из текущего контура
+	Vertical	Вертикальная
+	Vertical Centers	Центры по вертикали
+	Vertical Type Mask Tool	Вертикальный текст-маска
+cameraRaw	Vibrance	Красочность
+	Vibrance…	Вибрация…
+	Video Cache	Видеокэш
+	Video Frames to Layers…	Видеокадры в слои…
+	Video Layers	Видеослои
+	View	Просмотр
+	View menu	Меню «Просмотр»
+	View Options	Параметры вида
+	Vignetting	Виньетирование
+	Violet, Orange	Фиолетовый, оранжевый
+	Visible	Видимый
+	Vulkan	Vulkan
+	W	Ш
+	W x H x Resolution	Ш x В x Разрешение
+	Wand	Волшебная палочка
+	Warp Text…	Деформация текста…
+	Warp:	Деформация:
+	Water Paper	Мокрая бумага
+	Web Color	Web-цвет
+	Web Photo Gallery…	Фотогалерея Web…
+	Web Snap	Привязка к web-палитре
+	Webp	WebP
+	Weight	Насыщенность штриха
+	Weight:	Насыщенность штриха:
+	Wet Edges	Влажные края
+	Wetness Jitter	Колебание влажности
+	White Balance: As Shot	Баланс белого: как снято
+	White Matte	На белом фоне
+	WIA Support…	Поддержка WIA…
+	Wide Gamut RGB	Wide Gamut RGB
+	Windows LCD	Windows LCD
+	Wind…	Ветер…
+	Word Spacing	Межсловные интервалы
+	Work Path	Рабочий контур
+	Working Black Plate	Рабочая чёрная форма
+	Working CMY Plate	Рабочая голубая форма
+	Working Cyan Plate	Рабочая голубая форма
+	Working Gray Plate	Рабочая серая форма
+	Working Magenta Plate	Рабочая пурпурная форма
+	Working Space	Рабочее пространство
+	Working Spaces	Рабочие пространства
+	Working Yellow Plate	Рабочая жёлтая форма
+	Working: {working}	Рабочее пространство: {working}
+	Working…	Обработка…
+	Workspace…	Рабочая среда…
+	World ready	Универсальный
+	X11	X11
+	XOR	XOR
+cameraRaw	Yellow	Жёлтые
+	Yellow  ·  Blue	Жёлтый  ·  Синий
+	Your keyboard shortcut set {set} is in use here: {n} shortcuts differ from the defaults. Edit › Keyboard Shortcuts shows them; Reset All to Defaults undoes this.	Здесь используется ваш набор сочетаний клавиш {set}: сочетаний, отличных от стандартных: {n}. Их показывает Редактирование › Сочетания клавиш; «Сбросить всё к значениям по умолчанию» отменяет импорт.
+	ZigZag…	Зигзаг…
+	Zoom clicked point to center	Точка клика в центр при масштабировании
+	Zoom resizes windows	Масштаб меняет размер окон
+	Zoom Tool	Масштаб
+	Zoom with scroll wheel	Масштаб колесом мыши
+	Zoom with trackpad pinch	Масштаб щипком на трекпаде
+	{added}, {removed} subtracted	{added}, вычтено {removed}
+	{key} to subtract	{key} — вычесть
+	{key}-click to set the source	{key}-клик, чтобы задать источник
+	{label} is writing the file and can no longer be cancelled	{label}: идёт запись файла, отменить уже нельзя
+	{message} ({note})	{message} ({note})
+	{mode} Color · {bits} bit	{mode}, {bits} бит
+	{name} (Photoshop)	{name} (Photoshop)
+	{name} can't keep everything in this document	{name} не может сохранить все содержимое этого документа
+	{name} options	Параметры: {name}
+	{name} Properties	Свойства: {name}
+	{name} was changed by another app after it was opened or saved here.	Файл {name} был изменён другим приложением после того, как его открыли или сохранили здесь.
+@plural	{n} action|{n} actions	{n} операция|{n} операции|{n} операций
+	{n} commands are not in PhotoCraft.	Команд, которых нет в PhotoCraft: {n}.
+@plural	{n} layer recorded by this comp was deleted. Update the comp, or clear the warning.|{n} layers recorded by this comp were deleted. Update the comp, or clear the warning.	Удалён {n} слой, записанный в этом варианте. Обновите вариант или сбросьте предупреждение.|Удалены {n} слоя, записанных в этом варианте. Обновите вариант или сбросьте предупреждение.|Удалено {n} слоёв, записанных в этом варианте. Обновите вариант или сбросьте предупреждение.
+@plural	{n} layer|{n} layers	{n} слой|{n} слоя|{n} слоёв
+	{n} of {max} sample points	{n} из {max} точек замера
+@plural	{n} plane|{n} planes	{n} плоскость|{n} плоскости|{n} плоскостей
+@plural	{n} preset|{n} presets	{n} набор|{n} набора|{n} наборов
+@plural	{n} sample point removed|{n} sample points removed	Удалена {n} точка замера|Удалены {n} точки замера|Удалено {n} точек замера
+@plural	{n} sample|{n} samples	{n} образец|{n} образца|{n} образцов
+@plural	{n} slice|{n} slices	{n} фрагмент|{n} фрагмента|{n} фрагментов
+@plural	{n} step has no PhotoCraft equivalent yet|{n} steps have no PhotoCraft equivalent yet	{n} шаг пока не имеет эквивалента в PhotoCraft|{n} шага пока не имеют эквивалента в PhotoCraft|{n} шагов пока не имеют эквивалента в PhotoCraft
+@plural	{n} step with no Photoshop equivalent left out|{n} steps with no Photoshop equivalent left out	Пропущен {n} шаг без эквивалента в Photoshop|Пропущены {n} шага без эквивалента в Photoshop|Пропущено {n} шагов без эквивалента в Photoshop
+	{path}: the path is not valid Unicode; rename the file and open it again.	{path}: путь не является допустимым Unicode; переименуйте файл и откройте его снова.
+	{set} (modified)	{set} (изменён)
+	{shortcut} is reserved by the system and can't be assigned.	Комбинация {shortcut} зарезервирована системой и не может быть назначена.
+	{size} (was {old})	{size} (было {old})
+@plural	{warning} (+{n} more brush preset warning)|{warning} (+{n} more brush preset warnings)	{warning} (и ещё {n} предупреждение о наборах кистей)|{warning} (и ещё {n} предупреждения о наборах кистей)|{warning} (и ещё {n} предупреждений о наборах кистей)
+@plural	{what} with {n} warning|{what} with {n} warnings	{what}: {n} предупреждение|{what}: {n} предупреждения|{what}: {n} предупреждений
+	{w} px x {h} px ({ppi} ppi)	{w} px × {h} px ({ppi} ppi)
+	{w} {unit} x {h} {unit} ({ppi} ppi)	{w} {unit} × {h} {unit} ({ppi} ppi)
+	{zoom}%	{zoom}%
+	…and {n} more	…и ещё {n}
+	↑↓ navigate   {key} run   esc close	↑↓ переход   {key} выполнить   esc закрыть

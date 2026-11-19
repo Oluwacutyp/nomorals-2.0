@@ -1,0 +1,457 @@
+# Hrvatski (hr) interface catalog for every Crafting App.
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   @plural  English `one|other`; the translation lists this language's plural forms, `|`-separated.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary. No other product's localisation, string table or translated UI was
+# consulted or copied; add entries the same way.
+
+	% of all commits	% svih commitova
+	(Custom)	(Prilagođeno)
+	(none)	(ništa)
+	About	O programu
+	Accessibility	Pristupačnost
+	Add	Dodaj
+	Add a comment	Dodaj komentar
+	Add to Dictionary	Dodaj u rječnik
+	Adjust	Prilagodi
+	Advanced	Napredno
+	Align	Poravnaj
+	Align Left	Poravnaj lijevo
+	Align Right	Poravnaj desno
+	Align Text	Poravnaj tekst
+	Alignment	Poravnanje
+	Alignment:	Poravnanje:
+	All	Sve
+	All Caps	Sva velika slova
+	All files	Sve datoteke
+	All pages	Sve stranice
+	Animation	Animacija
+	Apply	Primijeni
+	Apply Character Style	Primijeni stil znakova
+	Apply to:	Primijeni na:
+	Area	Površina
+	Arrange	Rasporedi
+	Arrow	Strelica
+	Arrows	Strelice
+	Ascending	Uzlazno
+	Assign	Dodijeli
+	Author	Autor
+	Auto	Automatski
+	Auto ({percent}%)	Automatski ({percent} %)
+	Automatic	Automatski
+	Backspace	Backspace
+	Bar	Traka
+	Binary assets added	Dodani binarni resursi
+	Binary assets removed	Uklonjeni binarni resursi
+	Bold	Podebljano
+	Borders	Obrubi
+	Bottom	Dolje
+	Bottom:	Dolje:
+	Break Link	Prekini vezu
+	Bring Forward	Pomakni naprijed
+	Browse…	Pregledaj…
+	Bullet	Oznaka
+	Cancel	Odustani
+	Caption	Natpis
+	Category	Kategorija
+	Cell Size	Veličina ćelije
+	Center	Sredina
+	Centered	Centrirano
+	Centimeters	Centimetri
+	Change	Promijeni
+	Change Case	Promijeni veličinu slova
+	Character	Znak
+	Characters	Znakovi
+	Circle	Krug
+	City	Grad
+	Clear	Očisti
+	Clear All	Očisti sve
+	Clipboard	Međuspremnik
+	Close	Zatvori
+	Collapse	Sažmi
+	Color	Boja
+	Color:	Boja:
+	Colors	Boje
+	Colors:	Boje:
+	Column width	Širina stupca
+	Columns	Stupci
+	Columns:	Stupci:
+	Combine	Kombiniraj
+	Commands:	Naredbe:
+	Comment	Komentar
+	Comments	Komentari
+	Commits	Commitovi
+	Company	Tvrtka
+	Compare	Usporedi
+	Comparison	Usporedba
+	Contains	Sadrži
+	Contributors	Doprinositelji
+	Convert	Pretvori
+	Copies	Kopije
+	Copy	Kopiraj
+	Copyright	Autorsko pravo
+	Country	Država
+	Create	Izradi
+	Crop	Obreži
+	Current	Trenutačno
+	Current page	Trenutačna stranica
+	Custom	Prilagođeno
+	Customize…	Prilagodi…
+	Cut	Izreži
+	Dark	Tamno
+	Dashed	Crtkano
+	Data	Podaci
+	Date and Time	Datum i vrijeme
+	Date format	Format datuma
+	Decrease Font Size	Smanji veličinu fonta
+	Default	Zadano
+	Delete	Izbriši
+	Delete Style	Izbriši stil
+	Deleted	Izbrisano
+	Descending	Silazno
+	Description:	Opis:
+	Diagonal	Dijagonalno
+	Diamond	Romb
+	Direction:	Smjer:
+	Discord	Discord
+	Display	Prikaz
+	Display name	Prikazno ime
+	Document	Dokument
+	Document Title	Naslov dokumenta
+	Documents	Dokumenti
+	Don't Save	Ne spremaj
+	Dot	Točka
+	Dots	Točke
+	Dotted	Točkasto
+	Down	Dolje
+	Draft	Nacrt
+	Draw	Crtanje
+	Dutch	Nizozemski
+	Editing	Uređivanje
+	Edit…	Uredi…
+	Effects	Efekti
+	Ellipsis	Trotočje
+	Em Dash	Crtica em
+	Em Space	Razmak em
+	Emboss	Reljef
+	En Dash	Crtica en
+	En Space	Razmak en
+	Envelope DL	Omotnica DL
+	Eraser	Gumica
+	Even pages only	Samo parne stranice
+	Example: {sample}	Primjer: {sample}
+	Expand	Proširi
+	Export	Izvoz
+	Export PDF	Izvezi PDF
+	Exported {path}	Izvezeno: {path}
+	Expression	Izraz
+	Field	Polje
+	Field properties	Svojstva polja
+	Fields	Polja
+	Fields:	Polja:
+	File	Datoteka
+	Fill	Ispuna
+	Find	Traži
+	Find and Replace	Traženje i zamjena
+	Find Next	Traži sljedeće
+	Find:	Traži:
+	Finish	Završi
+	First	Prvi
+	First commit	Prvi commit
+	Fit	Prilagodi
+	Flip Horizontal	Okreni vodoravno
+	Flip Vertical	Okreni okomito
+	Focus	Fokus
+	Font	Font
+	Font Size	Veličina fonta
+	Font:	Font:
+	Fonts	Fontovi
+	Format	Oblikovanje
+	Format:	Oblikovanje:
+	Full Screen	Cijeli zaslon
+	Functions	Funkcije
+	General	Općenito
+	Geometry	Geometrija
+	Glow	Sjaj
+	Graphic	Grafika
+	Grayscale	Sivi tonovi
+	Group	Grupiraj
+	Headings	Naslovi
+	Heart	Srce
+	Height:	Visina:
+	Help	Pomoć
+	Hidden	Skriveno
+	Hidden text	Skriveni tekst
+	Hindi	Hindski
+	Hollow	Šuplje
+	Home	Početna
+	Horizontal	Vodoravno
+	Hyphenation	Rastavljanje riječi
+	Ignore All	Zanemari sve
+	Inches	Inči
+	Increase Font Size	Povećaj veličinu fonta
+	Index	Kazalo
+	Inflate	Povećaj
+	Info	Informacije
+	Insert	Umetni
+	Inspect Document	Pregledaj dokument
+	Interface	Sučelje
+	Interface language	Jezik sučelja
+	Interface Theme	Tema sučelja
+	Intersection	Presjek
+	Italian	Talijanski
+	Italic	Kurziv
+	Japanese	Japanski
+	Justification	Obostrano poravnanje
+	Justify	Obostrano poravnaj
+	Keywords	Ključne riječi
+	Korean	Korejski
+	Labels	Naljepnice
+	Landscape	Položeno
+	Language	Jezik
+@id	language.name	Hrvatski
+	Large	Veliko
+	Lasso	Laso
+	Last	Zadnji
+	Last commit	Zadnji commit
+	Layout	Raspored
+	Left	Lijevo
+	Left:	Lijevo:
+	Letter	Letter
+	Level 1	Razina 1
+	Level 2	Razina 2
+	Level 3	Razina 3
+	Level 4	Razina 4
+	Light	Svijetlo
+	Line	Crta
+	Line delta	Delta redaka
+	Line spacing	Razmak redaka
+	Linear	Linearno
+	Lines	Crte
+	Lines +/−	Retci +/−
+	Lines added	Dodani retci
+	Lines deleted	Izbrisani retci
+	Link	Poveznica
+	Links	Poveznice
+	List	Popis
+	Location	Lokacija
+	lowercase	mala slova
+	Margins	Margine
+	Maximum	Maksimum
+	Medium	Srednje
+	Merge	Spoji
+	Merge Cells	Spoji ćelije
+	Merged PRs	Spojeni PR-ovi
+	Middle	Sredina
+	Millimeters	Milimetri
+	Minimum	Minimum
+	Model	Model
+	Models	Modeli
+	Move Down	Pomakni dolje
+	Move Up	Pomakni gore
+	Name	Naziv
+	Name (A–Z)	Naziv (A–Ž)
+	Name:	Naziv:
+	Navigation	Navigacija
+	New	Novo
+	New Document	Novi dokument
+	New document	Novi dokument
+	New from Template	Novo iz predloška
+	New Group	Nova grupa
+	New Style…	Novi stil…
+	New Window	Novi prozor
+	New…	Novo…
+	Next	Sljedeće
+	Next Change	Sljedeća promjena
+	Next Page	Sljedeća stranica
+	No	Ne
+	No Color	Bez boje
+	No limit	Bez ograničenja
+	Nonbreaking Space	Razmak bez prijeloma
+	None	Nema
+	Normal	Uobičajeni
+	Number	Broj
+	Object	Objekt
+	Odd pages only	Samo neparne stranice
+	Off	Isključeno
+	OK	U redu
+	Omit	Izostavi
+	On	Uključeno
+	Open	Otvori
+	Options	Mogućnosti
+	Options…	Mogućnosti…
+	Orientation	Orijentacija
+	Other	Ostalo
+	Outline	Struktura
+	Oval	Ovalno
+	Page	Stranica
+	Page {page} of {pages}	Stranica {page} od {pages}
+	Pages	Stranice
+	Paper	Papir
+	Paragraph	Odlomak
+	Password	Lozinka
+	Paste	Zalijepi
+	Paste Special	Zalijepi posebno
+	Pause	Pauziraj
+	Pen	Olovka
+	Pencil	Grafitna olovka
+	Picas	Pike
+	Play	Reproduciraj
+	Points	Točke
+	Portrait	Uspravno
+	Position	Položaj
+	Position:	Položaj:
+	Presets	Zadane postavke
+	Preview	Pretpregled
+	Previous	Prethodno
+	Previous Change	Prethodna promjena
+	Previous Page	Prethodna stranica
+	Print	Ispis
+	Printer	Pisač
+	Printing	Ispis
+	Properties	Svojstva
+	Protect	Zaštiti
+	PRs	PR-ovi
+	Pyramid	Piramida
+	Real name	Pravo ime
+	Recent	Nedavno
+	Recent Colors	Nedavne boje
+	Recover	Oporavi
+	Rectangle	Pravokutnik
+	Redo	Ponovi
+	Refresh	Osvježi
+	Relaxed	Opušteno
+	Remove	Ukloni
+	Remove Background	Ukloni pozadinu
+	Rename	Preimenuj
+	Rename Style	Preimenuj stil
+	Rename…	Preimenuj…
+	Repeat	Ponovi
+	Replace	Zamijeni
+	Replace:	Zamijeni:
+	Reply	Odgovori
+	Report	Izvješće
+	Reset	Vrati na zadano
+	Reset…	Vrati na zadano…
+	Result	Rezultat
+	Reverse the order	Obrni redoslijed
+	Review	Pregled
+	Right	Desno
+	Right:	Desno:
+	Rotate	Zakreni
+	Rotation	Rotacija
+	Rotation:	Rotacija:
+	Rounded Rectangle	Zaobljeni pravokutnik
+	Ruler	Ravnalo
+	Russian	Ruski
+	Save	Spremi
+	Save As	Spremi kao
+	Save as Template	Spremi kao predložak
+	Saved	Spremljeno
+	Scale	Mjerilo
+	Scripts	Rukopisna slova
+	Search	Traži
+	Select	Odaberi
+	Select All	Odaberi sve
+	Select Objects	Odaberi objekte
+	Selected pages	Odabrane stranice
+	Selection	Odabir
+	Send Backward	Pomakni natrag
+	Set	Postavi
+	Set as Default	Postavi kao zadano
+	Settings…	Postavke…
+	Shadow	Sjena
+	Shape Effects	Efekti oblika
+	Shapes	Oblici
+	Share	Podijeli
+	Show	Prikaži
+	Show rulers	Prikaži ravnala
+	Size	Veličina
+	Size:	Veličina:
+	Small Caps	Kapitelice
+	Sort	Sortiraj
+	Sort by	Sortiraj po
+	Spaces	Razmaci
+	Spacing	Razmak
+	Spacing:	Razmak:
+	Special	Posebno
+	Speed	Brzina
+	Spelling	Pravopis
+	Split	Podijeli
+	Square	Kvadrat
+	Stacked	Složeno
+	Standard	Standardno
+	Star	Zvijezda
+	Start at:	Počni od:
+	Statistics	Statistika
+	Status Bar	Statusna traka
+	Stop	Zaustavi
+	Strikethrough	Precrtano
+	Studio	Studio
+	Style	Stil
+	Style:	Stil:
+	Styles	Stilovi
+	Subject	Predmet
+	Subscript	Donji indeks
+	Subtitle	Podnaslov
+	Superscript	Gornji indeks
+	Symbol	Simbol
+	Symbols	Simboli
+	System	Sustav
+	Tab	Tab
+	Table	Tablica
+	Table style	Stil tablice
+	Tables	Tablice
+	Tabs	Tabulatori
+	Templates	Predlošci
+	Text	Tekst
+	Text:	Tekst:
+	The passwords don't match.	Lozinke se ne podudaraju.
+	Thickness	Debljina
+	This document has no bookmarks.	Ovaj dokument nema knjižnih oznaka.
+	Title	Naslov
+	Tools	Alati
+	Top	Gore
+	Top:	Gore:
+	Total	Ukupno
+	Tracking	Praćenje
+	Transform	Transformacija
+	Translate	Prevedi
+	Transparency	Prozirnost
+	Triangle	Trokut
+	Type	Vrsta
+	Type:	Vrsta:
+	Typing	Tipkanje
+	Underline	Podcrtano
+	Undo	Poništi
+	Undo {action}	Poništi: {action}
+	Ungroup	Razgrupiraj
+	Union	Unija
+	Up	Gore
+	UPPERCASE	VELIKA SLOVA
+	Username	Korisničko ime
+	Value	Vrijednost
+	Version	Verzija
+	Vertical	Okomito
+	Vertical Alignment	Okomito poravnanje
+	View	Prikaz
+	Voice	Glas
+	W:	Š:
+	Watermark	Vodeni žig
+	Wave	Val
+	Website	Web-mjesto
+	Weight	Težina
+	Width:	Širina:
+	Window	Prozor
+	Words	Riječi
+	Yes	Da
+	Your changes will be lost if you don't save them.	Vaše promjene bit će izgubljene ako ih ne spremite.
+	Zoom	Zumiranje
+	Zoom In	Povećaj
+	Zoom Out	Smanji

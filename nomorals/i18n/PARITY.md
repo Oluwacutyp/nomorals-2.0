@@ -77,3 +77,51 @@ so — absence is a recorded fact, not a faked 0%.
   Machine-translated contributions must pass
   `bridge.score_contribution` (back-translation F1 + judge)
   before they are written into a catalog file.
+
+## Upstream coverage (craft-i18n port, lane 116)
+
+The vendored upstream tree (`i18n/catalogs/upstream/locales/`,
+102 files, 46 locales, byte-identical copies of
+storytold/craft-i18n at `c199dc45`) passes its own checker with
+**zero findings** (`check_upstream_tree` returns `[]`): every
+file carries the `# Clean room:` header, every row is valid,
+no app override duplicates its shared row, every locale has
+its `@id language.name` row, and no regional row is redundant
+(sr-latn holds 1148 rows against sr's 421).
+
+Coverage is `<locale>/<file>: <rows>/<max>`, where `<max>` is
+the most rows any locale's catalog of that name has
+(`check.upstream_coverage`); a few lines, full table in
+`tests/test_gapfix_crafti18n.py`:
+
+```
+ar/cadcraft.tsv: 1016/1045
+ar/common.tsv: 496/1290
+ar/pdfcraft.tsv: 3854/4175
+ar/wordcraft.tsv: 2836/2991
+bg/common.tsv: 1135/1290
+bn/common.tsv: 1280/1290
+bs/common.tsv: 1281/1290
+ca/common.tsv: 2/1290
+de/common.tsv: 1214/1290
+fr/common.tsv: 1290/1290
+pt-br/common.tsv: 1281/1290
+sk/wordcraft.tsv: 2991/2991
+```
+
+Notes, honestly recorded:
+
+- **sk has no `common.tsv`.** Its only upstream file is
+  `wordcraft.tsv`; the locale survives in the tree on that file
+  alone, and its `language.name` row lives there.
+- **pt-br has no base `pt` catalog** in the shipped tree, so
+  its chain is `[pt-br, en]`; the pt-br rows are its own.
+- **ca/common.tsv has 2 rows** — the upstream Catalan catalog
+  is nearly empty, and the checker reports that as coverage,
+  not as an error.
+- The Devon catalogs (`catalogs/` 16 locales) and the upstream
+  tree are separate inputs served by one `Translator`:
+  `translate`/`translate_detailed` consult the upstream chain
+  first, then Devon's, then the source string; the upstream
+  `t`/`tc`/`get`/`tid`/`trn` family is the craft-libs `I18n`
+  API on the same object.

@@ -1,0 +1,509 @@
+# العربية (ar) interface catalog for every Crafting App.
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   @plural  English `one|other`; the translation lists this language's plural forms, `|`-separated.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary. No other product's localisation, string table or translated UI was
+# consulted or copied; add entries the same way.
+
+	% of all commits	% من كل الإيداعات
+	(none)	(لا شيء)
+	1 file	ملف واحد
+	About	حول
+	Absolute	مطلق
+	Accessibility	إمكانية الوصول
+	Actions	الإجراءات
+	Active	نشط
+	Actual Size	الحجم الفعلي
+	Add	إضافة
+	Add a comment	إضافة تعليق
+	Advanced	متقدم
+	Align	محاذاة
+	Align left	محاذاة لليسار
+	Align right	محاذاة لليمين
+	Align Text	محاذاة النص
+	Alignment:	المحاذاة:
+	All	الكل
+	All files	كل الملفات
+	All pages	كل الصفحات
+	Always	دائماً
+	Angle	الزاوية
+	Angular	زاوي
+	Animation effects	تأثيرات الحركة
+	Any	أي
+	Appearance	المظهر
+	Application	التطبيق
+	Apply	تطبيق
+	Apply to:	تطبيق على:
+	Arc	قوس
+	Area	المساحة
+	Arrow	سهم
+	ArtCraft website	موقع ArtCraft
+	Author	المؤلف
+	Auto	تلقائي
+	Auto ({percent}%)	تلقائي ({percent}%)
+	Automatically	تلقائياً
+	Available	متاح
+	Background	خلفية
+	Baseline	خط الأساس
+	Basic Latin	اللاتينية الأساسية
+	Binary assets added	الأصول الثنائية المضافة
+	Binary assets removed	الأصول الثنائية المُزالة
+	Black	أسود
+	Black and white	أبيض وأسود
+	Block	كتلة
+	Blocks	كتل
+	Blue	أزرق
+	Bold	غامق
+	Both	كلاهما
+	Both sides	الوجهان
+	Bottom	أسفل
+	Bottom:	الأسفل:
+	Bring to Front	إحضار إلى المقدمة
+	Browse…	استعراض…
+	Calculate	الحساب
+	Cancel	إلغاء
+	Category:	الفئة:
+	Center	وسط
+	Center X	مركز X
+	Center Y	مركز Y
+	Chamfer	شطف
+	Characters	الأحرف
+	Check for updates	التحقق من التحديثات
+	Choose…	اختيار…
+	Circle	دائرة
+	Clear	مسح
+	Clear All	مسح الكل
+	Clear History	مسح السجل
+	Clear Recent Files	مسح الملفات الأخيرة
+	Clipboard	الحافظة
+	Close	إغلاق
+	Close (Esc)	إغلاق (Esc)
+	Close All	إغلاق الكل
+	Collapse	طي
+	Collate	ترتيب النسخ
+	Color	اللون
+	Color:	اللون:
+	Colour	اللون
+	Combine	دمج
+	Command	أمر
+	Comment	تعليق
+	Comments	التعليقات
+	Commits	الإيداعات
+	Company	الشركة
+	Compare	مقارنة
+	Compatibility	التوافق
+	Compression	الضغط
+	Cone	مخروط
+	Continue	متابعة
+	Contributors	المساهمون
+	Convert	تحويل
+	Copies:	النسخ:
+	Copy	نسخ
+	Couldn't open {name}: {e}	تعذّر فتح {name}: {e}
+	Create	إنشاء
+	Cross	علامة خطأ
+	Current page	الصفحة الحالية
+	Custom	مخصص
+	Cut	قص
+	Cyan	سماوي
+	Dark	داكن
+	Dark gray	رمادي داكن
+	Dashed	متقطع
+	Date	تاريخ
+	Date format	تنسيق التاريخ
+	Dates	التواريخ
+	Default	افتراضي
+	Delete	حذف
+	Delete Layer	حذف الطبقة
+	Deleted	محذوف
+	Description	الوصف
+	Description:	الوصف:
+	Deselect All	إلغاء تحديد الكل
+	Details	التفاصيل
+	Diameter	القطر
+	Diamond	معيّن
+	Direction:	الاتجاه:
+	Discard	تجاهل
+	Dismiss	تجاهل
+	Display	عرض
+	Display name	الاسم المعروض
+	Distance	المسافة
+	Distribute	توزيع
+	Divide	قسمة
+	Document	المستند
+	Document Title	عنوان المستند
+	Done	تم
+	Dot	نقطة
+	Double-click	نقر مزدوج
+	Down	أسفل
+	Download	تنزيل
+	Draw	رسم
+	Duplicate	تكرار
+	Duplicate…	تكرار…
+	Dynamic	ديناميكي
+	Edit	تحرير
+	Editing	التحرير
+	Edit…	تحرير…
+	Elevation	الارتفاع
+	Ellipse	شكل بيضاوي
+	Endpoint	نقطة نهاية
+	Enter	إدخال
+	Erase	محو
+	Eraser	ممحاة
+	Error	خطأ
+	Even pages only	الصفحات الزوجية فقط
+	Example: {sample}	مثال: {sample}
+	Expand	توسيع
+	Export	تصدير
+	Export to	تصدير إلى
+	Exported to {path}	تم التصدير إلى {path}
+	Export…	تصدير…
+	Expression	تعبير
+	Extract	استخراج
+	Field	الحقل
+	Field properties	خصائص الحقل
+	Fields	الحقول
+	File	ملف
+	File Name	اسم الملف
+@id	file.close	إغلاق
+	Fill	تعبئة
+	Filter	تصفية
+	Find and Replace	بحث واستبدال
+	Find…	بحث…
+	First	الأول
+	First commit	أول إيداع
+	Fit	ملاءمة
+	Flatten	تسطيح
+	Flip Horizontal	قلب أفقي
+	Flip Vertical	قلب عمودي
+	Folder	مجلد
+	Font	الخط
+	Font size	حجم الخط
+	Font Size:	حجم الخط:
+	Font:	الخط:
+	Fonts	الخطوط
+	Format	الصيغة
+	Format:	التنسيق:
+	From	من
+	Full Screen	ملء الشاشة
+	General	عام
+	Geometry	الهندسة
+	Global	شامل
+	Gradient	التدرج اللوني
+	Graphic	رسم
+	Gray	رمادي
+	Grayscale	تدرج رمادي
+	Green	أخضر
+	Grid view	عرض الشبكة
+	Group	تجميع
+	Headings	العناوين
+	Height	الارتفاع
+	Height:	الارتفاع:
+	Help	مساعدة
+	Hidden text	النص المخفي
+	Hide All	إخفاء الكل
+	Hide Others	إخفاء الطبقات الأخرى
+	High	عالية
+	High Resolution	دقة عالية
+	High resolution	دقة عالية
+	History	سجل الإجراءات
+	Home	الرئيسية
+	Horizontal	أفقي
+	Horizontal scale	المقياس الأفقي
+	Horizontally	أفقيًا
+	Icon	الأيقونة
+	Image	صورة
+	Images	صور
+	Import	استيراد
+	Index	فهرس
+	Insert	إدراج
+	Interface Language	لغة الواجهة
+	Interface language	لغة الواجهة
+	Interface Theme	سمة الواجهة
+	Intersect	تقاطع
+	Intersection	تقاطع
+	Invert	عكس
+	Isolate	عزل
+	Italic	مائل
+	Join	وصل
+	Join our Discord	انضم إلى خادمنا على Discord
+	Join the ArtCraft Discord	انضم إلى خادم ArtCraft على Discord
+	Join the ArtCraft Discord…	الانضمام إلى Discord الخاص بـ ArtCraft…
+	Join us on Discord	انضم إلينا على Discord
+	just now	الآن
+	Justify	ضبط
+	Keywords	الكلمات المفتاحية
+	Label	التسمية
+	Labels	التسميات
+	Landscape	أفقي
+	Language	اللغة
+@id	language.name	العربية
+	Last	الأخير
+	Last commit	آخر إيداع
+	Later	لاحقًا
+	Layer	طبقة
+	Layers	الطبقات
+	Layout	تخطيط
+	Left	يسار
+	Left:	اليسار:
+	Legal	Legal
+	Length	الطول
+	Light	فاتح
+	Light gray	رمادي فاتح
+	Line	خط
+	Line delta	فرق الأسطر
+	Line spacing	تباعد الأسطر
+	Linear	خطي
+	Lines +/−	الأسطر +/−
+	Lines added	الأسطر المضافة
+	Lines deleted	الأسطر المحذوفة
+	Link	رابط
+	List	قائمة
+	List view	عرض القائمة
+	Location	الموقع
+	Lock	قفل
+	Locked	مقفل
+	Low	منخفضة
+	Magenta	أرجواني
+	Magnification	التكبير
+	Margins	الهوامش
+	Maximize	تكبير
+	Maximum	القصوى
+	Measure	قياس
+	Medium	متوسطة
+	Merge Cells	دمج الخلايا
+	Merged PRs	طلبات السحب المدموجة
+	Metadata	البيانات الوصفية
+	Midpoint	نقطة منتصف
+	Minimize	تصغير
+	Minimum	الأدنى
+	Mirror	مرآة
+	Mobile	الهاتف المحمول
+	Model	النموذج
+	Models	النماذج
+	Modified	تاريخ التعديل
+	Modify	تعديل
+	More	المزيد
+	Move	نقل
+	Name	الاسم
+	Name (A–Z)	الاسم (أ–ي)
+	Name:	الاسم:
+	Never	أبداً
+	New	جديد
+	New Layer	طبقة جديدة
+	Next	التالي
+	Next Change	التغيير التالي
+	Next page	الصفحة التالية
+	No	لا
+	No limit	بلا حد
+	No matches.	لا توجد تطابقات.
+	No recent files	لا توجد ملفات أخيرة
+	No results	لا نتائج
+	No selection	لا تحديد
+	None	لا شيء
+	Not available	غير متاح
+	Number	رقم
+	Object	كائن
+	Odd pages only	الصفحات الفردية فقط
+	Off	متوقف
+	Offset	الإزاحة
+	OK	موافق
+	On	تشغيل
+	Opacity	العتامة
+	Opacity:	العتامة:
+	Open	فتح
+	Open link	فتح الرابط
+	Open Recent	فتح الملفات الأخيرة
+	Open…	فتح…
+	Options	الخيارات
+	Options…	خيارات…
+	Orange	برتقالي
+	Orientation:	الاتجاه:
+	Original	الأصل
+	Outline	مخطط
+	Output	الناتج
+	Oval	شكل بيضاوي
+	Overlap:	التداخل:
+	Overlay	تراكب
+	Page	صفحة
+	Pages	الصفحات
+	Panels	اللوحات
+	Password	كلمة المرور
+	Paste	لصق
+	Path	مسار
+	Paths	المسارات
+	Pattern	النمط
+	Percent	مئوية
+	Percentage	نسبة مئوية
+	Perimeter	المحيط
+	Photo	صورة
+	Pink	وردي
+	Point	تأشير
+	Polygon	مضلع
+	Polyline	خط متعدد
+	Portrait	عمودي
+	Position	الموضع
+	Poster	ملصق
+	Preferences	التفضيلات
+	Preferences…	التفضيلات…
+	Prefix	البادئة
+	Preview	معاينة
+	Previous	السابق
+	Previous Change	التغيير السابق
+	Previous page	الصفحة السابقة
+	Print	طباعة
+	Printer:	الطابعة:
+	Printing	الطباعة
+	Print…	طباعة…
+	Properties	خصائص
+	Protect	حماية
+	PRs	طلبات السحب
+	Purple	بنفسجي
+	Pyramid	هرم
+	Quality	الجودة
+	Radius	نصف القطر
+	Ready	جاهز
+	Real name	الاسم الحقيقي
+	Recent	الأخيرة
+	Recover	استعادة
+	Rectangle	مستطيل
+	Rectangular	مستطيل
+	Red	أحمر
+	Redo	إعادة
+	Refresh	تحديث
+	Relative	نسبي
+	Reload	إعادة تحميل
+	Remove	إزالة
+	Rename	إعادة تسمية
+	Replace	استبدال
+	Reply	رد
+	Report	تقرير
+	Resize panel window	تغيير حجم نافذة اللوحة
+	Resize panels	تغيير حجم اللوحات
+	Resolution	الدقة
+	Resolution:	الدقة:
+	Restore	استعادة
+	Reveal in Finder	إظهار في Finder
+	Reverse	عكس
+	Reverse the order	عكس الترتيب
+	Revert	استرجاع
+	Review	مراجعة
+	Right	يمين
+	Rotate	تدوير
+	Rotate:	تدوير:
+	Rotation	التدوير
+	Rotation:	التدوير:
+	Rows	الصفوف
+	Save	حفظ
+	Save As	حفظ باسم
+	Save as PDF	حفظ بصيغة PDF
+	Scale	تحجيم
+	Scripts	السكربتات
+	Search	بحث
+	Security	الأمان
+	Select	تحديد
+	Select All	تحديد الكل
+	Select Objects	تحديد كائنات
+	Selected pages	الصفحات المحددة
+	Selection	التحديد
+	Send to Back	إرسال إلى الخلف
+	Sensitivity	الحساسية
+	Sent to {printer}	أُرسل إلى {printer}
+	Services	الخدمات
+	Settings	الإعدادات
+	Share	مشاركة
+	Show	إظهار
+	Show All	إظهار الكل
+	Show:	إظهار:
+	Size	الحجم
+	Sort	فرز
+	Sort by	فرز حسب
+	Source	المصدر
+	Special	خاص
+	Split	تقسيم
+	Square	مربع
+	Stamp	ختم
+	Standard	قياسي
+	Star	نجمة
+	Status	الحالة
+	Status Bar	شريط الحالة
+	Stretch	تمديد
+	Strikethrough	شطب
+	Style	النمط
+	Subject	الموضوع
+	Subset	مجموعة جزئية
+	Subtract	طرح
+	Summary	الملخص
+	System	النظام
+	Table	جدول
+	Table style	نمط الجدول
+	Tables	الجداول
+	Tabloid	Tabloid
+	Text	نص
+	The passwords don't match.	كلمتا المرور غير متطابقتين.
+	Theme	السمة
+	Thickness	السماكة
+	This document has no bookmarks.	هذا المستند لا يحتوي على إشارات مرجعية.
+	Thumbnails	المصغرات
+	Time	وقت
+	Title	العنوان
+	To	إلى
+	Tool	أداة
+	Tools	الأدوات
+	Top	أعلى
+	Total	الإجمالي
+	Translate	ترجمة
+	Transparency	شفافية
+	Type	النوع
+	Typewriter	آلة كاتبة
+	Underline	تسطير
+	Undo	تراجع
+	Undo {action}	التراجع عن {action}
+	Ungroup	فك التجميع
+	Union	اتحاد
+	Units	الوحدات
+	Unknown	غير معروف
+	Unlock	إلغاء القفل
+	Up	أعلى
+	Update	تحديث
+	User	مستخدم
+	Username	اسم المستخدم
+	Value	القيمة
+	Value:	القيمة:
+	Variables	متغيرات
+	Version	الإصدار
+	Version {version}	الإصدار {version}
+	Vertical	عمودي
+	Vertically	عموديًا
+	View	عرض
+	Warning	تحذير
+	Warnings	التحذيرات
+	Watermark	علامة مائية
+	White	أبيض
+	Width	العرض
+	Width:	العرض:
+	Window	نافذة
+	Words	الكلمات
+	X	X
+	Y	Y
+	Yellow	أصفر
+	Yes	نعم
+	yesterday	أمس
+	Your changes will be lost if you don't save them.	ستفقد تغييراتك إن لم تحفظها.
+	Zoom	التكبير
+	Zoom In	تكبير
+	Zoom in	تكبير
+	Zoom Out	تصغير
+	Zoom out	تصغير
+@plural	{n} byte|{n} bytes	{n} بايت|{n} بايت|{n} بايتان|{n} بايتات|{n} بايتاً|{n} بايت
+@plural	{n} commit|{n} commits	{n} إيداع|{n} إيداع|{n} إيداعان|{n} إيداعات|{n} إيداعاً|{n} إيداع
+	{n} files	{n} ملفات
+	{n} h ago	قبل {n} ساعة
+	{n} min ago	قبل {n} دقيقة
+	−Bin	−Bin

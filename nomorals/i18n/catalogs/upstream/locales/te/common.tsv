@@ -1,0 +1,386 @@
+# తెలుగు (te) interface catalog for every Crafting App.
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   @plural  English `one|other`; the translation lists this language's plural forms, `|`-separated.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary. No other product's localisation, string table or translated UI was
+# consulted or copied; add entries the same way.
+
+	% of all commits	మొత్తం కమిట్‌లలో %
+	(none)	(ఏదీ లేదు)
+	1 file	1 ఫైల్
+	About	పరిచయం
+	Accessibility	యాక్సెసిబిలిటీ
+	Actions	చర్యలు
+	Active	సక్రియం
+	Actual Size	అసలు పరిమాణం
+	Add	జోడించు
+	Add a comment	వ్యాఖ్యను జోడించండి
+	Advanced	అధునాతనం
+	Align	అమరిక
+	Align left	ఎడమకు అమర్చు
+	Align right	కుడికి అమర్చు
+	Alignment:	అమరిక:
+	All	అన్నీ
+	All pages	అన్ని పేజీలు
+	Angle	కోణం
+	Animation effects	యానిమేషన్ ప్రభావాలు
+	Any	ఏదైనా
+	Appearance	రూపం
+	Application	అప్లికేషన్
+	Apply	వర్తింపజేయి
+	Area	వైశాల్యం
+	Arrow	బాణం
+	ArtCraft website	ArtCraft వెబ్‌సైట్
+	Author	రచయిత
+	Auto	ఆటో
+	Auto ({percent}%)	ఆటో ({percent}%)
+	Available	అందుబాటులో ఉంది
+	Background	నేపథ్యం
+	Binary assets added	జోడించిన బైనరీ ఫైల్‌లు
+	Binary assets removed	తీసివేసిన బైనరీ ఫైల్‌లు
+	Black	నలుపు
+	Black and white	నలుపు తెలుపు
+	Blue	నీలం
+	Bold	బోల్డ్
+	Both	రెండూ
+	Both sides	రెండు వైపులా
+	Bottom	కింద
+	Bottom:	కింద:
+	Browse…	బ్రౌజ్ చేయి…
+	Calculate	గణన
+	Cancel	రద్దు చేయి
+	Category:	వర్గం:
+	Center	మధ్య
+	Characters	అక్షరాలు
+	Check for updates	అప్‌డేట్‌ల కోసం తనిఖీ చేయి
+	Circle	వృత్తం
+	Clear	క్లియర్ చేయి
+	Clear All	అన్నీ క్లియర్ చేయి
+	Clear Recent Files	ఇటీవలి ఫైళ్లను క్లియర్ చేయి
+	Clipboard	క్లిప్‌బోర్డ్
+	Close	మూసివేయి
+	Close (Esc)	మూసివేయి (Esc)
+	Collapse	ముడుచు
+	Collate	కాపీలను క్రమంలో అమర్చు
+	Color:	రంగు:
+	Colour	రంగు
+	Combine	కలుపు
+	Command	కమాండ్
+	Comments	వ్యాఖ్యలు
+	Commits	కమిట్‌లు
+	Company	సంస్థ
+	Compare	పోల్చు
+	Compatibility	అనుకూలత
+	Compression	కుదింపు
+	Continue	కొనసాగించు
+	Contributors	సహకారులు
+	Convert	మార్పిడి
+	Copies:	కాపీలు:
+	Copy	కాపీ చేయి
+	Couldn't open {name}: {e}	{name}ను తెరవడం సాధ్యం కాలేదు: {e}
+	Create	సృష్టించు
+	Cross	క్రాస్ గుర్తు
+	Current page	ప్రస్తుత పేజీ
+	Custom	అనుకూల
+	Cut	కత్తిరించు
+	Dark	డార్క్
+	Dark gray	ముదురు బూడిద రంగు
+	Dashed	డ్యాష్డ్
+	Date	తేదీ
+	Date format	తేదీ ఫార్మాట్
+	Dates	తేదీలు
+	Default	డిఫాల్ట్
+	Delete	తొలగించు
+	Deleted	తొలగింపు
+	Description	వివరణ
+	Description:	వివరణ:
+	Details	వివరాలు
+	Diamond	వజ్రాకారం
+	Direction:	దిశ:
+	Discard	విస్మరించు
+	Dismiss	మూసివేయి
+	Display name	ప్రదర్శించే పేరు
+	Distance	దూరం
+	Distribute	సమాన అంతరం
+	Document	పత్రం
+	Document Title	పత్రం శీర్షిక
+	Done	పూర్తయింది
+	Dot	చుక్క
+	Double-click	డబుల్-క్లిక్
+	Download	డౌన్‌లోడ్ చేయి
+	Draw	గీయి
+	Duplicate…	నకలు చేయి…
+	Dynamic	డైనమిక్
+	Edit	సవరణ
+	Editing	సవరించడం
+	Edit…	సవరించు…
+	Endpoint	అంత్య బిందువు
+	Erase	చెరిపివేయి
+	Eraser	ఎరేజర్
+	Even pages only	సరి పేజీలు మాత్రమే
+	Example: {sample}	ఉదాహరణ: {sample}
+	Expand	విస్తరించు
+	Export	ఎగుమతి చేయి
+	Export to	ఎగుమతి ఫార్మాట్
+	Exported to {path}	{path}కు ఎగుమతి చేయబడింది
+	Export…	ఎగుమతి చేయి…
+	Extract	వేరు తీయి
+	Field	ఫీల్డ్
+	Field properties	ఫీల్డ్ లక్షణాలు
+	Fields	ఫీల్డ్‌లు
+	File	ఫైల్
+	File Name	ఫైల్ పేరు
+	Fill	నింపడం
+	Find…	కనుగొను…
+	First	మొదటి
+	First commit	మొదటి కమిట్
+	Fit	సరిపోయేలా
+	Flatten	ఫ్లాటెన్ చేయి
+	Flip Horizontal	అడ్డంగా తిరగేయి
+	Flip Vertical	నిలువుగా తిరగేయి
+	Font size	ఫాంట్ పరిమాణం
+	Font Size:	ఫాంట్ పరిమాణం:
+	Font:	ఫాంట్:
+	Fonts	ఫాంట్‌లు
+	Format	ఫార్మాట్
+	Format:	ఫార్మాట్:
+	From	పరిధి
+	Full Screen	పూర్తి తెర
+	General	సాధారణం
+	Graphic	గ్రాఫిక్
+	Gray	బూడిద రంగు
+	Green	ఆకుపచ్చ
+	Grid view	గ్రిడ్ వీక్షణ
+	Headings	హెడింగ్‌లు
+	Height	ఎత్తు
+	Height:	ఎత్తు:
+	Help	సహాయం
+	Hidden text	దాచిన టెక్స్ట్
+	High	ఎక్కువ
+	High Resolution	అధిక రిజల్యూషన్
+	High resolution	అధిక రిజల్యూషన్
+	Home	హోమ్
+	Horizontal	అడ్డంగా
+	Horizontal scale	అడ్డు స్కేల్
+	Horizontally	అడ్డంగా
+	Icon	చిహ్నం
+	Image	చిత్రం
+	Images	చిత్రాలు
+	Index	ఇండెక్స్
+	Insert	చొప్పించు
+	Interface language	ఇంటర్‌ఫేస్ భాష
+	Intersection	ఖండన బిందువు
+	Invert	విలోమం
+	Italic	ఇటాలిక్
+	Join our Discord	మా Discordలో చేరండి
+	Join the ArtCraft Discord	ArtCraft Discordలో చేరండి
+	just now	ఇప్పుడే
+	Justify	రెండు వైపులా అమర్చు
+	Keywords	కీలక పదాలు
+	Label	లేబుల్
+	Labels	లేబుల్‌లు
+	Landscape	అడ్డం
+	Language	భాష
+@id	language.name	తెలుగు
+	Last	చివరి
+	Last commit	చివరి కమిట్
+	Later	తర్వాత
+	Layers	లేయర్‌లు
+	Left	ఎడమ
+	Left:	ఎడమ:
+	Light	లైట్
+	Light gray	లేత బూడిద రంగు
+	Line	గీత
+	Line delta	పంక్తుల నికర మార్పు
+	Line spacing	పంక్తి అంతరం
+	Lines +/−	పంక్తులు +/−
+	Lines added	జోడించిన పంక్తులు
+	Lines deleted	తొలగించిన పంక్తులు
+	Link	లింక్
+	List	లిస్ట్ బాక్స్
+	List view	జాబితా వీక్షణ
+	Location	స్థానం
+	Locked	లాక్ చేయబడింది
+	Low	తక్కువ
+	Magnification	జూమ్ స్థాయి
+	Margins	మార్జిన్‌లు
+	Maximize	గరిష్ఠీకరించు
+	Maximum	గరిష్ఠం
+	Measure	కొలత
+	Medium	మధ్యస్థం
+	Merged PRs	విలీనం చేసిన PRలు
+	Metadata	మెటాడేటా
+	Midpoint	మధ్య బిందువు
+	Minimize	కనిష్ఠీకరించు
+	Minimum	కనిష్ఠం
+	Mobile	మొబైల్
+	Model	మోడల్
+	Models	మోడల్‌లు
+	Modified	సవరించిన తేదీ
+	More	మరిన్ని
+	Name	పేరు
+	Name (A–Z)	పేరు (A–Z)
+	Name:	పేరు:
+	Next page	తదుపరి పేజీ
+	No	కాదు
+	No limit	పరిమితి లేదు
+	No matches.	సరిపోలికలు ఏవీ లేవు.
+	No recent files	ఇటీవలి ఫైళ్లు లేవు
+	None	ఏదీ లేదు
+	Number	సంఖ్య
+	Odd pages only	బేసి పేజీలు మాత్రమే
+	Off	ఆఫ్
+	OK	సరే
+	Opacity	అపారదర్శకత
+	Opacity:	అపారదర్శకత:
+	Open	తెరువు
+	Open link	లింక్‌ను తెరువు
+	Open Recent	ఇటీవలివి తెరువు
+	Open…	తెరువు…
+	Options	ఎంపికలు
+	Options…	ఎంపికలు…
+	Orange	నారింజ రంగు
+	Orientation:	దిశ:
+	Original	అసలు
+	Outline	అవుట్‌లైన్
+	Output	అవుట్‌పుట్
+	Oval	అండాకారం
+	Overlap:	అతివ్యాప్తి:
+	Page	పేజీ
+	Pages	పేజీలు
+	Panels	ప్యానెల్‌లు
+	Password	పాస్‌వర్డ్
+	Path	పాత్
+	Paths	పాత్‌లు
+	Pattern	నమూనా
+	Percentage	శాతం
+	Perimeter	చుట్టుకొలత
+	Photo	ఫోటో
+	Pink	గులాబీ రంగు
+	Polygon	పాలీగాన్
+	Polyline	పాలీలైన్
+	Portrait	నిలువు
+	Position	స్థానం
+	Poster	పోస్టర్
+	Preferences	ప్రాధాన్యతలు
+	Preferences…	ప్రాధాన్యతలు…
+	Prefix	ప్రిఫిక్స్
+	Preview	ప్రివ్యూ
+	Previous page	మునుపటి పేజీ
+	Print	ముద్రించు
+	Printer:	ప్రింటర్:
+	Printing	ముద్రణ
+	Print…	ముద్రించు…
+	Protect	రక్షణ
+	PRs	PRలు
+	Purple	ఊదా
+	Quality	నాణ్యత
+	Ready	సిద్ధం
+	Real name	అసలు పేరు
+	Recent	ఇటీవలి
+	Recover	పునరుద్ధరించు
+	Rectangle	దీర్ఘచతురస్రం
+	Red	ఎరుపు
+	Redo	మళ్లీ చేయి
+	Reload	మళ్లీ లోడ్ చేయి
+	Remove	తీసివేయి
+	Rename	పేరు మార్చు
+	Replace	భర్తీ చేయి
+	Reply	ప్రత్యుత్తరం ఇవ్వు
+	Report	నివేదిక
+	Resize panel window	ప్యానెల్ విండో పరిమాణం మార్చు
+	Resize panels	ప్యానెల్‌ల పరిమాణం మార్చు
+	Resolution	రిజల్యూషన్
+	Resolution:	రిజల్యూషన్:
+	Restore	పునరుద్ధరించు
+	Reveal in Finder	Finderలో చూపు
+	Reverse the order	వ్యతిరేక క్రమానికి మార్చు
+	Revert	సేవ్ చేసిన స్థితికి మార్చు
+	Review	సమీక్ష
+	Right	కుడి
+	Rotate	తిప్పు
+	Rotate:	తిప్పాల్సినవి:
+	Rotation	భ్రమణం
+	Rotation:	భ్రమణం:
+	Rows	వరుసలు
+	Save	సేవ్ చేయి
+	Save as PDF	PDFగా సేవ్ చేయి
+	Scripts	స్క్రిప్ట్‌లు
+	Search	శోధన
+	Security	భద్రత
+	Select All	అన్నీ ఎంచుకో
+	Selected pages	ఎంచుకున్న పేజీలు
+	Selection	ఎంచుకున్నవి
+	Sensitivity	సున్నితత్వం
+	Sent to {printer}	{printer}కు పంపబడింది
+	Settings	సెట్టింగ్‌లు
+	Show	చూపించు
+	Show:	చూపించు:
+	Size	పరిమాణం
+	Sort	క్రమపరిచే విధానం
+	Sort by	క్రమపరిచే విధానం
+	Source	మూలం
+	Special	ప్రత్యేకం
+	Split	విభజించు
+	Square	చతురస్రం
+	Stamp	స్టాంప్
+	Standard	ప్రామాణికం
+	Star	నక్షత్రం
+	Status	స్థితి
+	Strikethrough	కొట్టివేత
+	Style	శైలి
+	Subject	విషయం
+	Subset	ఉపసమితి
+	Summary	సారాంశం
+	Table	పట్టిక
+	Tables	పట్టికలు
+	Text	టెక్స్ట్
+	The passwords don't match.	పాస్‌వర్డ్‌లు సరిపోలడం లేదు.
+	Thickness	మందం
+	This document has no bookmarks.	ఈ పత్రంలో బుక్‌మార్క్‌లు లేవు.
+	Thumbnails	థంబ్‌నెయిల్‌లు
+	Time	సమయం
+	Title	శీర్షిక
+	Tool	సాధనం
+	Tools	సాధనాలు
+	Top	పైన
+	Total	మొత్తం
+	Translate	అనువదించు
+	Type	రకం
+	Typewriter	టైప్‌రైటర్
+	Underline	అండర్‌లైన్
+	Undo	రద్దు చేయి
+	Undo {action}	రద్దు చేయి: {action}
+	Units	యూనిట్‌లు
+	Unknown	తెలియని
+	Unlock	అన్‌లాక్ చేయి
+	Up	పైకి
+	Update	అప్‌డేట్ చేయి
+	Username	వినియోగదారు పేరు
+	Value:	విలువ:
+	Version	వెర్షన్
+	Vertical	నిలువుగా
+	Vertically	నిలువుగా
+	View	వీక్షణ
+	Warnings	హెచ్చరికలు
+	Watermark	వాటర్‌మార్క్
+	Width	వెడల్పు
+	Width:	వెడల్పు:
+	Words	పదాలు
+	Yellow	పసుపు
+	Yes	అవును
+	yesterday	నిన్న
+	Your changes will be lost if you don't save them.	మీరు సేవ్ చేయకపోతే మీ మార్పులు పోతాయి.
+	Zoom	జూమ్
+	Zoom in	జూమ్ పెంచు
+	Zoom out	జూమ్ తగ్గించు
+	{n} files	{n} ఫైల్‌లు
+	{n} h ago	{n} గం. క్రితం
+	{n} min ago	{n} నిమి. క్రితం
+	−Bin	−బైనరీ

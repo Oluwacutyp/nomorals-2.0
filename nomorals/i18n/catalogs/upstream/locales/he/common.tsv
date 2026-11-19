@@ -1,0 +1,1293 @@
+# עברית (he) interface catalog for every Crafting App.
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   @plural  English `one|other`; the translation lists this language's plural forms, `|`-separated.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary. No other product's localisation, string table or translated UI was
+# consulted or copied; add entries the same way.
+
+@id	language.name	עברית
+	% of all commits	% מכלל הקומיטים
+	(Custom)	(מותאם אישית)
+	(none)	(ללא)
+#	1 file	
+#	16 bit	
+#	24 bit	
+#	24 bits/pixel	
+#	32 bit	
+#	32 bits/pixel	
+#	8 bit	
+	About	אודות
+#	Absolute	
+#	Absolute Colorimetric	
+#	Accented Edges	
+	Accessibility	נגישות
+#	Accurate	
+#	Actions	
+#	Activate Panel	
+#	Active	
+#	Actual Size	
+#	Adaptive	
+	Add	הוספה
+	Add a comment	הוספת הערה
+#	Add Guide	
+	Add to Dictionary	הוספה למילון
+#	Add to favorites	
+#	Add to Swatches	
+	Adjust	התאמה
+#	Adjustments	
+	Advanced	מתקדם
+	Align	יישור
+#	Align center	
+	Align Left	יישור לשמאל
+#	Align left	
+	Align Right	יישור לימין
+#	Align right	
+	Align Text	יישור טקסט
+#	Align to Selection	
+	Alignment	יישור
+	Alignment:	יישור:
+	All	הכול
+	All Caps	אותיות רישיות בלבד
+#	All Categories	
+	All files	כל הקבצים
+#	All Layers	
+	All pages	כל העמודים
+#	All Slices	
+#	Alpha	
+#	Alt	
+#	Always	
+#	Amount	
+#	Amount:	
+#	Angle	
+#	Angle:	
+#	Angular	
+	Animation	הנפשה
+#	Animation effects	
+#	Anti-Alias	
+#	Anti-alias	
+#	Any	
+#	Appearance	
+#theme	Appearance	
+#	Appearance Settings…	
+#	Application	
+	Apply	החלה
+	Apply Character Style	החלת סגנון תווים
+#	Apply Data Set	
+	Apply to:	החלה על:
+#	Arc	
+	Area	שטח
+	Arrange	סידור
+	Arrow	חץ
+	Arrows	חצים
+#	Artboard	
+#	Artboards	
+#	ArtCraft	
+#	ArtCraft Website	
+#	ArtCraft website	
+#	Artistic	
+	Ascending	בסדר עולה
+#	Aspect Ratio	
+	Assign	הקצאה
+#	Assign Profile…	
+#	Audio	
+	Author	מחבר
+#	Author:	
+	Auto	אוטומטי
+	Auto ({percent}%)	אוטומטי ({percent}%)
+#	Auto Color	
+#	Automate	
+	Automatic	אוטומטי
+#	Automatically	
+#	Available	
+#	Average	
+#	Background	
+#	Background Color	
+#	Background Contents	
+	Backspace	Backspace
+#	Balance	
+	Bar	פס
+#	Baseline	
+#	Baseline Shift	
+#	Basic	
+#	Basic Latin	
+#	Batch	
+#	Batch…	
+#	Bend:	
+#	Bicubic	
+	Binary assets added	נכסים בינאריים שנוספו
+	Binary assets removed	נכסים בינאריים שהוסרו
+#	Bitmap	
+#	Black	
+#	Black & White	
+#	Black and white	
+#	Black Intensity	
+#	Blacks	
+#	Blend Mode	
+#	Blending Mode	
+#	Block	
+#	Blocks	
+#	Blue	
+#	Blur	
+#	Blur Angle	
+	Bold	מודגש
+#	Border	
+#	Border Thickness	
+	Borders	גבולות
+#	Both	
+#	Both sides	
+	Bottom	למטה
+#	Bottom Left	
+#	Bottom Right	
+	Bottom:	למטה:
+	Break Link	ניתוק קישור
+#	Brick	
+#	Brightness	
+	Bring Forward	הבאה קדימה
+#	Bring to Front	
+#	Brown	
+#	Browse	
+	Browse…	עיון…
+#	Brush Size	
+#	Brush Strokes	
+#	Brushes	
+#	Bulge	
+	Bullet	תבליט
+#	Burlap	
+#	Calculate	
+	Cancel	ביטול
+#	Canvas	
+	Caption	כיתוב
+#	Cascade	
+#	Case Sensitive	
+	Category	קטגוריה
+#	Category:	
+	Cell Size	גודל תא
+	Center	מרכז
+#	Center X	
+#	Center Y	
+	Centered	ממורכז
+	Centimeters	סנטימטרים
+#	Chamfer	
+	Change	שינוי
+#	Change All	
+	Change Case	שינוי רישיות
+#	Change Panel Layout	
+#	Channel	
+#	Channel Mixer	
+#	Channels	
+	Character	תו
+#	Character Styles	
+	Characters	תווים
+#	Check for Updates	
+#	Check for updates	
+#	Check Spelling…	
+#	Checkerboard	
+#	Choose…	
+	Circle	עיגול
+	City	עיר
+#	Clarity	
+#	Classic	
+	Clear	ניקוי
+	Clear All	ניקוי הכול
+#	Clear Guides	
+#	Clear History	
+#	Clear Recent Files	
+	Clipboard	לוח
+#	Clipping Mask	
+#	Clone	
+	Close	סגירה
+#	Close (Esc)	
+#	Close All	
+#	Close Panel	
+#	Cmd	
+#	CMYK Color	
+#	CMYK:	
+#	Coarse Dots	
+	Collapse	כיווץ
+#	Collate	
+	Color	צבע
+#	Color Balance	
+#	Color Burn	
+#	Color Dodge	
+#	Color Management	
+#	Color Mode	
+#	Color Picker	
+#	Color Settings	
+#	Color Settings…	
+#	Color Space	
+#	Color Swatches	
+#	Color Table	
+	Color:	צבע:
+#	Colorize	
+	Colors	צבעים
+	Colors:	צבעים:
+#	Color…	
+#	Colour	
+	Column width	רוחב עמודה
+	Columns	עמודות
+	Columns:	עמודות:
+	Combine	שילוב
+#	Command	
+	Commands:	פקודות:
+	Comment	הערה
+	Comments	הערות
+	Commits	קומיטים
+#	Community	
+	Company	חברה
+	Compare	השוואה
+	Comparison	השוואה
+#	Compatibility	
+#	Composite	
+#	Compression	
+#	Cone	
+	Contains	מכיל
+#	Continue	
+#	Contrast	
+	Contributors	תורמים
+	Convert	המרה
+#	Convert to Shape	
+#	Convert to sRGB	
+	Copies	עותקים
+#	Copies:	
+	Copy	העתקה
+	Copyright	זכויות יוצרים
+#	Copyrighted	
+#	Corner	
+#	Corners	
+#	Correction	
+#	Couldn't open {name}: {e}	
+#@msg	Couldn't open {name}: {e}	
+	Country	מדינה
+#	Crack Brightness	
+#	Crack Depth	
+#	Crack Spacing	
+	Create	יצירה
+#	Create Clipping Mask	
+	Crop	חיתוך
+#	Cross	
+#	Crosshatch	
+#	Crystallize	
+#	Crystallize…	
+#	Ctrl	
+	Current	נוכחי
+	Current page	העמוד הנוכחי
+#	Current Time	
+#	Curvature	
+#	Curve	
+#	Curves	
+#	Curves…	
+	Custom	מותאם אישית
+	Customize…	התאמה אישית…
+	Cut	גזירה
+#	Cyan	
+	Dark	כהה
+#	Dark Gray	
+#	Dark gray	
+#	Dark Strokes	
+#	Dark Theme	
+#	Darken	
+#	Darkness	
+	Dashed	מקווקו
+	Data	נתונים
+#	Data Sets	
+#	Date	
+	Date and Time	תאריך ושעה
+#	Date Created	
+	Date format	תבנית תאריך
+#	Dates	
+#	De-Interlace	
+	Decrease Font Size	הקטנת גודל הגופן
+	Default	ברירת מחדל
+	Delete	מחיקה
+#	Delete Brush	
+#	Delete Group	
+#	Delete Layer	
+#	Delete Mask	
+	Delete Style	מחיקת סגנון
+#	Delete Workspace	
+	Deleted	נמחק
+#	Delete…	
+#	Depth	
+#	Desaturate	
+	Descending	בסדר יורד
+#	Description	
+	Description:	תיאור:
+#	Deselect	
+#	Deselect All	
+#	Destination	
+#	Destination:	
+#	Details	
+	Diagonal	אלכסוני
+#	Diameter	
+#	Diameter:	
+	Diamond	מעוין
+#	Difference	
+#	Diffuse Glow	
+#	Diffusion	
+#	Digits	
+#	Dimensions	
+#	Direct Selection Tool	
+#	Direction	
+#	Direction Balance	
+	Direction:	כיוון:
+#	Discard	
+	Discord	Discord
+#	Discretionary Ligatures	
+#	Dismiss	
+	Display	תצוגה
+	Display name	שם תצוגה
+#	Distance	
+#	Distort	
+#	Distortion	
+#	Distribute	
+#	Divide	
+#	Dock Panel	
+	Document	מסמך
+	Document Title	כותרת המסמך
+	Documents	מסמכים
+	Don't Save	לא לשמור
+#	Done	
+	Dot	נקודה
+	Dots	נקודות
+	Dotted	מנוקד
+#	Double-click	
+	Down	למטה
+#	Download	
+	Draft	טיוטה
+	Draw	ציור
+#	Drop Shadow	
+#	Drop Shadow…	
+#	Duplicate	
+#	Duplicate Layer	
+#	Duplicate…	
+#	Duplication	
+#	Duration	
+	Dutch	הולנדית
+#	Dynamic	
+#	Dynamics	
+#	Edge	
+#	Edge Brightness	
+#	Edge Intensity	
+#	Edge Only	
+#	Edge Simplicity	
+#	Edge Thickness	
+#	Edge Width	
+#	Edit	
+#	Edit Contents	
+#	Edit Original	
+#	Edit Toolbar	
+	Editing	עריכה
+	Edit…	עריכה…
+#	Effect	
+	Effects	אפקטים
+#	Elevation	
+#	Eliminate	
+#	Ellipse	
+#	Ellipse Tool	
+	Ellipsis	שלוש נקודות
+	Em Dash	מקף ארוך
+	Em Space	רווח Em
+#	Embed	
+	Emboss	תבליט
+	En Dash	מקף בינוני
+	En Space	רווח En
+#	Enable	
+#	Endpoint	
+#	Enlarged	
+#	Enter	
+#	Entire Font	
+	Envelope DL	מעטפה DL
+#	Erase	
+	Eraser	מחק
+#	Eraser Tool	
+#	Error	
+#	Even Fields	
+	Even pages only	עמודים זוגיים בלבד
+#	Exact	
+	Example: {sample}	דוגמה: {sample}
+#	Exclusion	
+#	Exit	
+	Expand	הרחבה
+	Export	ייצוא
+#	Export As	
+#	Export As…	
+#	Export Options	
+	Export PDF	ייצוא PDF
+#	Export to	
+#	Exported to {path}	
+	Exported {path}	הייצוא הושלם: {path}
+#	Export…	
+#	Exposure	
+	Expression	ביטוי
+#	Extract	
+#	Eyedropper	
+#	Eyedropper Tool	
+#	Faded Film	
+#	Fast	
+#	Favorites	
+#	Feather	
+	Field	שדה
+	Field properties	מאפייני שדה
+	Fields	שדות
+	Fields:	שדות:
+	File	קובץ
+#	File Format	
+#	File Handling	
+#	File Info…	
+#	File Name	
+#	File Size	
+#@id	file.close	
+#	Files	
+	Fill	מילוי
+#	Fill:	
+#	Filter	
+	Find	חיפוש
+	Find and Replace	חיפוש והחלפה
+	Find Next	חיפוש הבא
+	Find:	חיפוש:
+#	Find…	
+#	Fine Dots	
+	Finish	סיום
+	First	ראשון
+	First commit	הקומיט הראשון
+	Fit	התאמה
+#	Fit in View	
+#	Fixed	
+#	Flash	
+#	Flatten	
+#	Flip	
+	Flip Horizontal	היפוך אופקי
+	Flip Vertical	היפוך אנכי
+	Focus	מיקוד
+#	Folder	
+	Font	גופן
+	Font Size	גודל גופן
+#	Font size	
+#	Font Size:	
+	Font:	גופן:
+	Fonts	גופנים
+	Format	עיצוב
+	Format:	עיצוב:
+#	Fractions	
+#	Frame	
+#	Free	
+#	Free Transform	
+#	French	
+#	Frequency	
+#	From	
+#	Frosted	
+#	Full	
+	Full Screen	מסך מלא
+#	Full Screen Mode	
+	Functions	פונקציות
+#	Gamma	
+#	Gamma Correction	
+#	Gamut Warning	
+#	Gaussian Blur	
+#	Gaussian Blur…	
+	General	כללי
+#	General…	
+#	Generate	
+	Geometry	גאומטריה
+#	German	
+#	GitHub	
+#	Glass	
+#	Global	
+	Glow	זוהר
+#	Glow Brightness	
+#	Glow Size	
+#	Glyphs	
+#	Good	
+#	Gradient	
+#	Gradient Tool	
+#	Gradients	
+#	Grain	
+#	Grain Type	
+#	Graininess	
+#	Grainy Dots	
+	Graphic	גרפיקה
+#	Graphics	
+#	Gray	
+#	Gray Gamma 2.2	
+	Grayscale	גווני אפור
+#	Green	
+#	Grid	
+#	Grid Size:	
+#	Grid view	
+#	Gridline every	
+	Group	קיבוץ
+#	Group with	
+#	Groups	
+#	Grout Width	
+#	Guides	
+#	Halftone Pattern	
+#	Hand	
+#	Hand Tool	
+#	Hard	
+#	Hard Light	
+#	Hard Mix	
+	Headings	כותרות
+	Heart	לב
+#	Height	
+	Height:	גובה:
+	Help	עזרה
+#	Hexagon	
+	Hidden	מוסתר
+	Hidden text	טקסט מוסתר
+#	Hide	
+#	Hide All	
+#	Hide Grid	
+#	Hide Others	
+#	High	
+#	High Pass	
+#	High Resolution	
+#	High resolution	
+#	Highlight Area	
+#	Highlights	
+	Hindi	הינדי
+#	Histogram	
+#	History	
+	Hollow	חלול
+	Home	בית
+	Horizontal	אופקי
+#	Horizontal scale	
+#	Horizontally	
+#	Hue	
+#	Hue Shift	
+#	Hue/Saturation…	
+	Hyphenation	מיקוף
+#	Icon	
+#	Ignore	
+	Ignore All	התעלמות מהכול
+#	Image	
+#	Image Size	
+#	Images	
+#	Import	
+	Import…	ייבוא…
+	Inches	אינצ'ים
+	Increase Font Size	הגדלת גודל גופן
+	Index	אינדקס
+	Inflate	ניפוח
+	Info	מידע
+#	Inner Glow…	
+#	Input:	
+	Insert	הוספה
+#	Inside	
+	Inspect Document	בדיקת מסמך
+#	Install Plug-in	
+#	Install Plug-in…	
+#	Intensity	
+	Interface	ממשק
+#	Interface Language	
+	Interface language	שפת הממשק
+	Interface Theme	ערכת נושא לממשק
+#	Interlaced	
+#	Interpolation	
+#	Intersect	
+	Intersection	חיתוך
+#	Invert	
+#	Invert Mask	
+#	Isolate	
+	Italian	איטלקית
+	Italic	נטוי
+	Japanese	יפנית
+#	Join	
+#	Join our Discord	
+#	Join the ArtCraft Discord	
+#	Join the ArtCraft Discord…	
+#	Join us on Discord	
+#	just now	
+	Justification	יישור
+	Justify	יישור לשני הצדדים
+#	Keep:	
+#	Kerning	
+#	Keyboard Shortcuts	
+#	Keyboard Shortcuts…	
+	Keywords	מילות מפתח
+#	Kind	
+	Korean	קוריאנית
+#	Lab	
+#	Label	
+	Labels	תוויות
+	Landscape	לרוחב
+	Language	שפה
+#	Language Options	
+#	Language:	
+	Large	גדול
+	Lasso	לאסו
+#	Lasso Tool	
+	Last	אחרון
+	Last commit	הקומיט האחרון
+#	Later	
+#	Layer	
+#	Layers	
+	Layout	פריסה
+#	Layout:	
+#	Leading	
+	Left	שמאל
+#	Left Diagonal	
+#	Left to Right	
+	Left:	שמאל:
+#	Legal	
+#	Length	
+#	Length:	
+#	Lens Flare	
+#	Less	
+	Letter	מכתב
+#	Level	
+	Level 1	רמה 1
+	Level 2	רמה 2
+	Level 3	רמה 3
+	Level 4	רמה 4
+#	Levels	
+#	Levels…	
+#	Libraries	
+#	Library	
+	Light	בהיר
+#	Light Blue	
+#	Light Direction	
+#	Light Gray	
+#	Light gray	
+#	Light Intensity	
+#	Light Theme	
+#	Light Type	
+#	Lighten	
+#	Lighter Color	
+#	Lighting	
+#	Lighting Effects	
+#	Lightness	
+	Line	קו
+	Line delta	הפרש שורות
+	Line spacing	מרווח בין שורות
+	Linear	לינארי
+#	Linear Burn	
+#	Linear Gradient	
+#	Linear Light	
+	Lines	שורות
+	Lines +/−	שורות +/−
+	Lines added	שורות שנוספו
+	Lines deleted	שורות שנמחקו
+	Link	קישור
+	Links	קישורים
+	List	רשימה
+#	List View	
+#	List view	
+	Location	מיקום
+#	Location:	
+#	Lock	
+#	Lock Guides	
+#	Lock Slices	
+#	Locked	
+#	Long Lines	
+#	Long Strokes	
+#	Low	
+	lowercase	אותיות קטנות
+#	Luminance	
+#	Luminosity	
+#	Magenta	
+#	Magic Wand Tool	
+#	Magnification	
+	Margins	שוליים
+#	Mask	
+#	Masks	
+#	Matte	
+#	Maximize	
+	Maximum	מקסימום
+#	Measure	
+#	Median	
+	Medium	בינוני
+#	Medium Dots	
+#	Medium Gray	
+#	Medium Lines	
+	Merge	מיזוג
+	Merge Cells	מיזוג תאים
+#	Merge Layers	
+	Merged PRs	בקשות משיכה שמוזגו
+#	Mesh	
+#	Message:	
+#	Metadata	
+#	Method	
+#	Method:	
+#	Mezzotint	
+#	Mezzotint…	
+	Middle	אמצע
+#	Midpoint	
+#	Midtones	
+	Millimeters	מילימטרים
+#	Minimize	
+	Minimum	מינימום
+#	Mirror	
+#	Missing	
+#	Mobile	
+#	Mode	
+#	Mode:	
+	Model	מודל
+	Models	מודלים
+#	Modern	
+#	Modified	
+#	Modify	
+#	Monitor RGB	
+#	Mono	
+#	Monochrome	
+#	More	
+#	Mosaic	
+#	Mosaic Tiles	
+#	Motion	
+#	Move	
+	Move Down	הזזה למטה
+#	Move Panel	
+	Move Up	הזזה למעלה
+#	Multiply	
+	Name	שם
+	Name (A–Z)	שם (א–ת)
+	Name:	שם:
+	Navigation	ניווט
+#	Navigator	
+#	Neon Glow	
+#	Never	
+	New	חדש
+	New Document	מסמך חדש
+	New document	מסמך חדש
+	New from Template	חדש מתבנית
+	New Group	קבוצה חדשה
+#	New Guide	
+#	New Layer	
+#	New Layer…	
+	New Style…	סגנון חדש…
+#	New Swatch…	
+	New Window	חלון חדש
+#	New Workspace	
+#	New Workspace…	
+	New…	חדש…
+	Next	הבא
+#	Next Appearance Mode	
+	Next Change	השינוי הבא
+	Next Page	העמוד הבא
+#	Next page	
+	No	לא
+	No Color	ללא צבע
+#	No Dither	
+#	No Document	
+#	No document	
+#	No document open	
+	No limit	ללא הגבלה
+#	No matches.	
+#	No matching commands	
+#	No recent files	
+#	No results	
+#	No Selection	
+#	No selection	
+#	Noise	
+	Nonbreaking Space	רווח בלתי ניתן לשבירה
+	None	ללא
+	Normal	רגיל
+#	Not available	
+#	NTSC Colors	
+	Number	מספר
+	Object	אובייקט
+#	Octagon	
+#	Odd Fields	
+	Odd pages only	עמודים אי-זוגיים בלבד
+	Off	כבוי
+#	Offline	
+#	Offset	
+#	Offset:	
+	OK	אישור
+	Omit	השמטה
+	On	מופעל
+#	Only Web Colors	
+#	Opacity	
+#	Opacity:	
+	Open	פתיחה
+#	Open link	
+#	Open Recent	
+#	OpenType	
+#	Open…	
+#	Optimized	
+	Options	אפשרויות
+	Options…	אפשרויות…
+#	Orange	
+#	Ordinals	
+	Orientation	כיוון
+#	Orientation:	
+#	Original	
+	Other	אחר
+#	Outer Glow…	
+	Outline	חלוקה לרמות
+#	Output	
+#	Output:	
+#	Outside	
+	Oval	אליפסה
+#	Overlap:	
+#	Overlay	
+#	Package…	
+	Page	עמוד
+	Page {page} of {pages}	עמוד {page} מתוך {pages}
+	Pages	עמודים
+#	Painting	
+#	Panel	
+#	Panel menu	
+#	Panel Options…	
+#	Panels	
+	Paper	נייר
+	Paragraph	פסקה
+#	Paragraph Styles	
+	Password	סיסמה
+	Paste	הדבקה
+	Paste Special	הדבקה מיוחדת
+#	Patchwork	
+#	Path	
+#	Path:	
+#	Paths	
+#	Pattern	
+#	Pattern Type	
+	Pause	השהיה
+	Pen	עט
+#	Pen Tool	
+	Pencil	עיפרון
+#	Pencil Tool	
+#	Pentagon	
+#	Percent	
+#	Percentage	
+#	Performance	
+#	Perimeter	
+#	Perspective	
+#	Photo	
+#	Photocopy	
+	Picas	פיקות
+#	Pin Light	
+#	Pink	
+#	Pixel	
+#	Pixelate	
+#	Pixels	
+	Play	הפעלה
+#	Plug-ins	
+#	Point	
+#	Pointillize	
+#	Pointillize…	
+	Points	נקודות
+#	Polygon	
+#	Polygon Tool	
+#	Polyline	
+	Portrait	לאורך
+#	Portuguese	
+	Position	מיקום
+	Position:	מיקום:
+#	Postcard	
+#	Poster	
+#	Poster Edges	
+#	Posterization	
+#	Posterize	
+#	Preferences	
+#	Preferences…	
+#	Prefix	
+#	Preserve	
+#	Preserve Luminosity	
+#	Preset	
+#	Preset Manager	
+#	Preset:	
+	Presets	הגדרות קבועות מראש
+#	Presets:	
+#	Press keys…	
+#	Pressure	
+	Preview	תצוגה מקדימה
+	Previous	הקודם
+	Previous Change	השינוי הקודם
+	Previous Page	העמוד הקודם
+#	Previous page	
+	Print	הדפסה
+	Printer	מדפסת
+#	Printer:	
+	Printing	הדפסה
+#	Print…	
+#	Profile	
+#	Progressive	
+#	Proof Setup	
+	Properties	מאפיינים
+	Protect	הגנה
+	PRs	בקשות משיכה
+#	Public Domain	
+#	Punctuation	
+#	Purple	
+	Pyramid	פירמידה
+#	Quality	
+#	Quick Actions	
+#	Radial	
+#	Radial Blur	
+#	Radial Blur…	
+#	Radial Gradient	
+#	Radius	
+#	Radius:	
+#	Random	
+#	Range	
+#	Range:	
+#	Rasterize	
+#	Ratio	
+#	Rays	
+#	Ready	
+	Real name	שם אמיתי
+	Recent	אחרונים
+	Recent Colors	צבעים אחרונים
+#	Recent Files	
+	Recover	שחזור
+	Rectangle	מלבן
+#	Rectangle Tool	
+#	Rectangular	
+#	Red	
+	Redo	ביצוע מחדש
+#	Reduce Noise	
+#	Refine	
+#	Reflected	
+	Refresh	רענון
+#	Regular	
+#	Relative	
+#	Relative Colorimetric	
+	Relaxed	מרווח
+#	Relief	
+#	Reload	
+	Remove	הסרה
+	Remove Background	הסרת רקע
+#	Remove from favorites	
+	Rename	שינוי שם
+#	Rename Group…	
+	Rename Style	שינוי שם סגנון
+	Rename…	שינוי שם…
+	Repeat	חזרה
+	Replace	החלפה
+	Replace:	החלפה:
+	Reply	תשובה
+	Report	דוח
+#	Report an Issue…	
+#	Reselect	
+	Reset	איפוס
+#	Reset Preferences	
+	Reset…	איפוס…
+#	Resize panel window	
+#	Resize panels	
+#	Resolution	
+#	Resolution:	
+#	Restore	
+	Result	תוצאה
+#	Resume	
+#	Reveal in Finder	
+#	Reverse	
+	Reverse the order	היפוך הסדר
+#	Revert	
+	Review	סקירה
+#	RGB	
+#	RGB Color	
+#	RGB:	
+	Right	ימין
+#	Right Diagonal	
+	Right:	ימין:
+	Rotate	סיבוב
+#	Rotate:	
+	Rotation	סיבוב
+	Rotation:	סיבוב:
+	Rounded Rectangle	מלבן מעוגל
+#	Roundness	
+#	Roundness:	
+#	Rows	
+	Ruler	סרגל
+#	Rulers	
+#	Rulers & Grids	
+	Russian	רוסית
+#	Sample Size	
+#	Sandstone	
+#	Saturation	
+	Save	שמירה
+#	Save a Copy	
+#	Save a Copy…	
+	Save As	שמירה בשם
+#	Save as PDF	
+	Save as Template	שמירה כתבנית
+#	Save as Template…	
+#	Save As…	
+#	Save Preset…	
+#	Save Selection	
+#	Save Selection…	
+	Saved	נשמר
+#	Save…	
+	Scale	קנה מידה
+#	Scale:	
+#	Scaling	
+#	Scratch Disks	
+#	Scratch Disks…	
+#	Screen	
+#	Screen Mode	
+	Scripts	כתבים
+	Search	חיפוש
+#	Security	
+#	Segments	
+	Select	בחירה
+	Select All	בחירת הכול
+	Select Objects	בחירת אובייקטים
+#	Select:	
+	Selected pages	עמודים נבחרים
+	Selection	בחירה
+#	Selection Tool	
+#	Selective	
+	Send Backward	העברה אחורה
+#	Send to Back	
+#	Sensitivity	
+#	Sent to {printer}	
+#	Services	
+	Set	קביעה
+	Set as Default	הגדרה כברירת מחדל
+#	Set:	
+#	Settings	
+#	Settings:	
+	Settings…	הגדרות…
+	Shadow	צל
+#	Shadows	
+#	Shape	
+	Shape Effects	אפקטים של צורה
+#	Shape:	
+	Shapes	צורות
+	Share	שיתוף
+#	Sharpen	
+#	Sharpness	
+#	Shift	
+#	Short Lines	
+#	Short Strokes	
+#	Shortcut	
+#	Shortcuts	
+	Show	הצגה
+#	Show All	
+#	Show Grid	
+#	Show Guides	
+#	Show in Folder	
+#	Show Mask	
+#	Show Mesh	
+#	Show Rulers	
+	Show rulers	הצגת סרגלים
+#	Show Tool Tips	
+#	Show:	
+#	Sides:	
+#	Simplify	
+	Size	גודל
+	Size:	גודל:
+#	Sketch	
+#	Skew	
+#	Slice	
+#	Slice Options	
+#	Slice Options…	
+#	Slice Tool	
+#	Slices	
+#	Small	
+	Small Caps	אותיות רישיות קטנות
+#	Smart Blur	
+#	Smart Blur…	
+#	Smart Guides	
+#	Smart quotes	
+#	Smoothness	
+#	Snap to Grid	
+#	Soft	
+#	Soft Light	
+#	Soften	
+#	Softness	
+#	Solarize	
+	Sort	מיון
+	Sort by	מיון לפי
+#	Source	
+#	Source code on GitHub	
+	Spaces	רווחים
+	Spacing	ריווח
+	Spacing:	ריווח:
+#	Spanish	
+#	Spatter	
+	Special	מיוחד
+#	Speckle	
+	Speed	מהירות
+	Spelling	איות
+#	Spherize	
+	Split	פיצול
+#	Spot Color	
+#	Spray Radius	
+	Square	ריבוע
+#	Square Size	
+#	sRGB IEC61966-2.1	
+	Stacked	מוערם
+#	Stained Glass	
+#	Stamp	
+	Standard	סטנדרטי
+#	Standard Ligatures	
+	Star	כוכב
+	Start at:	התחלה ב:
+	Statistics	סטטיסטיקה
+#	Status	
+	Status Bar	שורת המצב
+#	Stippled	
+	Stop	עצירה
+#	Strength	
+#	Stretch	
+	Strikethrough	קו חוצה
+#	Stroke	
+#	Stroke Color	
+#	Stroke Length	
+#	Stroke Options	
+#	Stroke:	
+	Studio	סטודיו
+	Style	סגנון
+	Style:	סגנון:
+	Styles	סגנונות
+#	Stylize	
+#	Subdivisions	
+	Subject	נושא
+	Subscript	כתב תחתי
+#	Subset	
+	Subtitle	כותרת משנה
+#	Subtract	
+#	Sumi-e	
+#	Summary	
+	Superscript	כתב עילי
+#	Swatches	
+	Symbol	סמל
+	Symbols	סמלים
+#	Sync with system	
+	System	מערכת
+	Tab	Tab
+	Table	טבלה
+	Table style	סגנון טבלה
+	Tables	טבלאות
+#	Tabloid	
+	Tabs	טאבים
+#	Taper	
+#	Target	
+#	Target:	
+#	Temperature	
+	Templates	תבניות
+	Text	טקסט
+#	Text color	
+	Text:	טקסט:
+#	Texture	
+	The passwords don't match.	הסיסמאות אינן תואמות.
+#	Theme	
+	Thickness	עובי
+	This document has no bookmarks.	אין סימניות במסמך זה.
+#	Threshold	
+#	Thumbnails	
+#	Tile	
+#	Tile Size	
+#	Tilt	
+#	Time	
+#	Timecode	
+#	Timeline	
+#	Tint	
+#	Tint Color	
+	Title	כותרת
+#	To	
+#	Tolerance	
+#	Tolerance:	
+#	Tool	
+#	Toolbars	
+	Tools	כלים
+	Top	למעלה
+#	Top Left	
+#	Top Right	
+	Top:	למעלה:
+	Total	סה"כ
+#	Total:	
+	Tracking	מעקב
+	Transform	המרה
+	Translate	תרגום
+	Transparency	שקיפות
+#	Transparent	
+#	Trap…	
+	Triangle	משולש
+#	Turbulent	
+#	Twirl	
+#	Twist	
+	Type	סוג
+#	Type Tool	
+	Type:	סוג:
+#	Typewriter	
+#	Type…	
+	Typing	הקלדה
+	Underline	קו תחתון
+	Undo	ביטול פעולה
+	Undo {action}	ביטול {action}
+	Ungroup	פירוק קבוצה
+#	Uniform	
+	Union	איחוד
+#	Units	
+#	Unknown	
+#	Unlock	
+#	Unsaved changes	
+#	Unsharp Mask	
+#	Untitled	
+	Up	למעלה
+#	Update	
+#	Updates	
+	UPPERCASE	אותיות גדולות
+#	Use Default	
+#	User	
+	Username	שם משתמש
+	Value	ערך
+#	Value:	
+#	Variables	
+	Version	גרסה
+#	Version {version}	
+	Vertical	אנכי
+	Vertical Alignment	יישור אנכי
+#	Vertical Type Tool	
+#	Vertically	
+#	Very High	
+#	Vibrance	
+#	Video	
+	View	תצוגה
+#	Violet	
+#	Visibility	
+#	Vivid Light	
+	Voice	קול
+	W:	ר:
+#	Warning	
+#	Warnings	
+#	Warp	
+	Watermark	סימן מים
+	Wave	גל
+#	Wave…	
+#	Web	
+	Website	אתר אינטרנט
+	Weight	משקל
+#	Wet	
+#	White	
+#	White Intensity	
+#	White Is High	
+#	Whites	
+#	Width	
+#	Width and Height	
+	Width:	רוחב:
+	Window	חלון
+#	Windows	
+	Words	מילים
+#	Working CMYK	
+#	Workspace	
+#	Workspaces	
+#	X	
+#	Y	
+#	Yellow	
+	Yes	כן
+#	yesterday	
+	Your changes will be lost if you don't save them.	השינויים יאבדו אם לא יישמרו.
+	Zoom	זום
+	Zoom In	הגדלת התצוגה
+#	Zoom in	
+	Zoom Out	הקטנת התצוגה
+#	Zoom out	
+#	Zoom Tool	
+@plural	{n} commit|{n} commits	{n} קומיט|{n} קומיטים|{n} קומיטים
+#	{n} files	
+#	{n} h ago	
+@plural	{n} item|{n} items	{n} פריט|{n} פריטים|{n} פריטים
+@plural	{n} Layer|{n} Layers	{n} שכבה|{n} שכבות|{n} שכבות
+#	{n} min ago	
+@plural	{n} step|{n} steps	{n} צעד|{n} צעדים|{n} צעדים
+#	−Bin	
+#	● Recording	

@@ -154,6 +154,18 @@ def _ro(n: float) -> str:
     return "other"
 
 
+def _sr(n: float) -> str:
+    """Serbian/Croatian/Bosnian shape: one, few, other — no many."""
+    if not _integral(n):
+        return "other"
+    n = int(n)
+    if n % 10 == 1 and n % 100 != 11:
+        return "one"
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return "few"
+    return "other"
+
+
 def _he(n: float) -> str:
     if not _integral(n):
         return "other"
@@ -166,6 +178,15 @@ def _he(n: float) -> str:
 
 
 #: language → (categories in CLDR order, integer cardinal rule).
+#: The categories are the ones whole numbers 0..1000 REACH — the
+#: counts craft-i18n's checker expects.  Russian/Ukrainian/
+#: Belarusian/Polish have three forms, not four: "other" is a
+#: decimals-only category there, so a @plural row listing four
+#: forms is rejected upstream (and the old four-form rows in
+#: Devon's own catalogs carried a duplicated fourth form).
+#: Portuguese is region-aware: CLDR's pt is Brazilian (0 is
+#: singular), so pt-BR takes the zero-one rule and every other
+#: pt takes pt-PT's (1 only) — see _entry below.
 _RULES: dict[str, tuple[tuple[str, ...], Rule]] = {
     "en": (("one", "other"), _one_other),
     "de": (("one", "other"), _one_other),
@@ -182,15 +203,34 @@ _RULES: dict[str, tuple[tuple[str, ...], Rule]] = {
     "sw": (("one", "other"), _one_other),
     "zu": (("one", "other"), _one_other),
     "xh": (("one", "other"), _one_other),
+    "bg": (("one", "other"), _one_other),
+    "bn": (("one", "other"), _one_other),
+    "ca": (("one", "other"), _one_other),
+    "dv": (("one", "other"), _one_other),
+    "gl": (("one", "other"), _one_other),
+    "hu": (("one", "other"), _one_other),
+    "ka": (("one", "other"), _one_other),
+    "kk": (("one", "other"), _one_other),
+    "sq": (("one", "other"), _one_other),
+    "ta": (("one", "other"), _one_other),
+    "te": (("one", "other"), _one_other),
+    "ps": (("one", "other"), _one_other),
+    "yi": (("one", "other"), _one_other),
+    "ug": (("one", "other"), _one_other),
+    "ckb": (("one", "other"), _one_other),
+    "fa": (("one", "other"), _one_other),
     "fr": (("one", "other"), _zero_one_other),
     "pt": (("one", "other"), _zero_one_other),
     "hi": (("one", "other"), _zero_one_other),
-    "ru": (("one", "few", "many", "other"), _ru),
-    "uk": (("one", "few", "many", "other"), _ru),
-    "be": (("one", "few", "many", "other"), _ru),
-    "pl": (("one", "few", "many", "other"), _pl),
+    "ru": (("one", "few", "many"), _ru),
+    "uk": (("one", "few", "many"), _ru),
+    "be": (("one", "few", "many"), _ru),
+    "pl": (("one", "few", "many"), _pl),
     "cs": (("one", "few", "other"), _cs),
     "sk": (("one", "few", "other"), _cs),
+    "sr": (("one", "few", "other"), _sr),
+    "hr": (("one", "few", "other"), _sr),
+    "bs": (("one", "few", "other"), _sr),
     "ar": (("zero", "one", "two", "few", "many", "other"), _ar),
     "lv": (("zero", "one", "other"), _lv),
     "lt": (("one", "few", "other"), _lt),
@@ -205,7 +245,8 @@ _RULES: dict[str, tuple[tuple[str, ...], Rule]] = {
     "th": (("other",), _other),
     "id": (("other",), _other),
     "ms": (("other",), _other),
-    "tr": (("other",), _other),
+    "tr": (("one", "other"), _one_other),
+    "lo": (("other",), _other),
     "yo": (("other",), _other),
     "ha": (("other",), _other),
     "ig": (("other",), _other),
@@ -216,9 +257,26 @@ _RULES: dict[str, tuple[tuple[str, ...], Rule]] = {
 
 
 def _entry(locale: str) -> tuple[tuple[str, ...], Rule]:
+    from .locale import language_of, normalize_locale
+
+    norm = normalize_locale(locale)
+    language = language_of(locale)
+    if language == "pt" and norm.upper() != "PT-BR":
+        # Portuguese other than pt-BR takes pt-PT's rule (upstream's
+        # plural_rules: CLDR's pt is Brazilian, so non-BR pt is
+        # explicitly switched to pt-PT — 0 is plural there).
+        return (("one", "other"), _one_other)
+    return _RULES.get(language, (("other",), _other))
+
+
+def has_plural_rules(locale: str) -> bool:
+    """Whether CLDR (via the table above) has a cardinal rule for
+    ``locale``'s language: ``False`` for a language with no rule
+    (``tlh``), where the checker reports "no plural rules" and
+    the runtime falls back to one form."""
     from .locale import language_of
 
-    return _RULES.get(language_of(locale), (("other",), _other))
+    return language_of(locale) in _RULES
 
 
 def plural_categories(locale: str) -> tuple[str, ...]:

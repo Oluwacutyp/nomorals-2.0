@@ -1,0 +1,386 @@
+# Қазақша (kk) interface catalog for every Crafting App.
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   @plural  English `one|other`; the translation lists this language's plural forms, `|`-separated.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary. No other product's localisation, string table or translated UI was
+# consulted or copied; add entries the same way.
+
+	% of all commits	Барлық коммиттердің пайызы
+	(none)	(жоқ)
+	1 file	1 файл
+	About	Туралы
+	Accessibility	Қолжетімділік
+	Actions	Әрекеттер
+	Active	Белсенді
+	Actual Size	Нақты өлшем
+	Add	Қосу
+	Add a comment	Түсініктеме қосу
+	Advanced	Қосымша
+	Align	Туралау
+	Align left	Солға туралау
+	Align right	Оңға туралау
+	Alignment:	Туралау:
+	All	Барлығы
+	All pages	Барлық беттер
+	Angle	Бұрыш
+	Animation effects	Анимация әсерлері
+	Any	Кез келген
+	Appearance	Сыртқы түрі
+	Application	Қолданба
+	Apply	Қолдану
+	Area	Аудан
+	Arrow	Жебе
+	ArtCraft website	ArtCraft веб-сайты
+	Author	Автор
+	Auto	Авто
+	Auto ({percent}%)	Авто ({percent}%)
+	Available	Қолжетімді
+	Background	Фон
+	Binary assets added	Қосылған бинарлы ресурстар
+	Binary assets removed	Жойылған бинарлы ресурстар
+	Black	Қара
+	Black and white	Ақ-қара
+	Blue	Көк
+	Bold	Жуан
+	Both	Екеуі де
+	Both sides	Екі жақ та
+	Bottom	Төмен
+	Bottom:	Төмен:
+	Browse…	Шолу…
+	Calculate	Есептеу
+	Cancel	Бас тарту
+	Category:	Санаты:
+	Center	Ортаға
+	Characters	Таңбалар
+	Check for updates	Жаңартуларды тексеру
+	Circle	Шеңбер
+	Clear	Тазарту
+	Clear All	Барлығын тазалау
+	Clear Recent Files	Соңғы файлдарды тазарту
+	Clipboard	Алмасу буфері
+	Close	Жабу
+	Close (Esc)	Жабу (Esc)
+	Collapse	Жинау
+	Collate	Даналар бойынша реттеу
+	Color:	Түс:
+	Colour	Түс
+	Combine	Біріктіру
+	Command	Команда
+	Comments	Түсініктемелер
+	Commits	Коммиттер
+	Company	Компания
+	Compare	Салыстыру
+	Compatibility	Үйлесімділік
+	Compression	Сығымдау
+	Continue	Жалғастыру
+	Contributors	Үлес қосушылар
+	Convert	Түрлендіру
+	Copies:	Даналар:
+	Copy	Көшіру
+	Couldn't open {name}: {e}	{name} файлын ашу мүмкін болмады: {e}
+	Create	Жасау
+	Cross	Крест
+	Current page	Ағымдағы бет
+	Custom	Өзіндік
+	Cut	Кесу
+	Dark	Күңгірт
+	Dark gray	Қою сұр
+	Dashed	Үзік
+	Date	Күн
+	Date format	Күн пішімі
+	Dates	Күндер
+	Default	Әдепкі
+	Delete	Жою
+	Deleted	Жойылған
+	Description	Сипаттама
+	Description:	Сипаттама:
+	Details	Мәліметтер
+	Diamond	Ромб
+	Direction:	Бағыт:
+	Discard	Елемеу
+	Dismiss	Жабу
+	Display name	Көрсетілетін аты
+	Distance	Қашықтық
+	Distribute	Бірдей тарату
+	Document	Құжат
+	Document Title	Құжат атауы
+	Done	Дайын
+	Dot	Нүкте
+	Double-click	Қос шерту
+	Download	Жүктеп алу
+	Draw	Салу
+	Duplicate…	Көшірмесін жасау…
+	Dynamic	Динамикалық
+	Edit	Түзету
+	Editing	Түзету
+	Edit…	Түзету…
+	Endpoint	Шеткі нүкте
+	Erase	Өшіру
+	Eraser	Өшіргіш
+	Even pages only	Тек жұп беттер
+	Example: {sample}	Мысал: {sample}
+	Expand	Жаю
+	Export	Экспорттау
+	Export to	Мынаған экспорттау
+	Exported to {path}	Экспортталды: {path}
+	Export…	Экспорттау…
+	Extract	Шығарып алу
+	Field	Өріс
+	Field properties	Өріс сипаттары
+	Fields	Өрістер
+	File	Файл
+	File Name	Файл атауы
+	Fill	Толтыру
+	Find…	Іздеу…
+	First	Алғашқы
+	First commit	Алғашқы коммит
+	Fit	Сыйдыру
+	Flatten	Жазықтау
+	Flip Horizontal	Жатыққа аудару
+	Flip Vertical	Тікке аудару
+	Font size	Қаріп өлшемі
+	Font Size:	Қаріп өлшемі:
+	Font:	Қаріп:
+	Fonts	Қаріптер
+	Format	Пішім
+	Format:	Пішім:
+	From	Бастап
+	Full Screen	Толық экран
+	General	Жалпы
+	Graphic	Графика
+	Gray	Сұр
+	Green	Жасыл
+	Grid view	Тор көрінісі
+	Headings	Тақырыптар
+	Height	Биіктік
+	Height:	Биіктігі:
+	Help	Көмек
+	Hidden text	Жасырын мәтін
+	High	Жоғары
+	High Resolution	Жоғары ажыратымдылық
+	High resolution	Жоғары ажыратымдылық
+	Home	Басты бет
+	Horizontal	Көлденең
+	Horizontal scale	Жатық масштаб
+	Horizontally	Көлденең
+	Icon	Таңбаша
+	Image	Кескін
+	Images	Кескіндер
+	Index	Индекс
+	Insert	Енгізу
+	Interface language	Интерфейс тілі
+	Intersection	Қиылыс
+	Invert	Терістеу
+	Italic	Көлбеу
+	Join our Discord	Discord-қа қосылыңыз
+	Join the ArtCraft Discord	ArtCraft Discord-ына қосылыңыз
+	just now	жаңа ғана
+	Justify	Екі жаққа туралау
+	Keywords	Кілт сөздер
+	Label	Белгі
+	Labels	Белгілер
+	Landscape	Жатық
+	Language	Тіл
+@id	language.name	Қазақша
+	Last	Соңғы
+	Last commit	Соңғы коммит
+	Later	Кейінірек
+	Layers	Қабаттар
+	Left	Сол жақ
+	Left:	Сол жақ:
+	Light	Ашық
+	Light gray	Ашық сұр
+	Line	Сызық
+	Line delta	Жолдар айырмасы
+	Line spacing	Жол аралығы
+	Lines +/−	Жолдар +/−
+	Lines added	Қосылған жолдар
+	Lines deleted	Жойылған жолдар
+	Link	Сілтеме
+	List	Тізім
+	List view	Тізім көрінісі
+	Location	Орналасқан жері
+	Locked	Құлыпталған
+	Low	Төмен
+	Magnification	Масштаб
+	Margins	Шеттер
+	Maximize	Жаю
+	Maximum	Максимум
+	Measure	Өлшеу
+	Medium	Орташа
+	Merged PRs	Біріктірілген PR-лер
+	Metadata	Метадеректер
+	Midpoint	Орта нүкте
+	Minimize	Жию
+	Minimum	Минимум
+	Mobile	Мобильді құрылғы
+	Model	Модель
+	Models	Модельдер
+	Modified	Өзгертілген
+	More	Қосымша
+	Name	Аты-жөні
+	Name (A–Z)	Аты (А–Я)
+	Name:	Атауы:
+	Next page	Келесі бет
+	No	Жоқ
+	No limit	Шектеу жоқ
+	No matches.	Сәйкестік жоқ.
+	No recent files	Соңғы файлдар жоқ
+	None	Жоқ
+	Number	Сан
+	Odd pages only	Тек тақ беттер
+	Off	Өшірулі
+	OK	ОК
+	Opacity	Мөлдірсіздік
+	Opacity:	Мөлдірсіздік:
+	Open	Ашу
+	Open link	Сілтемені ашу
+	Open Recent	Соңғы файлдарды ашу
+	Open…	Ашу…
+	Options	Параметрлер
+	Options…	Параметрлер…
+	Orange	Қызғылт сары
+	Orientation:	Бағдар:
+	Original	Түпнұсқа
+	Outline	Контур
+	Output	Шығыс
+	Oval	Сопақ
+	Overlap:	Қабаттасу:
+	Page	Бет
+	Pages	Беттер
+	Panels	Панельдер
+	Password	Құпиясөз
+	Path	Контур
+	Paths	Контурлар
+	Pattern	Шаблон
+	Percentage	Пайыз
+	Perimeter	Периметр
+	Photo	Сурет
+	Pink	Қызғылт
+	Polygon	Көпбұрыш
+	Polyline	Сынық сызық
+	Portrait	Тік
+	Position	Орналасу
+	Poster	Плакат
+	Preferences	Параметрлер
+	Preferences…	Параметрлер…
+	Prefix	Префикс
+	Preview	Алдын ала көру
+	Previous page	Алдыңғы бет
+	Print	Басып шығару
+	Printer:	Принтер:
+	Printing	Басып шығару
+	Print…	Басып шығару…
+	Protect	Қорғау
+	PRs	PR-лер
+	Purple	Күлгін
+	Quality	Сапа
+	Ready	Дайын
+	Real name	Шын аты
+	Recent	Соңғы
+	Recover	Қалпына келтіру
+	Rectangle	Тіктөртбұрыш
+	Red	Қызыл
+	Redo	Қайталау
+	Reload	Қайта жүктеу
+	Remove	Алып тастау
+	Rename	Атын өзгерту
+	Replace	Ауыстыру
+	Reply	Жауап беру
+	Report	Есеп
+	Resize panel window	Панель терезесінің өлшемін өзгерту
+	Resize panels	Панельдер өлшемін өзгерту
+	Resolution	Ажыратымдылық
+	Resolution:	Ажыратымдылық:
+	Restore	Қалпына келтіру
+	Reveal in Finder	Finder ішінде көрсету
+	Reverse the order	Ретін кері өзгерту
+	Revert	Сақталған нұсқаға қайту
+	Review	Пікір алмасу
+	Right	Оң жақ
+	Rotate	Бұру
+	Rotate:	Бұру:
+	Rotation	Бұрылу
+	Rotation:	Бұру:
+	Rows	Жолдар
+	Save	Сақтау
+	Save as PDF	PDF ретінде сақтау
+	Scripts	Скрипттер
+	Search	Іздеу
+	Security	Қауіпсіздік
+	Select All	Барлығын таңдау
+	Selected pages	Таңдалған беттер
+	Selection	Таңдалғандар
+	Sensitivity	Сезімталдық
+	Sent to {printer}	{printer} принтеріне жіберілді
+	Settings	Параметрлер
+	Show	Көрсету
+	Show:	Көрсету:
+	Size	Өлшем
+	Sort	Сұрыптау
+	Sort by	Бойынша сұрыптау
+	Source	Дереккөз
+	Special	Арнайы
+	Split	Бөлу
+	Square	Шаршы
+	Stamp	Мөр
+	Standard	Стандартты
+	Star	Жұлдыз
+	Status	Күй
+	Strikethrough	Сызып тастау
+	Style	Стиль
+	Subject	Тақырыбы
+	Subset	Ішкі жиын
+	Summary	Түйіндеме
+	Table	Кесте
+	Tables	Кестелер
+	Text	Мәтін
+	The passwords don't match.	Құпиясөздер сәйкес емес.
+	Thickness	Жуандық
+	This document has no bookmarks.	Бұл құжатта бетбелгілер жоқ.
+	Thumbnails	Миниатюралар
+	Time	Уақыт
+	Title	Атауы
+	Tool	Құрал
+	Tools	Құралдар
+	Top	Жоғары
+	Total	Барлығы
+	Translate	Аудару
+	Type	Түрі
+	Typewriter	Баспа машинасы
+	Underline	Астын сызу
+	Undo	Болдырмау
+	Undo {action}	Болдырмау: {action}
+	Units	Өлшем бірліктері
+	Unknown	Белгісіз
+	Unlock	Блоктан шығару
+	Up	Жоғары
+	Update	Жаңарту
+	Username	Пайдаланушы аты
+	Value:	Мәні:
+	Version	Нұсқа
+	Vertical	Тік
+	Vertically	Тік
+	View	Көрініс
+	Warnings	Ескертулер
+	Watermark	Су белгісі
+	Width	Ені
+	Width:	Ені:
+	Words	Сөздер
+	Yellow	Сары
+	Yes	Иә
+	yesterday	кеше
+	Your changes will be lost if you don't save them.	Сақтамасаңыз, өзгерістеріңіз жоғалады.
+	Zoom	Масштаб
+	Zoom in	Үлкейту
+	Zoom out	Кішірейту
+	{n} files	{n} файл
+	{n} h ago	{n} сағат бұрын
+	{n} min ago	{n} минут бұрын
+	−Bin	−Bin

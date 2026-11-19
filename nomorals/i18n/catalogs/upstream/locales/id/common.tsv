@@ -1,0 +1,1189 @@
+# Bahasa Indonesia (id) interface catalog for every Crafting App.
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   @plural  English `one|other`; the translation lists this language's plural forms, `|`-separated.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary. No other product's localisation, string table or translated UI was
+# consulted or copied; add entries the same way.
+
+	% of all commits	% dari semua commit
+	(Custom)	(Kustom)
+	1 file	1 berkas
+	16 bit	16 bit
+	24 bit	24 bit
+	24 bits/pixel	24 bit/piksel
+	32 bit	32 bit
+	32 bits/pixel	32 bit/piksel
+	8 bit	8 bit
+	About	Tentang
+	Absolute	Absolut
+	Absolute Colorimetric	Kolorimetrik absolut
+	Accented Edges	Tepi beraksen
+	Accurate	Akurat
+	Actions	Tindakan
+	Activate Panel	Aktifkan panel
+	Active	Aktif
+	Actual Size	Ukuran sebenarnya
+	Adaptive	Adaptif
+	Add	Tambah
+	Add Guide	Tambahkan panduan
+	Add to Dictionary	Tambahkan ke Kamus
+	Add to favorites	Tambahkan ke favorit
+	Add to Swatches	Tambahkan ke Swatches
+	Adjust	Sesuaikan
+	Adjustments	Penyesuaian
+	Advanced	Lanjutan
+	Align	Sejajarkan
+	Align center	Sejajarkan ke tengah
+	Align Left	Ratakan Kiri
+	Align left	Sejajarkan ke kiri
+	Align Right	Ratakan Kanan
+	Align right	Sejajarkan ke kanan
+	Align to Selection	Ratakan ke seleksi
+	Alignment	Perataan
+	Alignment:	Perataan:
+	All	Semua
+	All Caps	Semua kapital
+	All Categories	Semua kategori
+	All Layers	Semua lapisan
+	All Slices	Semua slice
+	Alpha	Alfa
+	Alt	Alt
+	Always	Selalu
+	Amount	Jumlah
+	Amount:	Jumlah:
+	Angle	Sudut
+	Angle:	Sudut:
+	Angular	Sudut
+	Animation	Animasi
+	Anti-Alias	Anti-alias
+	Anti-alias	Anti-alias
+	Any	Salah Satu
+	Appearance	Tampilan
+theme	Appearance	Tampilan
+	Appearance Settings…	Pengaturan Tampilan…
+	Application	Aplikasi
+	Apply	Terapkan
+	Apply Character Style	Terapkan gaya karakter
+	Apply Data Set	Terapkan set data
+	Arc	Busur
+	Arrange	Susun
+	Arrow	Panah
+	Artboard	Artboard
+	Artboards	Artboard
+	ArtCraft	ArtCraft
+	ArtCraft Website	Situs Web ArtCraft
+	ArtCraft website	Situs web ArtCraft
+	Artistic	Artistik
+	Aspect Ratio	Rasio aspek
+	Assign	Tetapkan
+	Assign Profile…	Tetapkan profil…
+	Audio	Audio
+	Author	Penulis
+	Author:	Penulis:
+	Auto	Otomatis
+	Auto Color	Warna otomatis
+	Automate	Otomatiskan
+	Automatic	Otomatis
+	Automatically	Otomatis
+	Average	Rata-rata
+	Background	Latar Belakang
+	Background Color	Warna Latar Belakang
+	Background Contents	Konten latar belakang
+	Backspace	Backspace
+	Balance	Keseimbangan
+	Bar	Batang
+	Baseline	Baseline
+	Baseline Shift	Pergeseran garis dasar
+	Basic	Dasar
+	Basic Latin	Latin dasar
+	Batch	Batch
+	Batch…	Batch…
+	Bend:	Lengkung:
+	Bicubic	Bikubik
+	Binary assets added	Aset biner ditambahkan
+	Binary assets removed	Aset biner dihapus
+	Bitmap	Bitmap
+	Black	Hitam
+	Black & White	Hitam & Putih
+	Black and white	Hitam putih
+	Black Intensity	Intensitas hitam
+	Blacks	Hitam
+	Blend Mode	Mode Campur
+	Blending Mode	Mode blend
+	Block	Blok
+	Blocks	Blok
+	Blue	Biru
+	Blur	Kabur
+	Blur Angle	Sudut Buram
+	Bold	Tebal
+	Border	Batas
+	Border Thickness	Ketebalan tepi
+	Borders	Batas
+	Both	Keduanya
+	Both sides	Kedua sisi
+	Bottom	Bawah
+	Bottom Left	Kiri bawah
+	Bottom Right	Kanan bawah
+	Bottom:	Bawah:
+	Break Link	Putuskan tautan
+	Brick	Bata
+	Brightness	Kecerahan
+	Bring Forward	Majukan
+	Bring to Front	Bawa ke Depan
+	Brown	Cokelat
+	Browse	Telusuri
+	Browse…	Telusuri…
+	Brush Size	Ukuran Kuas
+	Brush Strokes	Sapuan kuas
+	Brushes	Kuas
+	Bulge	Gembung
+	Bullet	Poin
+	Burlap	Goni
+	Calculate	Hitung
+	Cancel	Batal
+	Canvas	Kanvas
+	Caption	Keterangan
+	Cascade	Bertingkat
+	Case Sensitive	Peka Huruf Besar/Kecil
+	Category	Kategori
+	Category:	Kategori:
+	Cell Size	Ukuran sel
+	Center	Tengah
+	Centimeters	Sentimeter
+	Chamfer	Chamfer
+	Change	Ubah
+	Change All	Ubah semua
+	Change Case	Ubah huruf besar-kecil
+	Change Panel Layout	Ubah tata letak panel
+	Channel	Saluran
+	Channel Mixer	Mixer Kanal
+	Channels	Kanal
+	Character	Karakter
+	Character Styles	Gaya karakter
+	Check Spelling…	Periksa ejaan…
+	Checkerboard	Papan Catur
+	Choose…	Pilih…
+	Circle	Lingkaran
+	City	Kota
+	Clarity	Kejernihan
+	Classic	Klasik
+	Clear	Hapus
+	Clear All	Hapus Semua
+	Clear Guides	Hapus panduan
+	Clear History	Hapus riwayat
+	Clear Recent Files	Hapus Daftar Berkas Terakhir
+	Clipboard	Clipboard
+	Clipping Mask	Masker kliping
+	Clone	Klon
+	Close	Tutup
+	Close All	Tutup Semua
+	Close Panel	Tutup Panel
+	Cmd	Cmd
+	CMYK Color	Warna CMYK
+	CMYK:	CMYK:
+	Coarse Dots	Titik kasar
+	Collapse	Ciutkan
+	Collate	Susun
+	Color	Warna
+	Color Balance	Keseimbangan Warna
+	Color Burn	Bakar warna
+	Color Dodge	Dodge warna
+	Color Management	Manajemen Warna
+	Color Mode	Mode warna
+	Color Picker	Pemilih warna
+	Color Settings	Pengaturan warna
+	Color Settings…	Pengaturan warna…
+	Color Space	Ruang warna
+	Color Swatches	Swatch warna
+	Color Table	Tabel warna
+	Color:	Warna:
+	Colorize	Warnai
+	Colors	Warna
+	Colors:	Warna:
+	Color…	Warna…
+	Colour	Warna
+	Column width	Lebar kolom
+	Columns	Kolom
+	Columns:	Kolom:
+	Command	Perintah
+	Commands:	Perintah:
+	Comment	Komentar
+	Commits	Commit
+	Community	Komunitas
+	Company	Perusahaan
+	Comparison	Perbandingan
+	Compatibility	Kompatibilitas
+	Composite	Komposit
+	Compression	Kompresi
+	Cone	Kerucut
+	Contains	Berisi
+	Continue	Lanjutkan
+	Contrast	Kontras
+	Contributors	Kontributor
+	Convert	Konversi
+	Convert to Shape	Konversi ke bentuk
+	Convert to sRGB	Konversi ke sRGB
+	Copies	Salinan
+	Copies:	Salinan:
+	Copy	Salin
+	Copyright	Hak Cipta
+	Copyrighted	Berhak cipta
+	Corner	Sudut
+	Corners	Sudut
+	Correction	Koreksi
+@msg	Couldn't open {name}: {e}	Tidak dapat membuka {name}: {e}
+	Country	Negara
+	Crack Brightness	Kecerahan retakan
+	Crack Depth	Kedalaman retakan
+	Crack Spacing	Jarak retakan
+	Create	Buat
+	Create Clipping Mask	Buat clipping mask
+	Crop	Krop
+	Cross	Silang
+	Crosshatch	Arsir silang
+	Crystallize	Kristalisasi
+	Crystallize…	Kristalisasi…
+	Ctrl	Ctrl
+	Current	Saat Ini
+	Current Time	Waktu Saat Ini
+	Curvature	Kelengkungan
+	Curve	Kurva
+	Curves	Kurva
+	Curves…	Kurva…
+	Custom	Kustom
+	Customize…	Kustomisasi…
+	Cut	Potong
+	Cyan	Sian
+	Dark	Gelap
+	Dark Gray	Abu-abu gelap
+	Dark gray	Abu-abu gelap
+	Dark Strokes	Sapuan gelap
+	Dark Theme	Tema Gelap
+	Darken	Gelapkan
+	Darkness	Kegelapan
+	Dashed	Putus-putus
+	Data Sets	Set data
+	Date Created	Tanggal Dibuat
+	Dates	Tanggal
+	De-Interlace	De-Interlace
+	Decrease Font Size	Perkecil ukuran font
+	Default	Default
+	Delete	Hapus
+	Delete Brush	Hapus kuas
+	Delete Group	Hapus grup
+	Delete Layer	Hapus lapisan
+	Delete Mask	Hapus Masker
+	Delete Style	Hapus gaya
+	Delete Workspace	Hapus ruang kerja
+	Delete…	Hapus…
+	Depth	Kedalaman
+	Desaturate	Hilangkan Saturasi
+	Descending	Menurun
+	Description	Deskripsi
+	Description:	Deskripsi:
+	Deselect	Batalkan seleksi
+	Deselect All	Batalkan Semua Pilihan
+	Destination	Tujuan
+	Destination:	Tujuan:
+	Details	Detail
+	Diagonal	Diagonal
+	Diameter:	Diameter:
+	Diamond	Wajik
+	Difference	Selisih
+	Diffuse Glow	Pendaran difus
+	Diffusion	Difusi
+	Digits	Digit
+	Dimensions	Dimensi
+	Direct Selection Tool	Alat seleksi langsung
+	Direction	Arah
+	Direction Balance	Keseimbangan arah
+	Direction:	Arah:
+	Discard	Buang
+	Discord	Discord
+	Discretionary Ligatures	Ligatur opsional
+	Dismiss	Tutup
+	Display	Tampilan
+	Display name	Nama tampilan
+	Distance	Jarak
+	Distort	Distorsi
+	Distortion	Distorsi
+	Distribute	Distribusikan
+	Divide	Bagi
+	Dock Panel	Tambatkan panel
+	Document	Dokumen
+	Don't Save	Jangan Simpan
+	Done	Selesai
+	Dot	Titik
+	Dots	Titik
+	Dotted	Titik-titik
+	Double-click	Klik ganda
+	Down	Bawah
+	Download	Unduh
+	Draft	Draf
+	Draw	Menggambar
+	Drop Shadow	Bayangan Jatuh
+	Drop Shadow…	Bayangan jatuh…
+	Duplicate	Duplikat
+	Duplicate Layer	Duplikatkan lapisan
+	Duplicate…	Duplikat…
+	Duplication	Duplikasi
+	Duration	Durasi
+	Dutch	Belanda
+	Dynamics	Dinamika
+	Edge	Tepi
+	Edge Brightness	Kecerahan tepi
+	Edge Only	Hanya tepi
+	Edge Thickness	Ketebalan Tepi
+	Edge Width	Lebar tepi
+	Edit	Edit
+	Edit Contents	Edit konten
+	Edit Original	Edit asli
+	Edit Toolbar	Edit bilah alat
+	Editing	Penyuntingan
+	Edit…	Edit…
+	Effect	Efek
+	Effects	Efek
+	Eliminate	Eliminasi
+	Ellipse	Elips
+	Ellipse Tool	Alat elips
+	Ellipsis	Elipsis
+	Em Dash	Tanda pisah em
+	Em Space	Spasi em
+	Embed	Sematkan
+	Emboss	Emboss
+	En Dash	Tanda pisah en
+	En Space	Spasi en
+	Enable	Aktifkan
+	Enlarged	Diperbesar
+	Enter	Enter
+	Entire Font	Seluruh font
+	Envelope DL	Amplop DL
+	Erase	Hapus
+	Eraser	Penghapus
+	Eraser Tool	Alat penghapus
+	Error	Galat
+	Even Fields	Bidang genap
+	Exact	Eksak
+	Exclusion	Pengecualian
+	Exit	Keluar
+	Expand	Perluas
+	Export	Ekspor
+	Export As	Ekspor sebagai
+	Export As…	Ekspor sebagai…
+	Export Options	Opsi Ekspor
+	Export PDF	Ekspor PDF
+	Exported to {path}	Diekspor ke {path}
+	Exported {path}	Diekspor ke {path}
+	Export…	Ekspor…
+	Exposure	Eksposur
+	Extract	Ekstrak
+	Eyedropper	Penadah warna
+	Eyedropper Tool	Alat pipet
+	Faded Film	Film Pudar
+	Fast	Cepat
+	Favorites	Favorit
+	Feather	Feather
+	Fields:	Field:
+	File	Berkas
+	File Format	Format Berkas
+	File Handling	Penanganan berkas
+	File Info…	Info berkas…
+	File Name	Nama Berkas
+	File Size	Ukuran Berkas
+@id	file.close	Tutup
+	Files	File
+	Fill	Isian
+	Fill:	Isian:
+	Filter	Filter
+	Find	Temukan
+	Find Next	Cari berikutnya
+	Find:	Cari:
+	Find…	Cari…
+	Fine Dots	Titik halus
+	First	Pertama
+	First commit	Commit pertama
+	Fit	Pas
+	Fit in View	Sesuaikan ke tampilan
+	Fixed	Tetap
+	Flash	Kilat
+	Flatten	Ratakan
+	Flip	Balik
+	Flip Horizontal	Balik horizontal
+	Flip Vertical	Balik vertikal
+	Focus	Fokus
+	Folder	Folder
+	Font	Font
+	Font Size	Ukuran font
+	Font size	Ukuran font
+	Font Size:	Ukuran Font:
+	Font:	Font:
+	Fonts	Font
+	Format	Format
+	Format:	Format:
+	Fractions	Pecahan
+	Frame	Bingkai
+	Free	Bebas
+	Free Transform	Transformasi bebas
+	French	Prancis
+	Frequency	Frekuensi
+	From	Dari
+	Frosted	Buram
+	Full	Penuh
+	Full Screen Mode	Mode layar penuh
+	Functions	Fungsi
+	Gamma	Gamma
+	Gamma Correction	Koreksi Gamma
+	Gamut Warning	Peringatan Gamut
+	Gaussian Blur	Pengaburan Gaussian
+	Gaussian Blur…	Kabur Gaussian…
+	General	Umum
+	General…	Umum…
+	Generate	Buat
+	German	Jerman
+	GitHub	GitHub
+	Glass	Kaca
+	Global	Global
+	Glow	Pendar
+	Glow Brightness	Kecerahan Pendar
+	Glyphs	Glif
+	Good	Baik
+	Gradient	Gradien
+	Gradient Tool	Alat gradien
+	Gradients	Gradien
+	Grain	Butiran
+	Grain Type	Jenis butiran
+	Graininess	Kebutiran
+	Grainy Dots	Titik berbutir
+	Graphic	Grafis
+	Graphics	Grafis
+	Gray	Abu-abu
+	Gray Gamma 2.2	Gray Gamma 2.2
+	Grayscale	Skala abu-abu
+	Green	Hijau
+	Grid	Kisi
+	Grid Size:	Ukuran kisi:
+	Gridline every	Garis grid setiap
+	Group	Grupkan
+	Group with	Grupkan dengan
+	Groups	Grup
+	Grout Width	Lebar nat
+	Guides	Panduan
+	Halftone Pattern	Pola halftone
+	Hand	Tangan
+	Hand Tool	Alat tangan
+	Hard	Keras
+	Hard Light	Cahaya keras
+	Hard Mix	Campuran Keras
+	Heart	Hati
+	Height	Tinggi
+	Height:	Tinggi:
+	Help	Bantuan
+	Hexagon	Heksagon
+	Hidden	Tersembunyi
+	Hide	Sembunyikan
+	Hide All	Sembunyikan Semua
+	Hide Grid	Sembunyikan kisi
+	Hide Others	Sembunyikan yang lain
+	High	Tinggi
+	High Pass	High Pass
+	High Resolution	Resolusi tinggi
+	High resolution	Resolusi tinggi
+	Highlight Area	Area sorotan
+	Highlights	Sorotan
+	Hindi	Hindi
+	Histogram	Histogram
+	History	Riwayat
+	Hollow	Berongga
+	Home	Home
+	Horizontal	Horizontal
+	Horizontal scale	Skala horizontal
+	Horizontally	Secara Horizontal
+	Hue	Hue
+	Hue Shift	Pergeseran rona
+	Hue/Saturation…	Rona/saturasi…
+	Hyphenation	Pemenggalan kata
+	Icon	Ikon
+	Ignore	Abaikan
+	Ignore All	Abaikan Semua
+	Image	Gambar
+	Image Size	Ukuran gambar
+	Images	Gambar
+	Import	Impor
+	Import…	Impor…
+	Inches	Inci
+	Increase Font Size	Perbesar ukuran font
+	Inflate	Gembung
+	Info	Info
+	Inner Glow…	Pendar dalam…
+	Input:	Input:
+	Insert	Sisipkan
+	Inside	Di Dalam
+	Inspect Document	Periksa dokumen
+	Install Plug-in	Pasang plug-in
+	Install Plug-in…	Instal plug-in…
+	Intensity	Intensitas
+	Interface	Antarmuka
+	Interface Language	Bahasa antarmuka
+	Interlaced	Interlaced
+	Interpolation	Interpolasi
+	Intersect	Iris
+	Invert	Balikkan
+	Invert Mask	Balikkan masker
+	Isolate	Isolasi
+	Italian	Italia
+	Italic	Miring
+	Japanese	Jepang
+	Join	Sambungkan
+	Join our Discord	Gabung ke Discord kami
+	Join the ArtCraft Discord	Gabung ke Discord ArtCraft
+	Join the ArtCraft Discord…	Gabung ke Discord ArtCraft…
+	Join us on Discord	Bergabunglah dengan kami di Discord
+	just now	baru saja
+	Justification	Justifikasi
+	Justify	Ratakan
+	Keep:	Pertahankan:
+	Kerning	Kerning
+	Keyboard Shortcuts	Pintasan Keyboard
+	Keyboard Shortcuts…	Pintasan Keyboard…
+	Keywords	Kata Kunci
+	Kind	Jenis
+	Korean	Korea
+	Lab	Lab
+	Label	Label
+	Labels	Label
+	Landscape	Mendatar
+	Language	Bahasa
+	Language Options	Opsi bahasa
+@id	language.name	Bahasa Indonesia
+	Language:	Bahasa:
+	Large	Besar
+	Lasso	Lasso
+	Lasso Tool	Alat lasso
+	Last	Terakhir
+	Last commit	Commit terakhir
+	Layer	Lapisan
+	Layers	Lapisan
+	Layout	Layout
+	Layout:	Tata letak:
+	Leading	Leading
+	Left	Kiri
+	Left Diagonal	Diagonal kiri
+	Left to Right	Kiri ke kanan
+	Left:	Kiri:
+	Legal	Legal
+	Length	Panjang
+	Length:	Panjang:
+	Lens Flare	Suar Lensa
+	Less	Lebih sedikit
+	Letter	Letter
+	Level	Level
+	Level 1	Level 1
+	Level 2	Level 2
+	Level 3	Level 3
+	Level 4	Level 4
+	Levels	Level
+	Levels…	Level…
+	Libraries	Pustaka
+	Library	Pustaka
+	Light	Terang
+	Light Blue	Biru muda
+	Light Direction	Arah cahaya
+	Light Gray	Abu-abu terang
+	Light gray	Abu-abu terang
+	Light Intensity	Intensitas cahaya
+	Light Theme	Tema Terang
+	Light Type	Jenis Cahaya
+	Lighten	Menerangkan
+	Lighter Color	Warna Lebih Terang
+	Lighting	Pencahayaan
+	Lighting Effects	Efek Pencahayaan
+	Lightness	Kecerahan
+	Line	Garis
+	Line delta	Delta baris
+	Linear	Linear
+	Linear Burn	Bakar Linier
+	Linear Gradient	Gradien linier
+	Linear Light	Cahaya Linier
+	Lines	Garis
+	Lines +/−	Baris +/−
+	Lines added	Baris ditambahkan
+	Lines deleted	Baris dihapus
+	Link	Tautan
+	Links	Tautan
+	List	Daftar
+	List View	Tampilan daftar
+	Location	Lokasi
+	Location:	Lokasi:
+	Lock	Kunci
+	Lock Guides	Kunci panduan
+	Lock Slices	Kunci slice
+	Locked	Terkunci
+	Long Lines	Garis panjang
+	Long Strokes	Goresan panjang
+	Low	Rendah
+	lowercase	huruf kecil
+	Luminance	Luminans
+	Luminosity	Luminositas
+	Magenta	Magenta
+	Magic Wand Tool	Alat tongkat ajaib
+	Magnification	Pembesaran
+	Mask	Masker
+	Masks	Masker
+	Matte	Matte
+	Maximize	Maksimalkan
+	Maximum	Maksimum
+	Measure	Pengukur
+	Median	Median
+	Medium	Sedang
+	Medium Dots	Titik sedang
+	Medium Gray	Abu-abu sedang
+	Medium Lines	Garis sedang
+	Merge	Gabungkan
+	Merge Layers	Gabungkan lapisan
+	Merged PRs	PR yang digabung
+	Mesh	Mesh
+	Message:	Pesan:
+	Metadata	Metadata
+	Method	Metode
+	Method:	Metode:
+	Mezzotint	Mezzotint
+	Mezzotint…	Mezzotint…
+	Midpoint	Titik Tengah
+	Midtones	Nada Tengah
+	Millimeters	Milimeter
+	Minimize	Minimalkan
+	Minimum	Minimum
+	Mirror	Cermin
+	Missing	Hilang
+	Mobile	Seluler
+	Mode	Mode
+	Mode:	Mode:
+	Model	Model
+	Models	Model
+	Modern	Modern
+	Modified	Diubah
+	Modify	Ubah
+	Monitor RGB	RGB monitor
+	Mono	Mono
+	Monochrome	Monokrom
+	More	Selengkapnya
+	Mosaic	Mozaik
+	Mosaic Tiles	Ubin mosaik
+	Motion	Gerak
+	Move	Pindah
+	Move Down	Turunkan
+	Move Panel	Pindahkan panel
+	Move Up	Naikkan
+	Multiply	Multiply
+	Name	Nama
+	Name (A–Z)	Nama (A–Z)
+	Name:	Nama:
+	Navigation	Navigasi
+	Navigator	Navigator
+	Neon Glow	Pendar neon
+	Never	Tidak pernah
+	New	Baru
+	New Document	Dokumen Baru
+	New from Template	Baru dari templat
+	New Group	Grup baru
+	New Guide	Panduan baru
+	New Layer	Lapisan Baru
+	New Layer…	Lapisan baru…
+	New Style…	Gaya Baru…
+	New Swatch…	Swatch baru…
+	New Window	Jendela baru
+	New Workspace	Ruang Kerja Baru
+	New Workspace…	Ruang kerja baru…
+	New…	Baru…
+	Next	Berikutnya
+	Next Appearance Mode	Mode Penampilan Berikutnya
+	Next Page	Halaman berikutnya
+	Next page	Halaman berikutnya
+	No	Tidak
+	No Color	Tanpa Warna
+	No Dither	Tanpa dither
+	No Document	Tidak ada dokumen
+	No document	Tidak ada dokumen
+	No document open	Tidak ada dokumen terbuka
+	No matches.	Tidak ada yang cocok.
+	No matching commands	Tidak ada perintah yang cocok
+	No results	Tidak ada hasil
+	No Selection	Tidak ada seleksi
+	No selection	Tidak ada seleksi
+	Noise	Derau
+	Nonbreaking Space	Spasi tanpa putus
+	None	Tidak Ada
+	Normal	Normal
+	NTSC Colors	Warna NTSC
+	Number	Jumlah
+	Object	Objek
+	Octagon	Segi Delapan
+	Odd Fields	Bidang ganjil
+	Off	Mati
+	Offline	Offline
+	Offset	Offset
+	Offset:	Offset:
+	OK	OK
+	Omit	Abaikan
+	On	Aktif
+	Only Web Colors	Hanya warna web
+	Opacity	Opasitas
+	Opacity:	Opasitas:
+	Open	Buka
+	Open Recent	Terakhir Dibuka
+	OpenType	OpenType
+	Open…	Buka…
+	Optimized	Dioptimalkan
+	Options	Opsi
+	Options…	Opsi…
+	Orange	Oranye
+	Ordinals	Ordinal
+	Orientation	Orientasi
+	Orientation:	Orientasi:
+	Original	Asli
+	Other	Lainnya
+	Outer Glow…	Pendar luar…
+	Outline	Garis luar
+	Output	Keluaran
+	Output:	Keluaran:
+	Outside	Di Luar
+	Oval	Oval
+	Overlap:	Tumpang tindih:
+	Overlay	Overlay
+	Package…	Paketkan…
+	Page	Halaman
+	Page {page} of {pages}	Halaman {page} dari {pages}
+	Pages	Halaman
+	Painting	Painting
+	Panel	Panel
+	Panel menu	Menu panel
+	Panel Options…	Opsi panel…
+	Panels	Panel
+	Paper	Kertas
+	Paragraph	Paragraf
+	Paragraph Styles	Gaya paragraf
+	Password	Kata sandi
+	Paste	Tempel
+	Paste Special	Tempel Khusus
+	Patchwork	Patchwork
+	Path	Jalur
+	Path:	Jalur:
+	Paths	Jalur
+	Pattern	Pola
+	Pattern Type	Jenis pola
+	Pause	Jeda
+	Pen	Pena
+	Pen Tool	Alat pena
+	Pencil	Pensil
+	Pencil Tool	Alat pensil
+	Pentagon	Segi Lima
+	Percent	Persen
+	Performance	Kinerja
+	Perspective	Perspektif
+	Photo	Foto
+	Photocopy	Fotokopi
+	Picas	Pica
+	Pin Light	Pin Light
+	Pink	Merah muda
+	Pixel	Piksel
+	Pixelate	Pikselasi
+	Pixels	Piksel
+	Play	Putar
+	Plug-ins	Plug-in
+	Pointillize	Pointillisme
+	Pointillize…	Pointillisme…
+	Points	Titik
+	Polygon	Poligon
+	Polygon Tool	Alat poligon
+	Portrait	Potret
+	Portuguese	Portugis
+	Position	Posisi
+	Position:	Posisi:
+	Postcard	Kartu pos
+	Poster	Poster
+	Poster Edges	Tepi poster
+	Posterize	Posterisasi
+	Preferences	Preferensi
+	Preferences…	Preferensi…
+	Prefix	Awalan
+	Preserve	Pertahankan
+	Preserve Luminosity	Pertahankan Luminositas
+	Preset	Preset
+	Preset Manager	Manajer Preset
+	Preset:	Preset:
+	Presets	Preset
+	Presets:	Preset:
+	Press keys…	Tekan tombol…
+	Pressure	Tekanan
+	Preview	Pratinjau
+	Previous	Sebelumnya
+	Previous Page	Halaman sebelumnya
+	Previous page	Halaman sebelumnya
+	Print	Cetak
+	Printer	Printer
+	Printer:	Printer:
+	Print…	Cetak…
+	Profile	Profil
+	Progressive	Progresif
+	Proof Setup	Pengaturan uji
+	Properties	Properti
+	PRs	PR
+	Public Domain	Domain publik
+	Punctuation	Tanda baca
+	Purple	Ungu
+	Quality	Kualitas
+	Quick Actions	Tindakan cepat
+	Radial	Radial
+	Radial Blur	Pengaburan radial
+	Radial Blur…	Kabur radial…
+	Radial Gradient	Gradien radial
+	Radius	Radius
+	Radius:	Radius:
+	Random	Acak
+	Range	Rentang
+	Range:	Rentang:
+	Rasterize	Rasterkan
+	Ratio	Rasio
+	Rays	Sinar
+	Ready	Siap
+	Real name	Nama asli
+	Recent	Terbaru
+	Recent Colors	Warna terbaru
+	Recent Files	File terkini
+	Recover	Pulihkan
+	Rectangle	Persegi Panjang
+	Rectangle Tool	Alat persegi panjang
+	Rectangular	Persegi Panjang
+	Red	Merah
+	Redo	Ulangi
+	Reduce Noise	Kurangi Derau
+	Refine	Perhalus
+	Reflected	Terpantul
+	Refresh	Segarkan
+	Regular	Reguler
+	Relative	Relatif
+	Relative Colorimetric	Kolorimetrik relatif
+	Relaxed	Santai
+	Relief	Relief
+	Remove	Hapus
+	Remove Background	Hapus Background
+	Remove from favorites	Hapus dari favorit
+	Rename	Ganti Nama
+	Rename Group…	Ganti nama grup…
+	Rename Style	Ganti nama gaya
+	Rename…	Ganti Nama…
+	Repeat	Perulangan
+	Replace	Ganti
+	Replace:	Ganti:
+	Report an Issue…	Laporkan Masalah…
+	Reselect	Seleksi ulang
+	Reset	Atur ulang
+	Reset Preferences	Atur ulang preferensi
+	Reset…	Atur Ulang…
+	Resize panel window	Ubah ukuran jendela panel
+	Resize panels	Ubah ukuran panel
+	Resolution	Resolusi
+	Resolution:	Resolusi:
+	Restore	Pulihkan
+	Result	Hasil
+	Reveal in Finder	Tampilkan di Finder
+	Reverse	Balik
+	Reverse the order	Balik urutan
+	Revert	Kembalikan
+	Review	Tinjauan
+	RGB	RGB
+	RGB Color	Warna RGB
+	RGB:	RGB:
+	Right	Kanan
+	Right Diagonal	Diagonal kanan
+	Right:	Kanan:
+	Rotate	Putar
+	Rotate:	Putar:
+	Rotation	Rotasi
+	Rotation:	Rotasi:
+	Rounded Rectangle	Persegi panjang bulat
+	Roundness	Kebulatan
+	Roundness:	Kebulatan:
+	Rows	Baris
+	Ruler	Penggaris
+	Rulers	Penggaris
+	Rulers & Grids	Penggaris & kisi
+	Russian	Rusia
+	Sample Size	Ukuran Sampel
+	Sandstone	Batu pasir
+	Saturation	Saturasi
+	Save	Simpan
+	Save a Copy	Simpan salinan
+	Save a Copy…	Simpan Salinan…
+	Save As	Simpan sebagai
+	Save as PDF	Simpan sebagai PDF
+	Save as Template	Simpan sebagai templat
+	Save as Template…	Simpan sebagai templat…
+	Save As…	Simpan Sebagai…
+	Save Preset…	Simpan Preset…
+	Save Selection	Simpan seleksi
+	Save Selection…	Simpan seleksi…
+	Saved	Tersimpan
+	Save…	Simpan…
+	Scale	Skala
+	Scale:	Skala:
+	Scaling	Penskalaan
+	Scratch Disks	Disk scratch
+	Scratch Disks…	Disk Kerja…
+	Screen	Layar
+	Screen Mode	Mode layar
+	Scripts	Skrip
+	Search	Cari
+	Security	Keamanan
+	Segments	Segmen
+	Select	Seleksi
+	Select All	Pilih Semua
+	Select Objects	Pilih objek
+	Select:	Pilih:
+	Selection	Seleksi
+	Selection Tool	Alat seleksi
+	Selective	Selektif
+	Send Backward	Mundurkan
+	Send to Back	Kirim ke Belakang
+	Sensitivity	Sensitivitas
+	Sent to {printer}	Dikirim ke {printer}
+	Services	Layanan
+	Set	Atur
+	Set as Default	Atur sebagai default
+	Set:	Set:
+	Settings	Pengaturan
+	Settings:	Pengaturan:
+	Settings…	Pengaturan…
+	Shadow	Bayangan
+	Shadows	Bayangan
+	Shape	Bentuk
+	Shape Effects	Efek bentuk
+	Shape:	Bentuk:
+	Shapes	Bentuk
+	Sharpen	Pertajam
+	Sharpness	Ketajaman
+	Shift	Shift
+	Short Lines	Garis pendek
+	Short Strokes	Goresan pendek
+	Shortcut	Pintasan
+	Shortcuts	Pintasan
+	Show	Tampilkan
+	Show All	Tampilkan semua
+	Show Grid	Tampilkan kisi
+	Show Guides	Tampilkan panduan
+	Show in Folder	Tampilkan di folder
+	Show Mask	Tampilkan Masker
+	Show Mesh	Tampilkan mesh
+	Show Rulers	Tampilkan penggaris
+	Show rulers	Tampilkan Penggaris
+	Show Tool Tips	Tampilkan tips alat
+	Show:	Tampilkan:
+	Sides:	Sisi:
+	Simplify	Sederhanakan
+	Size	Ukuran
+	Size:	Ukuran:
+	Sketch	Sketsa
+	Skew	Miring
+	Slice	Slice
+	Slice Options	Opsi irisan
+	Slice Options…	Opsi slice…
+	Slice Tool	Alat iris
+	Slices	Slice
+	Small	Kecil
+	Small Caps	Kapital Kecil
+	Smart Blur	Pengaburan pintar
+	Smart Blur…	Kabur cerdas…
+	Smart Guides	Panduan cerdas
+	Smart quotes	Tanda kutip cerdas
+	Smoothness	Kehalusan
+	Snap to Grid	Snap ke kisi
+	Soft	Lembut
+	Soft Light	Cahaya lembut
+	Soften	Lembutkan
+	Softness	Kelembutan
+	Solarize	Solarisasi
+	Sort	Urutkan
+	Source	Sumber
+	Source code on GitHub	Kode sumber di GitHub
+	Spaces	Spasi
+	Spacing	Spasi
+	Spacing:	Spasi:
+	Spanish	Spanyol
+	Spatter	Cipratan
+	Special	Khusus
+	Speckle	Bintik
+	Speed	Kecepatan
+	Spelling	Ejaan
+	Spherize	Bulatkan
+	Split	Belah
+	Spot Color	Warna spot
+	Spray Radius	Radius semprot
+	Square	Persegi
+	Square Size	Ukuran persegi
+	sRGB IEC61966-2.1	sRGB IEC61966-2.1
+	Stacked	Tertumpuk
+	Stained Glass	Kaca patri
+	Stamp	Stempel
+	Standard	Standar
+	Standard Ligatures	Ligatur standar
+	Star	Bintang
+	Start at:	Mulai dari:
+	Status	Status
+	Stippled	Bertitik
+	Stop	Berhenti
+	Strength	Kekuatan
+	Stretch	Regangkan
+	Strikethrough	Coret
+	Stroke	Stroke
+	Stroke Color	Warna stroke
+	Stroke Length	Panjang sapuan
+	Stroke Options	Opsi goresan
+	Stroke:	Goresan:
+	Studio	Studio
+	Style	Gaya
+	Style:	Gaya:
+	Styles	Gaya
+	Stylize	Stilisasi
+	Subdivisions	Subdivisi
+	Subject	Subjek
+	Subscript	Subskrip
+	Subset	Subset
+	Subtitle	Subtitel
+	Subtract	Kurangi
+	Sumi-e	Sumi-e
+	Summary	Ringkasan
+	Superscript	Superskrip
+	Swatches	Sampel warna
+	Symbol	Simbol
+	Symbols	Simbol
+	Sync with system	Sinkronkan dengan sistem
+	System	Sistem
+	Tab	Tab
+	Table	Tabel
+	Tabloid	Tabloid
+	Tabs	Tab
+	Taper	Tirus
+	Target	Target
+	Target:	Target:
+	Temperature	Suhu
+	Templates	Templat
+	Text	Teks
+	Text color	Warna teks
+	Text:	Teks:
+	Texture	Tekstur
+	Theme	Tema
+	Thickness	Ketebalan
+	Threshold	Ambang batas
+	Thumbnails	Gambar Mini
+	Tile	Ubin
+	Tile Size	Ukuran ubin
+	Tilt	Miringkan
+	Time	Waktu
+	Timecode	Kode Waktu
+	Timeline	Linimasa
+	Tint	Tint
+	Tint Color	Warna Rona
+	Title	Judul
+	To	Ke
+	Tolerance	Toleransi
+	Tolerance:	Toleransi:
+	Tool	Alat
+	Toolbars	Bilah alat
+	Tools	Alat
+	Top	Atas
+	Top Left	Kiri atas
+	Top Right	Kanan atas
+	Top:	Atas:
+	Total:	Total:
+	Tracking	Tracking
+	Transform	Transformasi
+	Transparency	Transparansi
+	Transparent	Transparan
+	Trap…	Trap…
+	Triangle	Segitiga
+	Turbulent	Turbulen
+	Twirl	Pilin
+	Twist	Pilin
+	Type	Teks
+	Type Tool	Alat teks
+	Type:	Jenis:
+	Typewriter	Mesin Tik
+	Type…	Jenis…
+	Typing	Mengetik
+	Underline	Garis Bawah
+	Undo	Urungkan
+	Ungroup	Buka grup
+	Uniform	Seragam
+	Units	Satuan
+	Unknown	Tidak diketahui
+	Unlock	Buka kunci
+	Unsaved changes	Perubahan belum disimpan
+	Unsharp Mask	Unsharp Mask
+	Untitled	Tanpa Judul
+	UPPERCASE	HURUF BESAR
+	Use Default	Gunakan default
+	User	Pengguna
+	Username	Nama pengguna
+	Value	Nilai
+	Variables	Variabel
+	Version	Versi
+	Version {version}	Versi {version}
+	Vertical	Vertikal
+	Vertical Alignment	Perataan Vertikal
+	Vertical Type Tool	Alat teks vertikal
+	Vertically	Secara Vertikal
+	Very High	Sangat tinggi
+	Vibrance	Vibrance
+	Video	Video
+	View	Tampilan
+	Violet	Violet
+	Visibility	Visibilitas
+	Vivid Light	Cahaya Terang
+	Voice	Suara
+	W:	W:
+	Warning	Peringatan
+	Warnings	Peringatan
+	Warp	Warp
+	Wave	Gelombang
+	Wave…	Gelombang…
+	Web	Web
+	Weight	Ketebalan
+	Wet	Basah
+	White	Putih
+	White Intensity	Intensitas putih
+	White Is High	Putih Berarti Tinggi
+	Whites	Putih
+	Width	Lebar
+	Width and Height	Lebar dan tinggi
+	Width:	Lebar:
+	Window	Jendela
+	Windows	Jendela
+	Working CMYK	CMYK kerja
+	Workspace	Ruang kerja
+	Workspaces	Ruang Kerja
+	X	X
+	Y	Y
+	Yellow	Kuning
+	Yes	Ya
+	Your changes will be lost if you don't save them.	Perubahan Anda akan hilang jika tidak disimpan.
+	Zoom	Zoom
+	Zoom In	Perbesar
+	Zoom in	Zoom in
+	Zoom Out	Perkecil
+	Zoom out	Zoom out
+	Zoom Tool	Alat Zoom
+@plural	{n} byte|{n} bytes	{n} byte
+@plural	{n} commit|{n} commits	{n} commit
+	{n} files	{n} berkas
+	{n} h ago	{n} jam lalu
+@plural	{n} item|{n} items	{n} item
+@plural	{n} Layer|{n} Layers	{n} lapisan
+	{n} min ago	{n} mnt lalu
+@plural	{n} step|{n} steps	{n} langkah
+	● Recording	● Merekam

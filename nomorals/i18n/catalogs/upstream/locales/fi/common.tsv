@@ -1,0 +1,907 @@
+# Suomi (fi) interface catalog for every Crafting App.
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   @plural  English `one|other`; the translation lists this language's plural forms, `|`-separated.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary. No other product's localisation, string table or translated UI was
+# consulted or copied; add entries the same way.
+
+	% of all commits	% kaikista commiteista
+	16 bit	16 bittiä
+	24 bit	24 bittiä
+	24 bits/pixel	24 bittiä/pikseli
+	32 bit	32 bittiä
+	32 bits/pixel	32 bittiä/pikseli
+	8 bit	8 bittiä
+	About	Tietoja
+	Absolute	Absoluuttinen
+	Absolute Colorimetric	Absoluuttinen kolorimetrinen
+	Accented Edges	Korostetut reunat
+	Accurate	Tarkka
+	Actions	Toiminnot
+	Activate Panel	Aktivoi paneeli
+	Actual Size	Todellinen koko
+	Adaptive	Mukautuva
+	Add	Lisää
+	Add Guide	Lisää apuviiva
+	Add to Swatches	Lisää värimalleihin
+	Advanced	Lisäasetukset
+	Align	Tasaa
+	Align center	Tasaa keskelle
+	Align left	Tasaa vasemmalle
+	Align right	Tasaa oikealle
+	Align to Selection	Tasaa valintaan
+	Alignment:	Tasaus:
+	All	Kaikki
+	All Caps	Versaalit
+	All Categories	Kaikki luokat
+	All Layers	Kaikki tasot
+	All Slices	Kaikki viipaleet
+	Alt	Alt
+	Amount	Määrä
+	Amount:	Määrä:
+	Angle	Kulma
+	Angle:	Kulma:
+	Anti-Alias	Reunanpehmennys
+	Anti-alias	Reunanpehmennys
+	Appearance	Ulkoasu
+theme	Appearance	Ulkoasu
+	Apply	Käytä
+	Apply Character Style	Käytä merkkityyliä
+	Apply Data Set	Käytä tietojoukkoa
+	Arc	Kaari
+	Arrange	Järjestä
+	Arrow	Nuoli
+	Artboard	Piirtoalusta
+	Artboards	Piirtoalustat
+	ArtCraft Website	ArtCraft-verkkosivusto
+	ArtCraft website	ArtCraftin verkkosivusto
+	Artistic	Taiteelliset
+	Aspect Ratio	Kuvasuhde
+	Assign	Määritä
+	Assign Profile…	Määritä profiili…
+	Author:	Tekijä:
+	Auto	Automaattinen
+	Auto Color	Automaattinen väri
+	Automatic	Automaattinen
+	Automatically	Automaattisesti
+	Average	Keskiarvota
+	Background Contents	Taustan sisältö
+	Backspace	Askelpalautin
+	Balance	Tasapaino
+	Bar	Palkki
+	Baseline	Perusviiva
+	Baseline Shift	Perusviivan siirto
+	Basic	Perus
+	Basic Latin	Latinalainen perusmerkistö
+	Batch	Erä
+	Batch…	Erä…
+	Bend:	Taivutus:
+	Bicubic	Bikuubinen
+	Binary assets added	Lisätyt binääriresurssit
+	Binary assets removed	Poistetut binääriresurssit
+	Bitmap	Bittikartta
+	Black	Musta
+	Black & White	Mustavalkoinen
+	Black Intensity	Mustan voimakkuus
+	Blending Mode	Sekoitustila
+	Blocks	Lohkot
+	Blue	Sininen
+	Blur	Sumennus
+	Bold	Lihavoitu
+	Border Thickness	Reunuksen paksuus
+	Both sides	Molemmat puolet
+	Bottom	Ala
+	Bottom Left	Vasen alakulma
+	Bottom Right	Oikea alakulma
+	Bottom:	Alhaalla:
+	Break Link	Katkaise linkki
+	Brick	Tiili
+	Brightness	Kirkkaus
+	Bring Forward	Tuo eteenpäin
+	Bring to Front	Tuo eteen
+	Brown	Ruskea
+	Brush Strokes	Sivellinviivat
+	Brushes	Siveltimet
+	Bullet	Luettelomerkki
+	Burlap	Juuttikangas
+	Cancel	Peruuta
+	Canvas	Kangas
+	Cascade	Porrasta
+	Cell Size	Solun koko
+	Center	Keskitä
+	Centimeters	Senttimetrit
+	Chamfer	Viiste
+	Change	Muuta
+	Change All	Muuta kaikki
+	Change Case	Vaihda kirjainkoko
+	Change Panel Layout	Muuta paneelien asettelua
+	Channel	Kanava
+	Character	Merkki
+	Character Styles	Merkkityylit
+	Check Spelling…	Tarkista oikeinkirjoitus…
+	Choose…	Valitse…
+	Circle	Ympyrä
+	Classic	Perinteinen
+	Clear	Tyhjennä
+	Clear All	Tyhjennä kaikki
+	Clear Guides	Tyhjennä apuviivat
+	Clear History	Tyhjennä historia
+	Clear Recent Files	Tyhjennä viimeisimmät tiedostot
+	Clipping Mask	Leikkausmaski
+	Close	Sulje
+	Close All	Sulje kaikki
+	Close Panel	Sulje paneeli
+	Cmd	Cmd
+	CMYK Color	CMYK-väri
+	CMYK:	CMYK:
+	Coarse Dots	Karkeat pisteet
+	Collate	Lajittele
+	Color	Väri
+	Color Burn	Värisävyn tummennus
+	Color Dodge	Värisävyn vaalennus
+	Color Management	Värinhallinta
+	Color Mode	Väritila
+	Color Picker	Värinvalitsin
+	Color Settings	Väriasetukset
+	Color Settings…	Väriasetukset…
+	Color Space	Väriavaruus
+	Color Swatches	Värimallit
+	Color Table	Väritaulukko
+	Color:	Väri:
+	Colorize	Väritä
+	Colors	Värit
+	Colors:	Värit:
+	Columns:	Sarakkeet:
+	Command	Komento
+	Commits	Commitit
+	Community	Yhteisö
+	Company	Yritys
+	Composite	Yhdistelmä
+	Compression	Pakkaus
+	Contrast	Kontrasti
+	Contributors	Tekijät
+	Convert	Muunna
+	Convert to Shape	Muunna muodoksi
+	Convert to sRGB	Muunna sRGB:ksi
+	Copies:	Kopiot:
+	Copy	Kopioi
+	Copyright	Tekijänoikeus
+	Copyrighted	Tekijänoikeuden alainen
+	Corner	Kulma
+	Corners	Kulmat
+@msg	Couldn't open {name}: {e}	Tiedostoa {name} ei voitu avata: {e}
+	Crack Brightness	Halkeamien kirkkaus
+	Crack Depth	Halkeamien syvyys
+	Crack Spacing	Halkeamien väli
+	Create	Luo
+	Create Clipping Mask	Luo leikkausmaski
+	Crop	Rajaa
+	Cross	Risti
+	Crosshatch	Ristiviivoitus
+	Crystallize	Kiteytä
+	Crystallize…	Kiteytä…
+	Ctrl	Ctrl
+	Curvature	Kaarevuus
+	Curves…	Käyrät…
+	Custom	Mukautettu
+	Customize…	Mukauta…
+	Cut	Leikkaa
+	Cyan	Syaani
+	Dark	Tumma
+	Dark Gray	Tummanharmaa
+	Dark Strokes	Tummat vedot
+	Darken	Tummenna
+	Darkness	Tummuus
+	Dashed	Katkoviiva
+	Data Sets	Tietojoukot
+	Dates	Päivämäärät
+	De-Interlace	Poista lomitus
+	Decrease Font Size	Pienennä fonttikokoa
+	Default	Oletus
+	Delete	Poista
+	Delete Brush	Poista sivellin
+	Delete Group	Poista ryhmä
+	Delete Layer	Poista taso
+	Delete Style	Poista tyyli
+	Delete Workspace	Poista työtila
+	Depth	Syvyys
+	Description	Kuvaus
+	Description:	Kuvaus:
+	Deselect	Poista valinta
+	Destination:	Kohde:
+	Diameter:	Halkaisija:
+	Diamond	Vinoneliö
+	Difference	Erotus
+	Diffuse Glow	Hajahehku
+	Diffusion	Diffuusio
+	Digits	Numerot
+	Dimensions	Mitat
+	Direct Selection Tool	Suoravalintatyökalu
+	Direction Balance	Suuntatasapaino
+	Direction:	Suunta:
+	Discard	Hylkää
+	Discord	Discord
+	Discretionary Ligatures	Valinnaiset ligatuurit
+	Display name	Näyttönimi
+	Distance	Etäisyys
+	Distort	Vääristä
+	Distortion	Vääristymä
+	Distribute	Jaa tasaisesti
+	Divide	Jaa
+	Dock Panel	Telakoi paneeli
+	Document	Asiakirja
+	Don't Save	Älä tallenna
+	Done	Valmis
+	Dot	Piste
+	Dots	Pisteet
+	Double-click	Kaksoisnapsauta
+	Download	Lataa
+	Draft	Vedos
+	Draw	Piirrä
+	Drop Shadow	Pudotusvarjo
+	Drop Shadow…	Pudotusvarjo…
+	Duplicate	Monista
+	Duplicate Layer	Monista taso
+	Duplication	Monistus
+	Dutch	Hollanti
+	Edge	Reuna
+	Edge Brightness	Reunan kirkkaus
+	Edge Intensity	Reunojen voimakkuus
+	Edge Simplicity	Reunojen yksinkertaisuus
+	Edge Thickness	Reunojen paksuus
+	Edge Width	Reunan leveys
+	Edit	Muokkaa
+	Edit Contents	Muokkaa sisältöä
+	Edit Original	Muokkaa alkuperäistä
+	Edit Toolbar	Muokkaa työkaluriviä
+	Edit…	Muokkaa…
+	Effect	Tehoste
+	Effects	Tehosteet
+	Eliminate	Poista
+	Ellipse	Ellipsi
+	Ellipse Tool	Ellipsityökalu
+	Ellipsis	Kolme pistettä
+	Em Dash	Pitkä ajatusviiva
+	Em Space	Em-välilyönti
+	Embed	Upota
+	En Dash	Lyhyt ajatusviiva
+	En Space	En-välilyönti
+	Enlarged	Suurennettu
+	Enter	Enter
+	Entire Font	Koko fontti
+	Envelope DL	Kirjekuori DL
+	Eraser	Pyyhekumi
+	Eraser Tool	Pyyhekumityökalu
+	Error	Virhe
+	Even Fields	Parilliset kentät
+	Exact	Tarkka
+	Exclusion	Poissulkeminen
+	Exit	Lopeta
+	Expand	Laajenna
+	Export	Vie
+	Export As	Vie nimellä
+	Export As…	Vie muodossa…
+	Export PDF	Vie PDF
+	Exported {path}	Viety: {path}
+	Export…	Vie…
+	Eyedropper	Pipetti
+	Eyedropper Tool	Pipettityökalu
+	Favorites	Suosikit
+	Feather	Sulka
+	File	Tiedosto
+	File Handling	Tiedostojen käsittely
+	File Info…	Tiedoston tiedot…
+@id	file.close	Sulje
+	Files	Tiedostot
+	Fill	Täyttö
+	Fill:	Täyttö:
+	Filter	Suodata
+	Find	Etsi
+	Find Next	Etsi seuraava
+	Fine Dots	Hienot pisteet
+	First	Ensimmäinen
+	First commit	Ensimmäinen commit
+	Fit	Sovita
+	Fit in View	Sovita näkymään
+	Fixed	Kiinteä
+	Flatten	Litistä
+	Flip	Käännä
+	Flip Horizontal	Käännä vaakasuunnassa
+	Flip Vertical	Käännä pystysuunnassa
+	Folder	Kansio
+	Font	Fontti
+	Font Size	Fonttikoko
+	Font:	Fontti:
+	Fonts	Fontit
+	Format	Muoto
+	Format:	Muoto:
+	Fractions	Murtoluvut
+	Free	Vapaa
+	Free Transform	Vapaa muunnos
+	French	Ranska
+	Frequency	Taajuus
+	Frosted	Huurrettu
+	Full Screen Mode	Koko näytön tila
+	Gamma	Gamma
+	Gamut Warning	Väriavaruusvaroitus
+	Gaussian Blur	Gaussin sumennus
+	Gaussian Blur…	Gaussin sumennus…
+	General	Yleiset
+	German	Saksa
+	Glass	Lasi
+	Global	Globaali
+	Glow Brightness	Hehkun kirkkaus
+	Glow Size	Hehkun koko
+	Glyphs	Merkit
+	Good	Hyvä
+	Gradient	Liukuväri
+	Gradient Tool	Liukuvärityökalu
+	Gradients	Liukuvärit
+	Grain	Rakeisuus
+	Grain Type	Rakeen tyyppi
+	Graininess	Rakeisuus
+	Grainy Dots	Rakeiset pisteet
+	Graphic	Grafiikka
+	Graphics	Grafiikka
+	Gray	Harmaa
+	Gray Gamma 2.2	Harmaa gamma 2.2
+	Grayscale	Harmaasävy
+	Green	Vihreä
+	Grid	Ruudukko
+	Grid Size:	Ruudukon koko:
+	Gridline every	Ruudukkoviiva joka
+	Group	Ryhmitä
+	Group with	Ryhmitä kohteen kanssa
+	Groups	Ryhmät
+	Grout Width	Saumauksen leveys
+	Guides	Apuviivat
+	Halftone Pattern	Rasterikuvio
+	Hand	Käsi
+	Hand Tool	Käsityökalu
+	Hard	Tiukka
+	Hard Light	Kova valo
+	Height	Korkeus
+	Height:	Korkeus:
+	Help	Ohje
+	Hexagon	Kuusikulmio
+	Hidden	Piilotettu
+	Hide	Piilota
+	Hide Grid	Piilota ruudukko
+	Hide Others	Piilota muut
+	High	Korkea
+	High Resolution	Korkea tarkkuus
+	High resolution	Korkea tarkkuus
+	Highlight Area	Korostusalue
+	Hindi	Hindi
+	History	Historia
+	Hollow	Ontto
+	Home	Aloitus
+	Horizontal	Vaakasuora
+	Hue	Sävy
+	Hue Shift	Sävynsiirto
+	Hue/Saturation…	Sävy/kylläisyys…
+	Hyphenation	Tavutus
+	Ignore	Ohita
+	Image	Kuva
+	Image Size	Kuvan koko
+	Images	Kuvat
+	Import…	Tuo…
+	Inches	Tuumat
+	Increase Font Size	Suurenna fonttikokoa
+	Info	Tiedot
+	Inner Glow…	Sisähehku…
+	Insert	Lisää
+	Inside	Sisäpuoli
+	Inspect Document	Tarkastele asiakirjaa
+	Install Plug-in	Asenna laajennus
+	Install Plug-in…	Asenna laajennus…
+	Intensity	Voimakkuus
+	Interface Language	Käyttöliittymän kieli
+	Interlaced	Lomitettu
+	Interpolation	Interpolointi
+	Intersect	Leikkaa
+	Invert	Käänteinen
+	Invert Mask	Käännä maski
+	Isolate	Eristä
+	Italian	Italia
+	Italic	Kursivoitu
+	Japanese	Japani
+	Join	Liitä
+	Join our Discord	Liity Discordiimme
+	Justification	Tasaus
+	Justify	Tasaa molemmat reunat
+	Keep:	Säilytä:
+	Keyboard Shortcuts	Pikanäppäimet
+	Keyboard Shortcuts…	Pikanäppäimet…
+	Kind	Laji
+	Lab	Lab
+	Landscape	Vaaka
+	Language	Kieli
+	Language Options	Kieliasetukset
+@id	language.name	Suomi
+	Language:	Kieli:
+	Large	Suuri
+	Lasso	Lasso
+	Lasso Tool	Lassotyökalu
+	Last	Viimeisin
+	Last commit	Viimeisin commit
+	Layer	Taso
+	Layers	Tasot
+	Layout:	Asettelu:
+	Leading	Riviväli
+	Left	Vasen
+	Left Diagonal	Vasen vinottainen
+	Left to Right	Vasemmalta oikealle
+	Left:	Vasen:
+	Legal	Legal
+	Length	Pituus
+	Length:	Pituus:
+	Less	Vähemmän
+	Letter	Letter
+	Levels	Tasot
+	Levels…	Tasot…
+	Libraries	Kirjastot
+	Library	Kirjasto
+	Light	Vaalea
+	Light Blue	Vaaleansininen
+	Light Direction	Valon suunta
+	Light Gray	Vaaleanharmaa
+	Light Intensity	Valon voimakkuus
+	Lighten	Vaalenna
+	Lighting	Valaistus
+	Lightness	Vaaleus
+	Line	Viiva
+	Line delta	Rivien muutos
+	Linear	Lineaarinen
+	Linear Gradient	Lineaarinen liukuväri
+	Lines	Viivat
+	Lines +/−	Rivit +/−
+	Lines added	Lisätyt rivit
+	Lines deleted	Poistetut rivit
+	Link	Linkki
+	Links	Linkit
+	List View	Luettelonäkymä
+	Location	Sijainti
+	Location:	Sijainti:
+	Lock	Lukitse
+	Lock Guides	Lukitse apuviivat
+	Lock Slices	Lukitse siivut
+	Locked	Lukittu
+	Long Lines	Pitkät viivat
+	Long Strokes	Pitkät vedot
+	Low	Matala
+	lowercase	pienet kirjaimet
+	Luminosity	Luminanssi
+	Magenta	Magenta
+	Magic Wand Tool	Taikasauvatyökalu
+	Mask	Maski
+	Matte	Matta
+	Maximize	Suurenna
+	Maximum	Suurin
+	Measure	Mittaa
+	Medium	Keskitaso
+	Medium Dots	Keskikokoiset pisteet
+	Medium Gray	Keskiharmaa
+	Medium Lines	Keskipitkät viivat
+	Merge	Yhdistä
+	Merge Layers	Yhdistä tasot
+	Merged PRs	Yhdistetyt PR:t
+	Mesh	Verkko
+	Message:	Viesti:
+	Method	Menetelmä
+	Method:	Menetelmä:
+	Mezzotint	Mezzotinto
+	Mezzotint…	Mezzotinto…
+	Millimeters	Millimetrit
+	Minimize	Pienennä
+	Minimum	Pienin
+	Mirror	Peili
+	Missing	Puuttuu
+	Mobile	Mobiili
+	Mode:	Tila:
+	Model	Malli
+	Models	Mallit
+	Modern	Moderni
+	Modified	Muokattu
+	Modify	Muokkaa
+	Monitor RGB	Näytön RGB
+	Mono	Mono
+	Monochrome	Yksivärinen
+	More	Lisää
+	Mosaic Tiles	Mosaiikkilaatat
+	Move	Siirrä
+	Move Down	Siirrä alas
+	Move Panel	Siirrä paneelia
+	Move Up	Siirrä ylös
+	Multiply	Kerro
+	Name	Nimi
+	Name (A–Z)	Nimi (A–Ö)
+	Name:	Nimi:
+	Navigator	Navigaattori
+	Neon Glow	Neonhehku
+	New	Uusi
+	New from Template	Uusi mallista
+	New Group	Uusi ryhmä
+	New Guide	Uusi apuviiva
+	New Layer…	Uusi taso…
+	New Swatch…	Uusi värimalli…
+	New Window	Uusi ikkuna
+	New Workspace	Uusi työtila
+	New Workspace…	Uusi työtila…
+	New…	Uusi…
+	Next	Seuraava
+	Next Page	Seuraava sivu
+	Next page	Seuraava sivu
+	No Dither	Ei ditheröintiä
+	No Document	Ei asiakirjaa
+	No document	Ei asiakirjaa
+	No document open	Ei avointa asiakirjaa
+	No matches.	Ei osumia.
+	No results	Ei tuloksia
+	No Selection	Ei valintaa
+	No selection	Ei valintaa
+	Noise	Kohina
+	Nonbreaking Space	Sitova välilyönti
+	None	Ei mitään
+	Normal	Normaali
+	NTSC Colors	NTSC-värit
+	Object	Objekti
+	Odd Fields	Parittomat kentät
+	Off	Ei käytössä
+	Offset	Siirtymä
+	Offset:	Siirtymä:
+	OK	OK
+	Omit	Jätä pois
+	On	Käytössä
+	Only Web Colors	Vain verkkovärit
+	Opacity	Peittävyys
+	Opacity:	Peittävyys:
+	Open	Avaa
+	Open…	Avaa…
+	Optimized	Optimoitu
+	Options	Asetukset
+	Options…	Asetukset…
+	Orange	Oranssi
+	Ordinals	Järjestysluvut
+	Orientation	Suunta
+	Orientation:	Suunta:
+	Original	Alkuperäinen
+	Other	Muu
+	Outer Glow…	Ulkohehku…
+	Outline	Ääriviiva
+	Output	Tuloste
+	Output:	Tuloste:
+	Outside	Ulkopuoli
+	Oval	Soikio
+	Overlap:	Limitys:
+	Overlay	Sulautus
+	Package…	Paketoi…
+	Page	Sivu
+	Pages	Sivut
+	Panel menu	Paneelivalikko
+	Panel Options…	Paneelin asetukset…
+	Panels	Paneelit
+	Paragraph	Kappale
+	Paragraph Styles	Kappaletyylit
+	Password	Salasana
+	Paste	Liitä
+	Patchwork	Tilkkutyö
+	Path	Polku
+	Path:	Polku:
+	Paths	Polut
+	Pattern	Kuvio
+	Pattern Type	Kuviotyyppi
+	Pen	Kynä
+	Pen Tool	Kynätyökalu
+	Pencil	Lyijykynä
+	Pencil Tool	Lyijykynätyökalu
+	Performance	Suorituskyky
+	Perspective	Perspektiivi
+	Picas	Picat
+	Pink	Vaaleanpunainen
+	Pixel	Pikseli
+	Pixelate	Pikselöi
+	Pixels	Pikselit
+	Plug-ins	Laajennukset
+	Pointillize	Pisteytä
+	Pointillize…	Pisteytä…
+	Points	Pisteet
+	Polygon	Monikulmio
+	Polygon Tool	Monikulmiotyökalu
+	Portrait	Pysty
+	Portuguese	Portugali
+	Position	Sijainti
+	Postcard	Postikortti
+	Poster Edges	Julisteen reunat
+	Posterization	Posterointi
+	Preferences	Asetukset
+	Preferences…	Asetukset…
+	Preserve	Säilytä
+	Preset:	Esiasetus:
+	Presets	Esiasetukset
+	Presets:	Esiasetukset:
+	Press keys…	Paina näppäimiä…
+	Pressure	Paine
+	Preview	Esikatselu
+	Previous	Edellinen
+	Previous Page	Edellinen sivu
+	Previous page	Edellinen sivu
+	Print	Tulosta
+	Printer	Tulostin
+	Printer:	Tulostin:
+	Print…	Tulosta…
+	Progressive	Progressiivinen
+	Proof Setup	Vedosasetukset
+	Properties	Ominaisuudet
+	PRs	PR:t
+	Public Domain	Vapaasti käytettävä
+	Punctuation	Välimerkit
+	Purple	Violetti
+	Quality	Laatu
+	Quick Actions	Pikatoiminnot
+	Radial	Säteittäinen
+	Radial Blur	Säteittäinen sumennus
+	Radial Blur…	Säteittäinen sumennus…
+	Radial Gradient	Säteittäinen liukuväri
+	Radius	Säde
+	Radius:	Säde:
+	Random	Satunnainen
+	Range:	Alue:
+	Rasterize	Rasteroi
+	Ratio	Suhde
+	Rays	Säteet
+	Ready	Valmis
+	Real name	Oikea nimi
+	Recent	Viimeisimmät
+	Recent Colors	Viimeisimmät värit
+	Recent Files	Viimeisimmät tiedostot
+	Rectangle	Suorakulmio
+	Rectangle Tool	Suorakulmiotyökalu
+	Red	Punainen
+	Redo	Tee uudelleen
+	Refresh	Päivitä
+	Regular	Normaali
+	Relative	Suhteellinen
+	Relative Colorimetric	Suhteellinen kolorimetrinen
+	Relief	Korkokuva
+	Remove	Poista
+	Rename	Nimeä uudelleen
+	Rename Group…	Nimeä ryhmä uudelleen…
+	Rename Style	Nimeä tyyli uudelleen
+	Repeat	Toisto
+	Replace	Korvaa
+	Reselect	Valitse uudelleen
+	Reset	Palauta
+	Reset Preferences	Palauta asetukset
+	Resize panel window	Muuta paneeli-ikkunan kokoa
+	Resize panels	Muuta paneelien kokoa
+	Resolution:	Tarkkuus:
+	Restore	Palauta
+	Reverse the order	Käänteinen järjestys
+	Revert	Palauta
+	RGB	RGB
+	RGB Color	RGB-väri
+	RGB:	RGB:
+	Right	Oikea
+	Right Diagonal	Oikea vinottainen
+	Right:	Oikea:
+	Rotate	Kierrä
+	Rotation	Kierto
+	Rotation:	Kierto:
+	Rounded Rectangle	Pyöristetty suorakulmio
+	Roundness:	Pyöreys:
+	Rulers	Viivaimet
+	Rulers & Grids	Viivaimet ja ruudukot
+	Sandstone	Hiekkakivi
+	Saturation	Kylläisyys
+	Save	Tallenna
+	Save a Copy	Tallenna kopio
+	Save a Copy…	Tallenna kopio…
+	Save As	Tallenna nimellä
+	Save as Template	Tallenna mallina
+	Save as Template…	Tallenna mallipohjana…
+	Save As…	Tallenna nimellä…
+	Save Preset…	Tallenna esiasetus…
+	Save Selection	Tallenna valinta
+	Save Selection…	Tallenna valinta…
+	Saved	Tallennettu
+	Save…	Tallenna…
+	Scale	Skaalaa
+	Scale:	Skaalaus:
+	Scaling	Skaalaus
+	Scratch Disks	Työlevyt
+	Screen	Rasteri
+	Screen Mode	Näyttötila
+	Scripts	Komentosarjat
+	Search	Haku
+	Security	Suojaus
+	Segments	Segmentit
+	Select	Valitse
+	Select All	Valitse kaikki
+	Select Objects	Valitse objektit
+	Select:	Valitse:
+	Selection	Valinta
+	Selection Tool	Valintatyökalu
+	Selective	Valikoiva
+	Send Backward	Vie taaksepäin
+	Send to Back	Vie taakse
+	Services	Palvelut
+	Set as Default	Aseta oletukseksi
+	Set:	Joukko:
+	Settings	Asetukset
+	Settings…	Asetukset…
+	Shape	Muoto
+	Shape Effects	Muototehosteet
+	Shape:	Muoto:
+	Shapes	Muodot
+	Sharpen	Terävöitä
+	Sharpness	Terävyys
+	Shift	Vaihto
+	Short Lines	Lyhyet viivat
+	Short Strokes	Lyhyet vedot
+	Shortcut	Pikanäppäin
+	Shortcuts	Pikanäppäimet
+	Show	Näytä
+	Show All	Näytä kaikki
+	Show Grid	Näytä ruudukko
+	Show Guides	Näytä apuviivat
+	Show in Folder	Näytä kansiossa
+	Show Mesh	Näytä verkko
+	Show Rulers	Näytä viivaimet
+	Show Tool Tips	Näytä työkaluvihjeet
+	Show:	Näytä:
+	Sides:	Sivut:
+	Simplify	Yksinkertaista
+	Size	Koko
+	Size:	Koko:
+	Sketch	Luonnos
+	Skew	Vinoutus
+	Slice	Siivu
+	Slice Options	Viipaleen asetukset
+	Slice Options…	Siivun asetukset…
+	Slice Tool	Siivutyökalu
+	Slices	Siivut
+	Small	Pieni
+	Small Caps	Kapiteelit
+	Smart Blur	Älykäs sumennus
+	Smart Blur…	Älykäs sumennus…
+	Smart Guides	Älykkäät apuviivat
+	Smoothness	Pehmeys
+	Snap to Grid	Kohdista ruudukkoon
+	Soft	Pehmeä
+	Soft Light	Pehmeä valo
+	Softness	Pehmeys
+	Sort	Lajittele
+	Source code on GitHub	Lähdekoodi GitHubissa
+	Spaces	Välilyönnit
+	Spacing	Välistys
+	Spacing:	Välistys:
+	Spanish	Espanja
+	Spatter	Roiskeet
+	Speckle	Täplitys
+	Spelling	Oikeinkirjoitus
+	Spot Color	Spottiväri
+	Spray Radius	Suihkeen säde
+	Square	Neliö
+	Square Size	Neliön koko
+	sRGB IEC61966-2.1	sRGB IEC61966-2.1
+	Stacked	Pinottu
+	Stained Glass	Lasimaalaus
+	Standard Ligatures	Vakioligatuurit
+	Star	Tähti
+	Start at:	Aloita luvusta:
+	Status	Tila
+	Stippled	Pisteytetty
+	Stop	Pysäytä
+	Strength	Voimakkuus
+	Strikethrough	Yliviivaus
+	Stroke	Viiva
+	Stroke Color	Viivan väri
+	Stroke Length	Vedon pituus
+	Stroke Options	Viivan asetukset
+	Stroke:	Viiva:
+	Style	Tyyli
+	Style:	Tyyli:
+	Stylize	Tyylittele
+	Subdivisions	Jaot
+	Subscript	Alaindeksi
+	Subset	Osajoukko
+	Subtract	Vähennä
+	Sumi-e	Sumi-e
+	Summary	Yhteenveto
+	Superscript	Yläindeksi
+	Swatches	Värimallit
+	Symbol	Symboli
+	Symbols	Symbolit
+	Tab	Sarkain
+	Table	Taulukko
+	Tabloid	Tabloid
+	Tabs	Sarkaimet
+	Taper	Kavennus
+	Target	Kohde
+	Target:	Kohde:
+	Temperature	Lämpötila
+	Templates	Mallipohjat
+	Text	Teksti
+	Text:	Teksti:
+	Texture	Tekstuuri
+	Threshold	Kynnys
+	Tile	Vierekkäin
+	Tile Size	Laatan koko
+	Tint	Sävy
+	Tolerance	Toleranssi
+	Tolerance:	Toleranssi:
+	Tool	Työkalu
+	Toolbars	Työkalurivit
+	Tools	Työkalut
+	Top	Ylä
+	Top Left	Vasen yläkulma
+	Top Right	Oikea yläkulma
+	Top:	Ylä:
+	Total:	Yhteensä:
+	Tracking	Merkkiväli
+	Transform	Muunna
+	Transparency	Läpinäkyvyys
+	Transparent	Läpinäkyvä
+	Trap…	Ylitäyttö…
+	Triangle	Kolmio
+	Twirl	Pyöritä
+	Twist	Kierre
+	Type	Teksti
+	Type Tool	Tekstityökalu
+	Type:	Tyyppi:
+	Type…	Tyyppi…
+	Typing	Kirjoitus
+	Underline	Alleviivaus
+	Undo	Kumoa
+	Ungroup	Pura ryhmitys
+	Uniform	Tasainen
+	Units	Yksiköt
+	Unknown	Tuntematon
+	Unlock	Avaa lukitus
+	Unsharp Mask	Epäterävä maski
+	Untitled	Nimetön
+	UPPERCASE	ISOT KIRJAIMET
+	Use Default	Käytä oletusta
+	Username	Käyttäjätunnus
+	Variables	Muuttujat
+	Version	Versio
+	Vertical	Pystysuora
+	Vertical Type Tool	Pystysuuntainen tekstityökalu
+	Very High	Erittäin korkea
+	Video	Video
+	View	Näytä
+	Violet	Violetti
+	Visibility	Näkyvyys
+	W:	L:
+	Warnings	Varoitukset
+	Warp	Vääristys
+	Wave…	Aalto…
+	Weight	Paksuus
+	White	Valkoinen
+	White Intensity	Valkoisen voimakkuus
+	Width	Leveys
+	Width and Height	Leveys ja korkeus
+	Width:	Leveys:
+	Window	Ikkuna
+	Windows	Windows
+	Working CMYK	Työ-CMYK
+	Workspace	Työtila
+	Yellow	Keltainen
+	Your changes will be lost if you don't save them.	Muutokset menetetään, jos niitä ei tallenneta.
+	Zoom	Zoomaa
+	Zoom In	Lähennä
+	Zoom Out	Loitonna
+	Zoom Tool	Zoomaustyökalu
+@plural	{n} byte|{n} bytes	{n} tavu|{n} tavua
+@plural	{n} commit|{n} commits	{n} commit|{n} commitia
+@plural	{n} item|{n} items	{n} kohde|{n} kohdetta
+@plural	{n} Layer|{n} Layers	{n} taso|{n} tasoa
+@plural	{n} step|{n} steps	{n} vaihe|{n} vaihetta
+	● Recording	● Tallennetaan

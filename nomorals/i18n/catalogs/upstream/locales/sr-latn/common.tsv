@@ -1,0 +1,1161 @@
+# Srpski (latinica) (sr-latn) interface catalog for every Crafting App.
+# Columns, separated by a TAB:  context <TAB> English source text <TAB> translation
+#   context  usually empty. `@plural`, `@id` and `@msg` mean something to the apps; any other
+#            word is a label that tells apart two meanings of the same English.
+#   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns (in any
+#            order), and a trailing "…" in one needs one in the other.
+#   @plural  English `one|other`; the translation lists this language's plural forms, `|`-separated.
+#   Lines starting with # and blank lines are ignored. A missing entry shows in English.
+#
+# Clean room: every entry was written from the plain meaning of the English text in ordinary
+# computing vocabulary. No other product's localisation, string table or translated UI was
+# consulted or copied; add entries the same way.
+
+	% of all commits	% svih commit-ova
+	(Custom)	(Prilagođeno)
+	(none)	(nema)
+	16 bit	16 bita
+	24 bits/pixel	24 bita/piksel
+	32 bits/pixel	32 bita/piksel
+	8 bit	8 bita
+	About	O programu
+	Absolute	Apsolutno
+	Absolute Colorimetric	Apsolutno kolorimetrijski
+	Accented Edges	Naglašene ivice
+	Accessibility	Pristupačnost
+	Accurate	Precizno
+	Actions	Radnje
+	Activate Panel	Aktiviraj panel
+	Active	Aktivno
+	Adaptive	Prilagodljivo
+	Add	Dodaj
+	Add a comment	Dodaj komentar
+	Add to Dictionary	Dodaj u rečnik
+	Add to favorites	Dodaj u omiljene
+	Add to Swatches	Dodaj u uzorke boja
+	Adjust	Podesi
+	Adjustments	Korekcije
+	Advanced	Napredno
+	Align	Poravnanje
+	Align Left	Levo poravnanje
+	Align Right	Desno poravnanje
+	Align Text	Poravnaj tekst
+	Alignment	Poravnanje
+	Alignment:	Poravnanje:
+	All	Svi
+	All Caps	Sve velika slova
+	All files	Sve datoteke
+	All Layers	Svi slojevi
+	All pages	Sve stranice
+	All Slices	Svi isečci
+	Alpha	Alfa
+	Alt	Alt
+	Always	Uvek
+	Amount	Količina
+	Amount:	Količina:
+	Angle	Ugao
+	Angle:	Ugao:
+	Animation	Animacija
+	Anti-Alias	Uglađivanje ivica
+	Anti-alias	Uglađivanje ivica
+	Appearance	Izgled
+	Appearance Settings…	Podešavanja izgleda…
+	Apply	Primeni
+	Apply Character Style	Primeni stil znakova
+	Apply Data Set	Primeni skup podataka
+	Apply to:	Primeni na:
+	Arc	Luk
+	Area	Površina
+	Arrange	Raspored
+	Arrow	Strelica
+	Arrows	Strelice
+	Artboard	Radna tabla
+	Artboards	Radne table
+	ArtCraft	ArtCraft
+	ArtCraft Website	Veb-sajt ArtCraft-a
+	Artistic	Umetnički
+	Ascending	Rastuće
+	Aspect Ratio	Odnos stranica
+	Assign	Dodeli
+	Assign Profile…	Dodeli profil…
+	Audio	Zvuk
+	Author	Autor
+	Author:	Autor:
+	Auto	Automatski
+	Auto ({percent}%)	Automatski ({percent}%)
+	Auto Color	Automatske boje
+	Automate	Automatizacija
+	Automatic	Automatski
+	Average	Prosek
+	Background	Pozadina
+	Background Color	Boja pozadine
+	Background Contents	Sadržaj pozadine
+	Backspace	Backspace
+	Balance	Balans
+	Bar	Linija
+	Baseline	Osnovna linija
+	Baseline Shift	Pomak osnovne linije
+	Basic	Osnovno
+	Basic Latin	Osnovna latinica
+	Batch	Grupna obrada
+	Batch…	Grupna obrada…
+	Bend:	Savijanje:
+	Bicubic	Bikubično
+	Binary assets added	Dodati binarni resursi
+	Binary assets removed	Uklonjeni binarni resursi
+	Bitmap	Bitmapa
+	Black	Crna
+	Black & White	Crno-belo
+	Black Intensity	Intenzitet crne
+	Blacks	Crne
+	Blend Mode	Režim stapanja
+	Blending Mode	Režim stapanja
+	Block	Blok
+	Blocks	Blokovi
+	Blue	Plava
+	Blur	Zamućenje
+	Blur Angle	Ugao zamućenja
+	Bold	Podebljano
+	Border	Obod
+	Border Thickness	Debljina oboda
+	Borders	Ivice
+	Both	Oba
+	Bottom	Dole
+	Bottom Left	Dole levo
+	Bottom Right	Dole desno
+	Bottom:	Dole:
+	Break Link	Prekini vezu
+	Brick	Cigla
+	Brightness	Osvetljenost
+	Bring Forward	Pomeri napred
+	Bring to Front	Premesti na vrh
+	Browse	Pregledaj
+	Browse…	Potraži…
+	Brush Size	Veličina četkice
+	Brush Strokes	Potezi četkicom
+	Brushes	Četkice
+	Bulge	Ispupčenje
+	Bullet	Oznaka
+	Burlap	Juta
+	Cancel	Otkaži
+	Canvas	Platno
+	Caption	Natpis
+	Cascade	Kaskadno
+	Category	Kategorija
+	Cell Size	Veličina ćelije
+	Center	Centar
+	Center X	Centar X
+	Center Y	Centar Y
+	Centered	Centrirano
+	Centimeters	Centimetri
+	Change	Promeni
+	Change All	Promeni sve
+	Change Case	Promeni veličinu slova
+	Change Panel Layout	Promeni raspored panela
+	Channel	Kanal
+	Channel Mixer	Mešač kanala
+	Channels	Kanali
+	Character	Znak
+	Character Styles	Stilovi znakova
+	Characters	Znakovi
+	Check for Updates	Proveri ažuriranja
+	Check Spelling…	Proveri pravopis…
+	Choose…	Izaberi…
+	Circle	Krug
+	City	Grad
+	Clarity	Jasnoća
+	Classic	Klasično
+	Clear	Obriši
+	Clear All	Obriši sve
+	Clear Guides	Ukloni vodilje
+	Clear History	Obriši istoriju
+	Clear Recent Files	Obriši spisak nedavnih datoteka
+	Clipboard	Ostava
+	Clipping Mask	Maska isecanja
+	Clone	Kloniraj
+	Close	Zatvori
+	Close All	Zatvori sve
+	Close Panel	Zatvori panel
+	Cmd	Cmd
+	CMYK Color	CMYK boje
+	CMYK:	CMYK:
+	Coarse Dots	Krupne tačke
+	Collapse	Skupi
+	Color	Boja
+	Color Balance	Balans boja
+	Color Burn	Zatamnjivanje boje
+	Color Dodge	Posvetljivanje boje
+	Color Management	Upravljanje bojama
+	Color Mode	Režim boja
+	Color Picker	Birač boja
+	Color Settings	Podešavanja boja
+	Color Settings…	Podešavanja boja…
+	Color Swatches	Uzorci boja
+	Color Table	Tabela boja
+	Color:	Boja:
+	Colorize	Oboji
+	Colors	Boje
+	Colors:	Boje:
+	Color…	Boja…
+	Column width	Širina kolone
+	Columns	Kolone
+	Columns:	Kolone:
+	Combine	Spoji
+	Command	Komanda
+	Commands:	Komande:
+	Comment	Komentar
+	Comments	Komentari
+	Commits	Commit-ovi
+	Company	Preduzeće
+	Compare	Upoređivanje
+	Comparison	Poređenje
+	Compatibility	Kompatibilnost
+	Compression	Kompresija
+	Cone	Kupa
+	Contains	Sadrži
+	Continue	Nastavi
+	Contrast	Kontrast
+	Contributors	Saradnici
+	Convert	Pretvori
+	Convert to Shape	Pretvori u oblik
+	Convert to sRGB	Pretvori u sRGB
+	Copies	Primerci
+	Copy	Kopiraj
+	Copyright	Autorska prava
+	Copyrighted	Zaštićeno autorskim pravima
+	Corner	Ugao
+	Corners	Uglovi
+	Correction	Korekcija
+	Country	Zemlja
+	Crack Brightness	Osvetljenost pukotina
+	Crack Depth	Dubina pukotina
+	Crack Spacing	Razmak pukotina
+	Create	Napravi
+	Create Clipping Mask	Napravi masku isecanja
+	Crop	Opseci
+	Cross	Krst
+	Crosshatch	Unakrsno šrafiranje
+	Crystallize	Kristalizacija
+	Crystallize…	Kristalizacija…
+	Ctrl	Ctrl
+	Current	Tekuće
+	Current page	Trenutna stranica
+	Current Time	Trenutno vreme
+	Curve	Kriva
+	Curves	Krive
+	Curves…	Krive…
+	Custom	Prilagođeno
+	Customize…	Prilagodi…
+	Cut	Iseci
+	Cyan	Cijan
+	Dark	Tamna
+	Dark Gray	Tamnosiva
+	Dark gray	Tamnosiva
+	Dark Strokes	Tamni potezi
+	Dark Theme	Tamna tema
+	Darken	Zatamnjenje
+	Darkness	Tama
+	Dashed	Isprekidano
+	Data	Podaci
+	Data Sets	Skupovi podataka
+	Date	Datum
+	Date and Time	Datum i vreme
+	Date Created	Datum nastanka
+	Date format	Format datuma
+	De-Interlace	Uklanjanje preplitanja
+	Decrease Font Size	Smanji veličinu fonta
+	Default	Podrazumevano
+	Delete	Obriši
+	Delete Brush	Obriši četkicu
+	Delete Group	Obriši grupu
+	Delete Layer	Obriši sloj
+	Delete Mask	Obriši masku
+	Delete Style	Obriši stil
+	Delete Workspace	Obriši radni prostor
+	Deleted	Izbrisano
+	Delete…	Obriši…
+	Depth	Dubina
+	Desaturate	Ukloni zasićenost
+	Descending	Opadajuće
+	Description	Opis
+	Description:	Opis:
+	Deselect	Poništi selekciju
+	Deselect All	Poništi sav izbor
+	Destination	Odredište
+	Details	Detalji
+	Diagonal	Dijagonala
+	Diameter	Prečnik
+	Diameter:	Prečnik:
+	Diamond	Dijamant
+	Difference	Razlika
+	Diffuse Glow	Difuzni sjaj
+	Diffusion	Difuzija
+	Digits	Cifre
+	Direct Selection Tool	Alatka za direktnu selekciju
+	Direction	Smer
+	Direction Balance	Balans smera
+	Direction:	Smer:
+	Discord	Discord
+	Discretionary Ligatures	Opcione ligature
+	Dismiss	Odbaci
+	Display	Ekran
+	Display name	Ime za prikaz
+	Distance	Udaljenost
+	Distort	Izobličenje
+	Distortion	Izobličenje
+	Distribute	Raspodeli
+	Divide	Deljenje
+	Dock Panel	Usidri panel
+	Document	Dokument
+	Document Title	Naslov dokumenta
+	Documents	Dokumenti
+	Don't Save	Nemoj sačuvati
+	Done	Gotovo
+	Dot	Tačka
+	Dots	Tačke
+	Dotted	Tačkasta
+	Down	Nadole
+	Draft	Nacrt
+	Draw	Crtanje
+	Drop Shadow	Bačena senka
+	Drop Shadow…	Bačena senka…
+	Duplicate	Dupliraj
+	Duplicate Layer	Dupliraj sloj
+	Duplicate…	Dupliraj…
+	Duplication	Dupliranje
+	Duration	Trajanje
+	Dutch	Holandski
+	Dynamics	Dinamika
+	Edge	Ivica
+	Edge Brightness	Osvetljenost ivica
+	Edge Intensity	Intenzitet ivica
+	Edge Only	Samo ivice
+	Edge Simplicity	Jednostavnost ivica
+	Edge Thickness	Debljina ivica
+	Edge Width	Širina ivica
+	Edit	Uređivanje
+	Edit Contents	Uredi sadržaj
+	Edit Toolbar	Uredi traku alatki
+	Editing	Uređivanje
+	Edit…	Uredi…
+	Effects	Efekti
+	Elevation	Elevacija
+	Eliminate	Eliminiši
+	Ellipse Tool	Alatka elipsa
+	Ellipsis	Tri tačke
+	Em Dash	Duga crta
+	Em Space	Em razmak
+	Emboss	Reljef
+	En Dash	Srednja crta
+	En Space	En razmak
+	Enable	Omogući
+	Enlarged	Uvećano
+	Entire Font	Ceo font
+	Envelope DL	Koverta DL
+	Erase	Briši
+	Eraser	Gumica
+	Eraser Tool	Alatka gumica
+	Error	Greška
+	Even Fields	Parni poluslikovi
+	Even pages only	Samo parne stranice
+	Exact	Tačno
+	Example: {sample}	Primer: {sample}
+	Exclusion	Isključenje
+	Exit	Izađi
+	Expand	Proširi
+	Export	Izvoz
+	Export As	Izvezi kao
+	Export As…	Izvezi kao…
+	Export Options	Opcije izvoza
+	Export PDF	Izvezi PDF
+	Export to	Izvezi u
+	Exported {path}	Izvezeno: {path}
+	Export…	Izvoz…
+	Exposure	Ekspozicija
+	Expression	Izraz
+	Eyedropper	Pipeta
+	Eyedropper Tool	Alatka pipeta
+	Faded Film	Izbledeli film
+	Fast	Brzo
+	Feather	Omekšavanje ivica
+	Field	Polje
+	Field properties	Svojstva polja
+	Fields	Polja
+	Fields:	Polja:
+	File	Fajl
+	File Format	Format datoteke
+	File Handling	Rukovanje datotekama
+	File Info…	Informacije o datoteci…
+	File Name	Ime datoteke
+	File Size	Veličina datoteke
+@id	file.close	Zatvori
+	Files	Datoteke
+	Fill	Popuna
+	Fill:	Popuna:
+	Filter	Filter
+	Find	Pronađi
+	Find and Replace	Pronađi i zameni
+	Find Next	Pronađi sledeće
+	Find:	Pronađi:
+	Fine Dots	Fine tačke
+	Finish	Završi
+	First	Prvi
+	First commit	Prvi commit
+	Fit	Uklopi
+	Fit in View	Uklopi u prikaz
+	Fixed	Fiksno
+	Flash	Blic
+	Flip	Okreni
+	Flip Horizontal	Okreni horizontalno
+	Flip Vertical	Okreni vertikalno
+	Focus	Fokus
+	Folder	Fascikla
+	Font	Font
+	Font Size	Veličina fonta
+	Font size	Veličina fonta
+	Font Size:	Veličina fonta:
+	Font:	Font:
+	Fonts	Fontovi
+	Format	Format
+	Format:	Format:
+	Fractions	Razlomci
+	Frame	Okvir
+	Free	Slobodno
+	Free Transform	Slobodna transformacija
+	Frequency	Frekvencija
+	From	Od
+	Frosted	Mat staklo
+	Full	Potpuna
+	Full Screen	Ceo ekran
+	Full Screen Mode	Režim celog ekrana
+	Functions	Funkcije
+	Gamma	Gama
+	Gamma Correction	Korekcija game
+	Gamut Warning	Upozorenje o gamutu
+	Gaussian Blur	Gausovo zamućenje
+	Gaussian Blur…	Gausovo zamućenje…
+	General	Opšte
+	General…	Opšte…
+	Generate	Generisanje
+	GitHub	GitHub
+	Glass	Staklo
+	Global	Globalno
+	Glow	Sjaj
+	Glow Brightness	Osvetljenost sjaja
+	Glow Size	Veličina sjaja
+	Glyphs	Glifovi
+	Good	Dobro
+	Gradient	Gradijent
+	Gradient Tool	Alatka gradijent
+	Gradients	Gradijenti
+	Grain	Zrno
+	Grain Type	Vrsta zrna
+	Graininess	Zrnastost
+	Grainy Dots	Zrnaste tačke
+	Graphic	Grafika
+	Graphics	Grafika
+	Gray	Siva
+	Gray Gamma 2.2	Siva gama 2.2
+	Grayscale	Nijanse sive
+	Green	Zelena
+	Grid	Mreža
+	Grid Size:	Veličina mreže:
+	Grid view	Prikaz mreže sličica
+	Gridline every	Linija mreže na svakih
+	Group	Grupa
+	Group with	Grupiši sa
+	Groups	Grupe
+	Grout Width	Širina fuge
+	Guides	Vodilje
+	Halftone Pattern	Polutonska šara
+	Hand	Ruka
+	Hand Tool	Alatka ruka
+	Hard	Tvrdo
+	Hard Light	Oštro svetlo
+	Hard Mix	Oštro mešanje
+	Headings	Naslovi
+	Heart	Srce
+	Height	Visina
+	Height:	Visina:
+	Help	Pomoć
+	Hexagon	Šestougao
+	Hidden	Skriveno
+	Hidden text	Skriveni tekst
+	Hide	Sakrij
+	Hide All	Sakrij sve
+	Hide Grid	Sakrij mrežu
+	Hide Others	Sakrij ostale
+	High	Visoko
+	High Pass	Visokopropusni filter
+	Highlight Area	Oblast svetla
+	Highlights	Svetla
+	Hindi	Hindi
+	Histogram	Histogram
+	History	Istorija
+	Hollow	Šuplje
+	Home	Početak
+	Horizontal	Horizontalno
+	Horizontal scale	Horizontalna razmera
+	Horizontally	Horizontalno
+	Hue	Nijansa
+	Hue/Saturation…	Nijansa/zasićenost…
+	Hyphenation	Deljenje reči
+	Ignore	Zanemari
+	Ignore All	Zanemari sve
+	Image	Slika
+	Image Size	Veličina slike
+	Import	Uvoz
+	Import…	Uvezi…
+	Inches	Inči
+	Increase Font Size	Povećaj veličinu fonta
+	Index	Indeks
+	Inflate	Naduvavanje
+	Info	Informacije
+	Inner Glow…	Unutrašnji sjaj…
+	Input:	Ulaz:
+	Insert	Umetanje
+	Inside	Unutra
+	Inspect Document	Pregledaj dokument
+	Install Plug-in	Instaliraj dodatak
+	Install Plug-in…	Instaliraj dodatak…
+	Intensity	Intenzitet
+	Interface	Interfejs
+	Interface language	Jezik interfejsa
+	Interface Theme	Tema interfejsa
+	Interlaced	Isprepletano
+	Interpolation	Interpolacija
+	Invert	Invertuj
+	Invert Mask	Invertuj masku
+	Italian	Italijanski
+	Italic	Kurziv
+	Japanese	Japanski
+	Join the ArtCraft Discord	Pridružite se ArtCraft Discord zajednici
+	Join the ArtCraft Discord…	Pridružite se ArtCraft Discord zajednici…
+	Join us on Discord	Pridružite nam se na Discordu
+	Justification	Obostrano poravnanje
+	Justify	Obostrano poravnanje
+	Kerning	Kerning
+	Keyboard Shortcuts	Prečice na tastaturi
+	Keyboard Shortcuts…	Prečice na tastaturi…
+	Keywords	Ključne reči
+	Kind	Vrsta
+	Korean	Korejski
+	Lab	Lab
+	Label	Oznaka
+	Labels	Nalepnice
+	Landscape	Položeno
+	Language	Jezik
+	Language Options	Jezičke opcije
+@id	language.name	Srpski (latinica)
+	Large	Velika
+	Lasso	Laso
+	Lasso Tool	Alatka laso
+	Last	Zadnji
+	Last commit	Zadnji commit
+	Layer	Sloj
+	Layers	Slojevi
+	Layout	Raspored
+	Leading	Prored
+	Left	Levo
+	Left Diagonal	Leva dijagonala
+	Left:	Levo:
+	Legal	Legal
+	Length	Dužina
+	Length:	Dužina:
+	Lens Flare	Odsjaj objektiva
+	Less	Manje
+	Letter	Letter
+	Level	Nivo
+	Levels	Nivoi
+	Levels…	Nivoi…
+	Libraries	Biblioteke
+	Library	Biblioteka
+	Light	Svetla
+	Light Blue	Svetloplava
+	Light Direction	Smer svetla
+	Light Gray	Svetlosiva
+	Light gray	Svetlosiva
+	Light Intensity	Intenzitet svetla
+	Light Theme	Svetla tema
+	Light Type	Vrsta svetla
+	Lighten	Posvetljenje
+	Lighter Color	Svetlija boja
+	Lighting	Osvetljenje
+	Lighting Effects	Efekti osvetljenja
+	Lightness	Svetlina
+	Line	Linija
+	Line delta	Razlika u linijama
+	Line spacing	Proređenost
+	Linear	Linearno
+	Linear Burn	Linearno zatamnjivanje
+	Linear Gradient	Linearni gradijent
+	Linear Light	Linearno svetlo
+	Lines	Linije
+	Lines +/−	Redovi +/−
+	Lines added	Dodati redovi
+	Lines deleted	Obrisani redovi
+	Link	Veza
+	Links	Veze
+	List	Lista
+	List view	Prikaz spiska
+	Location	Lokacija
+	Location:	Položaj:
+	Lock	Zaključaj
+	Lock Guides	Zaključaj vodilje
+	Lock Slices	Zaključaj isečke
+	Locked	Zaključano
+	Long Lines	Duge linije
+	Long Strokes	Dugi potezi
+	Low	Nisko
+	lowercase	malim slovima
+	Luminance	Luminansa
+	Luminosity	Svetlina tona
+	Magenta	Magenta
+	Magic Wand Tool	Alatka čarobni štapić
+	Margins	Margine
+	Mask	Maska
+	Masks	Maske
+	Matte	Podloga
+	Maximize	Uvećaj
+	Maximum	Maksimum
+	Measure	Meri
+	Median	Medijana
+	Medium	Srednja
+	Medium Dots	Srednje tačke
+	Medium Gray	Srednje siva
+	Medium Lines	Srednje linije
+	Merge	Spoji
+	Merge Cells	Spoji ćelije
+	Merge Layers	Spoji slojeve
+	Merged PRs	Spojeni PR-ovi
+	Mesh	Mrežica
+	Message:	Poruka:
+	Metadata	Metapodaci
+	Method	Metod
+	Mezzotint	Mecotinta
+	Mezzotint…	Mecotinta…
+	Middle	Sredina
+	Midpoint	Središnja tačka
+	Midtones	Srednji tonovi
+	Millimeters	Milimetri
+	Minimize	Umanji
+	Minimum	Minimum
+	Mirror	Preslikavanje
+	Mobile	Mobilni
+	Mode	Režim
+	Mode:	Režim:
+	Model	Model
+	Models	Modeli
+	Modern	Moderno
+	Modify	Izmeni
+	Monitor RGB	RGB monitora
+	Monochrome	Jednobojno
+	More	Više
+	Mosaic	Mozaik
+	Mosaic Tiles	Mozaik pločice
+	Motion	Pokret
+	Move	Pomeranje
+	Move Down	Pomeri nadole
+	Move Panel	Premesti panel
+	Move Up	Pomeri nagore
+	Multiply	Množenje
+	Name	Ime
+	Name (A–Z)	Naziv (A–Š)
+	Name:	Naziv:
+	Navigation	Navigacija
+	Navigator	Navigator
+	Neon Glow	Neonski sjaj
+	Never	Nikad
+	New	Novo
+	New Document	Novi dokument
+	New document	Novi dokument
+	New from Template	Novo iz šablona
+	New Group	Nova grupa
+	New Guide	Nova vodilja
+	New Layer	Novi sloj
+	New Layer…	Novi sloj…
+	New Style…	Novi stil…
+	New Swatch…	Novi uzorak boje…
+	New Window	Novi prozor
+	New Workspace	Novi radni prostor
+	New Workspace…	Novi radni prostor…
+	New…	Novo…
+	Next	Sledeće
+	Next Appearance Mode	Sledeći režim izgleda
+	Next Change	Sledeća izmena
+	Next Page	Sledeća strana
+	No	Ne
+	No Color	Bez boje
+	No Dither	Bez diterovanja
+	No Document	Nema dokumenta
+	No document	Nema dokumenta
+	No document open	Nijedan dokument nije otvoren
+	No limit	Bez ograničenja
+	No matching commands	Nema odgovarajućih komandi
+	No recent files	Nema nedavnih datoteka
+	No Selection	Nema selekcije
+	No selection	Nema selekcije
+	Noise	Šum
+	Nonbreaking Space	Nedeljivi razmak
+	None	Nijedno
+	Normal	Normalno
+	NTSC Colors	NTSC boje
+	Number	Broj
+	Object	Objekat
+	Octagon	Osmougao
+	Odd Fields	Neparni poluslikovi
+	Odd pages only	Samo neparne stranice
+	Off	Isključeno
+	Offset	Pomak
+	OK	U redu
+	Omit	Izostavi
+	On	Uključeno
+	Only Web Colors	Samo veb boje
+	Opacity	Neprozirnost
+	Opacity:	Neprozirnost:
+	Open	Otvori
+	Open Recent	Otvori nedavno
+	OpenType	OpenType
+	Open…	Otvori…
+	Optimized	Optimizovano
+	Options	Opcije
+	Options…	Opcije…
+	Orange	Narandžasta
+	Ordinals	Redni brojevi
+	Orientation	Orijentacija
+	Original	Original
+	Other	Ostalo
+	Outer Glow…	Spoljašnji sjaj…
+	Outline	Kontura
+	Output	Izlaz
+	Output:	Izlaz:
+	Outside	Spolja
+	Oval	Ovalno
+	Overlay	Preklapanje
+	Package…	Spakuj…
+	Page	Strana
+	Page {page} of {pages}	Strana {page} od {pages}
+	Pages	Strane
+	Painting	Slikanje
+	Panel	Panel
+	Panel menu	Meni panela
+	Panel Options…	Opcije panela…
+	Panels	Paneli
+	Paper	Papir
+	Paragraph	Pasus
+	Paragraph Styles	Stilovi pasusa
+	Password	Lozinka
+	Paste	Nalepi
+	Paste Special	Specijalno lepljenje
+	Patchwork	Mozaik od krpica
+	Path	Putanja
+	Path:	Putanja:
+	Paths	Putanje
+	Pattern	Šara
+	Pattern Type	Vrsta šare
+	Pause	Pauza
+	Pen	Pero
+	Pen Tool	Alatka pero
+	Pencil	Olovka
+	Pencil Tool	Alatka olovka
+	Pentagon	Petougao
+	Percent	Procenat
+	Percentage	Procenat
+	Performance	Performanse
+	Perimeter	Obim
+	Perspective	Perspektiva
+	Photo	Fotografija
+	Photocopy	Fotokopija
+	Picas	Pike
+	Pin Light	Tačkasto svetlo
+	Pixel	Piksel
+	Pixelate	Pikselizacija
+	Pixels	Pikseli
+	Play	Pusti
+	Plug-ins	Dodaci
+	Point	Tačka
+	Pointillize	Poentilizam
+	Pointillize…	Poentilizam…
+	Points	Tačke
+	Polygon Tool	Alatka mnogougao
+	Portrait	Uspravno
+	Position	Položaj
+	Position:	Položaj:
+	Postcard	Razglednica
+	Poster	Poster
+	Poster Edges	Posterske ivice
+	Posterization	Posterizacija
+	Posterize	Posterizacija
+	Preferences	Podešavanja
+	Preferences…	Podešavanja…
+	Preserve	Očuvaj
+	Preserve Luminosity	Očuvaj osvetljenje
+	Preset	Šablon
+	Preset Manager	Upravljač šablonima
+	Preset:	Šablon:
+	Presets	Šabloni
+	Presets:	Šabloni:
+	Press keys…	Pritisnite tastere…
+	Pressure	Pritisak
+	Preview	Pregled
+	Previous	Prethodno
+	Previous Change	Prethodna izmena
+	Previous Page	Prethodna stranica
+	Print	Štampaj
+	Printer	Štampač
+	Printing	Štampanje
+	Print…	Štampaj…
+	Profile	Profil
+	Progressive	Progresivno
+	Proof Setup	Podešavanje probnog prikaza
+	Properties	Svojstva
+	Protect	Zaštiti
+	PRs	PR-ovi
+	Public Domain	Javno dobro
+	Punctuation	Interpunkcija
+	Purple	Ljubičasta
+	Pyramid	Piramida
+	Quality	Kvalitet
+	Quick Actions	Brze radnje
+	Radial	Radijalno
+	Radial Blur	Radijalno zamućenje
+	Radial Blur…	Radijalno zamućenje…
+	Radial Gradient	Radijalni gradijent
+	Radius	Poluprečnik
+	Radius:	Poluprečnik:
+	Random	Nasumično
+	Range	Opseg
+	Range:	Opseg:
+	Rasterize	Rasterizuj
+	Ratio	Odnos
+	Ready	Spremno
+	Real name	Pravo ime
+	Recent	Nedavno
+	Recent Colors	Nedavne boje
+	Recent Files	Nedavne datoteke
+	Recover	Oporavi
+	Rectangle	Pravougaonik
+	Rectangle Tool	Alatka pravougaonik
+	Rectangular	Pravougaona
+	Red	Crvena
+	Redo	Ponovi
+	Reduce Noise	Smanji šum
+	Refine	Doteraj
+	Reflected	Reflektovano
+	Refresh	Osveži
+	Regular	Obično
+	Relative	Relativno
+	Relative Colorimetric	Relativno kolorimetrijski
+	Relaxed	Opušteno
+	Relief	Reljef
+	Remove	Ukloni
+	Remove Background	Ukloni pozadinu
+	Remove from favorites	Ukloni iz omiljenih
+	Rename	Preimenuj
+	Rename Group…	Preimenuj grupu…
+	Rename Style	Preimenuj stil
+	Rename…	Preimenuj…
+	Repeat	Ponavljaj
+	Replace	Zameni
+	Replace:	Zameni:
+	Reply	Odgovori
+	Report	Izveštaj
+	Report an Issue…	Prijavi problem…
+	Reselect	Ponovo izaberi
+	Reset	Resetuj
+	Reset Preferences	Resetuj podešavanja
+	Reset…	Resetuj…
+	Resize panel window	Promeni veličinu prozora panela
+	Resize panels	Promeni veličinu panela
+	Resolution	Rezolucija
+	Resolution:	Rezolucija:
+	Restore	Vrati
+	Result	Rezultat
+	Resume	Nastavi
+	Reveal in Finder	Prikaži u Finderu
+	Reverse	Obrni
+	Reverse the order	Obrni redosled
+	Revert	Vrati sačuvano
+	Review	Pregled
+	RGB	RGB
+	RGB Color	RGB boje
+	RGB:	RGB:
+	Right	Desno
+	Right Diagonal	Desna dijagonala
+	Right:	Desno:
+	Rotate	Rotiraj
+	Rotate:	Rotacija:
+	Rotation	Rotacija
+	Rotation:	Rotacija:
+	Rounded Rectangle	Zaokružen pravougaonik
+	Roundness	Zaobljenost
+	Roundness:	Zaobljenost:
+	Rows	Redovi
+	Ruler	Lenjir
+	Rulers	Lenjiri
+	Rulers & Grids	Lenjiri i mreže
+	Russian	Ruski
+	Sample Size	Veličina uzorka
+	Sandstone	Peščar
+	Saturation	Zasićenost
+	Save	Sačuvaj
+	Save a Copy	Sačuvaj kopiju
+	Save a Copy…	Sačuvaj kopiju…
+	Save As	Sačuvaj kao
+	Save as PDF	Sačuvaj kao PDF
+	Save as Template	Sačuvaj kao šablon
+	Save As…	Sačuvaj kao…
+	Save Preset…	Sačuvaj šablon…
+	Save Selection	Sačuvaj selekciju
+	Save Selection…	Sačuvaj selekciju…
+	Saved	Sačuvano
+	Save…	Sačuvaj…
+	Scale	Skaliranje
+	Scale:	Razmera:
+	Scaling	Skaliranje
+	Scratch Disks	Radni diskovi
+	Scratch Disks…	Radni diskovi…
+	Screen	Ekran
+	Screen Mode	Režim ekrana
+	Scripts	Skripte
+	Search	Pretraga
+	Select	Selekcija
+	Select All	Izaberi sve
+	Select Objects	Izaberi objekte
+	Select:	Izaberi:
+	Selected pages	Izabrane stranice
+	Selection	Izbor
+	Selective	Selektivno
+	Send Backward	Pomeri nazad
+	Send to Back	Premesti na dno
+	Sensitivity	Osetljivost
+	Sent to {printer}	Poslato na {printer}
+	Services	Usluge
+	Set	Postavi
+	Set as Default	Postavi kao podrazumevano
+	Set:	Skup:
+	Settings	Podešavanja
+	Settings:	Podešavanja:
+	Settings…	Podešavanja…
+	Shadow	Senka
+	Shadows	Senke
+	Shape	Oblik
+	Shape Effects	Efekti oblika
+	Shape:	Oblik:
+	Shapes	Oblici
+	Share	Deli
+	Sharpen	Izoštravanje
+	Sharpness	Oštrina
+	Shift	Shift
+	Short Lines	Kratke linije
+	Short Strokes	Kratki potezi
+	Shortcut	Prečica
+	Shortcuts	Prečice
+	Show	Prikaži
+	Show All	Prikaži sve
+	Show Grid	Prikaži mrežu
+	Show Guides	Prikaži vodilje
+	Show in Folder	Prikaži u fascikli
+	Show Mask	Prikaži masku
+	Show Mesh	Prikaži mrežicu
+	Show Rulers	Prikaži lenjire
+	Show rulers	Prikaži lenjire
+	Show:	Prikaži:
+	Sides:	Stranice:
+	Size	Veličina papira
+	Size:	Veličina:
+	Sketch	Skica
+	Skew	Iskošenje
+	Slice Options	Opcije isečka
+	Slice Options…	Opcije isečka…
+	Slice Tool	Alatka za isecanje na isečke
+	Slices	Isečci
+	Small	Mala
+	Small Caps	Kapitalke
+	Smart Blur	Pametno zamućenje
+	Smart Blur…	Pametno zamućenje…
+	Smart Guides	Pametne vodilje
+	Smart quotes	Pametni navodnici
+	Smoothness	Glatkoća
+	Snap to Grid	Prianjaj uz mrežu
+	Soft	Meko
+	Soft Light	Meko svetlo
+	Soften	Omekšaj
+	Softness	Mekoća
+	Solarize	Solarizacija
+	Sort	Sortiraj
+	Sort by	Sortiraj po
+	Source	Izvor
+	Spaces	Razmaci
+	Spacing	Razmak
+	Spacing:	Razmak:
+	Spatter	Prskanje
+	Special	Posebno
+	Speckle	Pegavost
+	Speed	Brzina
+	Spelling	Pravopis
+	Spherize	Sferizacija
+	Split	Podeli
+	Spot Color	Spot boja
+	Spray Radius	Poluprečnik raspršivanja
+	Square	Kvadratno
+	Square Size	Veličina kvadrata
+	sRGB IEC61966-2.1	sRGB IEC61966-2.1
+	Stacked	Naslagano
+	Stained Glass	Vitraž
+	Stamp	Pečat
+	Standard	Standardne
+	Standard Ligatures	Standardne ligature
+	Star	Zvezda
+	Start at:	Počni od:
+	Statistics	Statistika
+	Status Bar	Statusna traka
+	Stippled	Tačkasto
+	Stop	Zaustavi
+	Strength	Jačina
+	Stretch	Rastegni
+	Strikethrough	Precrtano
+	Stroke	Obrub
+	Stroke Color	Boja obruba
+	Stroke Length	Dužina poteza
+	Stroke Options	Opcije obruba
+	Stroke:	Obrub:
+	Studio	Studio
+	Style	Stil
+	Style:	Stil:
+	Styles	Stilovi
+	Stylize	Stilizacija
+	Subdivisions	Pododeljci
+	Subject	Subjekat
+	Subscript	Indeks
+	Subtract	Oduzimanje
+	Sumi-e	Sumi-e
+	Superscript	Eksponent
+	Swatches	Uzorci boja
+	Symbol	Simbol
+	Symbols	Simboli
+	Sync with system	Usklađeno sa sistemom
+	System	Sistem
+	Tab	Tab
+	Table	Tabela
+	Table style	Stil tabele
+	Tables	Tabele
+	Tabloid	Tabloid
+	Tabs	Tabulatori
+	Taper	Sužavanje kraja
+	Target	Cilj
+	Target:	Cilj:
+	Temperature	Temperatura
+	Templates	Šabloni
+	Text	Tekst
+	Text color	Boja teksta
+	Text:	Tekst:
+	Texture	Tekstura
+	The passwords don't match.	Lozinke se ne podudaraju.
+	Theme	Tema
+	Thickness	Debljina
+	Threshold	Prag
+	Tile	Popločaj
+	Tile Size	Veličina pločice
+	Tilt	Nagib
+	Time	Vreme
+	Timecode	Vremenski kod
+	Timeline	Vremenska linija
+	Tint	Preliv
+	Tint Color	Boja preliva
+	Title	Naslov
+	To	Do
+	Tolerance	Tolerancija
+	Tolerance:	Tolerancija:
+	Tool	Alatka
+	Toolbars	Trake alatki
+	Tools	Alati
+	Top	Gore
+	Top Left	Gore levo
+	Top Right	Gore desno
+	Top:	Gore:
+	Total	Ukupno
+	Total:	Ukupno:
+	Tracking	Razmak između slova
+	Transform	Transformacija
+	Translate	Prevedi
+	Transparency	Providnost
+	Transparent	Providno
+	Trap…	Trepovanje…
+	Triangle	Trougao
+	Turbulent	Turbulentno
+	Twirl	Uvrtanje
+	Twist	Zavrtanje
+	Type	Tip
+	Type:	Vrsta:
+	Type…	Tekst…
+	Underline	Podvučeno
+	Undo	Opozovi
+	Undo {action}	Opozovi {action}
+	Ungroup	Razgrupiši
+	Uniform	Ravnomerno
+	Units	Jedinice
+	Unknown	Nepoznato
+	Unlock	Otključaj
+	Unsaved changes	Nesačuvane izmene
+	Unsharp Mask	Maska neoštrine
+	Untitled	Bez naslova
+	Up	Gore
+	Update	Ažuriraj
+	Updates	Ažuriranja
+	UPPERCASE	VELIKA SLOVA
+	Use Default	Koristi podrazumevano
+	Username	Korisničko ime
+	Value	Vrednost
+	Variables	Promenljive
+	Version	Verzija
+	Version {version}	Verzija {version}
+	Vertical	Uspravno
+	Vertical Alignment	Uspravno poravnanje
+	Vertical Type Tool	Alatka za vertikalni tekst
+	Vertically	Vertikalno
+	Very High	Veoma visoka
+	Vibrance	Živost
+	Video	Video
+	View	Prikaz
+	Violet	Ljubičasta
+	Visibility	Vidljivost
+	Vivid Light	Živo svetlo
+	Voice	Glas
+	W:	Š:
+	Warning	Upozorenje
+	Warp	Krivljenje
+	Watermark	Vodeni žig
+	Wave	Talas
+	Wave…	Talas…
+	Web	Veb
+	Website	Veb-sajt
+	Weight	Debljina
+	Wet	Vlažnost
+	White	Bela
+	White Intensity	Intenzitet bele
+	White Is High	Bela je visoko
+	Whites	Bele
+	Width	Širina
+	Width and Height	Širina i visina
+	Width:	Širina:
+	Window	Prozor
+	Windows	Windows
+	Words	Reči
+	Working CMYK	Radni CMYK
+	Workspace	Radni prostor
+	Workspaces	Radni prostori
+	X	X
+	Y	Y
+	Yellow	Žuta
+	Yes	Da
+	Your changes will be lost if you don't save them.	Vaše izmene će biti izgubljene ako ih ne sačuvate.
+	Zoom	Zumiranje
+	Zoom In	Uvećaj prikaz
+	Zoom in	Uvećaj
+	Zoom Out	Umanji prikaz
+	Zoom out	Umanji
+	Zoom Tool	Alatka lupa
+@plural	{n} item|{n} items	{n} stavka|{n} stavke|{n} stavki
+@plural	{n} Layer|{n} Layers	{n} sloj|{n} sloja|{n} slojeva
+@plural	{n} step|{n} steps	{n} korak|{n} koraka|{n} koraka
