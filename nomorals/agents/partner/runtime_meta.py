@@ -1561,7 +1561,11 @@ class RuntimeMetaMixin:
         store. ``/photo edit <id> crop <l> <t> <r> <b>`` crops the
         canvas; ``/photo edit <id> enhance [brightness <n>]``
         brightens the active layer; ``/photo edit <id> develop
-        [brightness <n>] [contrast <n>]`` runs the develop stage.
+        [brightness <n>] [contrast <n>]`` runs the develop stage —
+        the legacy sliders, or the full LightCraft controls as
+        dotted keys (light.exposure, wb.temp, curve.master,
+        mixer.red.hue, geometry.rotate, profile.id, wb.mode,
+        treatment, geometry.upright).
         ``/photo undo|redo <id>`` steps the op history.
         ``/photo show <id>`` and ``/photo list`` read documents.
         ``/photo save <id> [path]`` writes the PSD back.
@@ -1575,9 +1579,11 @@ class RuntimeMetaMixin:
         usage = ("usage: /photo open <path.psd> | edit <id> crop "
                  "<l> <t> <r> <b> | edit <id> enhance [brightness "
                  "<n>] [contrast <n>] | edit <id> develop "
-                 "[brightness <n>] [contrast <n>] | undo|redo <id> "
-                 "| show <id> | list | save <id> [path] | render "
-                 "<id> <png path> | page <id> <html path>")
+                 "[brightness <n>] [contrast <n>] | edit <id> "
+                 "develop light.exposure <n> wb.mode <name> ... | "
+                 "undo|redo <id> | show <id> | list | save <id> "
+                 "[path] | render <id> <png path> | page <id> "
+                 "<html path>")
         try:
             words = shlex.split(tail or "")
         except ValueError:
@@ -1693,6 +1699,14 @@ class RuntimeMetaMixin:
                         except ValueError:
                             return ("/photo edit layer needs an "
                                     "integer.")
+                        i += 2
+                        continue
+                    if key in ("wb.mode", "treatment", "profile.id",
+                               "geometry.upright") \
+                            and i + 1 < len(rest):
+                        # String-valued develop controls — the
+                        # next token is a name, not a number.
+                        params[key] = rest[i + 1]
                         i += 2
                         continue
                     if i + 1 >= len(rest):

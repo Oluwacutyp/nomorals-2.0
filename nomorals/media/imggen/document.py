@@ -195,19 +195,26 @@ def _mask_from_params(params: dict, op_id: str) -> MaskRef:
 
 
 def _run_develop(img, params: dict, ctx: _RenderContext):
-    from .develop import DEVELOP_FIELDS, develop_image
+    from .develop import DEVELOP_FIELDS, develop_image, develop_settings_from_params, render_develop
 
     p = dict(params)
     mask_ref = None
     if p.get("mask") is not None:
         mask_ref = _mask_from_params(p, "develop")
         p.pop("mask")
-    unknown = sorted(set(p) - set(DEVELOP_FIELDS))
-    if unknown:
-        raise ImgGenError(
-            f"develop op got unknown controls {unknown}; "
-            f"use {list(DEVELOP_FIELDS)}")
-    developed = develop_image(img, **p)
+    if any("." in k or k == "settings" for k in p):
+        # The full LightCraft engine: dotted controls
+        # (light.exposure, wb.temp, curve.master, ...) or a whole
+        # settings dict — merged over the legacy sliders.
+        settings = develop_settings_from_params(p)
+        developed = render_develop(img, settings)
+    else:
+        unknown = sorted(set(p) - set(DEVELOP_FIELDS))
+        if unknown:
+            raise ImgGenError(
+                f"develop op got unknown controls {unknown}; "
+                f"use {list(DEVELOP_FIELDS)}")
+        developed = develop_image(img, **p)
     if mask_ref is None:
         return developed, "develop (numpy, deterministic)", ""
     res = mask_ref.resolve(img, box_predictor=ctx.box_predictor)

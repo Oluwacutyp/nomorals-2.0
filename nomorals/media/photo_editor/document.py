@@ -540,9 +540,16 @@ class PhotoDocument:
 
             out = apply_chain(img, [{"op": "enhance", **clean}])
         else:
-            from ..imggen.develop import develop_image
+            from ..imggen.develop import develop_image, develop_settings_from_params, render_develop
 
-            out = develop_image(img, **clean)
+            if any("." in k or k == "settings" for k in clean):
+                # The full LightCraft engine: dotted controls
+                # (light.exposure, wb.temp, ...) or a whole
+                # settings dict.
+                settings = develop_settings_from_params(clean)
+                out = render_develop(img, settings)
+            else:
+                out = develop_image(img, **clean)
         layer.surface.replace_with_pil(out)
 
     # -- render -----------------------------------------------------------
