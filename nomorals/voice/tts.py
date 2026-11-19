@@ -788,13 +788,17 @@ def available_backends() -> list[str]:
              ("orpheus", "orpheus_tts"), ("dia", "dia"), ("zonos", "zonos"),
              ("xtts", "TTS"),
              ("cosyvoice", "cosyvoice"), ("kokoro", "kokoro"),
-             ("piper", "piper"), ("kitten", "kittentts"), ("bark", "bark"),
-             ("hf-endpoint", "huggingface_hub")]
+             ("piper", "piper"), ("kitten", "kittentts"), ("vits", "vits"),
+             ("bark", "bark"), ("hf-endpoint", "huggingface_hub")]
 
     def _probed(name: str, spec: str) -> bool:
         # spark has no pip package — probed by checkout presence
         if name == "spark":
             return _spark_available()
+        # vits is in-repo — probed by torch + an exported model
+        if name == "vits":
+            from .vits.backend import _vits_available
+            return _vits_available()
         return _spec(spec)
 
     found = [name for name, spec in order if _probed(name, spec)]
@@ -857,6 +861,9 @@ BACKEND_CAPABILITIES: dict[str, dict[str, Any]] = {
     "diffsinger": {"quality": 4, "latency": 5, "streams": False,
                    "needs": "cpu", "license": "varies by voicebank",
                    "clones": False, "sings": True},
+    "vits": {"quality": 4, "latency": 5, "streams": False,
+             "needs": "cpu", "license": "MIT", "clones": True,
+             "finetuned": True},
 }
 
 
@@ -2638,6 +2645,15 @@ def _make_diffsinger():
 # DiffSinger is registered lazily (its __init__ probes for voicebanks).
 _BACKENDS["diffsinger"] = _make_diffsinger  # type: ignore[assignment]
 
+
+def _make_vits():
+    from .vits.backend import VITSBackend
+    return VITSBackend()
+
+
+# VITS is registered lazily (its __init__ probes for exported models).
+_BACKENDS["vits"] = _make_vits  # type: ignore[assignment]
+
 #: backend name → importable module proving it is installed. (This also
 #: fixes a latent KeyError: "hf-endpoint" was in _BACKENDS but missing
 #: from the old inline spec map.)
@@ -2651,7 +2667,7 @@ _BACKEND_SPECS = {"bark": "bark", "xtts": "TTS", "kokoro": "kokoro",
                   "f5tts": "f5_tts", "omnivoice": "omnivoice",
                   "qwen3tts": "qwen_tts", "system": None,
                   "kitten": "kittentts", "spark": None, "zonos": "zonos",
-                  "diffsinger": None}  # in-repo: probed via construction
+                  "diffsinger": None, "vits": None}  # in-repo: probed via construction
 
 
 class _DialogueRenderError(Exception):

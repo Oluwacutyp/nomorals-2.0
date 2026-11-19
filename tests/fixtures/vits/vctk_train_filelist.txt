@@ -1,0 +1,2 @@
+tests/fixtures/vits/wavs/vctk_001.wav|67|The whole process is a vicious circle at the moment.
+tests/fixtures/vits/wavs/vctk_002.wav|3|That would be a serious problem.

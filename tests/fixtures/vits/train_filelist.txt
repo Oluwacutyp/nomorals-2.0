@@ -1,0 +1,6 @@
+tests/fixtures/vits/wavs/ljs_001.wav|Mrs. De Mohrenschildt thought that Oswald,
+tests/fixtures/vits/wavs/ljs_002.wav|The Secret Service believed that it was very doubtful that any President would ride regularly in a vehicle with a fixed top, even though transparent.
+tests/fixtures/vits/wavs/ljs_003.wav|Between the hours of eight and nine p.m. they were occupied with the children in the bedrooms located at the extreme east end of the house.
+tests/fixtures/vits/wavs/ljs_004.wav|It has used other Treasury law enforcement agents on special experiments in building and route surveys in places to which the President frequently travels.
+tests/fixtures/vits/wavs/long_001.wav|The overwhelming majority of people in this country know how to sift the wheat from the chaff in what they hear and what they read.
+tests/fixtures/vits/wavs/wrong_sr.wav|Although Chief Rowley does not complain about the pay scale for Secret Service agents,

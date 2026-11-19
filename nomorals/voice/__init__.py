@@ -167,6 +167,8 @@ from .tts import (
     voice_print,
     voice_print_distance,
 )
+from .vits import list_configs, load_config, prepare_run
+from .vits.backend import VITSBackend, list_vits_models, vits_model_dir
 
 __all__ = [
     "CANONICAL_BURSTS",
@@ -275,4 +277,10 @@ __all__ = [
     "voice_print",
     "voice_print_distance",
     "with_ambience",
+    "VITSBackend",
+    "list_configs",
+    "list_vits_models",
+    "load_config",
+    "prepare_run",
+    "vits_model_dir",
 ]

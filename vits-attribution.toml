@@ -1,0 +1,468 @@
+# VITS attribution — SHA-256 provenance for every upstream file ported
+# from storytold/vits-finetuning (MIT, Copyright (c) 2021 Jaehyeon Kim),
+# commit b1e03be ("Add Bin loss"). Verified by tests/test_gapfix_vits.py.
+#
+# Convention: sha256 is the hash of the file as it sits in this repo;
+# upstream_sha256 is the hash of the upstream file it came from, present
+# exactly when the port adapted the file (import rewrites, documented
+# fixes). Byte-identical vendored files carry no upstream_sha256.
+#
+# Two vendored configs were fixed: ljs_li44_tmbert_ft_small_s1_arpa.json
+# and ljs_li44_tmbert_s1_arpa_mid.json both miss the comma after
+# "use_8bit": true upstream (invalid JSON); the vendored copies add it.
+# ljs_li44_tmbert_small_s1_arpa.json parses fine upstream and is unchanged.
+#
+# TorchMoji weights (moji/model/pytorch_model.bin) are NOT in the clone
+# and are NOT vendored; the frontend fails honestly until they are placed
+# at nomorals/voice/vits/data/pytorch_model.bin.
+
+# Lane 120 fix-up (ruff): 30 vendored files were reformatted
+# (import order / %-format and .format() to f-strings / zip
+# strict=True / dead-code removal); their sha256 values were
+# re-measured after the reformat. Three files that were
+# byte-identical to upstream (transforms.py, moji/lstm.py,
+# moji/attlayer.py) gained upstream_sha256 + note entries.
+#
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'commons.py'
+path = 'nomorals/voice/vits/commons.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '666b2589d05c2f1dc19fedd1b7ebcf0f66c1c521ac82a631251e761c9912734e'
+upstream_sha256 = 'f223dc1df791d2fb2953cfebd7014a7bc2a6ed614c05de6c17c7b44718a42cdd'
+note = 'deduped convert_pad_shape'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'stft.py'
+path = 'nomorals/voice/vits/stft.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '1e64ac7c54ad6f1a468e0322f7b92b70343c6b8f000f2277f72680335ce1c965'
+upstream_sha256 = '85096e0a90b0d01818c57109abff725141ab4db6b86c64f7429accb3d0160f9b'
+note = 'librosa import made lazy'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'mel_processing.py'
+path = 'nomorals/voice/vits/mel_processing.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '43a4df3a5f96b61025fb4624d5a6a8952a422eb0e05e35f32707a5a19f8ef80c'
+upstream_sha256 = 'b85880b6ce7b295d88c3bf556ff56d58908f41f7e85b468869fcdffc4f48dae2'
+note = 'numpy mel fallback when librosa absent'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'attentions.py'
+path = 'nomorals/voice/vits/attentions.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = 'a9108831902393b6994f9a877f0c6d02c8785e4de82736ba19c8688a30800920'
+upstream_sha256 = 'dc65085d0e5d67da9f7603c98efad1e27eaf42c572f632a58080a5cc0f577f92'
+note = 'package-relative imports'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'modules.py'
+path = 'nomorals/voice/vits/modules.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '19b9dad9bf95e9aad04ecbc4e922f6834610337888a306de843da9f57f6840d5'
+upstream_sha256 = 'd9cd05b77cc06ea0e901194878cdba69f7457a4085ae8ff67779a2e83cd74252'
+note = 'spectral_norm import; PQMF.synthesis returns x; numba optional'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'models.py'
+path = 'nomorals/voice/vits/models.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '1a6a6453a29191c2bee9f3645c5858dd0b30c52a367398b9d87ced99e2f7d8f5'
+upstream_sha256 = '1a24bcbca21c1af52bfda92e36fc6bc1d787d47e911d92ce35f28fba4ebba358'
+note = 'Generator.forward binds x1 before the loop'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'losses.py'
+path = 'nomorals/voice/vits/losses.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '170f7a6f8d0ab4f292ba5c2e27096f7aaebd53ba40bb53aeeedddb9d07d1d386'
+upstream_sha256 = 'f4d9d14d6247976dc78caec95b61c74f666889fcdb1d28ea6724fe7ae5623a8e'
+note = 'dead NeMo input_types/output_types properties dropped'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'transforms.py'
+path = 'nomorals/voice/vits/transforms.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '1a3ac79c03f47b8655564047afc375734d972c4cfd7370370f22e723bf3244c7'
+upstream_sha256 = '9d95e518610c35581c4f1c3b4e8eeca91b7c3d6899e7f0ebb86a0387394d3046'
+note = 'Formatting-only ruff cleanup in the lane 120 fix-up (import order / pyupgrade rewrites; no behavior change). Upstream file was byte-identical before the cleanup.'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'text/symbols.py'
+path = 'nomorals/voice/vits/text/symbols.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '5b05f001405b03372294d7d1aa8481c4ea45d1d3333f48f6f5a11f892681fa8c'
+upstream_sha256 = 'ef031df0f0a67dc5ea8150fb7c76af5173f239031aba1a8ea38df0118ad497bb'
+note = 'g2p_en phoneme list vendored as a constant'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'text/__init__.py'
+path = 'nomorals/voice/vits/text/__init__.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '1496ba4b9a9fa8fe93e000f1daaf6e59d8f499ed5d4af871ecb8b5914ca7614c'
+upstream_sha256 = 'fbee0661d3d37f44e400fd937ad2325a56b0b0b30e0eb49024cfffc6a128f6ab'
+note = 'identity-vs-equality fix in _should_keep_symbol'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'text/arpa.py'
+path = 'nomorals/voice/vits/text/arpa.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = 'dbf2428bfd45adaa261523df1f8fc0da244b6f1ee81b5d37f1fa661c1e1fe9a1'
+upstream_sha256 = 'e7099a4b43ecdff9fe2fb1f1bc80f181ca0057a941790ea4c6bdd1381b0bf73f'
+note = 'dictionary vendored; g2p_en lazy; no import-time download'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'text/cleaners.py'
+path = 'nomorals/voice/vits/text/cleaners.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '0d602f2cca1e7f0924f4916caca2af1c413b3bd9160b71148a9f61db0947be7b'
+upstream_sha256 = '3ffeb5a355468daeb35da2cbce41faeb6d64fe18cf63aa4624fb8bfb79cacbbe'
+note = 'phonemizers lazy; honest errors for missing backends'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'moji/moji.py'
+path = 'nomorals/voice/vits/moji/moji.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '25a68b76aeb10e5e28da2beb3e3651e4c2adc1a82bd54257d9861fbe01732d27'
+upstream_sha256 = '59d9c64338119e4cdda77d2d0fb2f5697a5bee9ce540c38474167d3e36b0f752'
+note = 'honest error when weights absent'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'moji/model_def.py'
+path = 'nomorals/voice/vits/moji/model_def.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '1cd1db85bea8a0e13fbfb15ea6ba8c0cf1d8630bf6966f6bc5758e8fe6e57bfc'
+upstream_sha256 = '6051548068fc32d14089d33b0926e15d658f7273e809b0769545b66e8d62d057'
+note = 'package-relative imports'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'moji/lstm.py'
+path = 'nomorals/voice/vits/moji/lstm.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '5ed1971496a635abb2ab8c89fc4c5f5feb2f0b4245615bdcfbcb37bdb48ba275'
+upstream_sha256 = 'a5e4444067b28cf381a807ad41d6b518acd9df38fb6a5a0b1131b960fca15f47'
+note = 'Formatting-only ruff cleanup in the lane 120 fix-up (import order / pyupgrade rewrites; no behavior change). Upstream file was byte-identical before the cleanup.'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'moji/attlayer.py'
+path = 'nomorals/voice/vits/moji/attlayer.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = 'a84596b30a6081142321010ba2b5d2534e854ffc003cf6a6ef705ecffe470738'
+upstream_sha256 = '3e759ff17cba5448e992caa57b968bf8f04a28067d4c9fa1452baae29215cb5d'
+note = 'Formatting-only ruff cleanup in the lane 120 fix-up (import order / pyupgrade rewrites; no behavior change). Upstream file was byte-identical before the cleanup.'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'moji/sentence_tokenizer.py'
+path = 'nomorals/voice/vits/moji/sentence_tokenizer.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '841703df2678d00bfa0a8056085830abfb789d4ff3ded9055082f5a0280b11da'
+upstream_sha256 = '80619f71bd06e7cab8378634540600197362deb91fb95c5df3ad6c8312dba294'
+note = 'sklearn/create_vocab lazy'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'moji/tokenizer.py'
+path = 'nomorals/voice/vits/moji/tokenizer.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '6bc140944733c12e6c3fc1e8346206543d620343b0008d7bb0173ae40a30e851'
+upstream_sha256 = '846e06b1b3f48c155922256a6ed90bc29dc8cdf6edfd7bda3a5536b1a6e146ed'
+note = '(?i) flags moved to compile flags (py3.11+)'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'moji/word_generator.py'
+path = 'nomorals/voice/vits/moji/word_generator.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = 'cfe9cfac41beebb79bdb7c1dcde7b936cea76b2d544fe03f373986c11971fa0c'
+upstream_sha256 = '8ae825c00145007201d4d840527474b31b36b31b60b94281fa8d4ae3a4909b8c'
+note = 'text_unidecode -> unidecode -> stdlib fallback'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'moji/filter_utils.py'
+path = 'nomorals/voice/vits/moji/filter_utils.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = 'e1dfce788d375bf31b5bebb005e074750a0d8f1685d70ab53e4043802ed9d803'
+upstream_sha256 = '9dc782b880d7ccff82a7b2c910fd36a46771b3233cdf13c3c4f461b59bdced27'
+note = 'emoji import lazy'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'moji/create_vocab.py'
+path = 'nomorals/voice/vits/moji/create_vocab.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '467b8073fcbdfd2db8cddc6529aec4ca48f390978ea82ddc873fae2ef8a80d36'
+upstream_sha256 = '578f941bae65a2306d13a60c9b719272926b9973da3d0f500327cacfbd30b346'
+note = 'lazy-only: used by extend_vocabulary'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'moji/global_variables.py'
+path = 'nomorals/voice/vits/moji/global_variables.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = 'a661dc6a76c1d556179f2ab7fc71927b2d7bcb2c4f492249066e297ba84408dd'
+upstream_sha256 = '1de05c647804bcdac616b86aec444c81ca86bf9a6ef23b1a5e4457ac96a9c011'
+note = 'paths point at the vendored data dir'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'train.py'
+path = 'nomorals/voice/vits/train.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '8360f1d584163d87a67a44b1c2070451a6d194264f5024e8a21be5f676aca8ed'
+upstream_sha256 = '75a36f19641cf97ff70cf8ccb8faa55bbf4ce3dbce26e604b70683d5ee8fa4fa'
+note = 'unified single/multi-speaker trainer; CPU allowed; DDP kept for CUDA'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'train_ms.py'
+path = 'nomorals/voice/vits/train.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '8360f1d584163d87a67a44b1c2070451a6d194264f5024e8a21be5f676aca8ed'
+upstream_sha256 = 'a002caaecb3497c32e048d2dbe8057952197b4a1248d6de4d36e2c88bc76e38e'
+note = 'same file: multi-speaker path fixed (upstream call signature broken)'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'preprocess.py'
+path = 'nomorals/voice/vits/preprocess.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '25f3a25edffdf86b0c23cf7a9527321a3e8417f993399a78f7cb40a2927e9a93'
+upstream_sha256 = 'd229b32945c99f523fd258106a796f2e8a95ba9187e96d798bc3ab5141d165e0'
+note = 'sidecars optional; cleaned filelist needs no torch'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'export_ts.py'
+path = 'nomorals/voice/vits/infer.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '80be4ac0c24676152c681786aa3bb83efe88c187daa6eb5a5ef6fb7e1ca980f6'
+upstream_sha256 = 'c6256ef11d94d3fa89e7d860a5accbaec8c07d8c7da2c744df080e8e0f5c35b0'
+note = 'export_torchscript()'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'infer_ts.py'
+path = 'nomorals/voice/vits/infer.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '80be4ac0c24676152c681786aa3bb83efe88c187daa6eb5a5ef6fb7e1ca980f6'
+upstream_sha256 = '4919b1cbf7e3d087256ece2a436246e5c7afe42a756ba6048bca73bc5cb849fd'
+note = 'VITSFrontend.infer; soundfile replaced by scipy wav write'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'tsvitsfe.py'
+path = 'nomorals/voice/vits/infer.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '80be4ac0c24676152c681786aa3bb83efe88c187daa6eb5a5ef6fb7e1ca980f6'
+upstream_sha256 = '327f664aa7d9c1fcbf923fd8dad22a3dcf50ace5dda5ad4bf412fce7bbd36161'
+note = 'VITSFrontend'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'bertfe.py'
+path = 'nomorals/voice/vits/bertfe.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = 'b98dde72f3d78ddf44fb795ef7078c86a49b1124d361de5d1d4e0798a5455e2a'
+upstream_sha256 = 'b9e82fd6320ac2eb523379175da4d216bb6f5b648d1b9e3890ca8e91fb931058'
+note = 'transformers import lazy; honest error when unloadable'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'utils.py'
+path = 'nomorals/voice/vits/train_utils.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '28b3c9a98b97afa045ceea1f8131f9805984d39fea2b7b3aa00981df2c75c6eb'
+upstream_sha256 = '5aa6d5db2334f7ae1e9f48696be4355942ba917e6c759da4598940169ab820ef'
+note = 'HParams moved to configs.py; np.fromstring -> frombuffer'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'data_utils.py'
+path = 'nomorals/voice/vits/data.py'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = 'f33ae79b7633894df0dc2f6acb8832f3f2d52ba983e22113e13383056ff7fce3'
+upstream_sha256 = 'ff2fd0299168e957f121ff26d75b904caa12526f171ab3576e2381b9505da102'
+note = 'numpy port; speaker _filter n_fau fix; .spec.npz cache'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'moji/model/vocabulary.json'
+path = 'nomorals/voice/vits/data/vocabulary.json'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '951e74fe4661b23e490e79d3a9496bd61d027b14b55dd99dd1ae2c1fc3e25f3e'
+note = 'vendored copy'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = "zdict.txt (Google Drive id 1lYKcml_bkTiOke2TMF3F_fn7UWTYHNWp)"
+path = "nomorals/voice/vits/data/zdict.txt"
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = 'b9bea1c1dd1d66f4f24fe4f5cb7de7347248cc63291c5ff6b5c451dec4c0e420'
+note = "vendored copy: fetched from upstream's own Drive link; upstream downloads it at import time"
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'configs/ljs_44v2.json'
+path = 'nomorals/voice/vits/data/configs/ljs_44v2.json'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '4cacf501cbe87d2240fa41908889482e09ae7415574b4ddc1bb167886d118810'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'configs/ljs_li22.json'
+path = 'nomorals/voice/vits/data/configs/ljs_li22.json'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '0ab16c42460d7c65365844794dc0b568ddb41b55cb6966d98dfa72a050e98a25'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'configs/ljs_li24_tmbert_mp_gacc_s1_arpa.json'
+path = 'nomorals/voice/vits/data/configs/ljs_li24_tmbert_mp_gacc_s1_arpa.json'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '6ac49aed705cfcc93408790a883f3b21e8a853704478549f1eb868e1ebbd49a6'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'configs/ljs_li24_tmbert_mp_s1_arpa.json'
+path = 'nomorals/voice/vits/data/configs/ljs_li24_tmbert_mp_s1_arpa.json'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '55e49f4e9347e5b76cb917dbde8756bc33302280216774b08fe62b0eb347b0d2'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'configs/ljs_li24_tmbert_nmp_s1_arpa.json'
+path = 'nomorals/voice/vits/data/configs/ljs_li24_tmbert_nmp_s1_arpa.json'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '667e9152a3d07bb8c82c98dd688ba0d3d4f2783febad207bd5fe1a10973bd15f'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'configs/ljs_li44.json'
+path = 'nomorals/voice/vits/data/configs/ljs_li44.json'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '1da64bbc3ca30a9cc92754a5be950d5a81fa0ba14120541b3dafeaea7d8cf582'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'configs/ljs_li44_tmbert_ft_s1_arpa.json'
+path = 'nomorals/voice/vits/data/configs/ljs_li44_tmbert_ft_s1_arpa.json'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '6a9bd406c973da2126f725cdc374fb85bf4d50c7bae506122d5751c077069823'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'configs/ljs_li44_tmbert_ft_small_s1_arpa.json'
+path = 'nomorals/voice/vits/data/configs/ljs_li44_tmbert_ft_small_s1_arpa.json'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '1dc764395377879d3f8acae114cd21182d3fcfd9271a10deb4fc03ad76fcd6a1'
+upstream_sha256 = '504049a3c27c981b34a891133d5c6de97dc0873dabf68a71c05b6a8b0ac3cbbb'
+note = 'vendored copy FIXED: missing comma after use_8bit added'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'configs/ljs_li44_tmbert_nmp_s1.json'
+path = 'nomorals/voice/vits/data/configs/ljs_li44_tmbert_nmp_s1.json'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = 'a1d0da0e1996b41e049873da8929362b415cfe8bb04d82de7bab32c61e0d1450'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'configs/ljs_li44_tmbert_nmp_s1_arpa.json'
+path = 'nomorals/voice/vits/data/configs/ljs_li44_tmbert_nmp_s1_arpa.json'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = 'a2df0f20e29531b9c88658d8b60c0c116f19d457ec41e7f1a6a3269dca05fd56'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'configs/ljs_li44_tmbert_s1_arpa_mid.json'
+path = 'nomorals/voice/vits/data/configs/ljs_li44_tmbert_s1_arpa_mid.json'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '74890d377fa35d1c3ac6b8f53d78c11efda2f8e301716358e04d2d5ccfc39ab6'
+upstream_sha256 = 'b032e01db09bcd82bfe633b38d57e16b451c26c945489b46838ede5ef1f5bc22'
+note = 'vendored copy FIXED: missing comma after use_8bit added'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'configs/ljs_li44_tmbert_small_s1_arpa.json'
+path = 'nomorals/voice/vits/data/configs/ljs_li44_tmbert_small_s1_arpa.json'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = 'bed4dcd10a40054168cde140295703186edb5ffbb273dd84ef6ddfed6b6ff29c'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'configs/ljs_nosdp.json'
+path = 'nomorals/voice/vits/data/configs/ljs_nosdp.json'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = 'db900e65d8e33cfcf1e11f20593cae2b41540dc3bc13bb19bf111ff2fe74fbc5'
+
+[[assets]]
+repo = "storytold/vits-finetuning"
+upstream_path = 'configs/spanish_li44.json'
+path = 'nomorals/voice/vits/data/configs/spanish_li44.json'
+license = "MIT"
+author = "Jaehyeon Kim"
+sha256 = '6892eb2526727a1453b9546d77b816aa97f14cee9074a6967d1e7d07cc974af8'

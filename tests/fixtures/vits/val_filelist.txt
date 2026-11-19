@@ -1,0 +1,2 @@
+tests/fixtures/vits/wavs/ljs_002.wav|The Secret Service believed that it was very doubtful that any President would ride regularly in a vehicle with a fixed top, even though transparent.
+tests/fixtures/vits/wavs/ljs_003.wav|Between the hours of eight and nine p.m. they were occupied with the children in the bedrooms located at the extreme east end of the house.
