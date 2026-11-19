@@ -486,8 +486,9 @@ class ToolTests(unittest.TestCase):
         # 723 after the deckcraft port, 724 after the designcraft
         # port (lane 104), 725 after the figcraft port (lane 105),
         # 726 after the soundcraft port (lane 107), 727 after the
-        # cadcraft port (lane 106).
-        self.assertEqual(len(registry._tools), 727)
+        # cadcraft port (lane 106), 728 after the materialcraft
+        # port (lane 109).
+        self.assertEqual(len(registry._tools), 728)
 
     def test_tool_inspect_and_render(self) -> None:
         import tempfile

@@ -1,0 +1,81 @@
+# MaterialCraft parity — real fixtures, real operations, expected outcomes.
+# A missing fixture FAILS its case, never a silent skip.
+schema_version = 1
+
+[[cases]]
+id = "simple-inspect"
+fixture = "simple.mcraft"
+ops = ["inspect"]
+[cases.expect]
+nodes = 4
+connections = 3
+outputs = 2
+
+[[cases]]
+id = "simple-roundtrip"
+fixture = "simple.mcraft"
+ops = ["roundtrip"]
+[cases.expect]
+byte_identical = true
+
+[[cases]]
+id = "perlin-cook"
+fixture = "simple.mcraft"
+ops = ["cook_gray"]
+[cases.expect]
+mean = 0.5
+pixel_0_0 = 0.5031
+
+[[cases]]
+id = "brick-cook"
+fixture = "brick.mcraft"
+ops = ["cook_pixel"]
+[cases.expect]
+pixel_0_0 = [0.8, 0.8, 0.78]
+mean = [0.6556, 0.431, 0.394]
+
+[[cases]]
+id = "blend-cook"
+fixture = "blend.mcraft"
+ops = ["cook_pixel"]
+[cases.expect]
+pixel_0_0 = [0.4187, 0.2709, 0.197]
+mean = [0.425, 0.275, 0.2]
+
+[[cases]]
+id = "cycle-detected"
+fixture = "cycle.mcraft"
+ops = ["cycle"]
+[cases.expect]
+cycle = true
+
+[[cases]]
+id = "cache-hit"
+fixture = "simple.mcraft"
+ops = ["cook_twice"]
+[cases.expect]
+cache_hits_second = 4
+byte_identical = true
+
+[[cases]]
+id = "invalidate"
+fixture = "two-branch.mcraft"
+ops = ["invalidate"]
+[cases.expect]
+recooked = ["n1", "n2", "n3"]
+nodes_cooked = 3
+
+[[cases]]
+id = "normal-vector"
+fixture = "normal.mcraft"
+ops = ["normal_vector"]
+[cases.expect]
+normal_0_0 = [0.5006, 0.498, 1.0]
+
+[[cases]]
+id = "preset-metal"
+ops = ["preset"]
+preset = "metal"
+[cases.expect]
+channels = ["albedo", "metallic", "normal", "roughness"]
+mean = [0.6199, 0.6301, 0.6499]

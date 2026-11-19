@@ -1,0 +1,189 @@
+# MaterialCraft attribution — SHA-256 provenance for the port of
+# storytold/materialcraft (dual MIT/Apache-2.0). Upstream hashes are
+# pinned to the clone at the commit below and verified by
+# verify_attribution; devon entries name the upstream units they
+# derive from.
+upstream_commit = "4e8bb9ca9aaad45ae92afee8059587f6e3f30dd4"
+upstream_repo = "storytold/materialcraft"
+
+[[assets]]
+kind = "upstream"
+path = "crates/core/src/graph.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "767907a8be6ab2ba515af7b0f5d6d4cf23c160d0364ed4961443ceb110398e63"
+
+[[assets]]
+kind = "upstream"
+path = "crates/core/src/value.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "240a895adfe501ae10b34e4d780f67669cd3040820edc2ebcb3bfff8aec96731"
+
+[[assets]]
+kind = "upstream"
+path = "crates/core/src/package.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "3037b35beabd4bdb3fc6262c21b611e437c99bb6098eb7e72bc418b1bfbf3600"
+
+[[assets]]
+kind = "upstream"
+path = "crates/core/src/function.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "765fbe8ac99f851e705fc2b637d5e105990d91f320673aec21a7790a05ba12cc"
+
+[[assets]]
+kind = "upstream"
+path = "crates/image/src/lib.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "3a8ae45ec8ac751dcb4664564e4fc50dffefc2019004f9ddb7d5fcb642be49aa"
+
+[[assets]]
+kind = "upstream"
+path = "crates/nodes/src/catalog.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "3b336748bf35af09e0b17cd0232c1685a02d82e2a4b4dc0b6575443b5e573a10"
+
+[[assets]]
+kind = "upstream"
+path = "crates/nodes/src/noise.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "ef5174ad11bae87e1d5872dd19f9ab860166ac530abc3d63d76fb382e5ac884e"
+
+[[assets]]
+kind = "upstream"
+path = "crates/nodes/src/noise3d.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "5494bd1cef01bd2956f0676224a5801715388559858aa587c8c48a4bf1fce163"
+
+[[assets]]
+kind = "upstream"
+path = "crates/nodes/src/patterns.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "bfaeadac673dcc5398cbd3d4f57d668a406c373e42dbebf201106bf53be6c0ec"
+
+[[assets]]
+kind = "upstream"
+path = "crates/nodes/src/generators.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "847ef5202b8479956fefb9abea99a91cb1fbcadc10ba48a97a5bf4440bae9fe4"
+
+[[assets]]
+kind = "upstream"
+path = "crates/nodes/src/filters.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "2c016b42a834f380f9fac51b6f8bc0b99d42f7ecd6041492e1399bb2b25e3c24"
+
+[[assets]]
+kind = "upstream"
+path = "crates/nodes/src/atomic.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "e133e2f80ab3e1033fbfbbda64bf387b8f1e5a5612f00d1ce47c0717be79be7d"
+
+[[assets]]
+kind = "upstream"
+path = "crates/nodes/src/material.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "4b6a741721e7b8e20dd80c27792833b60044419e7348064cdde424845085e0fd"
+
+[[assets]]
+kind = "upstream"
+path = "crates/nodes/src/material_more.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "bce24ec11bf3ff8cb20ad0255cf75f788e86180916027b3a30d60953a4f4657f"
+
+[[assets]]
+kind = "upstream"
+path = "crates/eval/src/lib.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "4946607dcedd76e413317d558f4c72b271a677bec78d515c7716154b4ba38f0f"
+
+[[assets]]
+kind = "upstream"
+path = "crates/formats/src/material.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "46427b2c886b89ea30dea926e6006ca16aa793f28b8f7696a72a22f015a5f6e2"
+
+[[assets]]
+kind = "upstream"
+path = "crates/formats/src/sbs.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "7f72429742ce2ef4f47ea9b71ffe7536785d8cb7d2b6b5185961b99cb2e9b4c7"
+
+[[assets]]
+kind = "upstream"
+path = "crates/render/src/preview.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "7484a446398ebde51917820b5731c95b2b74f149195c26caa143ade25b11d4e6"
+
+[[assets]]
+kind = "upstream"
+path = "crates/render/src/ibl.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "0be6301356cd43710dcd30197772c5d0892a8a5a2e7005e1e9146cc5bdebda93"
+
+[[assets]]
+kind = "upstream"
+path = "crates/engine/src/session.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "07645dbf5522d62828f30bdfca9168022a4436276ca449d17f833a375d4e6fe9"
+
+[[assets]]
+kind = "upstream"
+path = "crates/engine/src/inspect.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "6f9e096d77be37bac59076a5f292bd719ee8b639dc6b1eb67f9fb0257cbfa993"
+
+[[assets]]
+kind = "upstream"
+path = "docs/architecture.md"
+license = "MIT OR Apache-2.0"
+sha256 = "c47dda2dd91dd5b891c855c3a350a31bea4bbf14296a05e7b78a863725f1c74e"
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/material/model.py"
+derives_from = "crates/core/src/graph.rs, crates/core/src/value.rs, crates/core/src/package.rs, crates/formats/src/material.rs"
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/material/image.py"
+derives_from = "crates/image/src/lib.rs"
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/material/noise.py"
+derives_from = "crates/nodes/src/noise.rs, crates/nodes/src/noise3d.rs"
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/material/nodes.py"
+derives_from = "crates/nodes/src/catalog.rs, crates/nodes/src/generators.rs, crates/nodes/src/patterns.rs, crates/nodes/src/filters.rs, crates/nodes/src/atomic.rs, crates/nodes/src/material.rs"
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/material/eval.py"
+derives_from = "crates/eval/src/lib.rs"
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/material/pbr.py"
+derives_from = "crates/render/src/preview.rs, crates/render/src/ibl.rs"
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/material/library.py"
+derives_from = "crates/engine/src/session.rs (sample materials)"
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/material/edit.py"
+derives_from = "crates/engine/src/session.rs (Session::edit snapshots)"
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/material/parity.py"
+derives_from = "crates/nodes/src/catalog.rs (every_node_cooks habit)"
+
+[[assets]]
+kind = "devon"
+path = "nomorals/tools/materialcraft.py"
+derives_from = "crates/engine/src/commands.rs (command registry)"
