@@ -666,6 +666,7 @@ class ToolRegistry:
             "wiki",  # durable knowledge pages — links, search, history, board export (craft-wiki port)
             "wordcraft",  # open/edit/save real .docx — document model, fidelity-preserving edits, parity + attribution (WordCraft port)
             "vectorcraft",  # open/edit/render/save real .svg — vector document model, boolean path ops, rasterizer, parity + attribution (VectorCraft port)
+            "gridcraft",  # open/edit/recalculate real .xlsx — workbook model, formula engine, calc graph, parity + attribution (GridCraft port)
             "workspace",
             "trading",
             "characters",

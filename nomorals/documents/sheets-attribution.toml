@@ -1,0 +1,170 @@
+# GridCraft attribution — SHA-256 provenance for the storytold/gridcraft port.
+# Upstream: storytold/gridcraft, dual MIT/Apache-2.0 (LICENSE-MIT + LICENSE-APACHE),
+# commit 632e4a1bc51ee86b3f0a55e95ee78def391aab30 ("formula, calc: LET/LAMBDA names
+# looked up through a map; ragged array literals refused before reserving (#3312)",
+# 2026-11-03). `upstream` entries are hash-pinned against the clone on disk;
+# `devon` entries name the upstream units they derive from.
+upstream = "storytold/gridcraft"
+upstream_commit = "632e4a1bc51ee86b3f0a55e95ee78def391aab30"
+upstream_license = "MIT OR Apache-2.0"
+
+[[assets]]
+kind = "upstream"
+path = "crates/formula/src/lexer.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "e33e564c1cdf87f4828dd997a4dee341143ff2923c5d0a117497e9c374c6780a"
+derives = "formula tokeniser — token kinds, $ handling, string escapes"
+
+[[assets]]
+kind = "upstream"
+path = "crates/formula/src/parser.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "10a0fea549f637df828614dbec850988b2eb0e9acaf628324961daa4c010782f"
+derives = "formula Pratt parser — precedence, %, ^ right-assoc, LET"
+
+[[assets]]
+kind = "upstream"
+path = "crates/formula/src/ast.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "eb800dfdb2ea8b01ed2aa6e6bbc556bbd080e5a231cbce5818486915ae235d00"
+derives = "formula AST — Num/Str/Bool/Ref/Range/Name/Func/Unary/Binary/Let"
+
+[[assets]]
+kind = "upstream"
+path = "crates/formula/src/printer.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "c3c623ea23eb2c35200ca3633bf9cd489b760a4cad36fe03ca269f77ce3d7468"
+derives = "formula printer — AST back to text, $ anchors, sheet quoting"
+
+[[assets]]
+kind = "upstream"
+path = "crates/formula/src/adjust.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "5bbf9775808d3217fcb1e7265a8d9a49bf9755e9ee8f5246f3dcac3c7aaed1d9"
+derives = "formula ref adjustment on insert — the shift rule"
+
+[[assets]]
+kind = "upstream"
+path = "crates/calc/src/recalc.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "41aaf1b4397a9677af1f104a81965bd220ce2e19abe5f5ca35fd6ff7cddb284d"
+derives = "recalc driver — rebuild / recalc_all / cells_changed"
+
+[[assets]]
+kind = "upstream"
+path = "crates/calc/src/recalc/graph.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "4ad2175f3a5f6627ea2d2cf077aa1e6704c917418a7aebce089db84c9cdedaa7"
+derives = "dependency graph — edges, topological order, cycle detection"
+
+[[assets]]
+kind = "upstream"
+path = "crates/calc/src/eval.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "1d536a4b5bbcb33d180c87a0f2a884cb847124c002b0d5a32affd8484be1d88a"
+derives = "evaluator — cell memoisation, visiting guard, error propagation"
+
+[[assets]]
+kind = "upstream"
+path = "crates/core/src/value.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "deed492212fa71ac11ca73962aa596360a361c0187d5c135983a2ab080967d9e"
+derives = "CellError taxonomy + display strings, incl. #CIRC!"
+
+[[assets]]
+kind = "upstream"
+path = "crates/core/src/addr.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "88a819b6727b5a7fd11345e460c0235c1b0888a1352889b234fcbf3b7420168a"
+derives = "A1 addressing — col/row conversion, range parsing"
+
+[[assets]]
+kind = "upstream"
+path = "crates/core/src/date.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "8c0e88f6c2dcea56d82247294abfd9b434d9100fbd1e71358338591a4f9e5aaf"
+derives = "Excel 1900 serial dates, incl. the fake 1900-02-29"
+
+[[assets]]
+kind = "upstream"
+path = "crates/model/src/workbook.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "c014229d165fc1dc3423d12440aab292997ef486483296916193b920282b7d74"
+derives = "workbook model — sheets, defined names, core properties"
+
+[[assets]]
+kind = "upstream"
+path = "crates/model/src/cell.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "934ba5e8ce5ae157d30b48ceffb99e64e835bca6e1f39e7dd6d157256e737758"
+derives = "cell model — value/formula/cached/style, display value"
+
+[[assets]]
+kind = "upstream"
+path = "crates/xlsx/src/read.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "a488587220c7d1c1387d0d02e957c42abcd038bcad08f3c1c621c341b7153272"
+derives = "xlsx reader — workbook/sheets/shared-strings/styles parsing"
+
+[[assets]]
+kind = "upstream"
+path = "crates/xlsx/src/write.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "4afd7cc3248159ecb48f024023820e8be595b36402abafd40b95ef27900a01a6"
+derives = "xlsx writer — sheet serialisation, shared strings, styles"
+
+[[assets]]
+kind = "upstream"
+path = "crates/functions/src/lib.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "0f2e868ce0cf01d1571f2e9ff3493ddab5fdc18bd46a2acdee8be37a61b38604"
+derives = "function library registry — names, arities, lazy vs eager"
+
+[[assets]]
+kind = "upstream"
+path = "crates/functions/src/lookup.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "eb3911e72689a4c9c4cf2e09d9948a33f3062ee3385fd0bc988d0e54c0a43ee3"
+derives = "VLOOKUP/HLOOKUP/INDEX/MATCH — exact + approximate modes"
+
+[[assets]]
+kind = "upstream"
+path = "crates/engine/src/cmd.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "76a64d8440553f4e99622617d820127bf4864f59e9b49f64dc168f3960fd0521"
+derives = "engine command catalogue — the command sequences the fuzzer drives"
+
+[[assets]]
+kind = "devon"
+path = "nomorals/documents/sheets/model.py"
+derives_from = ["crates/model/src/workbook.rs", "crates/model/src/cell.rs", "crates/xlsx/src/read.rs", "crates/xlsx/src/write.rs", "crates/core/src/addr.rs", "crates/core/src/date.rs", "crates/core/src/value.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/documents/sheets/formula.py"
+derives_from = ["crates/formula/src/lexer.rs", "crates/formula/src/parser.rs", "crates/formula/src/ast.rs", "crates/formula/src/printer.rs", "crates/formula/src/adjust.rs", "crates/calc/src/eval.rs", "crates/functions/src/lib.rs", "crates/functions/src/lookup.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/documents/sheets/calc.py"
+derives_from = ["crates/calc/src/recalc.rs", "crates/calc/src/recalc/graph.rs", "crates/calc/src/eval.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/documents/sheets/edit.py"
+derives_from = ["crates/engine/src/cmd.rs", "crates/formula/src/adjust.rs", "crates/model/src/workbook.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/documents/sheets/ooxml.py"
+derives_from = ["crates/xlsx/src/read.rs", "crates/xlsx/src/write.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/documents/sheets/fuzz.py"
+derives_from = ["crates/engine/src/cmd.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/documents/sheets/parity.py"
+derives_from = ["crates/calc/src/recalc.rs", "crates/xlsx/src/read.rs"]

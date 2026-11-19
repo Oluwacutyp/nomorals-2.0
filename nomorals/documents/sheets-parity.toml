@@ -1,0 +1,139 @@
+# GridCraft parity — machine-checked expectations over real .xlsx fixtures.
+# Run with nomorals.documents.sheets.run_parity(). A missing fixture fails
+# its case; nothing here is a silent skip. Upstream design: storytold/gridcraft
+# crates/calc (recalc graph) + crates/formula (parser/evaluator) + crates/xlsx
+# (OOXML reader/writer), commit 632e4a1bc51ee86b3f0a55e95ee78def391aab30.
+schema_version = 1
+
+[[cases]]
+id = "simple-inspect"
+fixture = "simple.xlsx"
+ops = ["inspect"]
+[cases.expect]
+sheets = ["Data", "Summary"]
+title = "Simple Fixture"
+[cases.expect.values]
+"Data!D6" = 51
+"Summary!B1" = 51
+"Summary!A2" = 102
+
+[[cases]]
+id = "simple-set-value"
+fixture = "simple.xlsx"
+ops = ["set-value"]
+[cases.op_args]
+sheet = "Data"
+ref = "B3"
+value = 100
+[cases.expect]
+parts_preserved = true
+untouched_cells_changed = 0
+[cases.expect.values]
+"Data!D3" = 150
+"Data!D6" = 183
+"Summary!B1" = 183
+
+[[cases]]
+id = "simple-set-formula"
+fixture = "simple.xlsx"
+ops = ["set-formula"]
+[cases.op_args]
+sheet = "Data"
+ref = "A7"
+formula = "=SUM(D3:D5)"
+[cases.expect]
+parts_preserved = true
+[cases.expect.formulas]
+"Data!A7" = "SUM(D3:D5)"
+[cases.expect.cached]
+"Data!A7" = 51
+
+[[cases]]
+id = "simple-insert-row"
+fixture = "simple.xlsx"
+ops = ["insert-rows"]
+[cases.op_args]
+sheet = "Data"
+at = 3
+count = 1
+[cases.expect]
+parts_preserved = true
+untouched_cells_changed = 0
+[cases.expect.formulas]
+"Data!D4" = "B4*C4"
+"Data!D7" = "SUM(D4:D6)"
+[cases.expect.values]
+"Data!A4" = "Apples"
+"Data!D7" = 51
+
+[[cases]]
+id = "simple-insert-col"
+fixture = "simple.xlsx"
+ops = ["insert-cols"]
+[cases.op_args]
+sheet = "Data"
+at = 2
+count = 1
+[cases.expect]
+parts_preserved = true
+[cases.expect.formulas]
+"Data!E3" = "C3*D3"
+"Data!E6" = "SUM(E3:E5)"
+[cases.expect.cached]
+"Data!E6" = 51
+
+[[cases]]
+id = "formulas-recalc"
+fixture = "formulas.xlsx"
+ops = ["recalc"]
+[cases.expect]
+[cases.expect.cached]
+"Calc!A2" = 20
+"Calc!B2" = 30
+"Calc!A3" = "big"
+"Calc!A4" = "#DIV/0!"
+"Calc!B4" = "#REF!"
+"Calc!C4" = "#NAME?"
+"Calc!A5" = "Bola"
+"Calc!B5" = "Chidi"
+"Calc!A6" = 15
+
+[[cases]]
+id = "cycle-named"
+fixture = "cycle.xlsx"
+ops = ["recalc"]
+[cases.expect]
+[cases.expect.cached]
+"Loop!A1" = "#CIRC!"
+"Loop!B1" = "#CIRC!"
+"Loop!A2" = "#CIRC!"
+
+[[cases]]
+id = "styled-inspect"
+fixture = "styled.xlsx"
+ops = ["inspect"]
+[cases.expect]
+[cases.expect.values]
+"Styled!A1" = "Revenue"
+"Styled!C2" = 820.25
+
+[[cases]]
+id = "values-inspect"
+fixture = "values.xlsx"
+ops = ["inspect"]
+[cases.expect]
+[cases.expect.values]
+"Values!A1" = 42
+"Values!B1" = -3.25
+"Values!C1" = 1500
+"Values!D1" = true
+"Values!A2" = "hello"
+"Values!B2" = "wörld ✓"
+"Values!C2" = "inline text"
+
+[[cases]]
+id = "broken-refused"
+fixture = "broken.xlsx"
+ops = ["open-refused"]
+[cases.expect]
+error_kind = "parse"
