@@ -680,5 +680,6 @@ def test_registry_tool_count(self=None):
     # (lane 110) added the anicraft tool, 731 after the craft-anything
     # port (lane 111) added the craftanything tool, 732 after the
     # craftlauncher port (lane 112) added the craftlauncher tool,
-    # 733 after the craft-libs port (lane 113) added the craftlibs tool.
-    assert len(registry._tools) == 733
+    # 733 after the craft-libs port (lane 113) added the craftlibs tool,
+    # 734 after the craft-fonts port (lane 114) added the craftfonts tool.
+    assert len(registry._tools) == 734

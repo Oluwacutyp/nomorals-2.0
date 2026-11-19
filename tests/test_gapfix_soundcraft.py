@@ -500,8 +500,9 @@ class ToolTests(unittest.TestCase):
         # anicraft port (lane 110), 731 after the
         # craft-anything port (lane 111), 732 after the
         # craftlauncher port (lane 112), 733 after the
-        # craft-libs port (lane 113) added the craftlibs tool.
-        self.assertEqual(len(registry._tools), 733)
+        # craft-libs port (lane 113) added the craftlibs tool, 734
+        # after the craft-fonts port (lane 114) added the craftfonts tool.
+        self.assertEqual(len(registry._tools), 734)
 
     def test_tool_inspect_and_render(self) -> None:
         import tempfile

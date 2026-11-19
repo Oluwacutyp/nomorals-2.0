@@ -1,0 +1,78 @@
+# Craft-Fonts attribution: every ported unit traced to its upstream file.
+# Upstream: storytold/craft-fonts aced4137c022f1f587624d48e81ec77e1914a9cc.
+# SHA-256 values are the hashes of the files as read from the clone.
+
+[[upstream]]
+file = "crates/craft-fonts/src/parse.rs"
+sha256 = "dd8dbef7108d2f6748a9ecec75264974ffc5c12bb5c13e997768c30a784c5044"
+note = "Manifest format + parse_manifest (FieldCount / EmptyField / BadSha256)."
+
+[[upstream]]
+file = "crates/craft-fonts/src/lib.rs"
+sha256 = "1856400c4f1a395ebcafdfedc2bc1f0cccd26fdcf1bec3916dfeb39382b6e82c"
+note = "Font entry shape, FONTS / LATIN_FONTS tables, for_script, dir_from_env, load / load_latin / load_manifest, embedded."
+
+[[upstream]]
+file = "crates/craft-fonts/build.rs"
+sha256 = "1aa21f8918cb8d8bf1b0ce5839789071e780aab74d84f8505a08828adc062f5c"
+note = "Manifest-to-table build recipe; embed payload shape."
+
+[[upstream]]
+file = "crates/craft-fonts-tests/tests/fonts.rs"
+sha256 = "cb60710569377b534cf0e0b626c572f63287a733b38ce8cf2fce0e198a97f395"
+note = "Checksum, licence, family/style and script-coverage assertions mirrored by the parity TOML."
+
+[[upstream]]
+file = "crates/craft-fonts-tests/src/lib.rs"
+sha256 = "bf8ed8752cad250d3d08ac5383a61e15efd52ba7e9812b6f7d1c0505afda4bf6"
+note = "Test-crate root: repo_root() the attribution checker reads through."
+
+[[upstream]]
+file = "fonts/manifest.txt"
+sha256 = "e825709cd46ff7abe213c141e981c0c11e098195a134951e95dada85eaea778a"
+note = "Default table: 13 faces. Copied verbatim into nomorals/media/typography/craftfonts/."
+
+[[upstream]]
+file = "fonts/latin-manifest.txt"
+sha256 = "ed0271fc566c46642ad4280bafd2fd4125b3df5ebe582ca9f85e14372a503542"
+note = "Opt-in Latin table: 16 families, 51 faces. Copied verbatim into nomorals/media/typography/craftfonts/."
+
+[[upstream]]
+file = "fonts/simplified-chinese-manifest.txt"
+sha256 = "5e42723fe7148934bff0ddf28191e59cc41b021cf82c21803a5477031a24b7c1"
+note = "Opt-in native-only Simplified Chinese table: 1 face. Copied verbatim into nomorals/media/typography/craftfonts/."
+
+[[upstream]]
+file = "docs/integration.md"
+sha256 = "771d752bdecc9910951f0b756d3b8ae879ae3c32f2ce0a5518d9947ae961f90d"
+note = "Fully-optional build input (CRAFT_FONTS_DIR / CRAFT_FONTS_REQUIRED); web allowlist shape."
+
+[[upstream]]
+file = "ATTRIBUTION.md"
+sha256 = "5ffc2bfba3b480451cb98c5dd50887999b81168022f8fb005c46c1cb2ea7c37a"
+note = "Pinned sources and licences for every font in fonts/."
+
+[[upstream]]
+file = "README.md"
+sha256 = "96f775517c96b9d1b2f9dd4f9cbf91df2da652da23a0b682e6b5cb4946bd7a78"
+note = "Catalog tables (default / Latin / Simplified Chinese) and their purposes."
+
+[[upstream]]
+file = "Cargo.toml"
+sha256 = "3109a5104225536c21c0604dea25f4caa8d87f343fbf0267fc9fc583c25f99cb"
+note = "Workspace root: craft-fonts + craft-fonts-tests crates."
+
+[[devon]]
+file = "craftfonts.py"
+derives_from = "crates/craft-fonts/src/parse.rs + crates/craft-fonts/src/lib.rs + crates/craft-fonts/build.rs"
+note = "The port itself: manifest parsing, catalog tables, checkout loading, install, embed bundle, parity + attribution runners."
+
+[[devon]]
+file = "../../tools/craftfonts.py"
+derives_from = "crates/craft-fonts/src/lib.rs"
+note = "Brain tool surface over the organ (catalog / for_script / check / load / install / bundle / render / parity / attribution)."
+
+[[devon]]
+file = "../layout/compose.py"
+derives_from = "nomorals/media/typography/policy.py (Devon typography service)"
+note = "Layout font door unified onto the typography service's pil_font_for (explicit DejaVu Sans family, DejaVu ladder kept as fallback); no upstream file — Devon-internal unification."

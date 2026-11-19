@@ -1,0 +1,114 @@
+# Craft-Fonts parity: the port's promises, run for real.
+# Each case names the outcome the organ must produce. A missing
+# fixture is a failed case, never a skip.
+# Upstream: storytold/craft-fonts aced4137c022f1f587624d48e81ec77e1914a9cc.
+
+[[case]]
+id = "manifest-parse-valid"
+kind = "manifest_parse"
+text = """Noto Sans Hebrew | Regular | fonts/noto-sans-hebrew/NotoSansHebrew-Regular.ttf | Hebr | OFL-1.1 | fonts/noto-sans-hebrew/OFL.txt | 671951828bd5c95db818e5bb12dcea2d0c0dda00311888522be061ee6835125e | https://github.com/notofonts/hebrew/releases/tag/NotoSansHebrew-v3.001
+Caladea | Regular | fonts/caladea/Caladea-Regular.ttf | Latn | OFL-1.1 | fonts/caladea/OFL.txt | f1e899278b7b4491aba5b6a8253c4b04c050cc59b21865be5c37559a775153cd | https://github.com/google/fonts/tree/7085eb89a950e85db5b166b7a58d414544b4140c/ofl/caladea
+"""
+[case.expect]
+entries = 2
+first_family = "Noto Sans Hebrew"
+
+[[case]]
+id = "manifest-field-count"
+kind = "manifest_error"
+text = "A | B\n"
+[case.expect]
+error = "field_count"
+line = 1
+
+[[case]]
+id = "manifest-empty-field"
+kind = "manifest_error"
+text = "A |  | f | Jpan | OFL-1.1 | l | 0000000000000000000000000000000000000000000000000000000000000000 | s\n"
+[case.expect]
+error = "empty_field"
+line = 1
+field = "style"
+
+[[case]]
+id = "manifest-bad-sha"
+kind = "manifest_error"
+text = "A | B | f | Jpan | OFL-1.1 | l | XYZ | s\n"
+[case.expect]
+error = "bad_sha256"
+line = 1
+
+[[case]]
+id = "manifest-comments"
+kind = "manifest_parse"
+text = "# comment\n\n"
+[case.expect]
+entries = 0
+
+[[case]]
+id = "catalog-default-count"
+kind = "catalog_count"
+table = "default"
+[case.expect]
+faces = 13
+
+[[case]]
+id = "catalog-latin-count"
+kind = "catalog_count"
+table = "latin"
+[case.expect]
+faces = 51
+
+[[case]]
+id = "catalog-chinese-count"
+kind = "catalog_count"
+table = "chinese"
+[case.expect]
+faces = 1
+
+[[case]]
+id = "for-script-jpan"
+kind = "for_script"
+script = "Jpan"
+[case.expect]
+faces = 4
+families = ["BIZ UDPGothic", "BIZ UDMincho", "Shippori Mincho"]
+
+[[case]]
+id = "tables-disjoint"
+kind = "tables_disjoint"
+
+[[case]]
+id = "load-checkout-valid"
+kind = "load_checkout"
+[case.expect]
+faces = 2
+
+[[case]]
+id = "load-checkout-tampered"
+kind = "load_tampered"
+
+[[case]]
+id = "install-checkout"
+kind = "install_checkout"
+[case.expect]
+installed = 2
+
+[[case]]
+id = "bundle-allowlist"
+kind = "bundle_allowlist"
+allowlist = [["Noto Sans Hebrew", "Regular"], ["Caladea", "Regular"]]
+[case.expect]
+faces = 2
+members = ["fonts/caladea/Caladea-Regular.ttf", "fonts/caladea/OFL.txt", "fonts/noto-sans-hebrew/NotoSansHebrew-Regular.ttf", "fonts/noto-sans-hebrew/OFL.txt", "manifest.txt", "provenance.json"]
+
+[[case]]
+id = "bundle-missing-face"
+kind = "bundle_missing"
+
+[[case]]
+id = "coverage-hebrew"
+kind = "coverage"
+text = "שלום"
+[case.expect]
+covers = true

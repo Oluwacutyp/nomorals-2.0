@@ -29,6 +29,24 @@ _DEFAULT_SIZE = 12.0
 
 def _font(size: float, bold: bool = False):
     size = max(4, int(round(size)))
+    try:
+        # The typography service is the one font door: the same
+        # DejaVuSans face this ladder used to find by host path,
+        # resolved by family name through the stocked library then
+        # the parsed catalogue, with the weight asked for. A host
+        # without the service (or without DejaVu at all) falls
+        # through to the old ladder below — the measured widths
+        # are identical either way (proven by the craftfonts
+        # lane: service and direct widths match to the point).
+        from ..typography import get_service, pil_font_for
+
+        font = pil_font_for(get_service(), "text", size,
+                            family="DejaVu Sans",
+                            weight=700 if bold else 400)
+        if font is not None:
+            return font
+    except Exception:  # noqa: BLE001 - the ladder below is the fallback
+        pass
     names = (("DejaVuSans-Bold.ttf", "DejaVuSans.ttf") if bold
              else ("DejaVuSans.ttf",))
     for name in names:

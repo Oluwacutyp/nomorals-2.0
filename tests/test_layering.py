@@ -602,6 +602,11 @@ MODULE_PINS: dict[str, int] = {
     # the animation organ — it owns no pipeline of its own, only
     # argument routing and reply shaping.
     "nomorals.tools.craftlauncher": 5,
+    # The craftfonts tool surface is the L5 composed tool over the
+    # L4 media/typography organ (its craftfonts module), the same
+    # shape as tools/craftlauncher.py over os.launcher — it owns no
+    # catalog of its own, only argument routing and reply shaping.
+    "nomorals.tools.craftfonts": 5,
     # os.verifiers is a leaf verification library (lint / git-clean /
     # disk-space gates + the unittest/docs verifiers): it imports core
     # (L1) only, plus stdlib. The os/ package (L6) is too coarse a
