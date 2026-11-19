@@ -662,6 +662,7 @@ class ToolRegistry:
             "studio_extensions",  # Studio extensions — themes, plug-ins, resource packs (craft-extensions port)
             "ticket_relay",  # Discord tickets ↔ GitHub issues (ticket-relay port)
             "triage",  # issue triage over tracked GitHub repos (autocraft port)
+            "filmcraft",  # video editor + motion compositor (FilmCraft + EffectCraft ports)
             "workspace",
             "trading",
             "characters",
