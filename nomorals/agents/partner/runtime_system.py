@@ -2882,6 +2882,221 @@ class RuntimeSystemMixin:
                 "duplicates <owner/repo> | decisions [owner/repo] | "
                 "answer <id> <option> | apply <id>")
 
+    # ── wiki: /wiki (craft-wiki port) ──────────────────────────────
+    def _wiki_store(self) -> Any:
+        """The wiki store — the injected store wins (the test seam,
+        same shape as the triage relay's); otherwise the durable
+        store under the process home, the same file the wiki brain
+        tool reads."""
+        injected = getattr(self, "_wiki_store", None)
+        if injected is not None:
+            return injected() if callable(injected) else injected
+        from ...core.config import get_settings
+        from ...wiki.store import WikiStore, wiki_path
+
+        return WikiStore(wiki_path(get_settings()))
+
+    def _control_wiki(self, tail: str, chat_key: str = "") -> Any:
+        """ /wiki — Devon's wiki: durable knowledge pages (craft-wiki
+        patterns, original Devon code).
+
+        /wiki                          — the board: pages by category
+        /wiki list [category]          — pages, optionally in one category
+        /wiki read <slug>              — one page whole
+        /wiki search <query>           — ranked matches
+        /wiki new <type> <title>       — a page from a type skeleton
+        /wiki template <type> <title>  — same as new
+        /wiki edit <slug> | <body>     — replace a page's body
+        /wiki retitle <slug> <title>   — rename (the slug never moves)
+        /wiki links <slug>             — outgoing links, broken named
+        /wiki backlinks <slug>         — pages linking here
+        /wiki orphans                  — pages nothing links to
+        /wiki broken                   — every broken link, named
+        /wiki history <slug>           — revision history
+        /wiki revert <slug> <rev>      — restore a revision
+        /wiki import <path>            — markdown file with frontmatter
+        /wiki from-memory <query> [| <title>] — page from memory recall
+        /wiki board <slug>             — page on the board as nodes
+        /wiki remove <slug>            — delete a page
+        """
+        from ...wiki import links as wiki_links
+        from ...wiki import render as wiki_render
+        from ...wiki import surface as wiki_surface
+        from ...wiki.pages import PAGE_TYPES
+        from ...wiki.search import search_pages
+        from ...wiki.templates import template_body
+
+        store = self._wiki_store()
+        tail = (tail or "").strip()
+        if not tail:
+            return wiki_surface.render_board(store)
+        verb, _, rest = tail.partition(" ")
+        verb = verb.strip().lower()
+        rest = rest.strip()
+
+        if verb == "list":
+            return wiki_surface.render_page_list(store, rest)
+        if verb == "read":
+            if not rest:
+                return "usage: /wiki read <slug>"
+            page = store.get(rest)
+            if page is None:
+                return (f"no page {rest!r} — /wiki list shows what "
+                        "exists.")
+            return wiki_render.render_chat(store, page)
+        if verb == "search":
+            if not rest:
+                return "usage: /wiki search <query>"
+            results = search_pages(store, rest)
+            return wiki_surface.render_search_results(results, rest)
+        if verb in ("new", "template"):
+            type_, _, title = rest.partition(" ")
+            type_ = type_.strip().lower()
+            title = title.strip()
+            if type_ not in PAGE_TYPES:
+                return ("usage: /wiki new <type> <title> — type is one "
+                        "of " + ", ".join(sorted(PAGE_TYPES)))
+            if not title:
+                return "usage: /wiki new <type> <title>"
+            try:
+                page = store.create(title, template_body(type_, title),
+                                    type=type_)
+            except ValueError as exc:
+                return str(exc)
+            return (f"page {page.slug!r} started from the {type_} "
+                    f"skeleton — /wiki edit {page.slug} | <body> to "
+                    "write it.")
+        if verb == "edit":
+            slug, _, body = rest.partition("|")
+            slug = slug.strip().lower()
+            body = body.strip()
+            if not slug or not body:
+                return "usage: /wiki edit <slug> | <body>"
+            if not store.update(slug, body):
+                return (f"no page {slug!r}, or the body was empty — "
+                        "/wiki list shows what exists.")
+            return f"page {slug!r} updated — /wiki read {slug} to see it."
+        if verb == "retitle":
+            slug, _, title = rest.partition(" ")
+            slug = slug.strip().lower()
+            title = title.strip()
+            if not slug or not title:
+                return "usage: /wiki retitle <slug> <title>"
+            if not store.retitle(slug, title):
+                return f"no page {slug!r}, or the title was empty."
+            return (f"page {slug!r} is now {title!r} — the slug never "
+                    "moves, so links still work.")
+        if verb == "links":
+            if not rest:
+                return "usage: /wiki links <slug>"
+            page = store.get(rest)
+            if page is None:
+                return f"no page {rest!r}."
+            out = []
+            for target in wiki_links.extract_links(page.body):
+                slug = wiki_links.resolve_link(store, target)
+                out.append(f"• {target}"
+                           + (" (broken — no such page)" if slug is None
+                              else f" → {slug}"))
+            if not out:
+                return f"{page.title} links nowhere."
+            return f"Links from {page.title}:\n" + "\n".join(out)
+        if verb == "backlinks":
+            if not rest:
+                return "usage: /wiki backlinks <slug>"
+            page = store.get(rest)
+            if page is None:
+                return f"no page {rest!r}."
+            backs = wiki_links.backlinks_for(store, page.slug)
+            if not backs:
+                return f"nothing links to {page.title}."
+            return (f"Pages linking to {page.title}:\n" + "\n".join(
+                f"• {(store.get(s) or page).title} — /wiki read {s}"
+                for s in backs))
+        if verb == "orphans":
+            return wiki_surface.render_orphans(store)
+        if verb == "broken":
+            return wiki_surface.render_broken(store)
+        if verb == "history":
+            if not rest:
+                return "usage: /wiki history <slug>"
+            page = store.get(rest)
+            if page is None:
+                return f"no page {rest!r}."
+            return wiki_surface.render_history(page)
+        if verb == "revert":
+            slug, _, rev = rest.partition(" ")
+            slug = slug.strip().lower()
+            try:
+                rev_n = int(rev.strip())
+            except ValueError:
+                return "usage: /wiki revert <slug> <rev>"
+            if not store.revert(slug, rev_n):
+                return (f"no page {slug!r}, or no revision {rev_n} — "
+                        f"/wiki history {slug} lists them.")
+            return f"page {slug!r} reverted to revision {rev_n}."
+        if verb == "import":
+            if not rest:
+                return "usage: /wiki import <path>"
+            from pathlib import Path
+
+            try:
+                text = Path(rest).expanduser().read_text(encoding="utf-8")
+            except OSError as exc:
+                return f"couldn't read {rest!r}: {exc}"
+            try:
+                page = store.import_markdown(text)
+            except ValueError as exc:
+                return str(exc)
+            return (f"imported {page.slug!r} ({page.title}) — "
+                    f"/wiki read {page.slug}.")
+        if verb == "from-memory":
+            query, _, title = rest.partition("|")
+            query = query.strip()
+            if not query:
+                return "usage: /wiki from-memory <query> [| <title>]"
+            memory = getattr(self.context, "memory", None)
+            if memory is None:
+                return "memory is off in this session."
+            try:
+                page, sources = wiki_surface.build_from_memory(
+                    store, memory, query, title.strip())
+            except ValueError as exc:
+                return str(exc)
+            except Exception as exc:  # noqa: BLE001 — recall never kills chat
+                return f"memory recall failed: {exc}"
+            return (f"page {page.slug!r} built from {sources} memory "
+                    f"record(s) — /wiki read {page.slug}.")
+        if verb == "board":
+            if not rest:
+                return "usage: /wiki board <slug>"
+            page = store.get(rest)
+            if page is None:
+                return f"no page {rest!r}."
+            from ...media.edit_engine.board import BoardStore
+            from ...wiki.board import export_to_board
+
+            doc = export_to_board(store, page.slug)
+            home = getattr(
+                getattr(self.context, "settings", None), "home_path", None)
+            boards = BoardStore(home=home) if home else BoardStore()
+            path = boards.save(doc)
+            return (f"page {page.slug!r} is on the board {doc.id!r} "
+                    f"({path}) — /board show {doc.id} to open it.")
+        if verb == "remove":
+            if not rest:
+                return "usage: /wiki remove <slug>"
+            if not store.delete(rest):
+                return f"no page {rest!r}."
+            return f"page {rest!r} removed."
+        return ("usage: /wiki [board] | list [category] | read <slug> | "
+                "search <query> | new <type> <title> | template <type> "
+                "<title> | edit <slug> | <body> | retitle <slug> "
+                "<title> | links <slug> | backlinks <slug> | orphans | "
+                "broken | history <slug> | revert <slug> <rev> | import "
+                "<path> | from-memory <query> [| <title>] | board <slug> "
+                "| remove <slug>")
+
     # ── ideas: /ideas (WS3 P5) ────────────────────────────────────────
     def _idea_tracker(self) -> Any:
         """IdeaTracker over the context db, or None when no db is

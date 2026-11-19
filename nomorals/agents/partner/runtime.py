@@ -9068,6 +9068,36 @@ class PartnerRuntime(
                     f"theme {_ref}", message)
             return self._control_extensions("", message)
 
+        # Natural phrasing for the wiki: "what does the wiki say
+        # about <page>?" / "search the wiki for <words>" — a read
+        # matches only a page the wiki actually holds, so the
+        # question never steals an unrelated one. Owner-only, like
+        # /wiki.
+        from ...tools.wiki import parse_wiki_question
+
+        _wiki_parsed = None
+        try:
+            from pathlib import Path as _Path
+
+            from ...wiki.store import WikiStore
+
+            _home = getattr(
+                getattr(self.context, "settings", None), "home_path", None)
+            _wstore = (WikiStore(_Path(_home) / "wiki" / "wiki.json")
+                       if _home else WikiStore())
+            _known = [(page.slug, page.title)
+                      for page in _wstore.list_pages()]
+            _wiki_parsed = parse_wiki_question(text, _known)
+        except Exception:  # noqa: BLE001 — no store, no hook
+            _wiki_parsed = None
+        if _wiki_parsed is not None:
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            _verb, _ref = _wiki_parsed
+            if _verb == "search":
+                return self._control_wiki(f"search {_ref}", message)
+            return self._control_wiki(f"read {_ref}", message)
+
         # Living-card taps (Living Chat P2): a card button's
         # payload is a fencing stamp, not a command —
         # "cardtap <card_id> <revision> <index>". Checked before
@@ -11523,6 +11553,9 @@ class PartnerRuntime(
         if kind == "triage":
             return self._control_triage(command.tail or arg,
                                         chat_key=chat_key)
+        if kind == "wiki":
+            return self._control_wiki(command.tail or arg,
+                                      chat_key=chat_key)
         if kind == "drafts":
             return self._control_drafts(command.tail or arg,
                                         chat_key=chat_key,

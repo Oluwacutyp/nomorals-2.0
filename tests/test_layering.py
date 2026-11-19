@@ -175,6 +175,14 @@ LAYERS: dict[str, int] = {
     # by tools (L4, same layer), api (L7) and agents (L5). L4,
     # peer of media/plugins.
     "studio": 4,
+    # wiki/ is the wiki/knowledge organ (craft-wiki port, lane 94):
+    # durable pages (slug + frontmatter + markdown body + revision
+    # history), wikilinks/backlinks, token search, templates and
+    # board export, under <home>/wiki/wiki.json. Imports core only
+    # (memory recall and the board export are lazy, inside the
+    # functions that need them); imported by tools (L4, same layer)
+    # and agents (L5). L4, peer of studio/sources.
+    "wiki": 4,
     # legal/ is the legal-aid service organ: imports documents (L4),
     # imported by agents (L5). L4.
     "legal": 4,
@@ -481,6 +489,13 @@ MODULE_PINS: dict[str, int] = {
     # it mirrors issues through. The registry loads it dynamically
     # by dotted name, never by static import.
     "nomorals.tools.triage": 5,
+    # tools/wiki is the same shape: a tool *surface* over the L4
+    # wiki organ (the craft-wiki port) — the surface composes the
+    # organ with the L3 memory recall and the L4 board export, so
+    # it sits at L5 with the other composed tool surfaces. The
+    # registry loads it dynamically by dotted name, never by static
+    # import.
+    "nomorals.tools.wiki": 5,
     # The prompt-compiler tool surface composes the L5 organs that own
     # the graded journals (games.npc_learn, characters.learn) into a
     # compile/status surface — it IS the L5 composition layer, not an

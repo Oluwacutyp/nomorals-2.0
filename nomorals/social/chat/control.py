@@ -957,6 +957,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "recruit": (0, None),     # /recruit [status [<vac>]] | add <title> | <employer> | scrape <vac> | source <vac> | <url> | candidate <vac> | <name> | <email> | tier <cand> | close|open <vac> | remove <vac> | list — recruitment module, per-vacancy jobs + tiering + /status board (owner-only)
     "ticket": (0, None),      # /ticket [list] | open <owner/repo> | <title> [| <body>] [| type: X] [| labels: a, b] | status <ref> | comment <ref> | <text> | close <ref> | sync [ref] — Discord tickets filed as GitHub issues, both ways (owner-only)
     "triage": (0, None),      # /triage [board] | track <owner/repo> | untrack <owner/repo> | sync <owner/repo> | triage <owner/repo> | queue [owner/repo] | item <owner/repo>#<n> | duplicates <owner/repo> | decisions [owner/repo] | answer <id> <option> | apply <id> — issue triage over tracked GitHub repos (owner-only)
+    "wiki": (0, None),        # /wiki [board] | list [category] | read <slug> | search <query> | new <type> <title> | template <type> <title> | edit <slug> | <body> | retitle <slug> <title> | links <slug> | backlinks <slug> | orphans | broken | history <slug> | revert <slug> <rev> | import <path> | from-memory <query> [| <title>] | board <slug> | remove <slug> — durable knowledge pages (owner-only)
     "drafts": (0, None),      # /drafts [list] | show <n> | post <n> | discard <n> — post-draft review board (owner-only)
     "ideas": (0, None),       # /ideas [list] | add <title> [| <detail>] | show <n> | develop <n> [as goal|draft|mission|park] [in <class>] [when <trigger>] — raw ideas + the development cell (owner-only)
     "day": (0, None),         # /day [show] | tell <text> | yesterday | make | skip | unskip | export — the day record + derivation (owner-only)
@@ -3795,6 +3796,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/triage [board] | track <owner/repo> | untrack <owner/repo> | sync <owner/repo> | triage <owner/repo> | queue [owner/repo] | item <owner/repo>#<n> | duplicates <owner/repo> | decisions [owner/repo] | answer <id> <option> | apply <id>",
               "example": "/triage triage Oluwacutyp/nomorals-2.0",
               "related": "/ticket /recruit"},
+    "wiki": {"what": "Devon's wiki — durable knowledge pages (craft-wiki patterns, original Devon code): every page has a slug, frontmatter (type, category, parent, order, summary, tags), a markdown body and full revision history. Pages link with [[Title]]; backlinks, orphans and broken links are reported by name. Types are overview / guide / reference / troubleshooting / howto / decision / runbook, each with its own skeleton. Search ranks title over tag over body. A page can be built from memory recall or put on the board as chained section nodes. Owner-only.",
+             "usage": "/wiki [board] | list [category] | read <slug> | search <query> | new <type> <title> | template <type> <title> | edit <slug> | <body> | retitle <slug> <title> | links <slug> | backlinks <slug> | orphans | broken | history <slug> | revert <slug> <rev> | import <path> | from-memory <query> [| <title>] | board <slug> | remove <slug>",
+             "example": "/wiki search gold trading",
+             "related": "/remember /board /recall"},
     "drafts": {"what": "the post-draft review board: every draft Devon has queued for you — the weekly content batch, scheduled drafts, anything awaiting a decision — with its virality score, hook type and pillar on a styled card. Reviewing is per-draft: you see the exact draft, then post or discard THAT one (a tap or /drafts post <n> posts the draft you named, never a blind oldest-first pick). Nothing here posts on its own: a draft goes out only on your tap, your /drafts post, or your explicit 'post this' (build-map #43, unchanged). Draft numbers (#n) are the handles from the board — internal ids never print.",
               "usage": "/drafts [list] | show <n> | post <n> | discard <n>",
               "example": "/drafts show 2",
@@ -5005,7 +5010,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "identity", "book", "books", "features",
                            "checkpoint", "checkpoints", "rewind", "novel"]),
     ("memory & thinking", ["remember", "recall", "forget", "memories", "think",
-                           "benchmark", "redteam", "review", "representations", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion", "immune", "impossible", "scene", "board", "photo", "extensions", "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "family", "show", "life", "prefs", "presence", "publicface"]),
+                           "benchmark", "redteam", "review", "representations", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion", "immune", "impossible", "scene", "board", "photo", "extensions", "wiki", "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "family", "show", "life", "prefs", "presence", "publicface"]),
     ("money & spending", ["spend", "budget", "spending", "mandate",
                           "balances", "goal", "goals", "careers", "recruit", "ticket", "triage", "ideas", "insights", "subscriptions", "recurring", "trade", "import", "alert"]),
     ("games — 41, DM + group, start them directly",
@@ -5342,7 +5347,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
       "review", "representations", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion",
-      "immune", "impossible", "scene", "board", "photo", "extensions", "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "family", "show", "life", "prefs", "presence", "publicface"]),
+      "immune", "impossible", "scene", "board", "photo", "extensions", "wiki", "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "family", "show", "life", "prefs", "presence", "publicface"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
@@ -5426,6 +5431,7 @@ _LIST_GROUP_ALIASES = {
     "memory": "memory & thinking",
     "memories": "memory & thinking",
     "think": "memory & thinking",
+    "wiki": "memory & thinking",
     "voice": "voice & vision",
     "vision": "voice & vision",
     "tools": "tools & automation",
@@ -5763,6 +5769,7 @@ LIST_ONELINERS: dict[str, str] = {
     "recruit": "recruitment: per-vacancy jobs with their own queue, scraper, stats and CV flow — tiered candidates on the /recruit status board",
     "ticket": "ticket relay: Discord tickets filed as GitHub issues, both ways — replies here go to the issue, issue comments come back here",
     "triage": "issue triage over tracked GitHub repos — mirror, duplicate groups, type + P0–P4, work rank, decisions you answer",
+    "wiki": "Devon's wiki — durable knowledge pages: create, read, search, link, revise, put on the board",
     "drafts": "post drafts awaiting your review: the batch board, per-draft cards, post/discard the one you name",
     "ideas": "raw ideas, grown: capture verbatim, develop into a goal, a draft, a mission, or park with a trigger",
     "day": "your day record: tell it what you did, see the day whole, and make draft posts from it",

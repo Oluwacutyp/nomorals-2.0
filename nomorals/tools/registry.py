@@ -663,6 +663,7 @@ class ToolRegistry:
             "ticket_relay",  # Discord tickets ↔ GitHub issues (ticket-relay port)
             "triage",  # issue triage over tracked GitHub repos (autocraft port)
             "filmcraft",  # video editor + motion compositor (FilmCraft + EffectCraft ports)
+            "wiki",  # durable knowledge pages — links, search, history, board export (craft-wiki port)
             "workspace",
             "trading",
             "characters",
