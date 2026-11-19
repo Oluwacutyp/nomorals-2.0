@@ -62,6 +62,14 @@ from .pagewise import (
 from .parsers import (artifact_body_text, detect_format, extract_text,
                       parse_bytes, parse_path)
 from .pdf_tables import extract_text_tables, score_table
+from .decks import (
+    DeckDocument,
+    DeckEditor,
+    render_slide,
+    render_slide_to_png,
+    run_parity as run_deckcraft_parity,
+    verify_attribution as verify_deckcraft_attribution,
+)
 from .pdfcraft import (
     PdfDocument,
     PdfEditor,
@@ -129,6 +137,8 @@ __all__ = [
     "WordTable",
     "DocumentError",
     "DocumentIndex",
+    "DeckDocument",
+    "DeckEditor",
     "PdfDocument",
     "PdfEditor",
     "Cell",
@@ -185,10 +195,13 @@ __all__ = [
     "render_html",
     "render_markdown",
     "render_report_markdown",
+    "render_slide",
+    "render_slide_to_png",
     "render_terminal",
     "repair_pdf",
     "run_pagewise",
     "run_pdfcraft_parity",
+    "run_deckcraft_parity",
     "run_gridcraft_parity",
     "run_wordcraft_parity",
     "scan_to_pdf",
@@ -215,6 +228,7 @@ __all__ = [
     "to_xlsx",
     "unlock_pdf",
     "verify_pdfcraft_attribution",
+    "verify_deckcraft_attribution",
     "verify_gridcraft_attribution",
     "verify_wordcraft_attribution",
     "verify_spans",

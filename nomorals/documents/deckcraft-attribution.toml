@@ -1,0 +1,130 @@
+# DeckCraft attribution — SHA-256 provenance for the port of
+# storytold/deckcraft (dual MIT/Apache-2.0). Upstream hashes are
+# pinned to the clone at the commit below and verified by
+# verify_attribution; devon entries name the upstream units they
+# derive from.
+upstream_commit = "23ac4f7efdbd1e538bd9a7869584d4adeb9039b0"
+upstream_repo = "storytold/deckcraft"
+
+[[assets]]
+kind = "upstream"
+path = "crates/pptx/src/read.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "b8070b120a05504a5d794fb10d215eb274de2bca9f672c63d3faeadfa1593862"
+
+[[assets]]
+kind = "upstream"
+path = "crates/pptx/src/write.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "41374692fbfd21490943e02ad03cd928054d0c88804f28829eb9c9452e114b26"
+
+[[assets]]
+kind = "upstream"
+path = "crates/pptx/src/opc.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "8359f03f0cad696969114dda272c043eab9b30d3ea5d972ae63f78bfafe3b677"
+
+[[assets]]
+kind = "upstream"
+path = "crates/pptx/src/xml.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "ce9a2c92b9399fe3928cd3b2f561e5a694f2e00cbf2426543f118ded6fb88569"
+
+[[assets]]
+kind = "upstream"
+path = "crates/pptx/src/maps.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "fcec93ef010b18ab29f2868c4d0f5396af8f9bcaa17371b3ea3ae7c8cee8063e"
+
+[[assets]]
+kind = "upstream"
+path = "crates/pptx/src/tables.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "cda3e93bcf026b0f5dbea166b34b849ff709dcef77be7953250b137f4423a419"
+
+[[assets]]
+kind = "upstream"
+path = "crates/model/src/lib.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "cde6f2571aa0b8914f04a190491eeb8d07c7e7dc14f750da08c230bbe0a53419"
+
+[[assets]]
+kind = "upstream"
+path = "crates/model/src/text.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "1be550b79143b4f6b741a8be41e1106e6d2721f0a405807ecb68fdbdea731c6e"
+
+[[assets]]
+kind = "upstream"
+path = "crates/model/src/table.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "7ea3cd23370ffea5699c0413486ff048887a0fa6aac5a1edcc9d804b55a76790"
+
+[[assets]]
+kind = "upstream"
+path = "crates/model/src/theme.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "f5f856c5fd5dc3a8f070a2895ffdbc6737ec5d5c4447b20e56ad674f2b2dcbaf"
+
+[[assets]]
+kind = "upstream"
+path = "crates/model/src/style.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "416adf43bd6f813565e6651a04f90ee6f82401ad64ba5d3795e13fd526e20a6e"
+
+[[assets]]
+kind = "upstream"
+path = "AGENTS.md"
+license = "MIT OR Apache-2.0"
+sha256 = "82fe3169ddc79a84d06d53f50d8a62f3041e36cc310350f113ad68392da59c7b"
+
+[[assets]]
+kind = "upstream"
+path = "README.md"
+license = "MIT OR Apache-2.0"
+sha256 = "439cab25aa6809bb410ca7f377ed0081ea81c47234bd94f23951e951aa7a3aea"
+
+[[assets]]
+kind = "devon"
+path = "nomorals/documents/decks/ooxml.py"
+derives_from = ["crates/pptx/src/opc.rs", "crates/pptx/src/xml.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/documents/decks/model.py"
+derives_from = ["crates/model/src/lib.rs", "crates/model/src/text.rs", "crates/model/src/table.rs", "crates/model/src/theme.rs", "crates/pptx/src/read.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/documents/decks/edit.py"
+derives_from = ["crates/pptx/src/write.rs", "crates/model/src/lib.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/documents/decks/render.py"
+derives_from = ["crates/model/src/lib.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/documents/decks/parity.py"
+derives_from = ["crates/pptx/src/read.rs", "crates/pptx/src/write.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/documents/decks/attribution.py"
+derives_from = ["AGENTS.md"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/documents/decks/__init__.py"
+derives_from = ["crates/model/src/lib.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/tools/deckcraft.py"
+derives_from = ["crates/pptx/src/read.rs", "crates/pptx/src/write.rs"]
+
+[[assets]]
+kind = "devon"
+path = "tests/test_gapfix_deckcraft.py"
+derives_from = ["crates/pptx/src/read.rs", "crates/pptx/src/write.rs"]

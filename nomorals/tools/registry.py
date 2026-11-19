@@ -667,6 +667,7 @@ class ToolRegistry:
             "wordcraft",  # open/edit/save real .docx — document model, fidelity-preserving edits, parity + attribution (WordCraft port)
             "vectorcraft",  # open/edit/render/save real .svg — vector document model, boolean path ops, rasterizer, parity + attribution (VectorCraft port)
             "gridcraft",  # open/edit/recalculate real .xlsx — workbook model, formula engine, calc graph, parity + attribution (GridCraft port)
+            "deckcraft",  # open/edit/render/save real .pptx — presentation model, fidelity-preserving edits, slide renderer, parity + attribution (DeckCraft port)
             "workspace",
             "trading",
             "characters",
