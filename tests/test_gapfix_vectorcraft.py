@@ -479,8 +479,10 @@ class TestTool(unittest.TestCase):
         self.assertIn("inspect", spec.description)
         # 721 after the vectorcraft port, 722 after the gridcraft
         # port (lane 102) added the gridcraft tool, 723 after the
-        # deckcraft port (lane 103) added the deckcraft tool.
-        self.assertEqual(len(registry._tools), 723)
+        # deckcraft port (lane 103) added the deckcraft tool, 724
+        # after the designcraft port (lane 104) added the
+        # designcraft tool.
+        self.assertEqual(len(registry._tools), 724)
 
     def test_tool_inspect_and_render(self) -> None:
         registry = self._registry()

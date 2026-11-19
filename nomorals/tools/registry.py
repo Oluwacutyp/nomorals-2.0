@@ -668,6 +668,7 @@ class ToolRegistry:
             "vectorcraft",  # open/edit/render/save real .svg — vector document model, boolean path ops, rasterizer, parity + attribution (VectorCraft port)
             "gridcraft",  # open/edit/recalculate real .xlsx — workbook model, formula engine, calc graph, parity + attribution (GridCraft port)
             "deckcraft",  # open/edit/render/save real .pptx — presentation model, fidelity-preserving edits, slide renderer, parity + attribution (DeckCraft port)
+            "designcraft",  # open/edit/lay out/render real .designcraft — page/layout model, flex engine, composer, renderer, parity + attribution (DesignCraft port)
             "workspace",
             "trading",
             "characters",

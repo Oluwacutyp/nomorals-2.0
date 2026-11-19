@@ -1,0 +1,86 @@
+# DesignCraft parity — real fixtures, real operations, expected outcomes.
+# A missing fixture FAILS its case, never a silent skip.
+schema_version = 1
+
+[[cases]]
+id = "simple-inspect"
+fixture = "simple.designcraft"
+ops = ["inspect"]
+[cases.expect]
+items = 3
+pages = 1
+
+[[cases]]
+id = "simple-roundtrip"
+fixture = "simple.designcraft"
+ops = ["roundtrip"]
+[cases.expect]
+byte_identical = true
+
+[[cases]]
+id = "simple-render"
+fixture = "simple.designcraft"
+ops = ["render"]
+[cases.expect]
+pngs = 1
+png_ok = true
+
+[[cases]]
+id = "simple-move"
+fixture = "simple.designcraft"
+ops = ["move"]
+[cases.expect]
+first_x = 50.0
+first_y = 50.0
+
+[[cases]]
+id = "magazine-inspect"
+fixture = "magazine.designcraft"
+ops = ["inspect"]
+[cases.expect]
+items = 7
+pages = 2
+stories = 3
+
+[[cases]]
+id = "magazine-columns"
+fixture = "magazine.designcraft"
+ops = ["columns"]
+[cases.expect]
+edges = [0.0, 172.0, 184.0, 356.0, 368.0, 540.0]
+
+[[cases]]
+id = "flex-layout"
+fixture = "flex.designcraft"
+ops = ["flex"]
+[cases.expect]
+first_child_x = 0.0
+last_child_x = 220.0
+
+[[cases]]
+id = "simple-compose"
+fixture = "simple.designcraft"
+ops = ["compose"]
+[cases.expect]
+overset = false
+lines = 1
+
+[[cases]]
+id = "magazine-thread"
+fixture = "magazine.designcraft"
+ops = ["thread"]
+[cases.expect]
+total_lines = 9
+first_frame_lines = 9
+overset = false
+
+[[cases]]
+id = "simple-edit"
+fixture = "simple.designcraft"
+ops = ["group", "snap", "liquid"]
+[cases.expect]
+group_children = 2
+snapped = true
+snapped_x = 100.0
+kept_right = true
+kept_bottom = true
