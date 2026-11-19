@@ -357,6 +357,7 @@ class HttpClient:
         verify_tls: bool = True,
         proxy_url: str = "",
         allow_private_ips: bool = False,
+        force_direct: bool = False,
     ) -> None:
         self.timeout = timeout
         self.user_agent = user_agent
@@ -368,6 +369,12 @@ class HttpClient:
         #: are rejected — SSRF protection. Set True only for explicitly
         #: internal tooling that needs loopback access.
         self.allow_private_ips = allow_private_ips
+        #: When True, no proxy is used for any request, whatever the
+        #: explicit proxy, the rotation resolver or the process-wide
+        #: default says. The ai-http loopback rule: loopback traffic
+        #: is cleartext the consent architecture promises never leaves
+        #: the computer.
+        self.force_direct = force_direct
         self.stats = {"requests": 0, "errors": 0, "bytes": 0}
         # Verifying TLS context, built once: an explicit SSL_CERT_FILE
         # wins, else certifi's bundle, else the platform default store.
@@ -391,6 +398,8 @@ class HttpClient:
         per-domain affinity applies; zero-arg resolvers still work) →
         the process-wide default (``proxy_set``).
         """
+        if self.force_direct:
+            return ""
         if self.proxy_url:
             return self.proxy_url
         resolver = get_proxy_resolver()

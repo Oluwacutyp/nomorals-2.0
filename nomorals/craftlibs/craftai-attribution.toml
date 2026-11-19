@@ -1,0 +1,218 @@
+# Craft-AI attribution (census §3A.22, lane 115).
+#
+# Every ported unit mapped to its upstream file at commit
+# 02068b0424b2018b7b188258414bb2ac3a8b1e3d plus the SHA-256 of
+# the source read, and every Devon-authored module to its
+# lineage. Verified by nomorals/craftlibs/attribution.py.
+# License for every upstream file: MIT OR Apache-2.0.
+
+[[assets]]
+id = "craftai-consent-term"
+repo = "craft-ai-integrations"
+upstream = "crates/ai-core/src/consent_term.rs"
+sha256 = "4d3c2978ffa83764198020134818ecc3d93a1241810999f78a165fe0503e1c6e"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/consent_term.py"
+
+[[assets]]
+id = "craftai-model-folders"
+repo = "craft-ai-integrations"
+upstream = "crates/ai-core/src/model_folders.rs"
+sha256 = "3e97a694207b35997fcf016ea7f30c452c87f53a9a518a0bb08cc0ecc26914db"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/model_folders.py"
+
+[[assets]]
+id = "craftai-draft"
+repo = "craft-ai-integrations"
+upstream = "crates/ai-core/src/draft.rs"
+sha256 = "bf6bdaee0015ab2416d7a565ef057edd1d3cbc4c0962d4ac4254410f3affc897"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/draft.py"
+
+[[assets]]
+id = "craftai-draft-presets"
+repo = "craft-ai-integrations"
+upstream = "crates/ai-core/src/draft/presets.rs"
+sha256 = "1af92ea07a7447a16394b92c2746c2a58464e93a4dc53dc8dd8b7d8a04573f7c"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/draft.py"
+
+[[assets]]
+id = "craftai-draft-ids"
+repo = "craft-ai-integrations"
+upstream = "crates/ai-core/src/draft/ids.rs"
+sha256 = "068845689d4cd91e6bbd1bf3c7fa3e323c6fd62d9e432ff90f5e0d7c424315ac"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/draft.py"
+
+[[assets]]
+id = "craftai-segment"
+repo = "craft-ai-integrations"
+upstream = "crates/ai-core/src/segment.rs"
+sha256 = "d831669471026a5890e244ec89e30ff3e6d41dde936f5773b701f130891b2fba"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/segment.py"
+
+[[assets]]
+id = "craftai-secrets-mod"
+repo = "craft-ai-integrations"
+upstream = "crates/ai-native/src/secrets/mod.rs"
+sha256 = "ff2c9fd2a853d2e1e3d762c710ebd6219d5bb879d57253cd5d6453ed7ef632a3"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/secrets.py"
+
+[[assets]]
+id = "craftai-secrets-env"
+repo = "craft-ai-integrations"
+upstream = "crates/ai-native/src/secrets/env.rs"
+sha256 = "4d3f563a3df0d67b4b3398d13046ac1c4b2d6203aaaf16f2fdee71ad04462291"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/secrets.py"
+
+[[assets]]
+id = "craftai-secrets-memory"
+repo = "craft-ai-integrations"
+upstream = "crates/ai-native/src/secrets/memory.rs"
+sha256 = "b802aa10f84b48917b8350f0d9e6a789b09308498a99cc0e95852d9f81f6923f"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/secrets.py"
+
+[[assets]]
+id = "craftai-secrets-layered"
+repo = "craft-ai-integrations"
+upstream = "crates/ai-native/src/secrets/layered.rs"
+sha256 = "0366ecc29864873541bb683f24515bd4ad5fc8c001c2ef1311903cd94149b825"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/secrets.py"
+
+[[assets]]
+id = "craftai-shared"
+repo = "craft-ai-integrations"
+upstream = "crates/ai-native/src/shared.rs"
+sha256 = "f169a732f94c56659e12ae6fe2f213c6ec7e6626ffd180f3a5b763dc365e131e"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/shared.py"
+
+[[assets]]
+id = "craftai-history-file"
+repo = "craft-ai-integrations"
+upstream = "crates/ai-native/src/history_file.rs"
+sha256 = "ff18fbd94c1c4bdc1b87ccb1bcdf011ee9a08b51f7195a2f78b096106679cac9"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/shared.py"
+
+[[assets]]
+id = "craftai-client"
+repo = "craft-ai-integrations"
+upstream = "crates/ai-client/src/client.rs"
+sha256 = "f9527d5766c119621ba50cbc7025d6f8e080a478244db75ea54047cf30a3cb59"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/client.py"
+
+[[assets]]
+id = "craftai-client-run"
+repo = "craft-ai-integrations"
+upstream = "crates/ai-client/src/client_run.rs"
+sha256 = "0db0ec8697ad74175c81512c61e47a28e5d85e2096536d9239b114116bf11c31"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/client.py"
+
+[[assets]]
+id = "craftai-client-history"
+repo = "craft-ai-integrations"
+upstream = "crates/ai-client/src/history.rs"
+sha256 = "989f2d140f5ba0066211f2bf21440b7665f9c59582f73d086d4c34c800222ee2"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/client.py"
+
+[[assets]]
+id = "craftai-factory"
+repo = "craft-ai-integrations"
+upstream = "crates/ai-client/src/factory.rs"
+sha256 = "7b6374ae1208992d9a95f52dd4437a6a20f326c415ff1ae4d317f1fe4e28ce34"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/factory.py"
+
+[[assets]]
+id = "craftai-declarative"
+repo = "craft-ai-integrations"
+upstream = "crates/ai-client/src/declarative.rs"
+sha256 = "2ec4141fb3775b0980dfdfa32a3919ba2994de9826d18843927f79ed59013575"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/factory.py"
+
+[[assets]]
+id = "craftai-tools"
+repo = "craft-ai-integrations"
+upstream = "crates/ai-client/src/tools.rs"
+sha256 = "441a35eb6ded64b659248215a9880939e8a84c6b2ad0189f73598e843d9e0b3a"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/tools.py"
+
+[[assets]]
+id = "craftai-tools-sample"
+repo = "craft-ai-integrations"
+upstream = "crates/ai-client/src/tools_sample.rs"
+sha256 = "a59dff4327d864037cf75894a72f7448913ccacfd65debd97d80ed777d6911f9"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/tools.py"
+
+[[assets]]
+id = "craftai-http"
+repo = "craft-ai-integrations"
+upstream = "crates/ai-http/src/lib.rs"
+sha256 = "9f05ff0142669d0f7c81215ba462f742ccc4c7a25e027e6137638120f7107d32"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/http.py"
+
+[[assets]]
+id = "craftai-http-test"
+repo = "craft-ai-integrations"
+upstream = "crates/ai-http/tests/every_agent_uses_it.rs"
+sha256 = "adb401dc2917b638e7bd394f2954f2cd0bd53b60b49751eb8fc0e6ef8d663d02"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/http.py"
+
+[[assets]]
+id = "craftai-openai-http"
+repo = "craft-ai-integrations"
+upstream = "crates/ai-openai/src/http.rs"
+sha256 = "ca43d024df72f4f4fb3756f73f8cc7849d29e7d5a3ae0e9dd024eed3ed26f3a4"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/factory.py"
+
+[[devon]]
+id = "craftai-parity"
+path = "nomorals/craftlibs/ai/parity.py"
+lineage = "Devon-authored: the Craft-AI parity cases and runner"
+
+[[devon]]
+id = "craftai-parity-toml"
+path = "nomorals/craftlibs/craftai-parity.toml"
+lineage = "Devon-authored: the Craft-AI parity cases"
+
+[[devon]]
+id = "craftai-attribution-toml"
+path = "nomorals/craftlibs/craftai-attribution.toml"
+lineage = "Devon-authored: the Craft-AI attribution record"
+
+[[devon]]
+id = "craftai-test"
+path = "tests/test_gapfix_craftai.py"
+lineage = "Devon-authored: the Craft-AI test suite"
+
+[[devon]]
+id = "craftai-fixture-spec"
+path = "tests/fixtures/craftai/spec-conn.json"
+lineage = "Devon-authored: declarative spec fixture for the local test server"
+
+[[devon]]
+id = "craftai-fixture-png"
+path = "tests/fixtures/craftai/dot.png"
+lineage = "Devon-authored: 1x1 PNG fixture, built from bytes"
+
+[[devon]]
+id = "craftai-tool-ai"
+path = "nomorals/tools/craftlibs.py"
+lineage = "Devon-authored: the craftlibs tool's ai-client kinds (status/bind/plan/tools/http/consent)"

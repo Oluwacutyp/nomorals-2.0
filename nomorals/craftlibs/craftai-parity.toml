@@ -1,0 +1,139 @@
+# Craft-AI parity (census §3A.22, lane 115).
+#
+# Real fixtures + operations + expected outcomes for the ai-client
+# layer: consent terms, model folders, drafts, the image.segment
+# contract, binding refusal, conformance pass/fail, the single TLS
+# policy, the workspace scan, secret stores and history. Run by
+# nomorals/craftlibs/ai/parity.py through the shared runner in
+# nomorals/craftlibs/parity.py. Missing fixture = fail, never skip.
+
+[[cases]]
+id = "consent-term-one-hour"
+operation = "consent_term_agree"
+term = "one_hour"
+offset_seconds = 3600
+
+[[cases]]
+id = "consent-term-one-day"
+operation = "consent_term_agree"
+term = "one_day"
+offset_seconds = 86400
+
+[[cases]]
+id = "consent-term-until-revoked"
+operation = "consent_term_agree"
+term = "until_revoked"
+offset_seconds = -1
+
+[[cases]]
+id = "consent-term-this-time"
+operation = "consent_term_agree"
+term = "this_time"
+# this_time grants with no expiry on the for-job copy (upstream
+# grants, never grant_until); nothing is remembered, so the
+# caller's ledger still asks.
+offset_seconds = -1
+
+[[cases]]
+id = "consent-term-forget-lapsed"
+operation = "consent_term_forget"
+
+[[cases]]
+id = "model-folders-validate"
+operation = "model_folders_validate"
+folders = [{ id = "main", label = "Main", path = "/home/user/models", default = true, origin = "chosen", kinds = { checkpoints = ["checkpoints"] } }]
+
+[[cases]]
+id = "model-folders-download"
+operation = "model_folders_download"
+kind = "checkpoints"
+folder = "main"
+subfolder = "checkpoints"
+folders = [{ id = "main", label = "Main", path = "/home/user/models", default = true, origin = "chosen", kinds = { checkpoints = ["checkpoints"] } }]
+
+[[cases]]
+id = "draft-set-models-right-address"
+operation = "draft_set_models"
+preset = "ollama"
+address = "http://127.0.0.1:11434/v1"
+expected = true
+
+[[cases]]
+id = "draft-set-models-wrong-address"
+operation = "draft_set_models"
+preset = "ollama"
+address = "http://127.0.0.1:9999/v1"
+expected = false
+
+[[cases]]
+id = "draft-prepare-openai"
+operation = "draft_prepare"
+preset = "openai"
+label = "OpenAI"
+key = "sk-test-key"
+provider = "openai"
+
+[[cases]]
+id = "segment-clicks"
+operation = "segment_clicks"
+points = [[0.5, 0.4], [0.1, 0.9]]
+expected_count = 2
+
+[[cases]]
+id = "segment-clicks-too-many"
+operation = "segment_clicks"
+points = [[0.5, 0.5], [0.5, 0.5], [0.5, 0.5], [0.5, 0.5], [0.5, 0.5],
+          [0.5, 0.5], [0.5, 0.5], [0.5, 0.5], [0.5, 0.5], [0.5, 0.5],
+          [0.5, 0.5], [0.5, 0.5], [0.5, 0.5], [0.5, 0.5], [0.5, 0.5],
+          [0.5, 0.5], [0.5, 0.5], [0.5, 0.5], [0.5, 0.5], [0.5, 0.5],
+          [0.5, 0.5], [0.5, 0.5], [0.5, 0.5], [0.5, 0.5], [0.5, 0.5],
+          [0.5, 0.5], [0.5, 0.5], [0.5, 0.5], [0.5, 0.5], [0.5, 0.5],
+          [0.5, 0.5], [0.5, 0.5], [0.5, 0.5]]
+expect_error = "at most 32 points"
+
+[[cases]]
+id = "segment-found"
+operation = "segment_found"
+matched = true
+score = 0.87
+name = "cat"
+
+[[cases]]
+id = "binding-refusal"
+operation = "binding_refusal"
+kind = "unsupported"
+
+[[cases]]
+id = "conformance-pass"
+operation = "conformance_pass"
+
+[[cases]]
+id = "conformance-fail"
+operation = "conformance_fail"
+check = "lifecycle"
+
+[[cases]]
+id = "tls-policy"
+operation = "tls_policy"
+loopback_base = "http://127.0.0.1:11434/v1"
+hosted_base = "https://api.openai.com/v1"
+
+[[cases]]
+id = "tls-proxy-for-loopback"
+operation = "tls_proxy_for"
+base = "http://127.0.0.1:11434/v1"
+expected = ""
+
+[[cases]]
+id = "scan-agents-clean"
+operation = "scan_agents_clean"
+
+[[cases]]
+id = "secret-env"
+operation = "secret_env"
+reference = "parity-key"
+value = "sekrit"
+
+[[cases]]
+id = "history-round-trip"
+operation = "history_round_trip"

@@ -65,6 +65,7 @@ class Locality(Enum):
 class Billing(Enum):
     FREE = "free"
     METERED = "metered"
+    UNKNOWN = "unknown"
 
 
 class Auth:

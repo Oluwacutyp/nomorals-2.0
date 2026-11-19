@@ -111,6 +111,9 @@ class MockProvider(Provider):
     def _model_id(self, model) -> str:
         if hasattr(model, "as_str"):
             return model.as_str()
+        info_id = getattr(model, "id", None)
+        if info_id is not None and hasattr(info_id, "as_str"):
+            return info_id.as_str()
         return str(model)
 
     def _model_for(self, model):

@@ -14,6 +14,7 @@ import json
 from .connection import Connection, ConnectionError
 from .ids import AppId, RoleId
 from .model import InputRole
+from .model_folders import FolderError, ModelFolder, validate_folders
 from .role import Binding, ResolveError, Role, resolve
 
 __all__ = ["MAX_STORE_BYTES", "SCHEMA_VERSION", "StoreError",
@@ -28,7 +29,7 @@ class StoreError(ValueError):
     """Why a store file was refused. ``kind`` is one of
     ``too_large``, ``syntax``, ``too_new``, ``bad_version``,
     ``duplicate_connection``, ``duplicate_tool``, ``too_many_tools``,
-    ``invalid_tool``, ``invalid``."""
+    ``invalid_tool``, ``invalid``, ``folders``."""
 
     def __init__(self, kind: str, message: str) -> None:
         super().__init__(message)
@@ -75,12 +76,14 @@ class StoreFile:
                  defaults: list | None = None,
                  apps: dict | None = None,
                  custom_tools: list | None = None,
-                 schema_version: int = SCHEMA_VERSION) -> None:
+                 schema_version: int = SCHEMA_VERSION,
+                 model_folders: list | None = None) -> None:
         self.schema_version = schema_version
         self.connections: list[Connection] = list(connections or [])
         self.defaults: list[Binding] = list(defaults or [])
         self.apps: dict = dict(apps or {})
         self.custom_tools: list[CustomTool] = list(custom_tools or [])
+        self.model_folders: list[ModelFolder] = list(model_folders or [])
 
     @classmethod
     def parse(cls, text: str) -> StoreFile:
@@ -124,6 +127,12 @@ class StoreFile:
             overrides = [Binding.from_dict(b)
                          for b in (settings or {}).get("overrides", [])]
             apps[str(app_id)] = {"overrides": overrides}
+        folders = [ModelFolder.from_dict(f)
+                   for f in data.get("model_folders", [])]
+        try:
+            validate_folders(folders)
+        except FolderError as exc:
+            raise StoreError("folders", str(exc)) from exc
         return cls(
             [Connection.from_dict(c)
              for c in data.get("connections", [])],
@@ -131,16 +140,23 @@ class StoreFile:
             apps,
             [CustomTool.from_dict(t)
              for t in data.get("custom_tools", [])],
-            int(data.get("schema_version", SCHEMA_VERSION)))
+            int(data.get("schema_version", SCHEMA_VERSION)),
+            folders)
 
     def to_dict(self) -> dict:
-        return {"schema_version": self.schema_version,
-                "connections": [c.to_dict() for c in self.connections],
-                "defaults": [b.to_dict() for b in self.defaults],
-                "apps": {app_id: {"overrides": [b.to_dict() for b in
-                                                 settings["overrides"]]}
-                         for app_id, settings in self.apps.items()},
-                "custom_tools": [t.to_dict() for t in self.custom_tools]}
+        data: dict = {
+            "schema_version": self.schema_version,
+            "connections": [c.to_dict() for c in self.connections],
+            "defaults": [b.to_dict() for b in self.defaults],
+            "apps": {app_id: {"overrides": [b.to_dict() for b in
+                                            settings["overrides"]]}
+                     for app_id, settings in self.apps.items()},
+            "custom_tools": [t.to_dict() for t in self.custom_tools]}
+        # An empty list is not written, so older builds read the file.
+        if self.model_folders:
+            data["model_folders"] = [f.to_dict()
+                                     for f in self.model_folders]
+        return data
 
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), indent=2, ensure_ascii=False)
@@ -148,6 +164,10 @@ class StoreFile:
     def validate(self) -> None:
         """Check every connection and custom tool before anything
         is written."""
+        try:
+            validate_folders(self.model_folders)
+        except FolderError as exc:
+            raise StoreError("folders", str(exc)) from exc
         if len(self.custom_tools) > MAX_CUSTOM_TOOLS:
             raise StoreError(
                 "too_many_tools",

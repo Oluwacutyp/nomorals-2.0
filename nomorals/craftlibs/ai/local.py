@@ -127,7 +127,7 @@ class LocalMotionProvider(Provider):
         self._next += 1
         job_id = f"local-{self._next}"
         self._jobs[job_id] = {"result": result, "polled": False,
-                              "cancelled": False}
+                              "cancelled": False, "done": None}
         return job_id
 
     def poll(self, job_id: str) -> dict:
@@ -135,12 +135,15 @@ class LocalMotionProvider(Provider):
         job = self._jobs.get(job_id)
         if job is None:
             raise AiError.invalid(f"unknown job {job_id}")
+        if job["done"] is not None:
+            # A terminal state is final: a later cancel cannot
+            # flip a finished job to cancelled.
+            return JobSnapshot(job["done"], []).to_dict()
         if job["cancelled"]:
+            job["done"] = JobState.CANCELLED
             return JobSnapshot(JobState.CANCELLED, []).to_dict()
-        if job["polled"]:
-            # Finished jobs stay finished, with no events.
-            return JobSnapshot(JobState.SUCCEEDED, []).to_dict()
         job["polled"] = True
+        job["done"] = JobState.SUCCEEDED
         return JobSnapshot(
             JobState.SUCCEEDED,
             [{"type": "output",
@@ -152,11 +155,15 @@ class LocalMotionProvider(Provider):
         from .error import AiError
         if job_id not in self._jobs:
             raise AiError.invalid(f"unknown job {job_id}")
-        self._jobs[job_id]["cancelled"] = True
+        if self._jobs[job_id]["done"] is None:
+            self._jobs[job_id]["cancelled"] = True
 
     def _model_id(self, model) -> str:
         if hasattr(model, "as_str"):
             return model.as_str()
+        info_id = getattr(model, "id", None)
+        if info_id is not None and hasattr(info_id, "as_str"):
+            return info_id.as_str()
         return str(model)
 
     def _model_for(self, model):

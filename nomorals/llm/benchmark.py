@@ -13,18 +13,19 @@ Usage::
 ``server_factory`` is duck-typed: ``factory(model_id)`` returns an
 object with ``generate(prompt) -> str``. The CLI default builds a
 :class:`GGUFServerManager` per model and talks to its OpenAI-compatible
-``/v1/chat/completions`` endpoint with stdlib urllib (zero new deps).
+``/v1/chat/completions`` endpoint through the shared ``HttpClient``
+(the single TLS policy; loopback, so direct with no proxy).
 """
 from __future__ import annotations
 
 import argparse
 import json
 import time
-import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from ..core.http import HttpClient
 from ..core.logging_setup import get_logger
 
 _log = get_logger(__name__)
@@ -207,27 +208,41 @@ def run_benchmark(
 # ── default server factory: llama-server via its OpenAI-compatible API ──
 
 class _LlamaServerClient:
-    """Thin stdlib client for a running llama-server (chat completions)."""
+    """Thin client for a running llama-server (chat completions).
+
+    The server is always on this computer, so the client is the
+    loopback agent from the shared policy: the single verifying TLS
+    context, no proxy whatever the environment says, and loopback
+    allowed through the SSRF guard.
+    """
 
     def __init__(self, base_url: str, *, timeout: float = 300.0) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self._http = HttpClient(timeout=timeout, allow_private_ips=True,
+                                force_direct=True)
 
     def generate(self, prompt: str) -> str:
-        body = json.dumps({
+        body = {
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.2,
             "max_tokens": 512,
             "stream": False,
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            f"{self.base_url}/v1/chat/completions", data=body,
-            headers={"Content-Type": "application/json"}, method="POST")
+        }
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
+            response = self._http.post_json(
+                f"{self.base_url}/v1/chat/completions", body,
+                timeout=self.timeout)
         except Exception as exc:
             raise RuntimeError(f"llama-server chat failed: {exc}") from exc
+        if response.status < 200 or response.status >= 300:
+            raise RuntimeError(
+                f"llama-server chat failed: HTTP {response.status}")
+        try:
+            payload = json.loads(response.body.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise RuntimeError(
+                f"llama-server chat failed: {exc}") from exc
         try:
             return payload["choices"][0]["message"]["content"] or ""
         except (KeyError, IndexError, TypeError) as exc:
