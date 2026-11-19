@@ -449,6 +449,39 @@ class LiveKitVideoTransport(Protocol):
     def disconnect(self) -> None: ...
 
 
+def _classify_connect_error(url: str, exc: Exception
+                            ) -> tuple[str, str]:
+    """(message, missing) for a failed room connect.
+
+    The SDK's connect fails in two places with very different meanings,
+    and the caller deserves the true one:
+    * signal failure — the server was never reached (bad URL, down,
+      proxy in the way, bad token): the missing piece is a reachable
+      server.
+    * the room joined but the media connection (ICE) never established
+      — "wait_pc_connection timed out": the server is fine, the media
+      path is not (UDP blocked on this host, no ICE pair forms).
+      Saying "no reachable server" there sends the owner chasing a
+      healthy server. Proven live 2026-11-18: signal joined in under
+      a second while every STUN ping failed to send (UDP forbidden
+      on the host) and the wait timed out.
+    """
+    text = str(exc)
+    if "wait_pc_connection" in text or "pc_connection" in text:
+        return (
+            f"joined the LiveKit room at {url} but the media "
+            f"connection (ICE) never established: "
+            f"{type(exc).__name__}: {text}",
+            "a working media (ICE/UDP) path to the LiveKit server — "
+            "UDP is blocked on this host, or no ICE pair forms",
+        )
+    return (
+        f"could not join the LiveKit room at {url}: "
+        f"{type(exc).__name__}: {text}",
+        f"a reachable LiveKit server at {url}",
+    )
+
+
 class RtcTransport:
     """The real transport: ``livekit.rtc`` Room + AudioSource/AudioStream.
 
@@ -681,10 +714,8 @@ class RtcTransport:
                            timeout=timeout)
         except Exception as exc:
             self._connected = False
-            raise LiveKitUnavailable(
-                f"could not join the LiveKit room at {url}: "
-                f"{type(exc).__name__}: {exc}",
-                missing=f"a reachable LiveKit server at {url}") from exc
+            message, missing = _classify_connect_error(url, exc)
+            raise LiveKitUnavailable(message, missing=missing) from exc
 
     def poll_inbound(self, timeout: float = 0.05) -> bytes | None:
         try:
