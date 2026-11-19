@@ -670,6 +670,7 @@ class ToolRegistry:
             "deckcraft",  # open/edit/render/save real .pptx — presentation model, fidelity-preserving edits, slide renderer, parity + attribution (DeckCraft port)
             "designcraft",  # open/edit/lay out/render real .designcraft — page/layout model, flex engine, composer, renderer, parity + attribution (DesignCraft port)
             "figcraft",  # open/edit/prototype/render/save real .figcraft — design model, auto-layout, components, collab core, frame renderer, parity + attribution (FigCraft port)
+            "soundcraft",  # open/edit/mix/bounce real .scraft — session model, mixer, effects, realtime engine, quarantined plugin hosts, parity + attribution (SoundCraft port)
             "workspace",
             "trading",
             "characters",

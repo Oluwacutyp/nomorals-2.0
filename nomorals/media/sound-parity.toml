@@ -1,0 +1,73 @@
+# SoundCraft parity cases (lane 107). Every case runs against a real
+# fixture in tests/fixtures/sound/. Missing fixture = fail, never skip.
+
+[[cases]]
+id = "roundtrip_simple"
+fixture = "simple.scraft"
+operation = "roundtrip"
+
+[[cases]]
+id = "mix_two_sines"
+fixture = "simple.scraft"
+operation = "mix"
+
+[cases.expect]
+master_peak = 0.6222
+tolerance = 0.02
+clipped = false
+
+[[cases]]
+id = "pan_hard_left"
+fixture = "simple.scraft"
+operation = "pan_left"
+
+[[cases]]
+id = "eq_boost_440"
+fixture = "sine440.wav"
+operation = "eq_boost"
+
+[cases.expect]
+rms_ratio = 3.98
+tolerance = 0.35
+
+[[cases]]
+id = "compressor_reduction"
+fixture = "sine440.wav"
+operation = "compressor"
+
+[cases.expect]
+min_reduction_db = 3.0
+
+[[cases]]
+id = "limiter_ceiling"
+fixture = "sine440.wav"
+operation = "limiter"
+
+[[cases]]
+id = "automation_gain"
+fixture = "automated.scraft"
+operation = "automation"
+
+[cases.expect]
+last_quarter_rms = 0.0625
+tolerance = 0.02
+
+[[cases]]
+id = "midi_tone_440"
+fixture = "midi.scraft"
+operation = "midi_tone"
+
+[[cases]]
+id = "quarantine_crash"
+fixture = "simple.scraft"
+operation = "quarantine"
+
+[[cases]]
+id = "realtime_blocks"
+fixture = "simple.scraft"
+operation = "realtime"
+
+[[cases]]
+id = "broken_rejected"
+fixture = "broken.scraft"
+operation = "open_fails"

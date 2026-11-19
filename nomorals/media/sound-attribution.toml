@@ -1,0 +1,173 @@
+# SoundCraft attribution (lane 107). Upstream: storytold/soundcraft,
+# dual MIT/Apache-2.0, commit 5fabf28c315ee72ad5c0234beeb35ec832c11476
+# ("test: create scratch folders exclusively (#1334)"). Every upstream
+# file below is pinned by the SHA-256 of the source as read from the
+# clone at ~/workspace/echelon-mining/repos/storytold/soundcraft.
+
+[[assets]]
+id = "model-session"
+upstream = "crates/model/src/session.rs"
+sha256 = "8d3f67be7c83927b6af7f2b8ca67dcdff9c9beb1e680b6df0e7ef7f17c4635fb"
+ported_to = "nomorals/media/sound/model.py"
+
+[[assets]]
+id = "model-track"
+upstream = "crates/model/src/track.rs"
+sha256 = "7910a28c048d227462831ad1adf7949a11b4c4eb6437333139ac6fb3a8c25757"
+ported_to = "nomorals/media/sound/model.py"
+
+[[assets]]
+id = "model-clip"
+upstream = "crates/model/src/clip.rs"
+sha256 = "3466cb194abe024f94ffbac54670bb6a3033be2d5895a10c0bbe0c24af793ec0"
+ported_to = "nomorals/media/sound/model.py"
+
+[[assets]]
+id = "model-mixer"
+upstream = "crates/model/src/mixer.rs"
+sha256 = "4ca6e4f3f61f3c0ada7c357213f609c1e2effcaa1c1ddb6280f3bc2ca6e3a201"
+ported_to = "nomorals/media/sound/model.py"
+
+[[assets]]
+id = "mix-strip"
+upstream = "crates/mix/src/strip.rs"
+sha256 = "b0fc61c452b73c34571d277f535209aa1f7a6cef2139abac4744ebf7d0a4ef31"
+ported_to = "nomorals/media/sound/mix.py"
+
+[[assets]]
+id = "mix-pan"
+upstream = "crates/mix/src/pan.rs"
+sha256 = "70a924f4c2fec6b05cf3a05bc4b2f8a8a0f66e59c336502ddd14e54e729de4b9"
+ported_to = "nomorals/media/sound/mix.py"
+
+[[assets]]
+id = "mix-meter"
+upstream = "crates/mix/src/meter.rs"
+sha256 = "e604210c28d67739a5d4a59e82c2611a090df440921ccf1f8f3aba085e82b291"
+ported_to = "nomorals/media/sound/mix.py"
+
+[[assets]]
+id = "mix-offline"
+upstream = "crates/mix/src/offline.rs"
+sha256 = "ecf0e247279ffb83f0f27638f22c8f2edcead242e6058394d9e3ac9991f03380"
+ported_to = "nomorals/media/sound/render.py"
+
+[[assets]]
+id = "playback-callback"
+upstream = "crates/playback/src/callback.rs"
+sha256 = "f81fa193200f5bf6c9d44ef77e1a65713b60b05bd3eb01365de345fa9e953a35"
+ported_to = "nomorals/media/sound/engine.py"
+
+[[assets]]
+id = "dsp-dynamics"
+upstream = "crates/dsp/src/plugins/dynamics.rs"
+sha256 = "72b7f7b0f55ab41318fa18b494e44a977279e9b74167f376f39b092850dac34b"
+ported_to = "nomorals/media/sound/effects.py"
+
+[[assets]]
+id = "dsp-eq"
+upstream = "crates/dsp/src/plugins/eq.rs"
+sha256 = "4666c76f9319f5bd7f47918632c526c3e5e429d77e62c55ad34d9f725d77ffdb"
+ported_to = "nomorals/media/sound/effects.py"
+
+[[assets]]
+id = "dsp-biquad"
+upstream = "crates/dsp/src/biquad.rs"
+sha256 = "448eb02da3a5eb73f34a3c1a0e7c2dd0ed230b7831f326fe336a6fcb6897a786"
+ported_to = "nomorals/media/sound/effects.py"
+
+[[assets]]
+id = "clap-host-plugin"
+upstream = "crates/clap-host/src/plugin.rs"
+sha256 = "b54e7898a17d503f8a0c067e71028ead60b36ebd6637f8f3ab9b482d841f7e5d"
+ported_to = "nomorals/media/sound/hosts.py"
+
+[[assets]]
+id = "vst3-host-plugin"
+upstream = "crates/vst3-host/src/plugin.rs"
+sha256 = "02bee2c09279e00460bb1e772933b3270b36de0b1c6d1116d1bc16a3309f25d0"
+ported_to = "nomorals/media/sound/hosts.py"
+
+[[assets]]
+id = "au-host-plugin"
+upstream = "crates/au-host/src/plugin.rs"
+sha256 = "458f081055635d2eab64f87dc4805af6cb2cd3ec115f72328816b7a2aac17c02"
+ported_to = "nomorals/media/sound/hosts.py"
+
+[[assets]]
+id = "engine-commands"
+upstream = "crates/engine/src/lib.rs"
+sha256 = "933ff3821045f763ef7abb093182bc32fcacb66dc1fd7d03ff224df0d9af1f98"
+ported_to = "nomorals/media/sound/edit.py"
+
+[[assets]]
+id = "automation"
+upstream = "crates/automation/src/lib.rs"
+sha256 = "f4dfb6c03d04022ba381b073a672c2ced61e4973d922991ec488a6be3c8b5cea"
+ported_to = "nomorals/media/sound/automation.py"
+
+[[assets]]
+id = "audio-io-wav"
+upstream = "crates/audio-io/src/wav.rs"
+sha256 = "1a79e9250bf4a1eab6b0f144875c29740b92aedaff03f654d7cdd64e4362a3eb"
+ported_to = "nomorals/media/sound/model.py"
+
+[[devon]]
+id = "sound-errors"
+path = "nomorals/media/sound/errors.py"
+lineage = "Devon-authored: typed SoundError kinds for the sound organ."
+
+[[devon]]
+id = "sound-model"
+path = "nomorals/media/sound/model.py"
+lineage = "Devon-authored session model, ported from upstream crates/model with the .scraft ZIP codec and fidelity discipline."
+
+[[devon]]
+id = "sound-mix"
+path = "nomorals/media/sound/mix.py"
+lineage = "Devon-authored mixer, ported from upstream crates/mix with the equal-power pan law and honest clip reporting."
+
+[[devon]]
+id = "sound-effects"
+path = "nomorals/media/sound/effects.py"
+lineage = "Devon-authored effects chain: RBJ parametric EQ plus Devon's own compressor/limiter toolbox."
+
+[[devon]]
+id = "sound-engine"
+path = "nomorals/media/sound/engine.py"
+lineage = "Devon-authored realtime engine, ported from upstream crates/playback callback law (guarded blocks, stall detection, command ring)."
+
+[[devon]]
+id = "sound-hosts"
+path = "nomorals/media/sound/hosts.py"
+lineage = "Devon-authored plugin hosts with the quarantined subprocess boundary, ported from upstream clap/vst3/au hosts."
+
+[[devon]]
+id = "sound-worker"
+path = "nomorals/media/sound/_plugin_worker.py"
+lineage = "Devon-authored quarantined plugin worker (length-prefixed JSON frames over a pipe)."
+
+[[devon]]
+id = "sound-automation"
+path = "nomorals/media/sound/automation.py"
+lineage = "Devon-authored automation lanes, ported from upstream crates/automation."
+
+[[devon]]
+id = "sound-render"
+path = "nomorals/media/sound/render.py"
+lineage = "Devon-authored offline bounce, ported from upstream crates/mix offline render."
+
+[[devon]]
+id = "sound-edit"
+path = "nomorals/media/sound/edit.py"
+lineage = "Devon-authored session editor, ported from upstream crates/engine command registry."
+
+[[devon]]
+id = "sound-parity"
+path = "nomorals/media/sound/parity.py"
+lineage = "Devon-authored machine-checked parity runner for the sound organ."
+
+[[devon]]
+id = "sound-attribution"
+path = "nomorals/media/sound/attribution.py"
+lineage = "Devon-authored SHA-256 attribution verifier for the sound organ."
