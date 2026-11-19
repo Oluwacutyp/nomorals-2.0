@@ -13,10 +13,34 @@ from .journal import (
     DecisionJournal,
     OutcomeRevision,
 )
+from .rfc import (
+    KINDS,
+    PERIOD_DAYS,
+    STATUSES,
+    Objection,
+    Rfc,
+    RfcComment,
+    RfcError,
+    RfcStore,
+    RfcUsageError,
+    handle_rfc,
+    slugify,
+)
 
 __all__ = [
     "CONFIDENCE_BUCKETS",
     "Decision",
     "DecisionJournal",
+    "KINDS",
+    "Objection",
     "OutcomeRevision",
+    "PERIOD_DAYS",
+    "Rfc",
+    "RfcComment",
+    "RfcError",
+    "RfcStore",
+    "RfcUsageError",
+    "STATUSES",
+    "handle_rfc",
+    "slugify",
 ]

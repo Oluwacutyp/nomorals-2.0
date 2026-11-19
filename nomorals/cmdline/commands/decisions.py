@@ -39,6 +39,16 @@ def _journal(context: Any) -> Any:
     return DecisionJournal(str(Path(home) / "data" / "decisions.json"))
 
 
+def _rfc_store(context: Any) -> Any:
+    from ...decisions.rfc import RfcStore
+
+    home = _home_path(context)
+    if home is None:
+        raise ValueError("no home path on context")
+    return RfcStore(str(Path(home) / "data" / "rfcs.json"),
+                    journal=_journal(context))
+
+
 def _ledger(context: Any) -> Any:
     from ...commitments.ledger import CommitmentLedger
 
@@ -221,6 +231,16 @@ def _cmd_decisions(args: argparse.Namespace, context: Any) -> int:
         print(f"🧭 {sentence}")
         return 0
 
+    if action == "rfc":
+        from ...decisions.rfc import RfcError, handle_rfc
+
+        try:
+            store = _rfc_store(context)
+            print(handle_rfc(store, list(rest), actor="owner"))
+        except RfcError as exc:
+            return _usage_error(str(exc))
+        return 0
+
     if action == "whatif":
         if not rest:
             return _usage_error("usage: nm decisions whatif <id>")
@@ -241,4 +261,10 @@ def _cmd_decisions(args: argparse.Namespace, context: Any) -> int:
         "usage: nm decisions list · add <decision> "
         "[| chosen | prediction | conf% | opt1; opt2; ...]\n"
         "       resolve <id> [good|bad] <outcome> · "
-        "review [weekly|monthly] · calibration · whatif <id>")
+        "review [weekly|monthly] · calibration · whatif <id>\n"
+        "       rfc list · show <n> · open <title> | <kind> | <mod1; mod2> "
+        "[| summary] · period <n> · comment <n> <text> · approve <n> · "
+        "object <n> | <reason> | <resolves> · resolve <n> <objection-id> | "
+        "<note> · accept <n> [| reason] · close <n> | <reason> · "
+        "supersede <n> <title> | <kind> | <modules> · maintainers "
+        "[add|remove <name>] · module <name>")

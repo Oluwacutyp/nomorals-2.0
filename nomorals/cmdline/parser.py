@@ -2487,19 +2487,20 @@ def _parser() -> argparse.ArgumentParser:
     desk_sub.add_parser("provision", help="desk API key state (drive from chat: /desk provision <service>)")
 
     decisions_p = sub.add_parser("decisions", aliases=CLI_ALIASES["decisions"],
-        help="decision journal: list, add, resolve, review, calibration, whatif",
+        help="decision journal: list, add, resolve, review, calibration, whatif, rfc",
         description=("nm decisions [list]\\n"
                      "nm decisions add <decision> [| chosen | prediction | conf% | opt1; opt2; ...]\\n"
                      "nm decisions resolve <id> [good|bad] <outcome>\\n"
                      "nm decisions review [weekly|monthly]\\n"
                      "nm decisions calibration\\n"
                      "nm decisions whatif <id>\\n"
+                     "nm decisions rfc list · show <n> · open <title> | <kind> | <mod1; mod2>\\n"
                      "The same journal as chat /decisions"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     decisions_p.add_argument("decisions_action", nargs="?", default="list",
                              choices=["list", "add", "resolve", "review",
-                                      "calibration", "whatif"],
+                                      "calibration", "whatif", "rfc"],
                              help="Action to perform")
     decisions_p.add_argument("decisions_rest", nargs="*", default=[],
                              help="action arguments")

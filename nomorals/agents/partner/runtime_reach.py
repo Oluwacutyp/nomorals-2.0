@@ -1768,6 +1768,14 @@ class RuntimeReachMixin:
         path = self.context.settings.home_path / "data" / "decisions.json"
         return DecisionJournal(str(path))
 
+    def _rfc_store(self) -> Any:
+        """RfcStore on the durable home path, journal attached so an
+        accepted RFC lands in the decision journal."""
+        from ...decisions.rfc import RfcStore
+
+        path = self.context.settings.home_path / "data" / "rfcs.json"
+        return RfcStore(str(path), journal=self._decisions_journal())
+
     def _resolve_decision(self, journal: Any, ref: str) -> Any:
         """Exact id, else unique id-prefix, else None."""
         ref = (ref or "").strip()
@@ -3471,6 +3479,17 @@ class RuntimeReachMixin:
         verb = parts[0].lower() if parts else "list"
         rest = parts[1] if len(parts) > 1 else ""
         journal = self._decisions_journal()
+        if verb == "rfc":
+            # Cross-module decisions, the RFC-0000 process: the same
+            # verbs as ``nm decisions rfc`` over the same store.
+            from ...decisions.rfc import RfcError, handle_rfc
+
+            try:
+                return handle_rfc(self._rfc_store(),
+                                  rest.split() if rest else [],
+                                  actor="owner")
+            except RfcError as exc:
+                return str(exc)
         if verb in ("list", "open", ""):
             rows = journal.open_decisions()
             lines = []
@@ -3580,7 +3599,11 @@ class RuntimeReachMixin:
         return ("usage: /decisions list · add <decision> "
                 "[| chosen | prediction | conf% | opt1; opt2; ...]\n"
                 "       resolve <id> [good|bad] <outcome> · "
-                "review [weekly|monthly] · calibration · whatif <id>")
+                "review [weekly|monthly] · calibration · whatif <id>\n"
+                "       rfc list · show <n> · open <title> | <kind> | "
+                "<mod1; mod2> · period <n> · approve <n> · object <n> | "
+                "<reason> | <resolves> · accept <n> · close <n> | <reason> · "
+                "supersede <n> <title> | <kind> | <modules>")
 
     # ── backups: /backup ──────────────────────────────────────────────
     def _control_backup(self, tail: str, *, chat_key: str = "") -> str:
