@@ -13,7 +13,10 @@ documents with :func:`compare_documents`, and summarize with
 (:func:`to_xlsx` / :func:`to_pptx`, stdlib) and moves
 :class:`DocumentError` into the ``NoMoralsError`` code system
 (``code`` + ``kind`` on every raise; see ``documents/PARITY.md`` for
-the measured fidelity rows).
+the measured fidelity rows).  The PdfCraft port adds the PDF object
+model (:class:`PdfDocument`, :class:`PdfEditor` — incremental editing,
+machine-checked parity TOML, SHA-256 attribution DB; see
+``documents/pdfcraft/``).
 """
 
 from __future__ import annotations
@@ -59,6 +62,12 @@ from .pagewise import (
 from .parsers import (artifact_body_text, detect_format, extract_text,
                       parse_bytes, parse_path)
 from .pdf_tables import extract_text_tables, score_table
+from .pdfcraft import (
+    PdfDocument,
+    PdfEditor,
+    run_parity as run_pdfcraft_parity,
+    verify_attribution as verify_pdfcraft_attribution,
+)
 from .requirements import (
     Requirement,
     RequirementAnalysis,
@@ -92,6 +101,8 @@ __all__ = [
     "Table",
     "DocumentError",
     "DocumentIndex",
+    "PdfDocument",
+    "PdfEditor",
     "ArchiveOp",
     "CompressOp",
     "CropOp",
@@ -143,6 +154,7 @@ __all__ = [
     "render_terminal",
     "repair_pdf",
     "run_pagewise",
+    "run_pdfcraft_parity",
     "scan_to_pdf",
     "score_links",
     "score_table",
@@ -166,6 +178,7 @@ __all__ = [
     "to_text",
     "to_xlsx",
     "unlock_pdf",
+    "verify_pdfcraft_attribution",
     "verify_spans",
     "word_diff",
     "write_report",

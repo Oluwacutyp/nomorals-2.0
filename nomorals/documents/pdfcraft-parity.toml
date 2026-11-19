@@ -1,0 +1,116 @@
+# PdfCraft parity — machine-checked, measured on real fixture PDFs.
+# Port of the storytold/pdfcraft parity/*.toml design: each [[case]]
+# names a fixture (tests/fixtures/pdfcraft/), the ops applied, and the
+# expected outcomes.  `run_parity` in nomorals/documents/pdfcraft/parity.py
+# executes every case against the real engine; a wrong expectation fails,
+# a missing fixture fails (never a silent skip).  Regenerate fixtures with
+# ~/workspace/pdfcraft-verify/gen_fixtures.py.
+#
+# Ops: inspect, incremental_metadata, incremental_rotate,
+# incremental_annotate, incremental_stamp, open_repaired, open_refused.
+# Expect keys: page_count, text_contains, title, prefix_preserved,
+# repaired, error_kind.
+
+[schema]
+version = 1
+
+[[case]]
+id = "simple-inspect"
+fixture = "simple-3page.pdf"
+ops = ["inspect"]
+[case.expect]
+page_count = 3
+repaired = false
+text_contains = ["Alpha beta gamma 1", "Alpha beta gamma 3"]
+title = "Simple Fixture"
+
+[[case]]
+id = "embedded-inspect"
+fixture = "embedded-2page.pdf"
+ops = ["inspect"]
+[case.expect]
+page_count = 2
+repaired = false
+text_contains = ["Embedded one", "Embedded two"]
+title = "Embedded Fixture"
+
+[[case]]
+id = "nested-tree-inspect"
+fixture = "nested-tree.pdf"
+ops = ["inspect"]
+[case.expect]
+page_count = 3
+repaired = false
+text_contains = ["nested one", "nested three"]
+
+[[case]]
+id = "incremental-2gen-inspect"
+fixture = "incremental-2gen.pdf"
+ops = ["inspect"]
+[case.expect]
+page_count = 3
+repaired = false
+text_contains = ["Alpha beta gamma 2"]
+title = "Gen one"
+
+[[case]]
+id = "incremental-metadata"
+fixture = "simple-3page.pdf"
+ops = ["incremental_metadata"]
+title = "Parity Title"
+[case.expect]
+page_count = 3
+prefix_preserved = true
+text_contains = ["Alpha beta gamma 1"]
+title = "Parity Title"
+
+[[case]]
+id = "incremental-rotate"
+fixture = "simple-3page.pdf"
+ops = ["incremental_rotate"]
+page = 2
+degrees = 90
+[case.expect]
+page_count = 3
+prefix_preserved = true
+text_contains = ["Alpha beta gamma 2"]
+
+[[case]]
+id = "incremental-annotate"
+fixture = "simple-3page.pdf"
+ops = ["incremental_annotate"]
+page = 2
+rect = [72, 700, 200, 720]
+annotation = "Parity note."
+[case.expect]
+page_count = 3
+prefix_preserved = true
+text_contains = ["Alpha beta gamma 2"]
+annotations_contains = ["Parity note."]
+
+[[case]]
+id = "incremental-stamp"
+fixture = "simple-3page.pdf"
+ops = ["incremental_stamp"]
+page = 3
+stamp = "PARITY STAMP"
+[case.expect]
+page_count = 3
+prefix_preserved = true
+text_contains = ["Alpha beta gamma 3", "PARITY STAMP"]
+
+[[case]]
+id = "broken-xref-opens-repaired"
+fixture = "broken-xref.pdf"
+ops = ["open_repaired"]
+[case.expect]
+page_count = 3
+repaired = true
+text_contains = ["Alpha beta gamma 1"]
+
+[[case]]
+id = "encrypted-refused"
+fixture = "encrypted.pdf"
+ops = ["open_refused"]
+[case.expect]
+error_kind = "encrypted"

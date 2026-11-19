@@ -32,6 +32,9 @@ DOCUMENT_ERROR_KINDS = frozenset({
     "io",                  # file read/write failure
     "write",               # a writer failed to produce its output
     "ocr_unavailable",     # OCR stack absent (tesseract / pytesseract)
+    "encrypted",           # PDF carries /Encrypt — the pdfcraft reader
+                           # refuses it honestly rather than guessing
+                           # (pagewise protect/unlock owns the RC4 rung)
     "upstream",            # a backing engine/service the operation depends
                            # on (LLM brain, search backend, index storage)
                            # was present but failed or vanished at runtime —

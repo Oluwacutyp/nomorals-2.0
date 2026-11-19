@@ -1,0 +1,165 @@
+# PdfCraft attribution — SHA-256 provenance for the port.
+# Port of the storytold/pdfcraft ATTRIBUTION.toml design: one [[asset]]
+# per file, with source, licence, and the SHA-256 of the file as read.
+# `verify_attribution` in nomorals/documents/pdfcraft/attribution.py
+# recomputes the hashes against the upstream clone, so provenance is
+# checkable at runtime, not a comment.
+#
+# Upstream: storytold/pdfcraft, commit 8717a085ffec6b6de3ffa86de9c0c51da1488000
+# (clone: ~/workspace/echelon-mining/repos/storytold/pdfcraft).
+# Licence: MIT OR Apache-2.0 (LICENSE-MIT + LICENSE-APACHE in the clone).
+# The port takes the DESIGN (object model shape, incremental/full save
+# split, parity TOML schema, attribution record shape) — Devon's code is
+# written fresh in Python; no upstream source text is copied.
+
+[[asset]]
+path = "crates/cos/src/object.rs"
+kind = "upstream"
+title = "COS object model (Object enum)"
+source = "https://github.com/storytold/pdfcraft"
+licence = "MIT OR Apache-2.0"
+usage = "Design source for nomorals/documents/pdfcraft/cos.py object types (PdfName/PdfRef/PdfString/PdfStream)"
+sha256 = "46e9a3203b3f1a395eadcd4c78dd5aa5b963c14af47530c0b451008ea264de49"
+
+[[asset]]
+path = "crates/cos/src/parser.rs"
+kind = "upstream"
+title = "COS lexer and indirect-object parser"
+source = "https://github.com/storytold/pdfcraft"
+licence = "MIT OR Apache-2.0"
+usage = "Design source for nomorals/documents/pdfcraft/cos.py lexer (parse_object, parse_indirect)"
+sha256 = "c3788242e39a917eae9e4c5b27192c6ffdd75094285c42f6725e29b7cfbc70e9"
+
+[[asset]]
+path = "crates/cos/src/writer.rs"
+kind = "upstream"
+title = "COS serializer and incremental/full writers"
+source = "https://github.com/storytold/pdfcraft"
+licence = "MIT OR Apache-2.0"
+usage = "Design source for nomorals/documents/pdfcraft/cos.py serialize/build_incremental/build_full"
+sha256 = "f9510c1d17d64cb780b9efc5dd55f81cd44c8b85a4294ac6b888baa995a639e6"
+
+[[asset]]
+path = "crates/cos/src/document/xref.rs"
+kind = "upstream"
+title = "Cross-reference table model"
+source = "https://github.com/storytold/pdfcraft"
+licence = "MIT OR Apache-2.0"
+usage = "Design source for nomorals/documents/pdfcraft/cos.py Xref/XrefEntry and the /Prev chain walk"
+sha256 = "dad44c90a3cc1542c369990345eda042700dd166d80b8ca423a4b85a843ef299"
+
+[[asset]]
+path = "crates/cos/src/document/reader.rs"
+kind = "upstream"
+title = "Document reader (open, resolve, repair)"
+source = "https://github.com/storytold/pdfcraft"
+licence = "MIT OR Apache-2.0"
+usage = "Design source for nomorals/documents/pdfcraft/model.py opening + damaged-xref reconstruction"
+sha256 = "d5b6de23ad5e13a2e0a56c845bd8ba64f63488dae1741d5c13a82952a9dfaa48"
+
+[[asset]]
+path = "crates/cos/src/document/objects.rs"
+kind = "upstream"
+title = "Document object access"
+source = "https://github.com/storytold/pdfcraft"
+licence = "MIT OR Apache-2.0"
+usage = "Design source for nomorals/documents/pdfcraft/model.py page-tree walk and inventory"
+sha256 = "22d862a8ee488c566d5312191b7985005a28dc5626bb1681aaaa8b8bf2339e57"
+
+[[asset]]
+path = "crates/cos/src/document/state.rs"
+kind = "upstream"
+title = "Document dirty state"
+source = "https://github.com/storytold/pdfcraft"
+licence = "MIT OR Apache-2.0"
+usage = "Design source for nomorals/documents/pdfcraft/edit.py dirty tracking"
+sha256 = "e67e8bdc97d21262ddc119700b6a35e05b03fe264da8fe49bca44d2dd173f872"
+
+[[asset]]
+path = "crates/cos/src/document/open.rs"
+kind = "upstream"
+title = "Document open paths"
+source = "https://github.com/storytold/pdfcraft"
+licence = "MIT OR Apache-2.0"
+usage = "Design source for nomorals/documents/pdfcraft/model.py from_bytes/from_path"
+sha256 = "d6ca6114e306700079577bd109a72e2aa0aca0932f9c56d14566636a3a283698"
+
+[[asset]]
+path = "crates/edit/src/apply.rs"
+kind = "upstream"
+title = "Edit application"
+source = "https://github.com/storytold/pdfcraft"
+licence = "MIT OR Apache-2.0"
+usage = "Design source for nomorals/documents/pdfcraft/edit.py ops (set_info, rotate_page, annotate, stamp)"
+sha256 = "c881f7582aacab8faa1a97caf19ab05c07cd4a98bb82326aaebfb0d49e662a21"
+
+[[asset]]
+path = "crates/edit/src/objects.rs"
+kind = "upstream"
+title = "Edit object handling"
+source = "https://github.com/storytold/pdfcraft"
+licence = "MIT OR Apache-2.0"
+usage = "Design source for nomorals/documents/pdfcraft/edit.py changed-copy discipline"
+sha256 = "efa4c790952ed7059710c5f25626cf59243ba8799237f00e54287f732306b912"
+
+[[asset]]
+path = "parity/acrobat-features.toml"
+kind = "upstream"
+title = "Parity checklist schema"
+source = "https://github.com/storytold/pdfcraft"
+licence = "MIT OR Apache-2.0"
+usage = "Design source for nomorals/documents/pdfcraft-parity.toml schema and nomorals/documents/pdfcraft/parity.py"
+sha256 = "8f262834fbe9a2e527cdb0e9f09c5dbfae319ed79f073f3e16f84c4a3b5eb096"
+
+[[asset]]
+path = "ATTRIBUTION.toml"
+kind = "upstream"
+title = "Upstream attribution record"
+source = "https://github.com/storytold/pdfcraft"
+licence = "MIT OR Apache-2.0"
+usage = "Design source for nomorals/documents/pdfcraft-attribution.toml and nomorals/documents/pdfcraft/attribution.py"
+sha256 = "551ffdd35ecc85f793225b5a5ed09a0c7495c1803fc6733b8911ba86607cde12"
+
+[[asset]]
+path = "README.md"
+kind = "upstream"
+title = "PdfCraft readme (project description and licence)"
+source = "https://github.com/storytold/pdfcraft"
+licence = "MIT OR Apache-2.0"
+usage = "Project identification and licence confirmation for the port"
+sha256 = "a79976f5b477a3a311ed226341edbf42cdcfb61c021b6a40da0bea17f7aaf34c"
+
+[[asset]]
+path = "nomorals/documents/pdfcraft/cos.py"
+kind = "devon"
+title = "Devon COS layer"
+licence = "MIT OR Apache-2.0 (upstream design; Devon code)"
+derives_from = ["crates/cos/src/object.rs", "crates/cos/src/parser.rs", "crates/cos/src/writer.rs", "crates/cos/src/document/xref.rs"]
+
+[[asset]]
+path = "nomorals/documents/pdfcraft/model.py"
+kind = "devon"
+title = "Devon PDF document model"
+licence = "MIT OR Apache-2.0 (upstream design; Devon code)"
+derives_from = ["crates/cos/src/document/reader.rs", "crates/cos/src/document/objects.rs", "crates/cos/src/document/open.rs"]
+
+[[asset]]
+path = "nomorals/documents/pdfcraft/edit.py"
+kind = "devon"
+title = "Devon PDF edit session"
+licence = "MIT OR Apache-2.0 (upstream design; Devon code)"
+derives_from = ["crates/edit/src/apply.rs", "crates/edit/src/objects.rs", "crates/cos/src/document/state.rs", "crates/cos/src/writer.rs"]
+
+[[asset]]
+path = "nomorals/documents/pdfcraft/parity.py"
+kind = "devon"
+title = "Devon parity TOML runner"
+licence = "MIT OR Apache-2.0 (upstream design; Devon code)"
+derives_from = ["parity/acrobat-features.toml"]
+
+[[asset]]
+path = "nomorals/documents/pdfcraft/attribution.py"
+kind = "devon"
+title = "Devon attribution DB verifier"
+licence = "MIT OR Apache-2.0 (upstream design; Devon code)"
+derives_from = ["ATTRIBUTION.toml"]

@@ -33,12 +33,20 @@ from ..documents.pagewise import (
     pdf_info,
     run_pagewise,
 )
+from ..documents.pdfcraft import PdfDocument, PdfEditor
+from ..documents.pdfcraft import run_parity as run_pdfcraft_parity
+from ..documents.pdfcraft import (
+    verify_attribution as verify_pdfcraft_attribution,
+)
 
 __all__ = ["register"]
 
 _ACTIONS = ("merge", "select", "delete", "reorder", "rotate", "crop",
             "stamp", "compress", "repair", "protect", "unlock",
-            "archive", "scan", "sign", "info")
+            "archive", "scan", "sign", "info",
+            # PdfCraft port (documents/pdfcraft/): object-model reads and
+            # incremental edits ride the same tool, not a second one.
+            "inspect", "annotate", "metadata", "parity", "attribution")
 
 
 def _parse_box(spec: str) -> tuple[float, float, float, float]:
@@ -109,8 +117,16 @@ def register(registry: Any) -> None:
             "numbers or a watermark, compress, repair a damaged PDF, "
             "protect/unlock with a password, write the PDF/A archival "
             "shape, scan images into a PDF, or place a signature image. "
+            "PdfCraft actions (object model + incremental edits): "
+            "inspect=<read the catalog, pages, fonts, images, "
+            "annotations, metadata>; annotate=<append a sticky-note "
+            "annotation, text=<contents>, page=<n>, rect=<x0,y0,x1,y1>>; "
+            "metadata=<set the title/author incrementally, title=<t>, "
+            "author=<a>>; parity=<run the machine-checked parity TOML>; "
+            "attribution=<verify the SHA-256 attribution DB>. "
             "action=<merge|select|delete|reorder|rotate|crop|stamp|"
-            "compress|repair|protect|unlock|archive|scan|sign|info>; "
+            "compress|repair|protect|unlock|archive|scan|sign|info|"
+            "inspect|annotate|metadata|parity|attribution>; "
             "sources=<list of PDF paths>; output=<path to write>; "
             "ranges=<1-based pages like '2-5,7'>; pages=<1-based pages>; "
             "order=<new order like '3,1,2'>; degrees=<multiple of 90>; "
@@ -132,12 +148,91 @@ def register(registry: Any) -> None:
                       password: str = "", owner_password: str = "",
                       level: str = "1b", images: list[str] | None = None,
                       rect: str = "", title: str = "",
-                      page: int = 1) -> dict[str, Any]:
+                      page: int = 1, author: str = "") -> dict[str, Any]:
         action = (action or "info").lower()
         if action not in _ACTIONS:
             raise ValueError(f"unknown pagewise action {action!r}; use "
                              f"one of {', '.join(_ACTIONS)}")
         sources = list(sources or [])
+        if action == "inspect":
+            if not sources:
+                raise ValueError("pagewise inspect needs a source PDF")
+            summary = PdfDocument.from_bytes(
+                Path(sources[0]).read_bytes()).to_dict()
+            summary["reply"] = (
+                f"{sources[0]}: PDF {summary['version']}, "
+                f"{summary['page_count']} page(s), "
+                f"{len(summary['fonts'])} font(s), "
+                f"{len(summary['images'])} image(s), "
+                f"{len(summary['annotations'])} annotation(s)"
+                f"{', repaired xref' if summary['repaired'] else ''}.")
+            return summary
+        if action == "parity":
+            result = run_pdfcraft_parity()
+            failed = [c["id"] for c in result["cases"]
+                      if c["status"] == "fail"]
+            result["reply"] = (
+                f"pdfcraft parity: {result['passed']} passed, "
+                f"{result['failed']} failed"
+                + (f" ({', '.join(failed)})" if failed else "") + ".")
+            return result
+        if action == "attribution":
+            result = verify_pdfcraft_attribution()
+            result["reply"] = (
+                f"pdfcraft attribution: {result['checked']} verified, "
+                f"{result['failed']} failed, "
+                f"{result['skipped']} skipped (clone not on disk).")
+            return result
+        if action in ("annotate", "metadata"):
+            if not sources:
+                raise ValueError(
+                    f"pagewise {action} needs a source PDF")
+            if not output:
+                raise ValueError(
+                    f"pagewise {action} needs output=<path to write>")
+            original = Path(sources[0]).read_bytes()
+            editor = PdfEditor.from_bytes(original)
+            if action == "annotate":
+                if not text:
+                    raise ValueError(
+                        "pagewise annotate needs text=<contents>")
+                box = _parse_box(rect) if rect else (72, 700, 200, 720)
+                editor.add_text_annotation(page, box, text)
+            else:
+                fields: dict[str, str] = {}
+                if title:
+                    fields["title"] = title
+                if author:
+                    fields["author"] = author
+                if not fields:
+                    raise ValueError(
+                        "pagewise metadata needs title=<t> and/or "
+                        "author=<a>")
+                editor.set_info(**fields)
+            saved = editor.save_incremental()
+            out_path = Path(output).expanduser()
+            out_path.write_bytes(saved)
+            row: dict[str, Any] = {
+                "output": str(out_path),
+                "pages": editor.document.page_count,
+                "size_before": len(original),
+                "size_after": len(saved),
+                "incremental": True,
+                "prefix_preserved": saved[:len(original)] == original,
+            }
+            if action == "annotate":
+                row["annotations"] = len(editor.document.annotations())
+                row["reply"] = (
+                    f"annotated page {page} of {sources[0]} "
+                    f"(incremental, {len(saved) - len(original)} bytes "
+                    f"appended).")
+            else:
+                row["title"] = editor.document.info.get("Title", "")
+                row["author"] = editor.document.info.get("Author", "")
+                row["reply"] = (
+                    f"metadata set on {sources[0]} (incremental, "
+                    f"{len(saved) - len(original)} bytes appended).")
+            return row
         if action == "info":
             if not sources:
                 raise ValueError("pagewise info needs a source PDF")

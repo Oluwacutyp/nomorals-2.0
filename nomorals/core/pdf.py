@@ -22,7 +22,8 @@ from typing import Iterable
 from .branding import BrandMark
 
 __all__ = ["PdfError", "PdfPage", "render_pdf", "pdf_write", "read_pdf_text",
-           "pdf_read", "render_pdf_embedded"]
+           "read_pdf_page_texts", "pdf_read", "render_pdf_embedded",
+           "winansi_text", "escape_pdf_string"]
 
 
 class PdfError(ValueError):
@@ -87,6 +88,22 @@ def _pdf_escape(text: str) -> str:
         .replace("(", r"\(")
         .replace(")", r"\)")
     )
+
+
+def winansi_text(text: str) -> str:
+    """Public seam for :func:`_to_pdf_text`: best-effort WinAnsi encoding.
+
+    Unknown characters become ``?`` — a report must render, even if a
+    glyph is lost.  The pdfcraft editor's stamp stream uses this so its
+    text stays extractable with the standard fonts.
+    """
+    return _to_pdf_text(text)
+
+
+def escape_pdf_string(text: str) -> str:
+    """Public seam for :func:`_pdf_escape`: escape ``text`` for a PDF
+    literal string (backslash, open and close paren)."""
+    return _pdf_escape(text)
 
 
 def _wrap_line(line: str, budget: int, mono: bool) -> list[str]:
@@ -1190,19 +1207,20 @@ def _page_text(page_body: bytes, objects: dict[int, bytes]) -> str:
     return "\n".join(lines)
 
 
-def read_pdf_text(data: bytes, *, max_pages: int = 100) -> str:
-    """Extract readable text from a PDF.  Pure Python, no dependencies.
-
-    Handles FlateDecode streams, TJ/Tj text operators, Tm/Td/TD/T* line
-    positioning, escaped strings, and broken xref tables (falls back to
-    scanning object markers).  Scanned/image-only PDFs return little or
-    nothing — they need OCR, which is a separate capability.
-    """
+def read_pdf_page_texts(data: bytes, *, max_pages: int = 100,
+                        skip_empty: bool = True) -> list[str]:
+    """Extract readable text per page: one string per page, in document
+    order.  Same engine as :func:`read_pdf_text` — FlateDecode streams,
+    TJ/Tj operators, Tm/Td/TD/T* positioning, escaped strings,
+    ToUnicode maps, and broken-xref fallback to object scanning.
+    Scanned/image-only pages contribute nothing (they need OCR).
+    ``skip_empty=False`` keeps empty pages as ``""`` so the list stays
+    aligned with page numbers."""
     if not data[:5].startswith(b"%PDF-"):
         raise PdfError("not a PDF file")
     objects = _parse_objects(data)
     if not objects:
-        return ""
+        return []
     root_match = re.search(rb"/Root\s+(\d+)\s+0\s+R", data)
     root = objects.get(int(root_match.group(1)), b"") if root_match else b""
     if not root:
@@ -1218,9 +1236,21 @@ def read_pdf_text(data: bytes, *, max_pages: int = 100) -> str:
     texts: list[str] = []
     for page in pages[:max_pages]:
         t = _page_text(page, objects)
-        if t.strip():
+        if t.strip() or not skip_empty:
             texts.append(t)
-    return "\n\n".join(texts).strip()
+    return texts
+
+
+def read_pdf_text(data: bytes, *, max_pages: int = 100) -> str:
+    """Extract readable text from a PDF.  Pure Python, no dependencies.
+
+    Handles FlateDecode streams, TJ/Tj text operators, Tm/Td/TD/T* line
+    positioning, escaped strings, and broken xref tables (falls back to
+    scanning object markers).  Scanned/image-only PDFs return little or
+    nothing — they need OCR, which is a separate capability.
+    """
+    return "\n\n".join(
+        read_pdf_page_texts(data, max_pages=max_pages)).strip()
 
 
 def pdf_read(path: str, *, max_pages: int = 100) -> str:
