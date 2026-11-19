@@ -1,0 +1,411 @@
+# Conditioning parity — machine-checked cases (version 1).
+# Run: python -m nomorals.training.conditioning.parity (see parity.py)
+# or tests/test_gapfix_finetrainers.py::test_parity_toml.
+# Every expectation below was computed from upstream FineTrainers'
+# semantics (finetrainers/dataset.py, finetrainers/utils/data_utils.py,
+# finetrainers/cogvideox|hunyuan_video|ltx_video/lora.py), not asserted
+# from this port's output.
+
+[schema]
+version = 1
+
+# --- dataset formats (real fixtures) ---
+
+[[case]]
+id = "two-file-one-row"
+op = "load_dataset"
+format = "two-file"
+caption_column = "prompts.txt"
+video_column = "videos.txt"
+[case.expect]
+rows = 1
+first_caption = "A hiker standing at the top of a mountain, triumphantly, high quality"
+first_video = "hiker.mp4"
+source_format = "two-file"
+
+[[case]]
+id = "two-file-multi"
+op = "load_dataset"
+format = "two-file"
+caption_column = "prompts_multi.txt"
+video_column = "videos_multi.txt"
+[case.expect]
+rows = 2
+first_caption = "A hiker standing at the top of a mountain, triumphantly, high quality"
+first_video = "hiker.mp4"
+source_format = "two-file"
+
+[[case]]
+id = "csv-one-row"
+op = "load_dataset"
+format = "csv"
+dataset_file = "metadata.csv"
+caption_column = "caption"
+video_column = "video"
+[case.expect]
+rows = 1
+first_caption = "\"A hiker standing at the top of a mountain, triumphantly, high quality\""
+first_video = "hiker.mp4"
+source_format = "csv"
+
+[[case]]
+id = "json-two-rows"
+op = "load_dataset"
+format = "json"
+dataset_file = "dataset.json"
+caption_column = "caption"
+video_column = "video"
+[case.expect]
+rows = 2
+first_caption = "A hiker standing at the top of a mountain, triumphantly, high quality"
+first_video = "hiker.mp4"
+source_format = "json"
+
+[[case]]
+id = "jsonl-two-rows"
+op = "load_dataset"
+format = "jsonl"
+dataset_file = "dataset.jsonl"
+caption_column = "caption"
+video_column = "video"
+[case.expect]
+rows = 2
+first_caption = "A hiker standing at the top of a mountain, triumphantly, high quality"
+first_video = "hiker.mp4"
+source_format = "jsonl"
+
+[[case]]
+id = "two-file-llm-prefix"
+op = "load_dataset"
+format = "two-file"
+caption_column = "prompts_llm.txt"
+video_column = "videos_llm.txt"
+remove_llm_prefixes = true
+[case.expect]
+rows = 1
+first_caption = "a hiker climbs"
+first_video = "hiker.mp4"
+source_format = "two-file"
+
+# --- LLM prefix cleaning ---
+
+[[case]]
+id = "clean-prefix-in-this-video"
+op = "clean_prefixes"
+prompt = "In this video, a hiker climbs"
+[case.expect]
+cleaned = "a hiker climbs"
+
+[[case]]
+id = "clean-prefix-this-video-shows"
+op = "clean_prefixes"
+prompt = "This video shows a hiker"
+[case.expect]
+cleaned = "a hiker"
+
+[[case]]
+id = "clean-prefix-caption"
+op = "clean_prefixes"
+prompt = "Caption: a hiker"
+[case.expect]
+cleaned = "a hiker"
+
+[[case]]
+id = "clean-prefix-plain"
+op = "clean_prefixes"
+prompt = "A hiker climbs"
+[case.expect]
+cleaned = "A hiker climbs"
+
+# --- naming ---
+
+[[case]]
+id = "string-to-filename-cog"
+op = "string_to_filename"
+text = "THUDM/CogVideoX-5b"
+[case.expect]
+filename = "THUDM-CogVideoX-5b"
+
+[[case]]
+id = "string-to-filename-ltx"
+op = "string_to_filename"
+text = "Lightricks/LTX-Video"
+[case.expect]
+filename = "Lightricks-LTX-Video"
+
+[[case]]
+id = "string-to-filename-punct"
+op = "string_to_filename"
+text = "a b:c.d,e;f!g?h"
+[case.expect]
+filename = "a-b-c-d-e-f-g-h"
+
+[[case]]
+id = "dir-name-ltx"
+op = "dir_name"
+model_name = "ltx_video"
+model_id = "Lightricks/LTX-Video"
+[case.expect]
+dirname = "ltx_video_Lightricks-LTX-Video_precomputed"
+
+[[case]]
+id = "dir-name-cog"
+op = "dir_name"
+model_name = "cogvideox"
+model_id = "THUDM/CogVideoX-5b"
+[case.expect]
+dirname = "cogvideox_THUDM-CogVideoX-5b_precomputed"
+
+# --- buckets ---
+
+[[case]]
+id = "nearest-resolution-small"
+op = "nearest_resolution"
+buckets = [[49, 480, 720], [49, 256, 360], [49, 720, 960]]
+height = 240
+width = 368
+[case.expect]
+nearest = [256, 360]
+
+[[case]]
+id = "nearest-resolution-exact"
+op = "nearest_resolution"
+buckets = [[49, 480, 720], [49, 256, 360], [49, 720, 960]]
+height = 480
+width = 720
+[case.expect]
+nearest = [480, 720]
+
+[[case]]
+id = "frame-bucket-full"
+op = "frame_bucket"
+buckets = [[49, 480, 720], [24, 480, 720], [12, 480, 720]]
+num_frames = 49
+max_num_frames = 49
+[case.expect]
+bucket = 49
+
+[[case]]
+id = "frame-bucket-short-clip"
+op = "frame_bucket"
+buckets = [[49, 480, 720], [24, 480, 720], [12, 480, 720]]
+num_frames = 30
+max_num_frames = 49
+[case.expect]
+bucket = 24
+
+[[case]]
+id = "frame-bucket-shorter-than-all"
+op = "frame_bucket"
+buckets = [[49, 480, 720], [24, 480, 720]]
+num_frames = 5
+max_num_frames = 49
+[case.expect]
+bucket = 1
+
+[[case]]
+id = "sample-frames-strided"
+op = "sample_frames"
+num_frames = 10
+max_num_frames = 4
+[case.expect]
+indices = [0, 2, 4, 6]
+
+[[case]]
+id = "sample-frames-short-clip"
+op = "sample_frames"
+num_frames = 3
+max_num_frames = 49
+[case.expect]
+indices = [0, 1, 2]
+
+# --- post-latent math ---
+
+[[case]]
+id = "pad-frames-odd"
+op = "pad_frames"
+shape = [1, 4, 49, 8, 8]
+patch_size_t = 2
+[case.expect]
+padded_shape = [1, 4, 50, 8, 8]
+
+[[case]]
+id = "pad-frames-divisible"
+op = "pad_frames"
+shape = [1, 4, 48, 8, 8]
+patch_size_t = 2
+[case.expect]
+padded_shape = [1, 4, 50, 8, 8]
+
+[[case]]
+id = "pad-frames-one"
+op = "pad_frames"
+shape = [1, 4, 49, 8, 8]
+patch_size_t = 1
+[case.expect]
+padded_shape = [1, 4, 49, 8, 8]
+
+[[case]]
+id = "pack-latents-trivial"
+op = "pack_latents"
+shape = [1, 4, 8, 8, 8]
+patch_size = 1
+patch_size_t = 1
+[case.expect]
+packed_shape = [1, 512, 4]
+
+[[case]]
+id = "pack-latents-2x2"
+op = "pack_latents"
+shape = [1, 4, 8, 8, 8]
+patch_size = 2
+patch_size_t = 2
+[case.expect]
+packed_shape = [1, 64, 32]
+
+[[case]]
+id = "normalize-latents-basic"
+op = "normalize_latents"
+shape = [1, 2, 1, 1, 1]
+fill = 2.0
+mean = [0.0, 1.0]
+std = [1.0, 2.0]
+scaling_factor = 1.0
+[case.expect]
+first_value = 2.0
+
+[[case]]
+id = "normalize-latents-scaled"
+op = "normalize_latents"
+shape = [1, 2, 1, 1, 1]
+fill = 2.0
+mean = [0.0, 0.0]
+std = [1.0, 1.0]
+scaling_factor = 2.0
+[case.expect]
+first_value = 4.0
+
+# --- precompute decision ---
+
+[[case]]
+id = "should-precompute-missing"
+op = "should_precompute"
+layout = "missing"
+[case.expect]
+result = true
+
+[[case]]
+id = "should-precompute-empty"
+op = "should_precompute"
+layout = "empty"
+[case.expect]
+result = true
+
+[[case]]
+id = "should-precompute-matched"
+op = "should_precompute"
+layout = "matched"
+[case.expect]
+result = false
+
+[[case]]
+id = "should-precompute-mismatched"
+op = "should_precompute"
+layout = "mismatched"
+[case.expect]
+result = true
+
+# --- bucket sampler ---
+
+[[case]]
+id = "bucket-sampler-mixed"
+op = "bucket_sampler"
+shapes = [[49, 480, 720], [49, 480, 720], [48, 256, 360], [49, 480, 720]]
+batch_size = 2
+shuffle = false
+drop_last = false
+[case.expect]
+batches = [2, 1, 1]
+total = 4
+
+[[case]]
+id = "bucket-sampler-drop-last"
+op = "bucket_sampler"
+shapes = [[49, 480, 720], [49, 480, 720], [48, 256, 360], [49, 480, 720]]
+batch_size = 2
+shuffle = false
+drop_last = true
+[case.expect]
+batches = [2]
+total = 2
+
+[[case]]
+id = "bucket-sampler-no-shuffle-keeps-tail"
+op = "bucket_sampler"
+shapes = [[49, 480, 720], [48, 256, 360]]
+batch_size = 8
+shuffle = false
+drop_last = false
+[case.expect]
+batches = [1, 1]
+total = 2
+
+# --- condition specs ---
+
+[[case]]
+id = "spec-ltx"
+op = "spec"
+model_name = "ltx_video"
+[case.expect]
+model_id = "Lightricks/LTX-Video"
+max_sequence_length = 128
+condition_keys = ["prompt_embeds", "prompt_attention_mask"]
+text_encoder = "t5"
+
+[[case]]
+id = "spec-cog"
+op = "spec"
+model_name = "cogvideox"
+[case.expect]
+model_id = "THUDM/CogVideoX-5b"
+max_sequence_length = 226
+condition_keys = ["prompt_embeds"]
+text_encoder = "t5"
+
+[[case]]
+id = "spec-hunyuan"
+op = "spec"
+model_name = "hunyuan_video"
+[case.expect]
+model_id = "hunyuanvideo-community/HunyuanVideo"
+max_sequence_length = 256
+condition_keys = ["prompt_embeds", "prompt_attention_mask", "pooled_prompt_embeds", "guidance"]
+text_encoder = "llama+clip"
+
+# --- end-to-end precompute (demo encoders, real fixtures) ---
+
+[[case]]
+id = "precompute-ltx"
+op = "precompute"
+model_name = "ltx_video"
+caption_column = "prompts_multi.txt"
+video_column = "videos_multi.txt"
+[case.expect]
+conditions = 2
+latents = 2
+codec = "npz"
+pair_keys = ["prompt_attention_mask", "prompt_embeds"]
+pair_latent_keys = ["height", "latents", "latents_mean", "latents_std", "num_frames", "width"]
+
+[[case]]
+id = "precompute-cog"
+op = "precompute"
+model_name = "cogvideox"
+caption_column = "prompts_multi.txt"
+video_column = "videos_multi.txt"
+[case.expect]
+conditions = 2
+latents = 2
+codec = "npz"
+pair_keys = ["prompt_embeds"]
+pair_latent_keys = ["latents"]

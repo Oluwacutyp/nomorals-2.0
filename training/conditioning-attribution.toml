@@ -1,0 +1,272 @@
+# Conditioning attribution — SHA-256 provenance (version 1).
+# Upstream: storytold/FineTrainers-Conditioning, commit 9f0fdb5,
+# Apache-2.0. The clone is a pristine snapshot of upstream
+# aarnphm/FineTrainers: `git log` shows a single commit by its own
+# author (Aryan <aryan@huggingface.co>), no storytold-authored commits,
+# so every [[upstream]] row below is HF FineTrainers code, not storytold
+# code. Verify: python -m tests.test_gapfix_finetrainers (attribution)
+# or nomorals.training.conditioning.attribution.verify_attribution().
+
+[schema]
+version = 1
+upstream_repo = "storytold/FineTrainers-Conditioning"
+upstream_commit = "9f0fdb5"
+licence = "Apache-2.0"
+
+[[upstream]]
+id = "upstream-license"
+file = "LICENSE"
+sha256 = "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+licence = "Apache-2.0"
+notes = "Upstream licence: Apache License 2.0."
+
+[[upstream]]
+id = "upstream-readme"
+file = "README.md"
+sha256 = "be08e35c75cc8131fa381ba8a35e63ec95e8e53cddcc7f12d41931836377aec5"
+licence = "Apache-2.0"
+notes = "Project README: support matrix, quickstart, Disney dataset reference."
+
+[[upstream]]
+id = "upstream-train-entry"
+file = "train.py"
+sha256 = "333b5a17ff7d18012a957fdf4bc2a9d5218310109df240680d82010891645d70"
+licence = "Apache-2.0"
+notes = "Entry point: prepare_dataset -> prepare_models -> prepare_precomputations -> train."
+
+[[upstream]]
+id = "upstream-constants"
+file = "finetrainers/constants.py"
+sha256 = "8e31bd691dbfd9a15e80cdb1dd48489163918fa0233673ce333f16ab81dbe808"
+licence = "Apache-2.0"
+notes = "Bucket defaults, PRECOMPUTED_* names, COMMON_LLM_START_PHRASES, MODEL_DESCRIPTION."
+
+[[upstream]]
+id = "upstream-dataset"
+file = "finetrainers/dataset.py"
+sha256 = "8c0e4c1abaaea278c73147d05e8243c3c6698eba3584f3f3eec8bb5063bde789"
+licence = "Apache-2.0"
+notes = "ImageOrVideoDataset (4 loaders), PrecomputedDataset, BucketSampler."
+
+[[upstream]]
+id = "upstream-models"
+file = "finetrainers/models.py"
+sha256 = "766125e1983b4a8b474f88cadae8712608e6c2c8936c482555c768a6e433a782"
+licence = "Apache-2.0"
+notes = "SUPPORTED_MODEL_CONFIGS + get_config_from_model_name (cogvideox/hunyuan/ltx x lora/full)."
+
+[[upstream]]
+id = "upstream-args"
+file = "finetrainers/args.py"
+sha256 = "dd6297e33593761a63bfe13714d0d8aeb8334138a197b24282e222895e8e63d1"
+licence = "Apache-2.0"
+notes = "All training arguments; conditioning subset ported into configs.py."
+
+[[upstream]]
+id = "upstream-trainer"
+file = "finetrainers/trainer.py"
+sha256 = "f04d9e154ad56d2e43661b3a71886763522d9aa0beb36a4d26b0cfadcbfd898a"
+licence = "Apache-2.0"
+notes = "Trainer.prepare_precomputations: two-sweep precompute, .pt naming, dataloader swap."
+
+[[upstream]]
+id = "upstream-data-utils"
+file = "finetrainers/utils/data_utils.py"
+sha256 = "14c9c844098904540df0cd2dd0c0d1f002ac21f9937aac17c90bf6c48e5ab2e4"
+licence = "Apache-2.0"
+notes = "should_perform_precomputation: skip / clean-and-rerun decision."
+
+[[upstream]]
+id = "upstream-file-utils"
+file = "finetrainers/utils/file_utils.py"
+sha256 = "84fc22f3e243723a2b935cff7409ee91e5a188c6fc4b5abe91a22bce9900e75e"
+licence = "Apache-2.0"
+notes = "string_to_filename (model id -> directory-safe name)."
+
+[[upstream]]
+id = "upstream-cog-lora"
+file = "finetrainers/cogvideox/lora.py"
+sha256 = "279624b63ae3a7136a94e68db84ad4f77deb17ddd1486b8ac2c55eef56ee664c"
+licence = "Apache-2.0"
+notes = "CogVideoX T5 conditions (max 226), VAE latents, _pad_frames, scaling."
+
+[[upstream]]
+id = "upstream-hunyuan-lora"
+file = "finetrainers/hunyuan_video/lora.py"
+sha256 = "f26eb9d73e0240784968898863731e522734aef190d8d7e3d70a5ac727f28f04"
+licence = "Apache-2.0"
+notes = "HunyuanVideo Llama+CLIP conditions (max 256), prompt template, guidance x1000."
+
+[[upstream]]
+id = "upstream-ltx-lora"
+file = "finetrainers/ltx_video/lora.py"
+sha256 = "1f2e33ac03e269f0dc8d1752fb07b48af3cbc8cd525d9ffd57ae37049f5d32c2"
+licence = "Apache-2.0"
+notes = "LTX-Video T5 conditions (max 128), _normalize_latents, _pack_latents."
+
+[[upstream]]
+id = "upstream-ltx-full"
+file = "finetrainers/ltx_video/full_finetune.py"
+sha256 = "cdbe6b0474aa841bbecb2f11b6bdf9f0c345dd35353bcd230a1a73132166960d"
+licence = "Apache-2.0"
+notes = "LTX full-finetune reuses the same condition/latent hooks."
+
+[[upstream]]
+id = "upstream-dataset-docs"
+file = "docs/dataset/README.md"
+sha256 = "595f6df8eb6b896f40bd828ad4260ecb43f271748f5de5896423d2287b849e1c"
+licence = "Apache-2.0"
+notes = "Dataset format docs: two-file, CSV, JSON, JSONL + LLM-prefix note."
+
+[[upstream]]
+id = "upstream-prepare-dataset-sh"
+file = "training/prepare_dataset.sh"
+sha256 = "26533f94d5f65930573871ad4e8d0d448e5ea905bc776060207ab4baabf950a5"
+licence = "Apache-2.0"
+notes = "Precompute invocation: --save_latents_and_embeddings, bucket flags."
+
+[[upstream]]
+id = "upstream-test-dataset"
+file = "tests/test_dataset.py"
+sha256 = "ca1d4a75d3f397594e708b8fc1f4be4bb957e16b990f9bb66ba0ee99428e1a8a"
+licence = "Apache-2.0"
+notes = "Upstream dataset tests (torch/decord): shapes (49,3,480,720) etc."
+
+[[upstream]]
+id = "upstream-fixture-metadata-csv"
+file = "assets/tests/metadata.csv"
+sha256 = "0229aa44b475fa2a25d1f3d6f8e2c5e1b0bd7e0faef0bcec82362f2dc4af0e47"
+licence = "Apache-2.0"
+notes = "Vendored fixture: CSV dataset, 1 row (video,caption)."
+
+[[upstream]]
+id = "upstream-fixture-prompts"
+file = "assets/tests/prompts.txt"
+sha256 = "35abe1d337bed1412da0916616a9ec63c1cf19945292899567cf6f2de57afebc"
+licence = "Apache-2.0"
+notes = "Vendored fixture: two-file captions, 1 row."
+
+[[upstream]]
+id = "upstream-fixture-prompts-multi"
+file = "assets/tests/prompts_multi.txt"
+sha256 = "28bc95bb404c06e4a974e855149b8262e35cb56a11a217a876a4f7b160dfabd3"
+licence = "Apache-2.0"
+notes = "Vendored fixture: two-file captions, 2 rows."
+
+[[upstream]]
+id = "upstream-fixture-videos"
+file = "assets/tests/videos.txt"
+sha256 = "278c51bb1572e3092ca4baf639a64ff415022eec6d5194c08ad77e557735d055"
+licence = "Apache-2.0"
+notes = "Vendored fixture: two-file video paths, 1 row."
+
+[[upstream]]
+id = "upstream-fixture-videos-multi"
+file = "assets/tests/videos_multi.txt"
+sha256 = "7b2f9e088569d259ae21c9537dc38bf824a7ae01c56fe800c696a73d252e82b6"
+licence = "Apache-2.0"
+notes = "Vendored fixture: two-file video paths, 2 rows."
+
+[[upstream]]
+id = "upstream-fixture-hiker"
+file = "assets/tests/videos/hiker.mp4"
+sha256 = "31cff3a767260b9b9cd5fd21ff81fa987452991295fd73ba439c63394c6f93d2"
+licence = "Apache-2.0"
+notes = "Vendored fixture: real H.264 clip, 720x480, 49 frames."
+
+[[upstream]]
+id = "upstream-fixture-hiker-tiny"
+file = "assets/tests/videos/hiker_tiny.mp4"
+sha256 = "b8ef074befce5b73b604d06ec036052462c2a5f1190bdfa5448b5a964ae63dc4"
+licence = "Apache-2.0"
+notes = "Vendored fixture: real H.264 clip, 368x240, 49 frames."
+
+[[devon]]
+id = "devon-conditioning-errors"
+file = "nomorals/training/conditioning/errors.py"
+derives_from = []
+notes = "Devon errors: ConditioningError (ValueError) + ConditioningUnavailable."
+
+[[devon]]
+id = "devon-conditioning-constants"
+file = "nomorals/training/conditioning/constants.py"
+derives_from = ["upstream-constants"]
+notes = "Verbatim port of upstream constants.py + Devon model-id table + manifest name."
+
+[[devon]]
+id = "devon-conditioning-formats"
+file = "nomorals/training/conditioning/formats.py"
+derives_from = ["upstream-dataset", "upstream-dataset-docs"]
+notes = "Four dataset loaders + LLM-prefix cleaning + id_token (dataset.py loading half)."
+
+[[devon]]
+id = "devon-conditioning-buckets"
+file = "nomorals/training/conditioning/buckets.py"
+derives_from = ["upstream-dataset"]
+notes = "Resolution buckets + BucketSampler as pure shape math; three upstream bugs fixed."
+
+[[devon]]
+id = "devon-conditioning-frames"
+file = "nomorals/training/conditioning/frames.py"
+derives_from = ["upstream-dataset"]
+notes = "ffmpeg/PIL decode + preprocess replacing decord/torchvision (same math)."
+
+[[devon]]
+id = "devon-conditioning-precomputed"
+file = "nomorals/training/conditioning/precomputed.py"
+derives_from = ["upstream-dataset", "upstream-data-utils", "upstream-file-utils", "upstream-trainer"]
+notes = "Store layout, naming, should_perform_precomputation, TensorIO codecs."
+
+[[devon]]
+id = "devon-conditioning-encoders"
+file = "nomorals/training/conditioning/encoders.py"
+derives_from = ["upstream-models", "upstream-cog-lora", "upstream-hunyuan-lora", "upstream-ltx-lora"]
+notes = "Condition specs, lazy model loading, RealEncoders, post-latent math."
+
+[[devon]]
+id = "devon-conditioning-precompute"
+file = "nomorals/training/conditioning/precompute.py"
+derives_from = ["upstream-trainer"]
+notes = "Precomputer orchestration (two sweeps) + demo encoders + config runner."
+
+[[devon]]
+id = "devon-conditioning-configs"
+file = "nomorals/training/conditioning/configs.py"
+derives_from = ["upstream-args"]
+notes = "ConditioningConfig + CLI parsing (upstream flag names/defaults)."
+
+[[devon]]
+id = "devon-conditioning-parity"
+file = "nomorals/training/conditioning/parity.py"
+derives_from = []
+notes = "Parity runner (TOML-driven, executes cases against the real package)."
+
+[[devon]]
+id = "devon-conditioning-attribution"
+file = "nomorals/training/conditioning/attribution.py"
+derives_from = []
+notes = "Attribution runner (SHA-256 verification against the clone)."
+
+[[devon]]
+id = "devon-conditioning-init"
+file = "nomorals/training/conditioning/__init__.py"
+derives_from = []
+notes = "Public surface of the conditioning package."
+
+[[devon]]
+id = "devon-prepare-conditions-cli"
+file = "training/prepare_conditions.py"
+derives_from = ["upstream-train-entry", "upstream-prepare-dataset-sh"]
+notes = "Runnable CLI: load dataset -> precompute store (real or demo encoders)."
+
+[[devon]]
+id = "devon-conditioning-tests"
+file = "tests/test_gapfix_finetrainers.py"
+derives_from = ["upstream-test-dataset"]
+notes = "Lane tests: formats, buckets, store, specs, precompute, parity, attribution."
+
+[[devon]]
+id = "devon-conditioning-fixtures"
+file = "tests/fixtures/finetrainers-conditioning/README.md"
+derives_from = ["upstream-fixture-metadata-csv", "upstream-fixture-hiker"]
+notes = "Fixture provenance note (vendored vs derived files)."
