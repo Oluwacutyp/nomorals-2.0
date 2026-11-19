@@ -1,0 +1,131 @@
+# AniCraft attribution — upstream files pinned by SHA-256 at the ported commit.
+# Upstream: storytold/anicraft, MIT OR Apache-2.0.
+upstream_repo = "https://github.com/storytold/AniCraft"
+upstream_commit = "bcfea816478f2a00ab172cefe67f0bd5696b3886"
+ai_repo = "https://github.com/storytold/craft-ai-integrations"
+ai_commit = "02068b0424b2018b7b188258414bb2ac3a8b1e3d"
+
+[[assets]]
+kind = "upstream"
+path = "crates/doc/src/easing.rs"
+sha256 = "7c9f8f4c42282d3c5d45fc303a757c5c01159792a9b9fe911402e0d3a30d4ff7"
+devon = "nomorals/media/animation/easing.py"
+
+[[assets]]
+kind = "upstream"
+path = "crates/doc/src/easing_tests.rs"
+sha256 = "e69df6684f246025e86e00c06559261df079b03e78497bdc137d5c6f34983fcf"
+devon = "nomorals/media/animation/easing.py (ground truth)"
+
+[[assets]]
+kind = "upstream"
+path = "crates/doc/src/eval.rs"
+sha256 = "711d0f522580fb4b5b7676e57c47af48320c1fb28a3feabfda5431e7da890151"
+devon = "nomorals/media/animation/eval.py"
+
+[[assets]]
+kind = "upstream"
+path = "crates/doc/src/lib.rs"
+sha256 = "a4768d514479584295a682454758ce1d27365e39a6935240acced5ede8abd094"
+devon = "nomorals/media/animation/model.py"
+
+[[assets]]
+kind = "upstream"
+path = "crates/doc/src/player.rs"
+sha256 = "7a13003c604eb9796f25a12662a8e724793d23bddd971e453ff4294971e8b4a0"
+devon = "nomorals/media/animation/player.py"
+
+[[assets]]
+kind = "upstream"
+path = "crates/doc/src/publish.rs"
+sha256 = "270a6e566f50346ceb701d0a832fa18865760533fbd307fc3889edf1cb09f227"
+devon = "nomorals/media/animation/publish.py"
+
+[[assets]]
+kind = "upstream"
+path = "crates/doc/src/motion.rs"
+sha256 = "a939f9365c278501adb19b9563cf4bdf3bbca84d83740bbd0974cb3b50730562"
+devon = "nomorals/media/animation/model.py (MotionTween)"
+
+[[assets]]
+kind = "upstream"
+path = "crates/xfl/src/import.rs"
+sha256 = "6da8166d40a9ce3ce1b85f4a2f6c02e6fb34577f3a0f6fda97ab8ac00c910689"
+devon = "nomorals/media/animation/xfl.py"
+
+[[assets]]
+kind = "upstream"
+path = "crates/render/src/raster.rs"
+sha256 = "beaa3842ed90c1cc4f933f3b38c564445607ccfa8d8510ad0916392512aae8cd"
+devon = "nomorals/media/animation/render.py"
+
+[[assets]]
+kind = "upstream"
+path = "crates/engine/src/history.rs"
+sha256 = "ac207c7a1753a99866a530b91291b9bbc87a92285ca1ed41728ecb57e38d2a5b"
+devon = "nomorals/media/animation/edit.py"
+
+[[assets]]
+kind = "upstream"
+path = "crates/engine/src/cmds_timeline.rs"
+sha256 = "c0021719f2ffc6e02ae5c11f6e332d87384210b7070b6f564c1592a798b72d8d"
+devon = "nomorals/media/animation/edit.py"
+
+[[assets]]
+kind = "upstream"
+path = "crates/engine/src/cmds_retime.rs"
+sha256 = "b730ee1b670ad2e6ef9c9300c0f803f742c7f863c10eee922acc71feff12f08a"
+devon = "nomorals/media/animation/edit.py"
+
+[[assets]]
+kind = "upstream"
+path = "crates/geom/src/affine.rs"
+sha256 = "169d6a4d823cbfa82f594979ae6688dcb3d04ee4add16ce79717f6c160328564"
+devon = "nomorals/media/animation/geom.py"
+
+[[assets]]
+kind = "upstream"
+path = "crates/geom/src/path.rs"
+sha256 = "83f06ee3de0eca7f9978e45fa5d4f1fb59f47528459c38e3734c53cbb5ce785b"
+devon = "nomorals/media/animation/geom.py"
+
+[[assets]]
+kind = "upstream"
+repo = "craft-ai-integrations"
+path = "crates/ai-client/src/client.rs"
+sha256 = "f9527d5766c119621ba50cbc7025d6f8e080a478244db75ea54047cf30a3cb59"
+devon = "nomorals/media/animation/ai.py"
+
+[[assets]]
+kind = "upstream"
+repo = "craft-ai-integrations"
+path = "crates/ai-core/src/role.rs"
+sha256 = "a42570bc5d482f94e34933ae276701cb91b58cf6c4b46f12c114825d50b0f138"
+devon = "nomorals/media/animation/ai.py"
+
+[[assets]]
+kind = "upstream"
+repo = "craft-ai-integrations"
+path = "crates/ai-core/src/consent.rs"
+sha256 = "b055b86163cd78d292f9912cb810096b454d66b72bb30e9078c4d10de796f577"
+devon = "nomorals/media/animation/ai.py"
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/animation/library.py"
+lineage = "Devon-authored presets on the ported document model"
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/animation/parity.py"
+lineage = "Devon-authored parity runner (house habit)"
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/animation/attribution.py"
+lineage = "Devon-authored attribution runner (house habit)"
+
+[[assets]]
+kind = "devon"
+path = "nomorals/tools/anicraft.py"
+lineage = "Devon-authored brain tool surface over the organ"

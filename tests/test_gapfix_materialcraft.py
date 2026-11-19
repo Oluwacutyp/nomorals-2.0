@@ -388,8 +388,9 @@ class TestTool:
             assert "inspect" in spec.description
             # 727 after the cadcraft port (lane 106), 728 after
             # the materialcraft port (lane 109), 729 after the
-            # texturecraft port (lane 108).
-            assert len(registry._tools) == 729
+            # texturecraft port (lane 108), 730 after the
+            # anicraft port (lane 110).
+            assert len(registry._tools) == 730
 
     def test_tool_inspect_and_cook(self):
         with tempfile.TemporaryDirectory() as home:

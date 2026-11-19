@@ -1,0 +1,105 @@
+# AniCraft parity — real fixtures, real operations, expected outcomes.
+# A missing fixture FAILS its case, never a silent skip.
+schema_version = 1
+
+[[cases]]
+id = "easing-quad-in"
+ops = ["easing"]
+easing = "quad-in"
+t = 0.5
+[cases.expect]
+value = 0.25
+
+[[cases]]
+id = "easing-bounce-out"
+ops = ["easing"]
+easing = "bounce-out"
+t = 0.5
+[cases.expect]
+value = 0.765625
+
+[[cases]]
+id = "easing-elastic-in"
+ops = ["easing"]
+easing = "elastic-in"
+t = 0.5
+[cases.expect]
+value = -0.015625
+
+[[cases]]
+id = "easing-classic-minus-100"
+ops = ["classic"]
+strength = -100.0
+t = 0.5
+[cases.expect]
+value = 0.25
+
+[[cases]]
+id = "simple-inspect"
+fixture = "simple.acraft"
+ops = ["inspect"]
+[cases.expect]
+layers = 1
+keyframes = 2
+elements = 2
+
+[[cases]]
+id = "simple-roundtrip"
+fixture = "simple.acraft"
+ops = ["roundtrip"]
+[cases.expect]
+byte_identical = true
+
+[[cases]]
+id = "simple-eval-mid"
+fixture = "simple.acraft"
+ops = ["eval"]
+frame = 6
+[cases.expect]
+x = 80.0
+items = 1
+
+[[cases]]
+id = "simple-eval-end"
+fixture = "simple.acraft"
+ops = ["eval"]
+frame = 20
+[cases.expect]
+x = 160.0
+items = 1
+
+[[cases]]
+id = "bounce-eval-squash"
+fixture = "bounce.acraft"
+ops = ["eval"]
+frame = 12
+[cases.expect]
+scale_x = 1.25
+scale_y = 0.75
+items = 1
+
+[[cases]]
+id = "bounce-gif"
+fixture = "bounce.acraft"
+ops = ["publish"]
+format = "gif"
+[cases.expect]
+frame_count = 36
+exists = true
+
+[[cases]]
+id = "xfl-import"
+fixture = "sample.xfl"
+ops = ["xfl"]
+[cases.expect]
+layers = 2
+keyframes_layer0 = 2
+first_element_kind = "shape"
+
+[[cases]]
+id = "undo-restores"
+fixture = "simple.acraft"
+ops = ["undo"]
+[cases.expect]
+keyframes_before = 2
+keyframes_after_undo = 2
