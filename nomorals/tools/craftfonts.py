@@ -38,7 +38,8 @@ from ..media.typography.craftfonts import (
 __all__ = ["register"]
 
 _ACTIONS = ("catalog", "for_script", "check", "load", "install",
-            "bundle", "render", "parity", "attribution")
+            "bundle", "render", "preview", "health", "parity",
+            "attribution")
 
 
 def _home(params: dict[str, Any]) -> Path:
@@ -81,6 +82,25 @@ def _installed_face(store: Path, family: str) -> dict[str, Any] | None:
     return None
 
 
+def _preview_service(params: dict[str, Any]):
+    """The font-preview service for this call.
+
+    A ``home`` override (tests, alternate homes) gets a fresh
+    service rooted at that home; otherwise the process-wide one
+    — its catalogue build is the expensive part and is cached
+    per instance.
+    """
+    from ..media.typography.preview import (
+        FontPreviewService,
+        get_preview_service,
+    )
+    if params.get("home"):
+        from ..media.typography.service import TypographyService
+        return FontPreviewService(
+            TypographyService(store_dir=_home(params) / "typography"))
+    return get_preview_service()
+
+
 def register(registry: Any) -> None:
     """Attach the craftfonts family to a registry."""
     @registry.register(
@@ -101,9 +121,17 @@ def register(registry: Any) -> None:
             "sources=[<dir>], params=<{allowlist: [[family, style], ...], "
             "output: <path>}>>; render=<render text with an installed "
             "face, value=<text>, params=<{family, size, home, output: "
-            "<path>}>>; parity=<run the machine-checked parity TOML>; "
-            "attribution=<verify the SHA-256 attribution DB>. action=<"
-            "catalog|for_script|check|load|install|bundle|render|parity|"
+            "<path>}>>; preview=<render a text sample in a named font "
+            "at a size/style into a PNG preview through the "
+            "font-preview service (any catalogue family, not just "
+            "installed craft-fonts faces), value=<text>, params=<"
+            "{family, size, weight, style: regular|bold|italic|"
+            "bold-italic, format: png, max_width, home, output: "
+            "<path>}>>; health=<preview-service health: status, fonts "
+            "indexed, cache stats, shaping engine>; parity=<run the "
+            "machine-checked parity TOML>; attribution=<verify the "
+            "SHA-256 attribution DB>. action=<catalog|for_script|check|"
+            "load|install|bundle|render|preview|health|parity|"
             "attribution>; sources=<list of checkout paths>; output=<"
             "path to write>; value=<script code or text>; params=<dict>."
         ),
@@ -214,4 +242,45 @@ def register(registry: Any) -> None:
                     "png_bytes": len(png),
                     "png_sha256": hashlib.sha256(png).hexdigest(),
                     "output": target or None}
+        if action == "health":
+            return {"ok": True, **_preview_service(opts).health()}
+        if action == "preview":
+            from ..media.typography.fontlib import FontNotStocked
+            from ..media.typography.preview import (
+                PreviewBusy,
+                PreviewError,
+                PreviewRequest,
+            )
+
+            def _as_int(raw: Any, name: str) -> int | None:
+                if raw is None:
+                    return None
+                try:
+                    return int(raw)  # type: ignore[arg-type]
+                except (TypeError, ValueError):
+                    raise PreviewError(
+                        "craftfonts preview: "
+                        f"{name} {raw!r} is not a number") from None
+
+            try:
+                request = PreviewRequest(
+                    family=str(opts.get("family", "") or ""),
+                    text=value or str(opts.get("text", "")),
+                    size=_as_int(opts.get("size", 48), "size"),
+                    weight=_as_int(opts.get("weight"), "weight"),
+                    style=str(opts.get("style", "regular") or "regular"),
+                    format=str(opts.get("format", "png") or "png"),
+                    max_width=_as_int(opts.get("max_width"), "max_width"))
+                result = _preview_service(opts).preview(request)
+            except (FontNotStocked, PreviewError, PreviewBusy,
+                    RuntimeError, TypeError, ValueError) as exc:
+                return {"ok": False, "error": str(exc),
+                        "error_kind": type(exc).__name__}
+            payload = result.to_dict()
+            target = output or str(opts.get("output", ""))
+            if target:
+                Path(target).expanduser().write_bytes(
+                    Path(result.path).read_bytes())
+            payload["output"] = target or None
+            return {"ok": True, **payload}
         raise ValueError(f"unknown craftfonts action: {action}")

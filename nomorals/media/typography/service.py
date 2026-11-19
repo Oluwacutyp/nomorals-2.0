@@ -203,12 +203,12 @@ class TypographyService:
                             max_width=max_width, script=script,
                             weight=weight, family=family,
                             padding=padding, preview=False,
-                            surface_family=surface_family)
+                            surface_family=surface_family)[0]
 
     def preview_text(self, text: str, **kwargs: Any) -> Path:
         """A lightweight preview of the same render (capped font
         size, its own cache identity)."""
-        return self._render(text, preview=True, **kwargs)
+        return self._render(text, preview=True, **kwargs)[0]
 
     def _render(self, text: str, *, intent: str = "text", size: int = 48,
                 fill=(255, 255, 255, 255), stroke_width: int = 0,
@@ -216,14 +216,24 @@ class TypographyService:
                 max_width: int | None = None, script: str | None = None,
                 weight: int | None = None, family: str | None = None,
                 padding: int = 12, preview: bool = False,
-                surface_family: str | None = None) -> Path:
+                surface_family: str | None = None,
+                selection: Selection | None = None) -> tuple[Path, bool]:
+        """Render and cache one asset; returns (path, cache_hit).
+
+        ``selection`` is a pre-made choice (a caller that already
+        selected — e.g. style-adjusted — passes it in); without
+        one the render selects here. The cache identity is the
+        material dict, so a pre-made selection that resolves to
+        the same face, size and colours is the same asset.
+        """
         from PIL import Image, ImageDraw
 
         text = str(text)
         eff_size = min(size, _PREVIEW_MAX_SIZE) if preview else size
-        selection = self.select(intent, script=script, text=text,
-                                weight=weight, family=family,
-                                surface_family=surface_family)
+        if selection is None:
+            selection = self.select(intent, script=script, text=text,
+                                    weight=weight, family=family,
+                                    surface_family=surface_family)
         face = selection.face
         if face is None:
             raise RuntimeError(
@@ -244,7 +254,7 @@ class TypographyService:
         key = RenderCache.key(material)
         hit = self.cache.get(key)
         if hit is not None:
-            return hit
+            return hit, True
         font = shaping.load_font(face.path, eff_size, face.face_index)
         lines = shaping.wrap_text(text, font, max_width) \
             if max_width else text.split("\n")
@@ -274,7 +284,7 @@ class TypographyService:
         img.save(buf, format="PNG")
         return self.cache.put(key, buf.getvalue(), {
             "family": face.family, "intent": intent,
-            "size": eff_size, "preview": preview})
+            "size": eff_size, "preview": preview}), False
 
     def cache_stats(self) -> dict[str, Any]:
         return self.cache.stats()

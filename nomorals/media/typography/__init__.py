@@ -27,6 +27,17 @@ from .policy import (
     emoji_font_path,
     pil_font_for,
 )
+from .preview import (
+    FontPreviewService,
+    PreviewBusy,
+    PreviewError,
+    PreviewRequest,
+    PreviewResult,
+    PreviewTooLarge,
+    UnsupportedPreviewFormat,
+    get_preview_service,
+    reset_preview_service,
+)
 from .selection import INTENTS, Selection, face_traits, select
 from .service import TypographyService, get_service, reset_service
 from .shaping import (
@@ -42,12 +53,17 @@ from .shaping import (
 __all__ = [
     "CONTEXT_POLICIES", "ContextFontPolicy",
     "FontCatalogue", "FontFace", "FontLibrary", "FontNotStocked",
-    "INTENTS", "RenderCache", "Selection",
-    "TypographyService", "build_catalogue", "context_policy",
+    "FontPreviewService", "INTENTS",
+    "PreviewBusy", "PreviewError", "PreviewRequest", "PreviewResult",
+    "PreviewTooLarge",
+    "RenderCache", "Selection",
+    "TypographyService", "UnsupportedPreviewFormat",
+    "build_catalogue", "context_policy",
     "default_roots",
     "dominant_direction", "emoji_font_path", "face_traits",
-    "get_service", "graphemes",
-    "load_font", "parse_font_file", "pil_font_for", "reset_service",
+    "get_preview_service", "get_service", "graphemes",
+    "load_font", "parse_font_file", "pil_font_for",
+    "reset_preview_service", "reset_service",
     "script_fraction",
     "select", "shaped_width", "shaping_engine", "unshaped_width",
     "wrap_text",
