@@ -1,0 +1,57 @@
+# Shared CI setup step (thin-caller contract, census §3B.4).
+#
+# One composite action for the setup every CI job repeats: the Python
+# interpreter, TMPDIR pointed at the runner temp dir, the dev tooling
+# pip set, and optionally ffmpeg.  Jobs call it; they do not restate
+# these steps.  Third-party actions are pinned by full commit SHA
+# (see nomorals/tools/ci_contract.py).
+name: "CI Python setup"
+description: "Set up Python for a CI job: interpreter, TMPDIR, dev tooling, optional ffmpeg."
+inputs:
+  python-version:
+    description: "Python version to install"
+    required: true
+  dev-deps:
+    description: "Install the dev/media pip set (true) or nothing extra (false)"
+    required: false
+    default: "true"
+  with-ffmpeg:
+    description: "Install ffmpeg via apt (true/false)"
+    required: false
+    default: "false"
+runs:
+  using: "composite"
+  steps:
+    # NOTE: the `runner` context is NOT available in job-level `env`
+    # (GitHub fails the whole run at evaluation time, 0s, no jobs), so
+    # TMPDIR is exported here via $GITHUB_ENV instead of a job-level env:.
+    - name: Point TMPDIR at the runner temp dir
+      shell: bash
+      run: echo "TMPDIR=${{ runner.temp }}" >> "$GITHUB_ENV"
+
+    - name: Set up Python ${{ inputs.python-version }}
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install system dependencies (ffmpeg for video tests)
+      if: inputs.with-ffmpeg == 'true'
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq ffmpeg
+
+    - name: Install package + dev tooling
+      if: inputs.dev-deps == 'true'
+      shell: bash
+      run: |
+        python3 -m pip install --upgrade pip
+        # The offline suite exercises optional-acceleration paths for real
+        # (numpy/pandas/Pillow/yt-dlp), so CI installs them to match a real
+        # dev checkout; pyyaml is for the workflow self-check below;
+        # python-docx/openpyxl are for the document-engine tests. None
+        # are added to the package's own extras on purpose: the package
+        # keeps zero mandatory dependencies.
+        python3 -m pip install -e ".[dev,fast,media,media-edit]" \
+          "pandas>=2" "pyyaml>=6" "python-docx>=1.1" "openpyxl>=3.1" \
+          "ruff==0.17.3"
