@@ -495,7 +495,13 @@ def _parse_gdb_log(text: str) -> dict[str, Any]:
             continue
         m = _EXIT_RE.search(line)
         if m:
-            exit_code = int(m.group(1))
+            # GDB renders the exit status in OCTAL on this line
+            # ("052" is 42, "0177" is 127, "0377" is 255 — measured
+            # across exit codes 1/7/8/42/127/255 on GDB 15.1), so
+            # reading it as decimal misfiled every exit code >= 8
+            # in the Evidence record (42 filed as 52). Exit 0
+            # prints no such line; it arrives via $_exitcode below.
+            exit_code = int(m.group(1), 8)
             continue
         m = _EXITCODE_RE.search(line)
         if m and exit_code is None:
