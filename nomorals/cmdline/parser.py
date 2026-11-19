@@ -508,6 +508,16 @@ def _parser() -> argparse.ArgumentParser:
     update.add_argument("--yes", action="store_true",
                         help="non-interactive: assume yes to all prompts")
     update.add_argument("--json", action="store_true")
+    update.add_argument("--package", default="",
+                        help="install a verified update package instead of "
+                        "the git pull path (Craft-Launcher: the package is "
+                        "verified first and installed only if it passes)")
+    update.add_argument("--root", default="",
+                        help="install root for --package "
+                        "(default: the repo root)")
+    update.add_argument("--home", default="",
+                        help="launcher home for --package "
+                        "(default: ~/.nomorals)")
 
     golden = sub.add_parser("golden",
                             help="golden end-to-end mission drills")

@@ -336,11 +336,12 @@ class EngineTest(unittest.TestCase):
             effects=E.READ_ONLY)
         cls.engine = CraftEngine(cls.registry, max_result_bytes=1024)
 
-    def test_tool_count_is_731_after_craftanything(self):
+    def test_tool_count_is_732_after_craftlauncher(self):
         # 730 after the craft-anything port (lane 111) at its base,
         # 731 after the anicraft port (lane 110) landed between that
-        # base and this rebase.
-        self.assertEqual(self.base_count, 731)
+        # base and this rebase, 732 after the craft-launcher port
+        # (lane 112) added the craftlauncher tool.
+        self.assertEqual(self.base_count, 732)
 
     def test_unknown_tool_is_error_not_panic(self):
         result = self.engine.call("no_such_tool", {})

@@ -700,6 +700,7 @@ class ToolRegistry:
             "texturecraft",  # open/edit/paint/tile/render real .tcraft — sparse 64x64 COW tiles, procedural patterns, layer compositor, mipmaps, normal derivation, parity + attribution (TextureCraft port)
             "anicraft",  # design/play/publish real 2D vector animations — document model, Penner easings, timeline evaluator, frame renderer, publish formats, XFL interchange, parity + attribution (AniCraft port)
             "craftanything",  # ToolSpec effects + consent gates generalising the registry — list/inspect/call through one effect-checked, consent-gated dispatch, toolsets, standing rules, journals, plan + run multi-step tasks (Craft-Anything port)
+            "craftlauncher",  # verify-then-install updates through a trusted catalog — catalog trust rules, atomic swap, health-gated rollback, journal (Craft-Launcher port)
             "workspace",
             "trading",
             "characters",

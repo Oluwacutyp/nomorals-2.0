@@ -27,6 +27,37 @@ def _cmd_update(args: argparse.Namespace, settings: Any) -> int:
     check_only = bool(getattr(args, "check_only", False))
     repo = _repo_dir(args)
 
+    # Craft-Launcher path: a verified package install instead of the
+    # git pull. The package path needs no snapshot manager — the
+    # pipeline verifies first, swaps atomically, and rolls back on
+    # health failure — so this branch runs before _manager().
+    package = getattr(args, "package", "") or ""
+    if package:
+        from ...os.launcher import LauncherPipeline, default_catalog
+        from ...os.launcher.errors import InstallError, TrustError, VerificationError
+        root = Path(getattr(args, "root", "") or "").expanduser() \
+            if getattr(args, "root", "") else repo
+        home_arg = getattr(args, "home", "") or ""
+        home = Path(home_arg).expanduser() if home_arg \
+            else Path.home() / ".nomorals"
+        pipe = LauncherPipeline(root=root, home=home,
+                                catalog=default_catalog())
+        try:
+            result = pipe.install(package)
+        except (VerificationError, TrustError, InstallError) as exc:
+            print(f"package update refused: {exc}")
+            return 1
+        if result.ok:
+            print(f"installed {result.installed_version}"
+                  + (" (restart required)"
+                     if result.restart_required else ""))
+            if result.restart_required:
+                print("restart intent written; "
+                      "restart Devon to run the new version")
+            return 0
+        print(f"package update FAILED and was rolled back: {result.error}")
+        return 1
+
     if not yes and not check_only:
         print(f"this will: snapshot state, git pull in {repo}, migrate, "
               "health-check, and roll back automatically on any failure.")

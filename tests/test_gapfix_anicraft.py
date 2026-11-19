@@ -678,5 +678,6 @@ def test_registry_tool_count(self=None):
     # 728 after the materialcraft port (lane 109), 729 after the
     # texturecraft port (lane 108), 730 after the anicraft port
     # (lane 110) added the anicraft tool, 731 after the craft-anything
-    # port (lane 111) added the craftanything tool.
-    assert len(registry._tools) == 731
+    # port (lane 111) added the craftanything tool, 732 after the
+    # craftlauncher port (lane 112) added the craftlauncher tool.
+    assert len(registry._tools) == 732

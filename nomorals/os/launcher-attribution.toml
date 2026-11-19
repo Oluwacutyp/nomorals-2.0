@@ -1,0 +1,99 @@
+# Craft-Launcher attribution: every ported unit traced to its upstream
+# file at storytold/craft-launcher 9a317f2a8a6282d1a7de436b834f9ed88fac5334
+# (dual MIT/Apache-2.0). The craft_update crate (upstream's self-update
+# engine) arrives as a git dependency and is NOT in the launcher clone,
+# so it is recorded under [noted], never hash-faked.
+
+[[upstream]]
+file = "crates/core/src/catalog.rs"
+sha256 = "6229506adda3fc4f2d867f32e4098b20c93e02db02e19ef79d7c8f435d41163c"
+ported_to = "nomorals/os/launcher/catalog.py"
+
+[[upstream]]
+file = "crates/core/src/release.rs"
+sha256 = "5f3030f0fa1a89a5ad9ef488aa64d4f4c6b60e058f593aaaecce07d6bbbfb3bf"
+ported_to = "nomorals/os/launcher/catalog.py"
+
+[[upstream]]
+file = "crates/core/src/version.rs"
+sha256 = "7752d0e9e21e99c9d5e028ca37aedd80d75928cd52a2b51e5230d9b0042864ec"
+ported_to = "nomorals/os/launcher/version.py"
+
+[[upstream]]
+file = "crates/core/src/status.rs"
+sha256 = "970622915c7cef2b798e8836f62cf1a087df13703006b9e990e0169df38d59f2"
+ported_to = "nomorals/os/launcher/pipeline.py"
+
+[[upstream]]
+file = "crates/core/src/feed.rs"
+sha256 = "c3e1bf24cef836a6fe7d2a58437ec80728a7932d8fda562dd20ce029e7a050df"
+ported_to = "nomorals/os/launcher/catalog.py"
+
+[[upstream]]
+file = "crates/core/src/protocol.rs"
+sha256 = "123080cdc239e2dad3b41bd1e22bb4b764375c3657a02cf9df387aaefae0fd13"
+ported_to = "nomorals/os/launcher/catalog.py"
+
+[[upstream]]
+file = "crates/native/src/install.rs"
+sha256 = "d618c5ac7031613cb5005b519f9ba26f33dcf89c9468d76635a49a17bd74cfac"
+ported_to = "nomorals/os/launcher/pipeline.py"
+
+[[upstream]]
+file = "crates/native/src/self_update.rs"
+sha256 = "044d7b2412cce2d1cb4e00ad215a3c7bf6118fc93f6586bec21a2681c5f4bde1"
+ported_to = "nomorals/os/launcher/pipeline.py"
+
+[[upstream]]
+file = "crates/native/src/source.rs"
+sha256 = "ab8471bf7be87bc8c1cc213518879eedeff80befd86d9ebce6da453562f1329f"
+ported_to = "nomorals/os/launcher/catalog.py"
+
+[[upstream]]
+file = "crates/native/src/pins.rs"
+sha256 = "0e9097d9627a0e0943adf490b643521fc2f8f170293abb42207d36de44cd9083"
+ported_to = "nomorals/os/launcher/catalog.py"
+
+[[upstream]]
+file = "crates/native/src/manifest.rs"
+sha256 = "67408079eba6052b93e5683c32265e7b15ade4d3dbc56dbd151c9140c31bcdbb"
+ported_to = "nomorals/os/launcher/package.py"
+
+[[upstream]]
+file = "crates/native/src/packages.rs"
+sha256 = "ac05978ad1e792895a43cbed3c42389918696b801baaec8ee2970fb537a3392b"
+ported_to = "nomorals/os/launcher/package.py"
+
+[[upstream]]
+file = "crates/native/src/queue.rs"
+sha256 = "3b613e49f4947394713b08501e0e8bc994b14b12b93adea772a838309affed29"
+ported_to = "nomorals/os/launcher/pipeline.py"
+
+[[upstream]]
+file = "crates/native/src/backend.rs"
+sha256 = "649c5a16b00e02487b326bb10ae7554e480d3f7ad29f05c000fc3311fc6af5d1"
+ported_to = "nomorals/os/launcher/pipeline.py"
+
+[[devon]]
+file = "errors.py"
+derives_from = "lanes 99-111 habit: typed failures naming the cause"
+
+[[devon]]
+file = "journal.py"
+derives_from = "nomorals/os/update.py UpdateManager journal/history habit"
+
+[[devon]]
+file = "pipeline.py"
+derives_from = "nomorals/os/update.py UpdateManager transactional shape + crates/native/src/install.rs swap_into_place"
+
+[[devon]]
+file = "parity.py"
+derives_from = "lanes 99-111 habit: machine-checked parity TOML runner"
+
+[[devon]]
+file = "attribution.py"
+derives_from = "lanes 99-111 habit: SHA-256 attribution verifier"
+
+[[noted]]
+file = "craft_update crate (craft-libs, rev 4323a0f90e69e6e7a064607daacc25d081f58e1d)"
+reason = "upstream's self-update engine arrives as a git dependency and is not in the launcher clone, so no hash is claimed for it; the pipeline's swap/restart behaviour is ported from the launcher's own delegation in crates/native/src/self_update.rs"

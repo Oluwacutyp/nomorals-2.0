@@ -1,0 +1,91 @@
+# Craft-Launcher parity: the launcher's promises, run for real.
+# Each case names a fixture package and the outcome the pipeline must
+# produce. A missing fixture is a failed case, never a skip.
+# Upstream: storytold/craft-launcher 9a317f2a8a6282d1a7de436b834f9ed88fac5334.
+
+[[case]]
+id = "version-compare"
+kind = "version_compare"
+a = "1.2.3"
+b = "1.10.0"
+[case.expect]
+less = true
+
+[[case]]
+id = "version-stable"
+kind = "version_stable"
+version = "2.0.0-beta"
+[case.expect]
+stable = false
+
+[[case]]
+id = "trust-community-unpinned"
+kind = "trust"
+[case.expect]
+ok = false
+
+[[case]]
+id = "package-verify-valid"
+kind = "package_verify"
+fixture = "valid.zip"
+[case.expect]
+ok = true
+
+[[case]]
+id = "package-verify-tampered"
+kind = "package_verify"
+fixture = "tampered.zip"
+[case.expect]
+ok = false
+failure_contains = "engine.py"
+
+[[case]]
+id = "package-verify-incompatible"
+kind = "package_verify"
+fixture = "incompatible.zip"
+[case.expect]
+ok = false
+failure_contains = "99.0.0"
+
+[[case]]
+id = "package-verify-untrusted"
+kind = "package_verify"
+fixture = "untrusted.zip"
+[case.expect]
+ok = false
+failure_contains = "unknown source"
+
+[[case]]
+id = "package-verify-revoked"
+kind = "package_verify"
+fixture = "revoked.zip"
+revoked = true
+[case.expect]
+ok = false
+failure_contains = "revoked"
+
+[[case]]
+id = "install-verified"
+kind = "install"
+fixture = "valid.zip"
+[case.expect]
+version = "2.0.0"
+
+[[case]]
+id = "install-tampered-refused"
+kind = "install_refused"
+fixture = "tampered.zip"
+[case.expect]
+error = "VerificationError"
+
+[[case]]
+id = "install-untrusted-refused"
+kind = "install_refused"
+fixture = "untrusted.zip"
+[case.expect]
+error = "TrustError"
+
+[[case]]
+id = "install-health-rollback"
+kind = "install_rollback"
+fixture = "valid.zip"

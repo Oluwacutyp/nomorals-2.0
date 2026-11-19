@@ -390,8 +390,9 @@ class TestTool:
             # the materialcraft port (lane 109), 729 after the
             # texturecraft port (lane 108), 730 after the
             # anicraft port (lane 110), 731 after the
-            # craft-anything port (lane 111).
-            assert len(registry._tools) == 731
+            # craft-anything port (lane 111), 732 after the
+            # craftlauncher port (lane 112).
+            assert len(registry._tools) == 732
 
     def test_tool_inspect_and_cook(self):
         with tempfile.TemporaryDirectory() as home:

@@ -489,8 +489,9 @@ class ToolTests(unittest.TestCase):
         # cadcraft port (lane 106), 728 after the materialcraft
         # port (lane 109), 729 after the texturecraft port
         # (lane 108), 730 after the anicraft port (lane 110),
-        # 731 after the craft-anything port (lane 111).
-        self.assertEqual(len(registry._tools), 731)
+        # 731 after the craft-anything port (lane 111), 732 after the
+        # craftlauncher port (lane 112).
+        self.assertEqual(len(registry._tools), 732)
 
     def test_tool_inspect_and_render(self) -> None:
         import tempfile
