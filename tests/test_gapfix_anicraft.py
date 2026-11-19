@@ -683,5 +683,5 @@ def test_registry_tool_count(self=None):
     # 733 after the craft-libs port (lane 113) added the craftlibs tool,
     # 734 after the craft-fonts port (lane 114) added the craftfonts tool.
     # 735 after the indd-utils port (lane 117) added the inddutils tool.
-    # 748 after the auth-plugin wiring added 5 tools (session_forge, session_verify, payload_png_bomb, payload_svg_bomb, payload_keylogger) on top of the bughunter port (lane 121).
-    assert len(registry._tools) == 748
+    # 748 after the auth-plugin wiring added 5 tools (session_forge, session_verify, payload_png_bomb, payload_svg_bomb, payload_keylogger) on top of the bughunter port (lane 121). 749 after the mocap port (lane 125) added the mocap tool.
+    assert len(registry._tools) == 749

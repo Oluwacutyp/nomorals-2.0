@@ -9,7 +9,7 @@ never-imported ``_init_.py``. This file proves the wiring end to end
 against a local server: cookies ride on requests, Set-Cookie is stored
 (including on an error response), post() covers the plugins' shapes,
 all 12 plugins register, the forge stores + verifies a session, and
-the registry counts 748 tools.
+the registry counts 749 tools.
 """
 from __future__ import annotations
 
@@ -233,13 +233,13 @@ class AuthWiringTests(unittest.TestCase):
         self.assertIn(b"/Contents 3 0 R", data)
 
     # -- registry ------------------------------------------------------
-    def test_tool_count_is_748_after_auth_wiring(self):
+    def test_tool_count_is_749_after_auth_wiring(self):
         # 748 after the auth-plugin wiring added 5 tools (session_forge,
         # session_verify, payload_png_bomb, payload_svg_bomb,
-        # payload_keylogger) on top of the bughunter port (lane 121).
+        # payload_keylogger) on top of the bughunter port (lane 121). 749 after the mocap port (lane 125) added the mocap tool.
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 748)
+        self.assertEqual(len(registry._tools), 749)
         for name in ("session_forge", "session_verify", "payload_png_bomb",
                      "payload_svg_bomb", "payload_keylogger"):
             self.assertIn(name, registry._tools)

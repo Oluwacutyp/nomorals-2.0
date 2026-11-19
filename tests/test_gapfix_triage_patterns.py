@@ -15,7 +15,7 @@ only, no upstream code or text vendored):
 
 The tests prove the tables' edges: every threshold boundary, every
 truth-table row (all 256 signal combinations), and the tool surface
-that exercises both — with the tool count pinned at 748.
+that exercises both — with the tool count pinned at 749.
 """
 from __future__ import annotations
 
@@ -895,13 +895,13 @@ class TestToolSurface(unittest.TestCase):
         self.assertIn("urgent", unknown["error"])
         self.assertIn("prstate", unknown["error"])
 
-    def test_tool_count_stays_748(self) -> None:
+    def test_tool_count_stays_749(self) -> None:
         from nomorals.tools.registry import ToolRegistry
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
         # Lane 123 adds no tool: the four new actions ride the
-        # existing action-dispatched "triage" tool.
-        self.assertEqual(len(registry._tools), 748)
+        # existing action-dispatched "triage" tool. 749 after the mocap port (lane 125) added the mocap tool.
+        self.assertEqual(len(registry._tools), 749)
         self.assertIn("triage", registry._tools)
 
     def test_sync_stores_reactions_and_association(self) -> None:
