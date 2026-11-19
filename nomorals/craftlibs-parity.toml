@@ -1,0 +1,139 @@
+# Craft-Libs parity (lane 113). Real fixtures + operations + expected
+# outcomes for the shared libraries. A missing fixture fails, never
+# skips. Noise values are the textures/material parity pins (seed 7).
+
+[[cases]]
+id = "noise-point-value"
+operation = "noise_point"
+function = "point_value"
+point = [0.0, 0.0, 0.0]
+seed = 7
+expected = 0.044569507
+
+[[cases]]
+id = "noise-point-perlin"
+operation = "noise_point"
+function = "point_perlin"
+point = [0.5, 0.25, 0.125]
+seed = 7
+expected = 0.502421975
+
+[[cases]]
+id = "noise-point-fbm"
+operation = "noise_point"
+function = "point_fbm"
+point = [0.5, 0.25, 0.125]
+octaves = 5
+seed = 7
+base = "point_value"
+expected = 0.337487936
+
+[[cases]]
+id = "noise-point-cellular"
+operation = "noise_point"
+function = "point_cellular"
+point = [0.5, 0.25, 0.125]
+seed = 7
+component = 0
+expected = 0.851551
+
+[[cases]]
+id = "noise-point-worley"
+operation = "noise_point"
+function = "point_worley"
+point = [0.5, 0.25, 0.125]
+seed = 7
+expected = 0.851551
+
+[[cases]]
+id = "noise-grid-perlin"
+operation = "noise_grid"
+function = "grid_perlin"
+args = [8, 8, 2.0, 7]
+index = [0, 0]
+expected = 0.552639
+
+[[cases]]
+id = "noise-grid-value"
+operation = "noise_grid"
+function = "grid_value_noise"
+args = [8, 8, 2.0, 7]
+index = [0, 0]
+expected = 0.452911
+
+[[cases]]
+id = "noise-grid-fbm"
+operation = "noise_grid"
+function = "grid_fbm"
+args = [8, 8, 2.0, 3, 7]
+index = [0, 0]
+expected = 0.551907
+
+[[cases]]
+id = "noise-grid-worley"
+operation = "noise_grid"
+function = "grid_worley"
+args = [8, 8, 2.0, 7]
+index = [0, 0]
+expected = 0.371007
+
+[[cases]]
+id = "codec-round-trip"
+operation = "codec"
+document = {title = "parity", layers = 2}
+
+[[cases]]
+id = "pdf-safe-url-ok"
+operation = "pdf_safe_url"
+url = "https://example.com/x?q#f"
+safe = true
+
+[[cases]]
+id = "pdf-safe-url-refused"
+operation = "pdf_safe_url"
+url = "javascript:alert(1)"
+safe = false
+
+[[cases]]
+id = "pdf-round-trip"
+operation = "pdf_round_trip"
+text = "# Craftlibs parity\n\nHello.\n"
+title = "Craftlibs parity"
+contains = "Hello"
+
+[[cases]]
+id = "i18n-format-en"
+operation = "i18n_format"
+locale = "en"
+value = 1234.5
+decimals = 1
+expected = "1,234.5"
+
+[[cases]]
+id = "i18n-format-ar-eg"
+operation = "i18n_format"
+locale = "ar-EG"
+value = 1234.5
+decimals = 1
+expected = "١٬٢٣٤٫٥"
+
+[[cases]]
+id = "i18n-parse-de"
+operation = "i18n_parse"
+text = "1.234,5"
+locale = "de"
+expected = 1234.5
+
+[[cases]]
+id = "ai-suggest-motion"
+operation = "ai_suggest"
+prompt = "a ball bouncing happily"
+kind = "motion"
+expected = "bounce"
+
+[[cases]]
+id = "ai-suggest-easing"
+operation = "ai_suggest"
+prompt = "a ball bouncing happily"
+kind = "easing"
+expected = "bounce-out"

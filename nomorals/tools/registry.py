@@ -701,6 +701,7 @@ class ToolRegistry:
             "anicraft",  # design/play/publish real 2D vector animations — document model, Penner easings, timeline evaluator, frame renderer, publish formats, XFL interchange, parity + attribution (AniCraft port)
             "craftanything",  # ToolSpec effects + consent gates generalising the registry — list/inspect/call through one effect-checked, consent-gated dispatch, toolsets, standing rules, journals, plan + run multi-step tasks (Craft-Anything port)
             "craftlauncher",  # verify-then-install updates through a trusted catalog — catalog trust rules, atomic swap, health-gated rollback, journal (Craft-Launcher port)
+            "craftlibs",  # the shared libraries — ZIP package codec, both noise engines, ai-core data model, PDF primitives, i18n formatting rung, parity + attribution runners (Craft-Libs port)
             "workspace",
             "trading",
             "characters",

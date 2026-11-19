@@ -563,15 +563,16 @@ def test_pipeline_status_reports_installed(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_tool_registered_and_counts_732() -> None:
+def test_tool_registered_and_counts_733() -> None:
     registry = _registry()
     spec = registry.get("craftlauncher")
     assert spec is not None
     assert "verify" in spec.description
     # 730 after the anicraft port (lane 110), 731 after the
     # craft-anything port (lane 111), 732 after the craft-launcher
-    # port (lane 112) added the craftlauncher tool.
-    assert len(registry._tools) == 732
+    # port (lane 112) added the craftlauncher tool, 733 after the
+    # craft-libs port (lane 113) added the craftlibs tool.
+    assert len(registry._tools) == 733
 
 
 def _call(registry, **kwargs):

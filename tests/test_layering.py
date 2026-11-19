@@ -58,6 +58,12 @@ LAYERS: dict[str, int] = {
     # at L4 beside tools — it parses with tools/browser's HTML parser and
     # core/pdf, and reaches only downward.
     "documents": 4,
+    # craftlibs/ is the shared library home (lane 113): the ZIP package
+    # codec, the two noise engines, the ai-core data model, the PDF
+    # primitives and the i18n formatting rung. L4 beside media and
+    # documents — it imports core (L1), i18n (L3) and documents.pdfcraft
+    # (L4, same layer), and the media organs import it at the same layer.
+    "craftlibs": 4,
     # browser/ is the Wave K browser service (sessions/tabs/downloads/
     # screenshots as artifacts): wraps tools/browser's BrowserSession, L4.
     "browser": 4,

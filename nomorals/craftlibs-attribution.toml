@@ -1,0 +1,265 @@
+# Craft-Libs attribution (lane 113). Every ported unit maps to its
+# upstream file at its commit plus the SHA-256 of the source read.
+# Upstream: storytold/craft-libs at 38740b43, storytold/texturecraft
+# at 37ad2112, storytold/materialcraft at 4e8bb9ca — all dual
+# MIT/Apache-2.0. Devon-authored modules list their lineage below.
+
+[[assets]]
+id = "ai-core-ids"
+repo = "craft-libs"
+upstream = "crates/ai-core/src/ids.rs"
+sha256 = "9ad79f95786ad0b4eb29696965132ee77fc0b001049c59474a9f4c337c0718c9"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/ids.py"
+
+[[assets]]
+id = "ai-core-secret"
+repo = "craft-libs"
+upstream = "crates/ai-core/src/secret.rs"
+sha256 = "fc8f52ea4cf5e8fef42fcdedab8bf4c4dd12818b0df7945dd32beb5b08bf1916"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/secret.py"
+
+[[assets]]
+id = "ai-core-error"
+repo = "craft-libs"
+upstream = "crates/ai-core/src/error.rs"
+sha256 = "9cd1d332d5c2f8bfb3ad7fa3d1dc4f053f2fac55f3a7a7c2ddc84e42698a88aa"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/error.py"
+
+[[assets]]
+id = "ai-core-capability"
+repo = "craft-libs"
+upstream = "crates/ai-core/src/capability.rs"
+sha256 = "670122f9dfbe0f25b0fe082f02aea1ced00bab469dc78bddc3d51b0018daa6a4"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/capability.py"
+
+[[assets]]
+id = "ai-core-payload"
+repo = "craft-libs"
+upstream = "crates/ai-core/src/payload.rs"
+sha256 = "7258d6a33c93399af7a666e11e68a0b5a46be1b3122dedc6e27fdd0504b63e18"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/payload.py"
+
+[[assets]]
+id = "ai-core-model"
+repo = "craft-libs"
+upstream = "crates/ai-core/src/model.rs"
+sha256 = "b6b0309f3c6793d34a9c4564fd6104e1cf04112a8a46a2a98fb1729734199ab2"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/model.py"
+
+[[assets]]
+id = "ai-core-request"
+repo = "craft-libs"
+upstream = "crates/ai-core/src/request.rs"
+sha256 = "16924cc826ec5f4f4d42a8049dfd38cfae534e8728544192535334983479d49b"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/request.py"
+
+[[assets]]
+id = "ai-core-job"
+repo = "craft-libs"
+upstream = "crates/ai-core/src/job.rs"
+sha256 = "3580083e292aae30f50f4fe683a5070573d928a38709c89017b2394e0e1b66bb"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/job.py"
+
+[[assets]]
+id = "ai-core-endpoint"
+repo = "craft-libs"
+upstream = "crates/ai-core/src/endpoint.rs"
+sha256 = "b3c3a36e2a826a5717f892e386a75203bc6ad07157d4bb1be0421d966d4ab02e"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/endpoint.py"
+
+[[assets]]
+id = "ai-core-connection"
+repo = "craft-libs"
+upstream = "crates/ai-core/src/connection.rs"
+sha256 = "62fb55cc5cdccb3bbf770bb57d08e7f2eea8f50aad9705c252bab0020df9c76c"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/connection.py"
+
+[[assets]]
+id = "ai-core-role"
+repo = "craft-libs"
+upstream = "crates/ai-core/src/role.rs"
+sha256 = "bfbc19ceb026ed35fbe875eeadee3dac1eddc8977aa017225ccce27dc603465a"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/role.py"
+
+[[assets]]
+id = "ai-core-consent"
+repo = "craft-libs"
+upstream = "crates/ai-core/src/consent.rs"
+sha256 = "25d76cefd4242931036c505f3ad6d5232b12909db62fd77cb926dbca5a14d541"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/consent.py"
+
+[[assets]]
+id = "ai-core-history"
+repo = "craft-libs"
+upstream = "crates/ai-core/src/history.rs"
+sha256 = "33cd3d1f5434d207649893a5ad2af2f6b7513b61bca7687cf4e231ff22346beb"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/history.py"
+
+[[assets]]
+id = "ai-core-store"
+repo = "craft-libs"
+upstream = "crates/ai-core/src/store.rs"
+sha256 = "6dcb4c26bdbf808e863075cbd18d321172fa515beff37fe6fdb6bf2886f601a2"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/store.py"
+
+[[assets]]
+id = "ai-core-picks"
+repo = "craft-libs"
+upstream = "crates/ai-core/src/picks.rs"
+sha256 = "52c8d5be8e92a57d0bfc0f8e301bacaa16754f01e44d8a152d5df0f2c364c828"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/picks.py"
+
+[[assets]]
+id = "ai-core-spec"
+repo = "craft-libs"
+upstream = "crates/ai-core/src/spec.rs"
+sha256 = "c252f925e0865d0469425d086b2ffadf20270275e6a3f93d3ed28dcd95e8058e"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/spec/__init__.py"
+
+[[assets]]
+id = "ai-core-spec-check"
+repo = "craft-libs"
+upstream = "crates/ai-core/src/spec/check.rs"
+sha256 = "b04b88538ef54731615f6f524539bedf6efb804fa120a0b5c8c4ae45df786d23"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/spec/check.py"
+
+[[assets]]
+id = "ai-core-spec-template"
+repo = "craft-libs"
+upstream = "crates/ai-core/src/spec/template.rs"
+sha256 = "1d6ca591ce1f61750478c434105d8c64ee921bb0269e2addc21502c6c28411f7"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/spec/template.py"
+
+[[assets]]
+id = "ai-core-provider"
+repo = "craft-libs"
+upstream = "crates/ai-core/src/provider.rs"
+sha256 = "b95e1e8047d22febc157727484786ff981fc589843b5252e0d8c3626e275dc8a"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/provider.py"
+
+[[assets]]
+id = "ai-core-mock"
+repo = "craft-libs"
+upstream = "crates/ai-core/src/mock.rs"
+sha256 = "4ef848aaba4388489fa60ec8e425d549f60a91d330491bcb93cb30f41b8ee0ba"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/mock.py"
+
+[[assets]]
+id = "ai-core-conformance"
+repo = "craft-libs"
+upstream = "crates/ai-core/src/conformance.rs"
+sha256 = "57e0895faadc76c07e8db23812f47806a7d232d4a501557be2182e13e4b4db15"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/conformance.py"
+
+[[assets]]
+id = "ai-core-catalog"
+repo = "craft-libs"
+upstream = "crates/ai-core/src/catalog.json"
+sha256 = "7c1051f6e2bc3943b7c1dbe4da229694455681b8875a346c99279e555edb733f"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/ai/picks.py (builtin catalog)"
+
+[[assets]]
+id = "i18n-format"
+repo = "craft-libs"
+upstream = "crates/i18n/src/format.rs"
+sha256 = "be62d82c12c8968adae7b1c09fc918fa7a6fca786b66f66f11cbb1bba969892e"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/i18n.py (Format)"
+
+[[assets]]
+id = "i18n-number"
+repo = "craft-libs"
+upstream = "crates/i18n/src/number.rs"
+sha256 = "8a6c24c31dbb51a1e28908016867a19a29badd57883b31aa41abd7dbee2aae13"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/i18n.py (parse)"
+
+[[assets]]
+id = "i18n-region"
+repo = "craft-libs"
+upstream = "crates/i18n/src/region.rs"
+sha256 = "3ce718824dd3b5e7639f34c2ab10dca1b2506fc114ed58ab885caf0586b6d667"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/i18n.py (Region)"
+
+[[assets]]
+id = "i18n-size"
+repo = "craft-libs"
+upstream = "crates/i18n/src/size.rs"
+sha256 = "6895a501e456f931415fb028933e32b34badf88bab762aa9d7280ee73dd9ac94"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/i18n.py (FileSize)"
+
+[[assets]]
+id = "pdf-link"
+repo = "craft-libs"
+upstream = "crates/pdf/src/link.rs"
+sha256 = "06416450a82eb929fb1b2577f6681fc182de47179fca46633a71165dfbf76647"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/pdf.py (safe_url)"
+
+[[assets]]
+id = "texel-noise"
+repo = "texturecraft"
+upstream = "crates/texel/src/noise.rs"
+sha256 = "a9ffb3f993c61ff3fc0fbd46df1a5794fe45a0492ecc28bed76a8834ae819900"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/noise.py (point engine)"
+
+[[assets]]
+id = "nodes-noise"
+repo = "materialcraft"
+upstream = "crates/nodes/src/noise.rs"
+sha256 = "ef5174ad11bae87e1d5872dd19f9ab860166ac530abc3d63d76fb382e5ac884e"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/noise.py (grid engine)"
+
+[[assets]]
+id = "nodes-noise3d"
+repo = "materialcraft"
+upstream = "crates/nodes/src/noise3d.rs"
+sha256 = "5494bd1cef01bd2956f0676224a5801715388559858aa587c8c48a4bf1fce163"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/craftlibs/noise.py (grid engine)"
+
+[[devon]]
+id = "craftlibs-codec"
+path = "nomorals/craftlibs/codec.py"
+lineage = "Devon-authored: unifies the cad and layout package codecs"
+
+[[devon]]
+id = "craftlibs-local-motion"
+path = "nomorals/craftlibs/ai/local.py"
+lineage = "Devon-authored: the anicraft suggestion engine as a provider"
+
+[[devon]]
+id = "craftlibs-parity-runner"
+path = "nomorals/craftlibs/parity.py"
+lineage = "Devon-authored: shared parity runner for the organs"
+
+[[devon]]
+id = "craftlibs-attribution-runner"
+path = "nomorals/craftlibs/attribution.py"
+lineage = "Devon-authored: shared attribution runner for the organs"

@@ -3,6 +3,10 @@
 ``nomorals/media/textures-parity.toml`` lists real fixtures +
 operations + expected outcomes. ``run_parity`` runs every case and
 fails on any mismatch. Missing fixture = fail, never skip.
+
+The loop lives in the shared library now
+(``nomorals/craftlibs/parity.py``); this module keeps the
+textures case runner and the textures result shape.
 """
 from __future__ import annotations
 
@@ -10,6 +14,8 @@ import math
 import tomllib
 from pathlib import Path
 from typing import Any
+
+from nomorals.craftlibs.parity import run_cases
 
 from .blend import BlendMode, blend1, blend3
 from .compose import composite
@@ -199,19 +205,9 @@ def run_parity(path: str | Path | None = None) -> dict[str, Any]:
                 "skipped": 0}
     with toml_path.open("rb") as handle:
         data = tomllib.load(handle)
-    passed_ids: list[str] = []
-    failures: list[dict[str, str]] = []
-    for case in data.get("cases", []):
-        case_id = str(case.get("id", "<unnamed>"))
-        try:
-            _run_case(case)
-        except Exception as exc:  # noqa: BLE001 — one case's failure
-            failures.append({"id": case_id,
-                             "reason": f"{type(exc).__name__}: {exc}"})
-        else:
-            passed_ids.append(case_id)
-    return {"passed": len(passed_ids),
-            "failed": [f["id"] for f in failures],
-            "passed_ids": passed_ids,
-            "failures": failures,
+    result = run_cases(data.get("cases", []), run_case=_run_case)
+    return {"passed": result["passed"],
+            "failed": result["failed"],
+            "passed_ids": result["passed_ids"],
+            "failures": result["failures"],
             "skipped": 0}

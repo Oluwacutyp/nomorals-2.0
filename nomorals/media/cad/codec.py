@@ -6,6 +6,11 @@ zip timestamps, deterministic bytes, so an unedited document
 writes back byte-identical. Bounds mirror the word organ's
 OOXML package caps.
 
+The package shape itself now lives in the shared library
+(``nomorals/craftlibs/codec.py``); this module keeps the DXF
+import/export and the document mapping, and delegates the zip
+and JSON work, translating only the error type.
+
 DXF import reads the real corpus drawings (Autodesk's published
 DXF Reference, group-code pairs): HEADER, TABLES/LAYER, BLOCKS,
 ENTITIES — LINE, CIRCLE, ARC, ELLIPSE, SPLINE, POINT,
@@ -19,10 +24,25 @@ with kind ``unsupported`` naming the format, never faked.
 
 from __future__ import annotations
 
-import io
-import json
 import math
-import zipfile
+
+from nomorals.craftlibs.codec import (
+    MAX_JSON_DEPTH,
+    MAX_JSON_ELEMENTS,
+    MAX_PACKAGE_BYTES,
+    MAX_PART_BYTES,
+    CodecError,
+    write_package,
+)
+from nomorals.craftlibs.codec import (
+    bounded_json_loads as _shared_loads,
+)
+from nomorals.craftlibs.codec import (
+    canonical_json as _canonical_json,
+)
+from nomorals.craftlibs.codec import (
+    read_package as _shared_read,
+)
 
 from .errors import CadError
 from .model import (
@@ -49,93 +69,25 @@ __all__ = [
     "write_package",
 ]
 
-MAX_PACKAGE_BYTES = 64 * 1024 * 1024
-MAX_PART_BYTES = 32 * 1024 * 1024
-MAX_JSON_DEPTH = 100
-MAX_JSON_ELEMENTS = 500_000
-
 _FORMAT_VERSION = 1
-_DATE = (1980, 1, 1, 0, 0, 0)
-
-
-def _canonical_json(obj) -> bytes:
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"),
-                      ensure_ascii=False).encode("utf-8")
 
 
 def _bounded_json_loads(data: bytes):
     """Parse JSON with a depth/element budget so a hostile file
-    cannot blow up the parser (same habit as the word organ's
-    bounded XML)."""
+    cannot blow up the parser (shared implementation; failures
+    surface as CadError kind "parse")."""
     try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise CadError(f"document.json is not UTF-8: {exc}",
-                       kind="parse") from exc
-    try:
-        obj = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise CadError(f"document.json is not valid JSON: {exc}",
-                       kind="parse") from exc
-    count = [0]
-
-    def walk(node, depth: int) -> None:
-        if depth > MAX_JSON_DEPTH:
-            raise CadError("document.json nests too deep",
-                           kind="parse")
-        count[0] += 1
-        if count[0] > MAX_JSON_ELEMENTS:
-            raise CadError("document.json has too many elements",
-                           kind="parse")
-        if isinstance(node, dict):
-            for value in node.values():
-                walk(value, depth + 1)
-        elif isinstance(node, list):
-            for value in node:
-                walk(value, depth + 1)
-
-    walk(obj, 0)
-    return obj
+        return _shared_loads(data)
+    except CodecError as exc:
+        raise CadError(str(exc), kind="parse") from exc
 
 
 def read_package(data: bytes) -> dict[str, bytes]:
     """Read a ``.cadcraft`` zip into {part name: bytes}."""
-    if len(data) > MAX_PACKAGE_BYTES:
-        raise CadError(
-            f"package is {len(data)} bytes (max {MAX_PACKAGE_BYTES})",
-            kind="parse")
     try:
-        archive = zipfile.ZipFile(io.BytesIO(data))
-    except zipfile.BadZipFile as exc:
-        raise CadError(f"not a .cadcraft package: {exc}",
-                       kind="parse") from exc
-    parts: dict[str, bytes] = {}
-    try:
-        for info in archive.infolist():
-            if info.is_dir():
-                continue
-            if info.file_size > MAX_PART_BYTES:
-                raise CadError(f"part {info.filename} is too large",
-                               kind="parse")
-            parts[info.filename] = archive.read(info.filename)
-    except CadError:
-        raise
-    except (zipfile.BadZipFile, OSError, RuntimeError) as exc:
-        raise CadError(f"cannot read .cadcraft package: {exc}",
-                       kind="parse") from exc
-    return parts
-
-
-def write_package(parts: dict[str, bytes]) -> bytes:
-    """Write parts deterministically (fixed timestamps, sorted)."""
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
-        for name in sorted(parts):
-            info = zipfile.ZipInfo(name, date_time=_DATE)
-            info.compress_type = zipfile.ZIP_DEFLATED
-            info.external_attr = 0o600 << 16
-            archive.writestr(info, parts[name])
-    return buf.getvalue()
+        return _shared_read(data)
+    except CodecError as exc:
+        raise CadError(str(exc), kind="parse") from exc
 
 
 def parse_document(data: bytes) -> CadDocument:

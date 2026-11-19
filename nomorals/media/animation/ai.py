@@ -6,6 +6,13 @@ and for each feature runs: ``status`` (can it run?), ``plan`` (what
 would be sent?), consent if needed, ``start`` (go), then polls the
 :class:`Job`. That flow is upstream's, verbatim.
 
+The roles, jobs and the local motion engine behind this seam now
+live in the shared library (``nomorals/craftlibs/ai/``): a role is
+a shared :class:`~craftlibs.ai.role.Role`, a job carries a shared
+:class:`~craftlibs.ai.job.JobSnapshot`, and the local suggestion
+engine runs as a shared :class:`~craftlibs.ai.local.LocalMotionProvider`.
+This module is the app-facing seam over them — the keyword table,
+the preset choice and the easing choice live in exactly one place.
 Two honest facts about this port:
 
 * AniCraft at the ported commit (bcfea81) does NOT depend on
@@ -16,7 +23,7 @@ Two honest facts about this port:
   finds nothing). The seam is therefore built from the
   craft-ai-integrations crate itself, not from an AniCraft call site.
 * Devon has no ai-client and no external AI provider wired into
-  this organ. The local engine below runs motion suggestions
+  this organ. The local engine runs motion suggestions
   deterministically, on this machine, with no network and no cost;
   every capability that would need a provider reports
   ``Unavailable`` with the reason named, and cloud roles need
@@ -29,6 +36,20 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from nomorals.craftlibs.ai import (
+    AiError,
+    CapabilityId,
+    InputRole,
+    JobSnapshot,
+    JobState,
+    ModelId,
+    Payload,
+    Request,
+)
+from nomorals.craftlibs.ai.local import LocalMotionProvider, match_motion
+from nomorals.craftlibs.ai.local import suggest_easing as _shared_suggest_easing
+from nomorals.craftlibs.ai.role import Role as SharedRole
+
 from .errors import AnimationError
 
 __all__ = ["AiClient", "ConsentLedger", "Job", "Role"]
@@ -40,14 +61,29 @@ CLOUD_CAPABILITIES = ("motion.suggest-cloud",)
 
 
 class Role:
-    """One feature's AI role (upstream ``ai-core/src/role.rs``)."""
+    """One feature's AI role: a shared role, with this organ's
+    string-facing view over it."""
 
     def __init__(self, id: str, label: str, capability: str,
                  inputs: list[str] | None = None) -> None:
-        self.id = id
-        self.label = label
-        self.capability = capability
-        self.inputs = list(inputs or ["prompt"])
+        self._shared = SharedRole(id, label, capability,
+                                  inputs or ["prompt"])
+
+    @property
+    def id(self) -> str:
+        return self._shared.id.as_str()
+
+    @property
+    def label(self) -> str:
+        return self._shared.label
+
+    @property
+    def capability(self) -> str:
+        return self._shared.capability.as_str()
+
+    @property
+    def inputs(self) -> list[str]:
+        return [i.as_str() for i in self._shared.inputs]
 
     @classmethod
     def suggest_motion(cls) -> Role:
@@ -60,12 +96,17 @@ class Role:
                    "motion.ease", ["prompt"])
 
     def to_dict(self) -> dict[str, Any]:
-        return {"id": self.id, "label": self.label,
-                "capability": self.capability, "inputs": self.inputs}
+        return self._shared.to_dict()
 
 
 class ConsentLedger:
-    """Granted disclosures (upstream ``ai-core/src/consent.rs``)."""
+    """Granted disclosures (upstream ``ai-core/src/consent.rs``).
+
+    This ledger stays app-specific: its disclosures are free-text
+    strings ("runs locally; nothing leaves this machine"), a
+    different concept from the shared library's structured
+    per-kind consent ledger.
+    """
 
     def __init__(self) -> None:
         self._grants: dict[str, float | None] = {}
@@ -84,68 +125,76 @@ class ConsentLedger:
 
 
 class Job:
-    """A started job (upstream ``ai-client/src/client.rs``)."""
+    """A started job: a shared job snapshot, with this organ's
+    ``done`` / ``cancelled`` / ``unavailable`` view over it. A
+    job that fails — no provider to call — surfaces as
+    ``unavailable``, never as a silent empty."""
 
     def __init__(self, job_id: str, result: dict[str, Any] | None,
-                 reason: str | None = None) -> None:
+                 reason: str | None = None,
+                 snapshot: JobSnapshot | None = None) -> None:
         self.id = job_id
         self._result = result
         self._reason = reason
+        if snapshot is not None:
+            self._snapshot = snapshot
+        elif result is not None:
+            self._snapshot = JobSnapshot(JobState.SUCCEEDED, [])
+        else:
+            self._snapshot = JobSnapshot(JobState.failed(
+                AiError.unsupported(
+                    reason or "no provider configured")), [])
         self._cancelled = False
 
     def poll(self) -> dict[str, Any]:
         if self._cancelled:
             return {"status": "cancelled", "job_id": self.id}
-        if self._result is not None:
+        state = self._snapshot.state
+        if state.kind == "succeeded":
             return {"status": "done", "job_id": self.id,
                     "result": self._result}
+        if state.kind == "cancelled":
+            return {"status": "cancelled", "job_id": self.id}
+        reason = self._reason
+        if state.error is not None:
+            reason = str(state.error)
         return {"status": "unavailable", "job_id": self.id,
-                "reason": self._reason or "no provider configured"}
+                "reason": reason or "no provider configured"}
 
     def cancel(self) -> None:
         self._cancelled = True
 
 
-# -- the local motion engine (deterministic, no network) ---------------
-_KEYWORDS: list[tuple[tuple[str, ...], str, str]] = [
-    (("bounc", "hop", "jump"), "bounce", "bounce-out"),
-    (("walk", "stroll", "march"), "walk-cycle", "sine-in-out"),
-    (("fade", "appear", "dissolve"), "fade-in", "sine-in-out"),
-    (("slide", "enter", "arrive"), "slide-in", "quad-out"),
-    (("pulse", "beat", "throb", "breathe"), "pulse", "sine-in-out"),
-    (("type", "write", "spell"), "typewriter", "linear"),
-    (("spin", "rotat", "twirl"), "pulse", "quad-in-out"),
-]
-
-
 def suggest_motion(prompt: str) -> dict[str, Any]:
-    """Prompt -> a motion plan, by keyword. Deterministic, local."""
-    text = prompt.lower()
-    for keywords, preset, easing in _KEYWORDS:
-        if any(k in text for k in keywords):
-            return {"preset": preset, "easing": easing,
-                    "duration_frames": 24,
-                    "note": f"matched {preset!r} from the prompt"}
+    """Prompt -> a motion plan, by keyword. Deterministic, local.
+    The keyword row comes from the shared engine; the plan shape
+    (preset, easing, frames, note) is this organ's."""
+    matched = match_motion(prompt)
+    if matched is not None:
+        preset, easing = matched
+        return {"preset": preset, "easing": easing,
+                "duration_frames": 24,
+                "note": f"matched {preset!r} from the prompt"}
     return {"preset": "slide-in", "easing": "quad-out",
             "duration_frames": 24,
             "note": "no preset matched the prompt; slide-in is the "
                     "default"}
 
 
+# The shared easing choice has exactly four outcomes, each with
+# its own note here.
+_EASING_NOTES = {
+    "bounce-out": "springy motion wants bounce-out",
+    "sine-in-out": "gentle motion wants sine-in-out",
+    "quad-out": "snappy motion wants quad-out",
+    "quad-in-out": "no cue in the prompt; quad-in-out is the default",
+}
+
+
 def suggest_easing(prompt: str) -> dict[str, Any]:
     """Prompt -> an easing name, by keyword. Deterministic, local."""
-    text = prompt.lower()
-    if any(k in text for k in ("bounc", "spring", "elastic")):
-        return {"easing": "bounce-out",
-                "note": "springy motion wants bounce-out"}
-    if any(k in text for k in ("gentle", "smooth", "soft", "slow")):
-        return {"easing": "sine-in-out",
-                "note": "gentle motion wants sine-in-out"}
-    if any(k in text for k in ("fast", "snap", "quick", "sharp")):
-        return {"easing": "quad-out",
-                "note": "snappy motion wants quad-out"}
-    return {"easing": "quad-in-out",
-            "note": "no cue in the prompt; quad-in-out is the default"}
+    easing = _shared_suggest_easing(prompt)
+    return {"easing": easing, "note": _EASING_NOTES[easing]}
 
 
 class AiClient:
@@ -210,12 +259,26 @@ class AiClient:
         job_id = f"{self.app_id}-job-{self._jobs}"
         if plan.get("engine") == "local":
             prompt = str(plan.get("request", {}).get("prompt", ""))
+            provider = LocalMotionProvider()
+            request = Request(
+                CapabilityId.parse(plan["capability"]),
+                [(InputRole.PROMPT, Payload.text(prompt))])
+            model_id = ("local-motion"
+                        if plan["capability"] == "motion.suggest"
+                        else "local-motion-ease")
+            provider_job = provider.submit(ModelId.new(model_id),
+                                           request)
+            snapshot = JobSnapshot.from_dict(
+                provider.poll(provider_job))
             if plan["capability"] == "motion.suggest":
-                return Job(job_id, suggest_motion(prompt))
-            return Job(job_id, suggest_easing(prompt))
+                return Job(job_id, suggest_motion(prompt),
+                           snapshot=snapshot)
+            return Job(job_id, suggest_easing(prompt),
+                       snapshot=snapshot)
         return Job(job_id, None,
                    reason="no cloud provider configured for capability "
                           f"{plan.get('capability')!r}")
+
 
     def list_roles(self) -> list[dict[str, Any]]:
         return [Role.suggest_motion().to_dict(),

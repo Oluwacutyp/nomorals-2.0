@@ -1,0 +1,37 @@
+{
+  "spec_version": 1,
+  "id": "local-motion",
+  "label": "Local motion",
+  "base": "http://127.0.0.1:8188",
+  "auth": {
+    "kind": "none"
+  },
+  "models": [
+    {
+      "id": "local-motion",
+      "label": "Local motion",
+      "capability": "motion.suggest",
+      "accepts": {
+        "prompt": 1
+      },
+      "requires": [
+        "prompt"
+      ],
+      "max_outputs": 1
+    }
+  ],
+  "flow": {
+    "kind": "request_response",
+    "call": {
+      "method": "POST",
+      "path": "/suggest",
+      "body": {
+        "model": "{model}"
+      }
+    },
+    "result": {
+      "at": "/suggestion",
+      "as": "text"
+    }
+  }
+}

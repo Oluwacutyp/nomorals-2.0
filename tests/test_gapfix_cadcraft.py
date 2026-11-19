@@ -794,8 +794,9 @@ class TestTool:
             # texturecraft port (lane 108), 730 after the
             # anicraft port (lane 110), 731 after the
             # craft-anything port (lane 111), 732 after the
-            # craftlauncher port (lane 112).
-            assert len(registry._tools) == 732
+            # craftlauncher port (lane 112), 733 after the
+            # craft-libs port (lane 113) added the craftlibs tool.
+            assert len(registry._tools) == 733
 
     def test_tool_inspect_and_render(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
