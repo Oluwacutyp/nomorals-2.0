@@ -360,8 +360,12 @@ class HttpClient:
         force_direct: bool = False,
     ) -> None:
         self.timeout = timeout
-        self.user_agent = user_agent
-        self.headers = dict(headers or {})
+        self._headers: dict[str, str] = {"User-Agent": user_agent,
+                                         **dict(headers or {})}
+        #: ``headers`` is the same store as ``_headers`` — the public
+        #: alias the request path and existing callers already use.
+        self.headers = self._headers
+        self.cookies: dict[str, str] = {}
         self.max_redirects = max_redirects
         self.verify_tls = verify_tls
         self.proxy_url = proxy_url
@@ -389,6 +393,40 @@ class HttpClient:
         else:
             self.tls_cafile = None
             self._tls_context = None
+
+    @property
+    def user_agent(self) -> str:
+        return self._headers.get("User-Agent", "")
+
+    @user_agent.setter
+    def user_agent(self, value: str) -> None:
+        self._headers["User-Agent"] = value
+
+    def cookie_dict(self) -> list[tuple[str, str]]:
+        """(name, value) pairs — httpx jar semantics without the dependency."""
+        jar = getattr(self, "cookies", None)
+        if hasattr(jar, "items"):
+            return list(jar.items())
+        if hasattr(jar, "jar"):
+            return [(c.name, c.value) for c in jar.jar]
+        return []
+
+    def set_cookie(self, name: str, value: str) -> None:
+        jar = getattr(self, "cookies", None)
+        if hasattr(jar, "__setitem__"):
+            jar[name] = value
+
+    def _store_response_cookies(self, headers: Any) -> None:
+        """Fold Set-Cookie headers into the jar (name=value before ';')."""
+        try:
+            raw_cookies = headers.get_all("Set-Cookie") or []
+        except Exception:  # noqa: BLE001 - cookie storage must not break a fetch
+            return
+        for raw_cookie in raw_cookies:
+            pair = raw_cookie.split(";", 1)[0].strip()
+            if "=" in pair:
+                name, value = pair.split("=", 1)
+                self.cookies[name.strip()] = value.strip()
 
     def _effective_proxy(self, target: str) -> str:
         """Which proxy (if any) this request goes through.
@@ -479,6 +517,9 @@ class HttpClient:
             **self.headers,
             **(headers or {}),
         }
+        if self.cookies and not any(k.lower() == "cookie" for k in merged):
+            merged["Cookie"] = "; ".join(
+                f"{k}={v}" for k, v in self.cookies.items())
 
         opener_kwargs: dict[str, Any] = {}
         if not self.verify_tls:
@@ -524,6 +565,7 @@ class HttpClient:
             with raw_cm as raw:
                 final_url = raw.geturl()
                 response_headers = {k.lower(): v for k, v in raw.headers.items()}
+                self._store_response_cookies(raw.headers)
                 if destination is not None:
                     total = start_byte + int(raw.headers.get("Content-Length") or 0)
                     mode = "ab" if start_byte and raw.status == 206 else "wb"
@@ -573,6 +615,10 @@ class HttpClient:
                 err_headers = dict(exc.headers.items()) if exc.headers else None
             except Exception:  # noqa: BLE001 - error path must not raise
                 err_headers = None
+            if exc.headers is not None:
+                # a 401/403 challenge often sets the cookie the next
+                # step needs — keep it even though this call raises
+                self._store_response_cookies(exc.headers)
             raise http_error(exc.code, body.decode("utf-8", "replace"),
                              target, err_headers) from exc
         except urllib.error.URLError as exc:
@@ -611,6 +657,20 @@ class HttpClient:
 
     def head(self, url: str, **kw: Any) -> HttpResponse:
         return self.request("HEAD", url, **kw)
+
+    def post(self, url: str, data: Any = None, **kw: Any) -> HttpResponse:
+        """POST a form mapping, a str/bytes body, or an empty body.
+
+        The shape the auth plugins call: ``data`` as a mapping is
+        form-encoded like :meth:`post_form`; a str/bytes body goes
+        as-is (the caller sets Content-Type via ``headers``).
+        """
+        if data is None:
+            return self.request("POST", url, data=b"", **kw)
+        if isinstance(data, Mapping):
+            return self.post_form(url, data, **kw)
+        body = data.encode("utf-8") if isinstance(data, str) else data
+        return self.request("POST", url, data=body, **kw)
 
     def post_json(
         self, url: str, payload: Mapping[str, Any], **kw: Any

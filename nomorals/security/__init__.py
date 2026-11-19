@@ -21,6 +21,14 @@
   hunting (Claude-BugHunter port): scope rules, skill map, the
   7-Question Gate, coverage-closure ledger, engagement engine over
   Devon's HttpClient / brain / audit book / evidence chain.
+- :mod:`nomorals.security.session_forge` — forge authenticated
+  sessions with the auth plugins (security/plugins/): login, persist
+  the cookie jar + headers (0600), verify before reuse, browser
+  escalation when the HTTP flow fails.
+- :mod:`nomorals.security.payloads` — client-side payload organ:
+  decode bombs (PNG/GIF/SVG/PDF), keylogger page, cookie stealer.
+- :mod:`nomorals.security.plugins` — the auth plugin registry
+  (12 site plugins + the WebPlugin contract).
 - :mod:`nomorals.security.evidence` — hash-chained evidence packs,
   secrets masked at rest (owner's batch).
 - :mod:`nomorals.security.disclose` — severity rubric, RFC 9116

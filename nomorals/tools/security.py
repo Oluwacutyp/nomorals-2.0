@@ -322,3 +322,15 @@ def register(registry: Any) -> None:
     from ..security.bughunter import surface as _bughunter
 
     _bughunter.register(registry)
+
+    # Session forge + payloads (owner's auth plugins, 2026-11-19):
+    # log in with a plugin and persist the cookie jar; verify a
+    # stored session; client-side payload generators. The forge and
+    # the payloads live in security/ proper — their imports only
+    # resolve from there — and the plugin registry lives in
+    # security/plugins/__init__.py.
+    from ..security import payloads as _payloads
+    from ..security import session_forge as _session_forge
+
+    _session_forge.register(registry)
+    _payloads.register(registry)

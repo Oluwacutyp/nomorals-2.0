@@ -1279,16 +1279,16 @@ class AttributionTest(unittest.TestCase):
 
 
 class ToolCountTest(unittest.TestCase):
-    def test_tool_count_is_743_after_craftai(self):
+    def test_tool_count_is_748_after_craftai(self):
         # No new tool is added by this lane: the craftlibs tool's ai
         # action is extended in place. 733 at base 64821b6c, 734 after
         # the craft-fonts port (lane 114) shipped first and added the
         # craftfonts tool, 735 after the indd-utils port (lane 117)
-        # added the inddutils tool, 743 after the bughunter port
-        # (lane 121) added 8 bughunter tools.
+        # added the inddutils tool, 748 after the auth-plugin wiring
+        # added 5 tools on top of the bughunter port (lane 121, 8 tools).
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 743)
+        self.assertEqual(len(registry._tools), 748)
         self.assertIn("craftlibs", registry._tools)
 
     def test_craftlibs_ai_action_accepts_the_new_kinds(self):
