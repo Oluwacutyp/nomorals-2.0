@@ -1,0 +1,173 @@
+# CadCraft attribution — SHA-256 provenance for the port of
+# storytold/cadcraft (dual MIT/Apache-2.0) and its corpus
+# storytold/cadcraft-corpus (same licence). Upstream hashes are
+# pinned to the clones at the commits below and verified by
+# verify_attribution; devon entries name the upstream units they
+# derive from.
+upstream_commit = "2099288f5449b1602d2e2eedca92fe99fb19b973"
+upstream_repo = "storytold/cadcraft"
+corpus_repo = "storytold/cadcraft-corpus"
+
+[[assets]]
+kind = "upstream"
+path = "crates/constraints/src/model.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "f5df1476d67a41a6b47e297d32634a761182e926ab699897253b4ad809e36150"
+
+[[assets]]
+kind = "upstream"
+path = "crates/constraints/src/residual.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "19278f276df2f22584d71ac51f194d999265cddac6ab34dc43102cc98cd338e2"
+
+[[assets]]
+kind = "upstream"
+path = "crates/constraints/src/lm.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "386f4eb5e09085ade7af9c9bf5337ad9d4a0c2da5e98d45fb0da8aa70ee22315"
+
+[[assets]]
+kind = "upstream"
+path = "crates/constraints/src/dof.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "157fceee4cd76853a159121ca442c38f5df656cf5278b738d8b8e64f17312fc5"
+
+[[assets]]
+kind = "upstream"
+path = "crates/constraints/src/lib.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "7c01e4809f3541756b4fc64093b60b38828942d1d59013de85957f934c55c4b8"
+
+[[assets]]
+kind = "upstream"
+path = "crates/constraints/src/curves.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "7a7ec5ce6382c585dc16b064ebad559087661221a9f544b7f1f73d7c9e6276cb"
+
+[[assets]]
+kind = "upstream"
+path = "crates/engine/src/guard.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "eba1f0c1dec959256e8e7986d381fc854a0ee5b551b6e4211fa9d89a4c986dee"
+
+[[assets]]
+kind = "upstream"
+path = "crates/engine/src/cmd.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "70125c0d704fe65e8ec7c86e468b0f9a54654b08957a2dd35d465dccb1570540"
+
+[[assets]]
+kind = "upstream"
+path = "crates/engine/src/session.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "e570c542f74b2e5a951d5e5e00d5bf827e4c4203979d9d33d9e6297c8fa79818"
+
+[[assets]]
+kind = "upstream"
+path = "crates/doc/src/constraint.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "a986dbb19d38d40fd8cbd6ce9ad1cc2ca62015e35c09e2d5d8d1b5aef9b3b687"
+
+[[assets]]
+kind = "upstream"
+path = "crates/geom/src/intersect.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "b0cc036dcc07504a0e9c938f4217cac43fa568191bc11d9a4dfecaa71f4f1bc6"
+
+[[assets]]
+kind = "upstream"
+path = "crates/geom/src/fillet.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "1d4e52f2fbc4c98504b493ac31f8449967e10e84ff7271be31d6b03a13d5e050"
+
+[[assets]]
+kind = "upstream"
+path = "crates/geom/src/lib.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "d9e763e34b3b4636541aa832f0845ea792e8c65855ded5fb6c56ecd65402428e"
+
+[[assets]]
+kind = "upstream"
+path = "crates/dxf/src/lib.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "bc7688ee1212fd17c39b90961ea0706d6ca08a63e96c8e7071d554d509b01049"
+
+[[assets]]
+kind = "upstream"
+path = "crates/io/src/dxf_read.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "4b740740132da05bc773c5563d66cf09e161edf5d7b5996206a208f2000e80a6"
+
+[[assets]]
+kind = "upstream"
+path = "crates/io/src/dxf_write.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "1074fdc6dd4e05f21904792a79ae22bd38c5e3f50ffe9ca2c29bd49195968a75"
+
+[[assets]]
+kind = "upstream"
+repo = "storytold/cadcraft-corpus"
+path = "cadcraft/sample-bracket.dxf"
+license = "MIT OR Apache-2.0"
+sha256 = "c8c97a604c84f0be1c114b41c180abe0ace641db6187060e6cb8335cdf37b734"
+
+[[assets]]
+kind = "upstream"
+repo = "storytold/cadcraft-corpus"
+path = "cadcraft/sample-floorplan.dxf"
+license = "MIT OR Apache-2.0"
+sha256 = "3cc14ef2bcfbb77d7a9c311f3d8ecea71c39267202fd7cfb051c0ace9f944cf0"
+
+[[assets]]
+kind = "upstream"
+repo = "storytold/cadcraft-corpus"
+path = "cadcraft/sample-bracket.dwg"
+license = "MIT OR Apache-2.0"
+sha256 = "fb2656000fbb1e62b416d3fe872e716241bd2ff4ee71bdb788672b9fcbd8b04a"
+
+[[assets]]
+kind = "upstream"
+repo = "storytold/cadcraft-corpus"
+path = "cadcraft/sample-floorplan.dwg"
+license = "MIT OR Apache-2.0"
+sha256 = "6b893bbc67ada5ed4b4375da46bd5a7682f154b0a3023e5e169af05b9d58380a"
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/cad/model.py"
+derives_from = ["crates/doc/src/constraint.rs", "crates/constraints/src/model.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/cad/geom.py"
+derives_from = ["crates/geom/src/intersect.rs", "crates/geom/src/fillet.rs", "crates/geom/src/lib.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/cad/solver.py"
+derives_from = ["crates/constraints/src/model.rs", "crates/constraints/src/residual.rs", "crates/constraints/src/lm.rs", "crates/constraints/src/dof.rs", "crates/constraints/src/lib.rs", "crates/constraints/src/curves.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/cad/codec.py"
+derives_from = ["crates/dxf/src/lib.rs", "crates/io/src/dxf_read.rs", "crates/io/src/dxf_write.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/cad/edit.py"
+derives_from = ["crates/geom/src/fillet.rs", "crates/geom/src/intersect.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/cad/commands.py"
+derives_from = ["crates/engine/src/cmd.rs", "crates/engine/src/guard.rs", "crates/engine/src/session.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/cad/render.py"
+derives_from = ["crates/geom/src/lib.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/tools/cadcraft.py"
+derives_from = ["crates/engine/src/cmd.rs"]

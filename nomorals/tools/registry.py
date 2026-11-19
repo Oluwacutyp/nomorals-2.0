@@ -671,6 +671,7 @@ class ToolRegistry:
             "designcraft",  # open/edit/lay out/render real .designcraft — page/layout model, flex engine, composer, renderer, parity + attribution (DesignCraft port)
             "figcraft",  # open/edit/prototype/render/save real .figcraft — design model, auto-layout, components, collab core, frame renderer, parity + attribution (FigCraft port)
             "soundcraft",  # open/edit/mix/bounce real .scraft — session model, mixer, effects, realtime engine, quarantined plugin hosts, parity + attribution (SoundCraft port)
+            "cadcraft",  # sketch/constrain/solve/draft/render real CAD drawings — document model, constraint solver, typed commands, drafting ops, renderer, parity + attribution (CadCraft port)
             "workspace",
             "trading",
             "characters",

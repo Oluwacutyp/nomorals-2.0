@@ -1,0 +1,83 @@
+# CadCraft parity — real fixtures, real operations, expected outcomes.
+# A missing fixture FAILS its case, never a silent skip.
+schema_version = 1
+
+[[cases]]
+id = "simple-inspect"
+fixture = "simple.cadcraft"
+ops = ["inspect"]
+[cases.expect]
+entities = 3
+constraints = 0
+layers = 1
+
+[[cases]]
+id = "simple-roundtrip"
+fixture = "simple.cadcraft"
+ops = ["roundtrip"]
+[cases.expect]
+byte_identical = true
+
+[[cases]]
+id = "simple-render"
+fixture = "simple.cadcraft"
+ops = ["render"]
+[cases.expect]
+png_ok = true
+
+[[cases]]
+id = "bracket-import"
+fixture = "sample-bracket.dxf"
+ops = ["import"]
+[cases.expect]
+entities = 42
+
+[[cases]]
+id = "floorplan-import"
+fixture = "sample-floorplan.dxf"
+ops = ["import"]
+[cases.expect]
+entities = 16
+
+[[cases]]
+id = "bracket-dxf-roundtrip"
+fixture = "sample-bracket.dxf"
+ops = ["dxf_roundtrip"]
+[cases.expect]
+entities = 42
+identical = true
+
+[[cases]]
+id = "rect-solve"
+fixture = "rect-solve.cadcraft"
+ops = ["solve"]
+[cases.expect]
+converged = true
+status = "fully"
+dof = 0
+
+[[cases]]
+id = "tangent-solve"
+fixture = "tangent.cadcraft"
+ops = ["tangent_solve"]
+[cases.expect]
+converged = true
+gap_error = 0.0
+
+[[cases]]
+id = "trim"
+fixture = "trim.cadcraft"
+ops = ["trim"]
+[cases.expect]
+trimmed = true
+kept_end_x = 5.0
+
+[[cases]]
+id = "fillet"
+fixture = "fillet.cadcraft"
+ops = ["fillet"]
+[cases.expect]
+filleted = true
+arc_radius = 2.0
+arc_center_x = 8.0
+arc_center_y = 2.0

@@ -483,8 +483,9 @@ class TestTool(unittest.TestCase):
         # after the designcraft port (lane 104) added the
         # designcraft tool, 725 after the figcraft port (lane 105)
         # added the figcraft tool, 726 after the soundcraft port
-        # (lane 107) added the soundcraft tool.
-        self.assertEqual(len(registry._tools), 726)
+        # (lane 107) added the soundcraft tool, 727 after the
+        # cadcraft port (lane 106) added the cadcraft tool.
+        self.assertEqual(len(registry._tools), 727)
 
     def test_tool_inspect_and_render(self) -> None:
         registry = self._registry()
