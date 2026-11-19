@@ -2,13 +2,13 @@
 
 Wave 1's named gap 1, built. Until this module, a procedural
 segment had exactly one engine (``visualizer``) and the explainer
-family — diagrams, equations-as-text, chart builds — was a named
-compile refusal in :mod:`.project`. The family now ships as three
+family — diagrams, equations-as-text, chart builds, code traces — was a named
+compile refusal in :mod:`.project`. The family now ships as four
 engines over one discipline:
 
 * **Scenes are data.** A scene is a plain dict in a procedural
   segment's ``design`` (``engine`` = ``diagram`` | ``equation`` |
-  ``chart``, or the family name ``explainer`` + ``kind``), validated
+  ``chart`` | ``code``, or the family name ``explainer`` + ``kind``), validated
   by :func:`validate_design` at compile time — a malformed scene is
   a build error naming the field, never a render-time surprise.
 * **Deterministic frame functions.** Every frame is a pure function
@@ -18,7 +18,8 @@ engines over one discipline:
 * **Builds, not cuts.** Each scene is a list of *steps*; elements
   appear across their step's window with the studio's smooth ease —
   a labelled diagram assembles node by node, an equation accrues
-  line by line, a chart grows bar by bar (Manim's build idiom,
+  line by line, a chart grows bar by bar, a code trace lights each
+  line in turn (Manim's build idiom,
   Devon-shaped).
 * **Text is rendered, never model-drawn** (the P-brainstorm rule):
   labels, equations and values are composited by the deterministic
@@ -28,7 +29,7 @@ engines over one discipline:
   timing keeps its §2.4 provenance label (``measured`` /
   ``estimated`` / ``authored``) and the compile record states it.
 
-Out of scope stays refused, by name: engines outside the three
+Out of scope stays refused, by name: engines outside the four
 kinds (an ``explainer`` with no ``kind`` names no buildable scene),
 and scripted/freeform scene code — §1.5d's family is declarative
 scene data, not an embedded runtime (the §1.3b decision row).
@@ -71,7 +72,7 @@ __all__ = [
 ]
 
 #: the scene kinds the §1.5d family builds.
-EXPLAINER_KINDS = ("diagram", "equation", "chart")
+EXPLAINER_KINDS = ("diagram", "equation", "chart", "code")
 
 #: engine names a procedural segment may carry for this family:
 #: the three kinds directly, plus the family alias (``explainer``),
@@ -85,6 +86,8 @@ _KIND_LABELS = {
                 "current line lit, earlier lines settled",
     "chart": "chart build — axes first, then bars grow / the line "
              "draws on, values labelled",
+    "code": "code trace — lines light up in execution order, the "
+            "state each line leaves behind named beside it",
 }
 
 # the studio's explainer palette (dark board, one accent family)
@@ -126,11 +129,11 @@ def explainer_kind(design: dict[str, Any]) -> str:
         raise MotionStudioError(
             f"explainer segment names no buildable scene kind "
             f"(kind={kind!r}) — the plan §1.5d family builds "
-            f"'diagram', 'equation' and 'chart' scenes; set "
+            f"'diagram', 'equation', 'chart' and 'code' scenes; set "
             f"design['kind'] to one of those")
     raise MotionStudioError(
         f"not an explainer engine: {engine!r} — the plan §1.5d "
-        f"family builds 'diagram', 'equation' and 'chart'")
+        f"family builds 'diagram', 'equation', 'chart' and 'code'")
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +297,28 @@ def _validate_chart(design: dict[str, Any]) -> dict[str, Any]:
             "steps": _steps_of(series)}
 
 
+def _validate_code(design: dict[str, Any]) -> dict[str, Any]:
+    lines_in = design.get("lines")
+    if not isinstance(lines_in, list) or not lines_in:
+        raise MotionStudioError(
+            "code scene needs a non-empty 'lines' list")
+    lines: list[dict[str, Any]] = []
+    for i, raw in enumerate(lines_in):
+        what = f"code line #{i}"
+        if isinstance(raw, str):
+            raw = {"text": raw}
+        if not isinstance(raw, dict):
+            raise MotionStudioError(f"{what}: must be a dict (or a string)")
+        text = str(raw.get("text", "")).strip()
+        if not text:
+            raise MotionStudioError(f"{what}: empty 'text'")
+        step, at = _step_of(raw, i, what)  # each line its own step
+        lines.append({"text": text,
+                      "values": str(raw.get("values", "")).strip(),
+                      "step": step, "at": at})
+    return {"lines": lines, "steps": _steps_of(lines)}
+
+
 def validate_design(design: dict[str, Any]) -> dict[str, Any]:
     """Validate + normalize an explainer scene design (pure data).
 
@@ -311,6 +336,8 @@ def validate_design(design: dict[str, Any]) -> dict[str, Any]:
         spec.update(_validate_diagram(design))
     elif kind == "equation":
         spec.update(_validate_equation(design))
+    elif kind == "code":
+        spec.update(_validate_code(design))
     else:
         spec.update(_validate_chart(design))
     return spec
@@ -588,6 +615,39 @@ class _Scene:
                            fill=_lerp(BG_TOP, ACCENT, p))
             y += block_h
 
+    # -- code ---------------------------------------------------------------
+    def _frame_code(self, img, t: float, duration: float) -> None:
+        d = ImageDraw.Draw(img)
+        spec = self.spec
+        n_steps = int(spec["steps"])
+        progresses = [_progress(ln, n_steps, duration, t)
+                      for ln in spec["lines"]]
+        current = max((i for i, p in enumerate(progresses) if p > 0),
+                      default=-1)
+        _, glyph_h = text_size(d, "Ag", self.f_bold)
+        block_h = glyph_h * 2.05
+        y = self.h * 0.21
+        x = self.w * 0.09
+        for i, line in enumerate(spec["lines"]):
+            p = progresses[i]
+            if p > 0:
+                if i == current:
+                    tw, _ = text_size(d, line["text"], self.f_bold)
+                    d.rounded_rectangle(
+                        [x - 14, y - 8, x + tw + 14, y + glyph_h + 10],
+                        radius=8, outline=_lerp(BG_TOP, ACCENT, p),
+                        width=2)
+                color = INK if i == current else DIM
+                d.text((x, y), line["text"], font=self.f_bold,
+                       fill=_lerp(BG_TOP, color, p))
+                values = line.get("values", "")
+                if values and p > 0.5:
+                    vw, vh = text_size(d, values, self.f_small)
+                    d.text((self.w * 0.91 - vw, y + glyph_h + 4),
+                           values, font=self.f_small,
+                           fill=_lerp(BG_TOP, ACCENT, (p - 0.5) / 0.5))
+            y += block_h
+
     # -- chart ---------------------------------------------------------------
     def _frame_chart(self, img, t: float, duration: float) -> None:
         d = ImageDraw.Draw(img)
@@ -658,6 +718,8 @@ class _Scene:
             self._frame_diagram(img, t, duration)
         elif kind == "equation":
             self._frame_equation(img, t, duration)
+        elif kind == "code":
+            self._frame_code(img, t, duration)
         else:
             self._frame_chart(img, t, duration)
         d = ImageDraw.Draw(img)
@@ -721,6 +783,7 @@ def render_explainer(design: dict[str, Any],
     counts = {"diagram": lambda: {"nodes": len(spec["nodes"]),
                                   "edges": len(spec["edges"])},
               "equation": lambda: {"lines": len(spec["lines"])},
+              "code": lambda: {"lines": len(spec["lines"])},
               "chart": lambda: {"points": len(spec["series"])}}[spec["kind"]]()
     return {"engine": str(design.get("engine", "")),
             "kind": spec["kind"], "title": spec["title"],

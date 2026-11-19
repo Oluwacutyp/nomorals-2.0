@@ -50,7 +50,7 @@ lands on exactly one rung, named in the compile record:
 
 The code-driven explainer family (plan §1.5d) ships as procedural
 engines beside the visualizer: ``diagram`` / ``equation`` /
-``chart`` scenes are declarative data in the segment's ``design``,
+``chart`` / ``code`` scenes are declarative data in the segment's ``design``,
 rendered by :mod:`.explainers`' deterministic frame functions —
 builds that assemble step by step, text composited by the
 deterministic text path, never model-drawn.
@@ -376,8 +376,8 @@ class MotionSegment:
     ``timing_source`` or per-word ``timing_source`` keys), plus a
     typography ``preset``. Procedural segments name their engine in
     ``design["engine"]`` (``"visualizer"`` ships; the §1.5d
-    explainer family — ``"diagram"`` / ``"equation"`` / ``"chart"``,
-    or ``"explainer"`` + ``design["kind"]`` — ships beside it in
+    explainer family — ``"diagram"`` / ``"equation"`` / ``"chart"`` /
+    ``"code"``, or ``"explainer"`` + ``design["kind"]`` — ships beside it in
     :mod:`.explainers`; anything else refuses at compile, named).
     Explainer scenes take their narration from ``text``/``words`` +
     ``timing_source`` exactly like text segments.
@@ -1209,8 +1209,8 @@ def _compile_segment(seg: MotionSegment, *, grid: FrameGrid,
                 f"{engine_name!r} is not built — the procedural "
                 f"family ships 'visualizer' plus the plan §1.5d "
                 f"explainer engines ('diagram', 'equation', "
-                f"'chart'); anything else is outside §1.5d's scope "
-                f"and stays a named refusal, not a stub")
+                f"'chart', 'code'); anything else is outside §1.5d's "
+                f"scope and stays a named refusal, not a stub")
 
     else:  # pragma: no cover - __post_init__ already enforces kinds
         raise MotionStudioError(f"unknown segment kind {seg.kind!r}")

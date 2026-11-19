@@ -5096,6 +5096,7 @@ class RuntimeMediaMixin:
         paths below are untouched):
         /video gen "<prompt>" [--backend auto|ltx|wan|motion] [--seconds N]
         /video qc <path> | /video qc "<prompt>" [--seconds N]
+        /video explain <preset> <content> [--values "a|b"] [--seconds N]
         /video motion lyric <audio> "<lyrics>" [--preset NAME]
         /video motion visual <audio> [--preset phonk]
         /video motion slideshow <img1,img2> [audio]
@@ -5132,7 +5133,7 @@ class RuntimeMediaMixin:
         # kind so searches like "/video motion graphics" still search
         _motion_kinds = ("lyric", "visual", "slideshow", "trailer")
         if first in ("gen", "generate", "capability", "list", "chain",
-                     "qc") or (
+                     "qc", "explain") or (
                 first == "motion" and len(words) > 1
                 and words[1].lower() in _motion_kinds):
             return self._control_video_studio(first,
@@ -5368,6 +5369,8 @@ class RuntimeMediaMixin:
         try:
             if action in ("gen", "generate"):
                 return self._video_studio_gen(tail)
+            if action == "explain":
+                return self._control_video_explain(tail)
             if action == "qc":
                 return self._video_studio_qc(tail)
             if action == "motion":
@@ -6832,6 +6835,84 @@ class RuntimeMediaMixin:
                 return text + f"\n{failed}"
             return text + "\nsent."
         return text + f"\nfile: {path}"
+
+    def _control_video_explain(self, tail: str) -> str:
+        """Explainer presets: /video explain <preset> <content>.
+
+        ``/video explain code-trace x = 1 | x = x + 1 --values "x = 1 |
+        x = 2"`` renders the named Manim-class preset on the code
+        backend — deterministic seek(t) frames, narrated by default.
+        Never raises: bad input returns usage, render failures name
+        the problem. An unknown preset is refused with the list of
+        real ones — never a silent default.
+        """
+        import re
+
+        from ...media.videogen import VideogenError, list_presets, render_preset
+
+        def _usage() -> str:
+            lines = ["usage: /video explain <preset> <content> "
+                     "[--values \"a|b\"] [--title \"T\"] [--seconds N] "
+                     "[--silent]"]
+            for entry in list_presets():
+                lines.append(f"  {entry['name']}: {entry['description']}")
+            return "\n".join(lines)
+
+        tail = (tail or "").strip()
+        seconds = 5.0
+        narrate = True
+        values = ""
+        title = ""
+        if "--silent" in tail:
+            narrate = False
+            tail = tail.replace("--silent", " ").strip()
+        sm = re.search(r"--seconds\s+([\d.]+)", tail)
+        if sm:
+            try:
+                seconds = float(sm.group(1))
+            except ValueError:
+                seconds = 5.0
+            tail = (tail[:sm.start()] + tail[sm.end():]).strip()
+        vm = re.search(r'--values\s+"([^"]*)"', tail)
+        if vm:
+            values = vm.group(1)
+            tail = (tail[:vm.start()] + tail[vm.end():]).strip()
+        tm = re.search(r'--title\s+"([^"]*)"', tail)
+        if tm:
+            title = tm.group(1)
+            tail = (tail[:tm.start()] + tail[tm.end():]).strip()
+        if not tail:
+            return _usage()
+        name, _, content = tail.partition(" ")
+        name = name.strip().lower()
+        content = content.strip()
+        known = {entry["name"] for entry in list_presets()}
+        if name not in known:
+            return (f"unknown explainer preset {name!r} — known "
+                    f"presets: {', '.join(sorted(known))}")
+        if not content:
+            return _usage()
+        params: dict[str, Any] = {}
+        if name == "equation-walkthrough":
+            params["lines"] = content
+        elif name == "diagram-build":
+            params["nodes"] = content
+        elif name == "code-trace":
+            params["code"] = content
+            if values:
+                params["values"] = values
+        else:  # chart-build
+            params["series"] = content
+        if title:
+            params["title"] = title
+        try:
+            res = render_preset(name, duration_s=seconds,
+                                narrate=narrate, **params)
+        except VideogenError as exc:
+            return f"explain: {exc}"
+        except Exception as exc:  # noqa: BLE001 - chat surfaces as text
+            return f"explain error: {exc}"
+        return res.message()
 
     def _control_code_format(self, kind: str, tail: str) -> str:
         """Code-video format commands: /map-route, /headline, /teardown.

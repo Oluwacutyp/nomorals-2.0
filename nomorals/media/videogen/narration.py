@@ -67,6 +67,19 @@ def _speakable(text: str) -> str:
     return " ".join(out.split())
 
 
+def _speakable_code(text: str) -> str:
+    """Code as spoken words — operators read aloud, not spelled.
+
+    Kept separate from :func:`_speakable` on purpose: equations keep
+    their ``=``/``+`` verbatim (existing narration pins), while a
+    trace line reads ``x = x + 1`` as ``x equals x plus 1``.
+    """
+    out = _speakable(text)
+    out = out.replace("=", " equals ").replace("+", " plus ")
+    out = out.replace("*", " times ").replace("/", " over ")
+    return " ".join(out.split())
+
+
 def _fmt_value(value: Any) -> str:
     """A chart value as spoken words — ``42.0`` reads as ``42``."""
     try:
@@ -91,6 +104,15 @@ def _step_labels(spec: dict[str, Any]) -> dict[int, list[str]]:
     elif kind == "equation":
         for line in spec.get("lines", []):
             text = _speakable(str(line.get("text", "") or ""))
+            if text:
+                by_step.setdefault(int(line.get("step", 0)),
+                                  []).append(text)
+    elif kind == "code":
+        for line in spec.get("lines", []):
+            text = _speakable_code(str(line.get("text", "") or ""))
+            values = _speakable_code(str(line.get("values", "") or ""))
+            if values:
+                text = f"{text}. Now: {values}" if text else values
             if text:
                 by_step.setdefault(int(line.get("step", 0)),
                                   []).append(text)

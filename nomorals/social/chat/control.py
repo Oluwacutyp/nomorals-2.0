@@ -1279,6 +1279,7 @@ _HELP_TEXT = "\n".join(
         "  /play seek <s> | volume <n> | remove <n> | clear",
         "  /video <query> [platform]               find videos across the web (ranked)",
         "  /video download <url> [audio]           download it (yt-dlp)",
+        "  /video explain <preset> <content>       Manim-class explainer video (narrated)",
         "  /video watch <url|path> [question]      watch it: what it shows + what it says (owner)",
         "  /director cover <script>                professional coverage (verdict: pass/consider/recommend)",
         "  /director plan <script> [--style noir]  breakdown + lighting/camera design per shot",
@@ -4802,8 +4803,12 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                       "transcribed, answered from both (owner-only). "
                       "The brief subverb turns a long video into a "
                       "sectioned brief — timestamped sections, TLDR, deep "
-                      "links, transcript source named (owner-only).",
-              "usage": "/video <query> [platform] | /video download <url> [audio] | /video platforms | /video watch <url|path> [question] | /video brief <url|path> [--abstractive] | /video brief list | /video brief show <id>",
+                      "links, transcript source named (owner-only). "
+                      "The explain subverb renders a Manim-class "
+                      "explainer preset (equation-walkthrough, "
+                      "diagram-build, code-trace, chart-build) as a "
+                      "narrated code video — no model.",
+              "usage": "/video <query> [platform] | /video download <url> [audio] | /video platforms | /video watch <url|path> [question] | /video brief <url|path> [--abstractive] | /video brief list | /video brief show <id> | /video explain <preset> <content> [--values \"a|b\"] [--seconds N] [--silent]",
               "example": "/video lofi beats for studying youtube",
               "related": "/searchdeep · nm video on the console"},
     "map-route": {"what": "Code-video route scene: a route draws itself — "

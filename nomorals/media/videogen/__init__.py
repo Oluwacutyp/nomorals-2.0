@@ -31,6 +31,7 @@ from .capabilities import (
 from .pipeline import generate, request_hero_clip, capability_report, VideoResult
 from .codegen import render_code_scene
 from .formats import build_format, list_formats, render_format
+from .presets import build_preset, list_presets, render_preset
 from .narration import scene_narration, synthesize_narration
 from .captions import (
     caption_narration,
@@ -60,6 +61,9 @@ __all__ = [
     "build_format",
     "list_formats",
     "render_format",
+    "build_preset",
+    "list_presets",
+    "render_preset",
     "scene_narration",
     "synthesize_narration",
     "caption_narration",

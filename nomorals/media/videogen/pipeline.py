@@ -99,9 +99,11 @@ def capability_report(prefer: str = "auto") -> str:
                      f"(drop adapters under {_registry.models_root()}"
                      "/loras/<backend>/<name>)")
     lines.append("   code: deterministic scene rendering (diagram / "
-                 "equation / chart designs + HTML scenes), CPU-only, "
-                 "always available — pass a scene, or render a format "
-                 "(map-route, headline, teardown)")
+                 "equation / chart / code designs + HTML scenes), "
+                 "CPU-only, always available — pass a scene, or render "
+                 "a format (map-route, headline, teardown) or an "
+                 "explainer preset (equation-walkthrough, diagram-build, "
+                 "code-trace, chart-build)")
     return "\n".join(lines)
 
 
@@ -251,6 +253,7 @@ def generate(prompt: str, *, backend: str = "auto",
              scene: dict[str, Any] | None = None,
              narrate: bool = True,
              captions: bool = True,
+             preset: str | None = None,
              **kw) -> VideoResult:
     """Generate a video clip — neural when possible, motion otherwise.
 
@@ -277,6 +280,10 @@ def generate(prompt: str, *, backend: str = "auto",
     pairs (see :func:`registry.normalize_loras`). Selection errors
     (unknown model/LoRA, backend conflict, LoRA/backend mismatch)
     raise — they are caller errors, never silent substitutions.
+
+    ``preset``: the explainer preset that built ``scene`` (see
+    :mod:`.presets`) — recorded in the result's ``meta["preset"]``
+    and note, so a render always names the preset that ran.
     """
     if not (prompt or "").strip() and not image and not scene:
         raise VideogenError(
@@ -342,27 +349,37 @@ def generate(prompt: str, *, backend: str = "auto",
                         f"{caps.get('reason') or 'no narration'}")
         else:
             cap_note = "captions: off"
+        preset_note = (f"explainer preset {preset}: " if preset else "")
+        meta: dict[str, Any] = {"scene_kind": rec["kind"],
+                                "source": rec["source"],
+                                "frames": rec["frames"], "fps": rec["fps"],
+                                "duration": rec["duration"],
+                                "render_hash": rec["render_hash"],
+                                "contact_sheet": rec["contact_sheet"],
+                                "deterministic": True,
+                                "narration": narr,
+                                "captions": caps}
+        if preset:
+            meta["preset"] = preset
         result = VideoResult(
             path=rec["path"], engine="code", routed="code",
-            note=(f"code-rendered {rec['kind']} scene: deterministic "
+            note=(f"{preset_note}code-rendered {rec['kind']} scene: "
+                  f"deterministic "
                   f"seek(t) frames ({rec['frames']} frames, render hash "
                   f"{rec['render_hash'][:12]}…) — no model, CPU-only; "
                   f"contact sheet: {rec['contact_sheet']}\n"
                   f"   narration: {narr_note}\n"
                   f"   {cap_note}"),
             prompt=prompt,
-            meta={"scene_kind": rec["kind"], "source": rec["source"],
-                  "frames": rec["frames"], "fps": rec["fps"],
-                  "duration": rec["duration"],
-                  "render_hash": rec["render_hash"],
-                  "contact_sheet": rec["contact_sheet"],
-                  "deterministic": True,
-                  "narration": narr,
-                  "captions": caps})
-        record_ledger({"kind": "videogen.generate", "path": rec["path"],
-                       "engine": "code", "routed": "code",
-                       "scene_kind": rec["kind"],
-                       "render_hash": rec["render_hash"]})
+            meta=meta)
+        ledger_entry: dict[str, Any] = {
+            "kind": "videogen.generate", "path": rec["path"],
+            "engine": "code", "routed": "code",
+            "scene_kind": rec["kind"],
+            "render_hash": rec["render_hash"]}
+        if preset:
+            ledger_entry["preset"] = preset
+        record_ledger(ledger_entry)
         return result
 
     if backend != "motion":

@@ -81,8 +81,17 @@ CHART_SCENE = {
     ],
 }
 
+CODE_SCENE = {
+    "engine": "code", "title": "Trace: x doubles",
+    "lines": [
+        {"text": "x = 1", "values": "x = 1"},
+        {"text": "x = x + 1", "values": "x = 2"},
+        {"text": "print(x)", "values": "prints 2"},
+    ],
+}
+
 SCENES = {"diagram": DIAGRAM_SCENE, "equation": EQUATION_SCENE,
-          "chart": CHART_SCENE}
+          "chart": CHART_SCENE, "code": CODE_SCENE}
 
 GOLDENS_PATH = Path(__file__).parent / "golden" / "explainer_goldens.json"
 
