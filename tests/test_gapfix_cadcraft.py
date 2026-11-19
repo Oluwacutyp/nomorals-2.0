@@ -790,8 +790,9 @@ class TestTool:
             # 724 after the designcraft port, 725 after the figcraft
             # port (lane 105) and 726 after the soundcraft port
             # (lane 107), 727 after the cadcraft port (lane 106),
-            # 728 after the materialcraft port (lane 109).
-            assert len(registry._tools) == 728
+            # 728 after the materialcraft port (lane 109), 729 after the
+            # texturecraft port (lane 108).
+            assert len(registry._tools) == 729
 
     def test_tool_inspect_and_render(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

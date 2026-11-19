@@ -1,0 +1,157 @@
+# TextureCraft attribution (lane 108). Every ported unit maps to its
+# upstream file at commit 37ad2112 plus the SHA-256 of the source read.
+# Upstream: storytold/texturecraft, dual MIT/Apache-2.0.
+# Devon-authored modules list their lineage below.
+
+[[assets]]
+id = "texel-tile"
+upstream = "crates/texel/src/tile.rs"
+sha256 = "444fa607b804fff1cf00167e1246258e3889423d4eaf808dd9d5a60380b7fb6a"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/media/textures/tiles.py"
+
+[[assets]]
+id = "texel-noise"
+upstream = "crates/texel/src/noise.rs"
+sha256 = "a9ffb3f993c61ff3fc0fbd46df1a5794fe45a0492ecc28bed76a8834ae819900"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/media/textures/noise.py"
+
+[[assets]]
+id = "texel-dilate"
+upstream = "crates/texel/src/dilate.rs"
+sha256 = "6602991bc1046d14732d2e1b2ffdc12bf3cc2e78cdbadc4264768e8fc2506379"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/media/textures/dilate.py"
+
+[[assets]]
+id = "core-blend"
+upstream = "crates/core/src/blend.rs"
+sha256 = "b0acada0486207dd43482a6f32c05657463f78a1b67996c9994eb4d1e8b5c869"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/media/textures/blend.py"
+
+[[assets]]
+id = "core-layer"
+upstream = "crates/core/src/layer.rs"
+sha256 = "9f13bd80a0f3e41e1caa6dec1a52557562fb6b31bca5f7d3a94564968bc159fd"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/media/textures/model.py (Layer, ChannelBlend, ProceduralKind)"
+
+[[assets]]
+id = "core-channel"
+upstream = "crates/core/src/channel.rs"
+sha256 = "e6a4e850380f8c819ca57f86a0543004d00133f2b5ae5dedda2c8f376fca7209"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/media/textures/model.py (Channel, ChannelKind)"
+
+[[assets]]
+id = "compose-pattern"
+upstream = "crates/compose/src/pattern.rs"
+sha256 = "7e22dd6f1075e6202ff9fb78632d5a02ff6ab76546809052d4ada1e1f8197801"
+license = "MIT OR Apache-2.0"
+ported_to = "nomorals/media/textures/patterns.py"
+
+[[assets]]
+id = "upstream-agents"
+upstream = "AGENTS.md"
+sha256 = "bca41a79debcdb5c83b6331ef7113c2506405830464318390cddf80b22574b8b"
+license = "MIT OR Apache-2.0"
+ported_to = "house rules honoured (attribution row per asset, never crash on bad input, CPU oracle, undo is snapshots, everything is a command)"
+
+[[assets]]
+id = "upstream-attribution"
+upstream = "ATTRIBUTION.md"
+sha256 = "6ee6a03342d1918d95c4a8f43eb167576c6b340e5072412bf0907302a963874e"
+license = "MIT OR Apache-2.0"
+ported_to = "this file (attribution habit)"
+
+[[devon]]
+id = "textures-errors"
+path = "nomorals/media/textures/errors.py"
+lineage = "Devon-authored; TextureError/TextureErrorKind in the shape of the other craft organs"
+
+[[devon]]
+id = "textures-tiles"
+path = "nomorals/media/textures/tiles.py"
+lineage = "Port of texel/tile.rs (see assets texel-tile)"
+
+[[devon]]
+id = "textures-noise"
+path = "nomorals/media/textures/noise.py"
+lineage = "Port of texel/noise.rs (see assets texel-noise)"
+
+[[devon]]
+id = "textures-blend"
+path = "nomorals/media/textures/blend.py"
+lineage = "Port of core/blend.rs (see assets core-blend)"
+
+[[devon]]
+id = "textures-patterns"
+path = "nomorals/media/textures/patterns.py"
+lineage = "Port of compose/pattern.rs raw()/shape()/procedural() (see assets compose-pattern)"
+
+[[devon]]
+id = "textures-dilate"
+path = "nomorals/media/textures/dilate.py"
+lineage = "Port of texel/dilate.rs (see assets texel-dilate)"
+
+[[devon]]
+id = "textures-model"
+path = "nomorals/media/textures/model.py"
+lineage = "Devon-authored .tcraft codec; channel/layer model ported from core/channel.rs and core/layer.rs"
+
+[[devon]]
+id = "textures-compose"
+path = "nomorals/media/textures/compose.py"
+lineage = "Devon-authored CPU layer-stack compositor in the upstream compose/ oracle shape"
+
+[[devon]]
+id = "textures-paint"
+path = "nomorals/media/textures/paint.py"
+lineage = "Devon-authored brush engine in the upstream paint/ crate shape"
+
+[[devon]]
+id = "textures-mipmaps"
+path = "nomorals/media/textures/mipmaps.py"
+lineage = "Devon-authored mipmap chain and sampler"
+
+[[devon]]
+id = "textures-normal"
+path = "nomorals/media/textures/normal.py"
+lineage = "Devon-authored Sobel height-to-normal; RNM from blend.py (upstream core/blend.rs)"
+
+[[devon]]
+id = "textures-filters"
+path = "nomorals/media/textures/filters.py"
+lineage = "Devon-authored filter subset of upstream Filter (blur/sharpen/invert/threshold/clamp/posterize/levels)"
+
+[[devon]]
+id = "textures-render"
+path = "nomorals/media/textures/render.py"
+lineage = "Devon-authored PIL preview renderer over the compositor"
+
+[[devon]]
+id = "textures-edit"
+path = "nomorals/media/textures/edit.py"
+lineage = "Devon-authored typed commands with snapshot undo (upstream AGENTS.md: everything is a command, undo is snapshots)"
+
+[[devon]]
+id = "textures-parity"
+path = "nomorals/media/textures/parity.py"
+lineage = "Devon-authored parity runner over textures-parity.toml"
+
+[[devon]]
+id = "textures-attribution"
+path = "nomorals/media/textures/attribution.py"
+lineage = "Devon-authored attribution verifier over textures-attribution.toml"
+
+[[devon]]
+id = "textures-tool"
+path = "nomorals/tools/texturecraft.py"
+lineage = "Devon-authored brain tool over the texture organ"
+
+[[devon]]
+id = "textures-tests"
+path = "tests/test_gapfix_texturecraft.py"
+lineage = "Devon-authored failing-first tests; noise/blend/pattern/tile/dilate values pinned to the real upstream Rust (groundtruth.txt)"

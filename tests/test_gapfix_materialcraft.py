@@ -387,8 +387,9 @@ class TestTool:
             assert spec is not None
             assert "inspect" in spec.description
             # 727 after the cadcraft port (lane 106), 728 after
-            # the materialcraft port (lane 109).
-            assert len(registry._tools) == 728
+            # the materialcraft port (lane 109), 729 after the
+            # texturecraft port (lane 108).
+            assert len(registry._tools) == 729
 
     def test_tool_inspect_and_cook(self):
         with tempfile.TemporaryDirectory() as home:

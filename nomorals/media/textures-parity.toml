@@ -1,0 +1,62 @@
+# TextureCraft parity cases (lane 108). Every case runs against a real
+# fixture in tests/fixtures/textures/ or against the pinned upstream
+# values in groundtruth.txt. Missing fixture = fail, never skip.
+
+[[cases]]
+id = "roundtrip_simple"
+fixture = "simple.tcraft"
+operation = "roundtrip"
+
+[[cases]]
+id = "cow_sharing"
+operation = "cow"
+
+[[cases]]
+id = "noise_value_seed7"
+operation = "noise"
+
+[[cases]]
+id = "pattern_bricks"
+operation = "pattern"
+
+[[cases]]
+id = "blend_all_modes"
+operation = "blend"
+
+[[cases]]
+id = "composite_multiply"
+fixture = "simple.tcraft"
+operation = "composite"
+
+[[cases.expect.texels]]
+x = 16
+y = 16
+values = [49654, 16887, 16887, 65535]
+tolerance = 2
+
+[[cases.expect.texels]]
+x = 100
+y = 100
+values = [48234, 48234, 48234, 65535]
+tolerance = 2
+
+[[cases]]
+id = "mipmap_downsample"
+operation = "mipmap"
+
+[[cases]]
+id = "trilinear_sample"
+operation = "sample"
+
+[[cases]]
+id = "normal_from_height"
+operation = "normal"
+
+[[cases]]
+id = "dilate_center"
+operation = "dilate"
+
+[[cases]]
+id = "broken_rejected"
+fixture = "broken.tcraft"
+operation = "open_rejected"

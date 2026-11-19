@@ -542,6 +542,11 @@ MODULE_PINS: dict[str, int] = {
     # as tools/cadcraft.py over the cad organ — it owns no document
     # model of its own, only argument routing and reply shaping.
     "nomorals.tools.materialcraft": 5,
+    # The texturecraft tool surface is the L5 composed tool over the
+    # L4 media organ (nomorals/media/textures/), the same shape as
+    # tools/soundcraft.py over the sound organ — it owns no texture
+    # model of its own, only argument routing and reply shaping.
+    "nomorals.tools.texturecraft": 5,
     # The prompt-compiler tool surface composes the L5 organs that own
     # the graded journals (games.npc_learn, characters.learn) into a
     # compile/status surface — it IS the L5 composition layer, not an

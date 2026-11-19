@@ -673,6 +673,7 @@ class ToolRegistry:
             "soundcraft",  # open/edit/mix/bounce real .scraft — session model, mixer, effects, realtime engine, quarantined plugin hosts, parity + attribution (SoundCraft port)
             "cadcraft",  # sketch/constrain/solve/draft/render real CAD drawings — document model, constraint solver, typed commands, drafting ops, renderer, parity + attribution (CadCraft port)
             "materialcraft",  # design/cook/preview/export real PBR materials — node graph, node library, content-addressed cook cache, GGX preview, parity + attribution (MaterialCraft port)
+            "texturecraft",  # open/edit/paint/tile/render real .tcraft — sparse 64x64 COW tiles, procedural patterns, layer compositor, mipmaps, normal derivation, parity + attribution (TextureCraft port)
             "workspace",
             "trading",
             "characters",
