@@ -25,3 +25,10 @@ The full 258-file corpus lives at
 `~/workspace/echelon-mining/repos/storytold/photocraft-corpus/`
 and `nomorals.media.photo_editor.oracle.run_oracle` runs over it
 when present (env `NM_PHOTOCRAFT_CORPUS` overrides the path).
+Lane 118 vendored a 43-file subset of it in the sibling
+`tests/fixtures/photocraft-corpus/` (same relative paths as
+upstream: one file per mode/depth cell, plus every file the
+photo_editor tests name) — the vendored corpus is the always-run
+oracle (see tests/test_gapfix_corpora.py); its absence is a
+failure, never a skip. The gimp/ set (XCF) is not vendored:
+Devon has no XCF reader, so it would oracle nothing.

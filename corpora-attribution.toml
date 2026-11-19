@@ -1,0 +1,937 @@
+# Corpora attribution — SHA-256 provenance for the three vendored
+# storytold test corpora (all dual MIT OR Apache-2.0). Upstream
+# hashes are pinned to the clones at the commits below and verified
+# by tests/test_gapfix_corpora.py; a hash marked "vendored copy"
+# is not in the upstream SHA256SUMS (sidecars, docs, licence texts)
+# and is pinned from the vendored file itself.
+#
+# photocraft-corpus c3abfc1c794409a71ade6a22283caab4ba4d2aa8 (2026-10-23)
+# effectcraft-corpus 97262276f625afdeeb61787e4cbb74b3f17af510 (2026-11-04)
+# cadcraft-corpus fde57bc9e8c71c7c2d33a410edafa1afe44cae24 (2026-11-03)
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/cmyk16/baseline-layer-copy.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/cmyk16/baseline-layer-copy.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "a72ac9d56578780866972ee700b44981ed1b68c250c511ec1c823d476a2e394d"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/cmyk16/levels.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/cmyk16/levels.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "f2ec5fc028cc61fa688d492d552fe099a25e1ff3731990e48c0c6f069df459a8"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/cmyk8/brightness-contrast-legacy.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/cmyk8/brightness-contrast-legacy.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "97c9153c57992d5108c07c98ef932861b516f1f76849995890f7d07b16c19b96"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/cmyk8/photo-filter.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/cmyk8/photo-filter.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "a4cf08d366217280e375c3f356ffbe47a5a9e73ec53839a9a4f7535fa0f9566a"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/gray16/baseline-layer-copy.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/gray16/baseline-layer-copy.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "b83f91c4bda29287c8baa54fd99a616129250c80aeea1d4e3eb6566d67b7d385"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/gray16/levels.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/gray16/levels.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "477d41d9e65fe316e74f443d903cb21350a3841a574ceac521458d657809e20d"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/gray32/baseline-layer-copy.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/gray32/baseline-layer-copy.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "b8924389849513fabeb31a6cf724530df26161f70d3be3e409f5eecaa3c5800f"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/gray32/levels.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/gray32/levels.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "db1d78d84eee47c75adc980eb6439c3c252b9367cf233ae42f0942a71f0ce99f"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/gray8/curves.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/gray8/curves.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "6b55267f72862273445dade16c7a78dd8ca9bcdffe7810f5765e452bcf811fbd"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/gray8/exposure.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/gray8/exposure.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "2e02daf9d3b185762770eb76821f5769f85429450bf0877ff93e2c48f7b63e9a"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/gray8/gradient-map.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/gray8/gradient-map.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "b58acaa4db29bdcc1f2a3d7779a2af18fda0e87f9d96ad2867cb53c3afb67a95"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/gray8/levels.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/gray8/levels.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "0e8f8244ad71a61c20b94f42368845c917ae837424c45ab5ae63d58437917f11"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/lab16/baseline-layer-copy.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/lab16/baseline-layer-copy.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "c880c7fb100d75c1e5f4945e25b5fe1234c99f931dc785ec62bf05084c45cbe7"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/lab16/levels.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/lab16/levels.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "498d8c8178f7998643d541bb532f6e67566406873afa5dffb52a2793f08b191f"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/lab8/baseline-layer-copy.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/lab8/baseline-layer-copy.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "ece5abcbb2efc27ff3bed174700155f2bfb012e0bde0146dc4966f780f39cf58"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/lab8/curves.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/lab8/curves.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "25f57ec7a787198df08d4f5c8a539a9f1676d67ccd784928cb425b9a49b69ace"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/lab8/hue-saturation.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/lab8/hue-saturation.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "c9b2b21eab43d5c84f5ff7d60fb40a28575a1037a168466c48a0dfc4d6e0178f"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/lab8/invert.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/lab8/invert.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "e4ce3ef3350f6a5944a15ef4dea27efa79c950d08d3454091455eaa3e653904d"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/lab8/levels.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/lab8/levels.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "f13cd7300e9dea246083cbea458ff3d0e0e7c75168449649d0b40522fe076b8c"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/rgb16/baseline-layer-copy.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb16/baseline-layer-copy.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "f31e10d19689df9dba71ebdc60652b28eb364ad8da9040a80bc5aeffcf34228e"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/rgb16/levels.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb16/levels.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "fbb18d1cfa5fc74cf1c4777b99acdc2465b2920574bd9069b5a2ac129c8151d9"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/rgb32/baseline-layer-copy.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb32/baseline-layer-copy.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "73199414108280d7717cc5c908a76f51c5e3091d7471e21e7d0bac1a75734f32"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/rgb32/levels.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb32/levels.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "aa2eb41afb426f181a56a45fda2abda4e4d75fa6126007aa9179f54dc282a50f"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/rgb8/brightness-contrast-legacy.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb8/brightness-contrast-legacy.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "a49675a1bfc5c6638020511b6ac73fe90bd2681e7b9f4c73855b5180beb0e6fe"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/rgb8/brightness-contrast.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb8/brightness-contrast.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "10074c81b1ce26fdbd263f2629e28b57781e28072cf2a8a01271827ff6fea7ab"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/rgb8/channel-mixer.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb8/channel-mixer.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "88483af89e465b389b95a53b6b58a0b8dcf708aaf290bf9de53caf3e67dbfb6b"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/rgb8/clipped-hue-sat-blend-color.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb8/clipped-hue-sat-blend-color.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "d8e9eefd434a1c762a2df2ef17a19e13e2b0d16218a8235d3294748e9f45fd9b"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/rgb8/color-balance.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb8/color-balance.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "318ba3fc481a9ffd855d6914ceaea0e5539ab8bf3dfe4f4e3f6d23d6606f5aa4"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/rgb8/curves.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb8/curves.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "d82a45068b914495a8459ff4d5f9c691899e57ecf5f3d616db0aff549e4ff8eb"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/rgb8/exposure.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb8/exposure.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "4b3a9d86d8ebe5bfac9b9accbfdf1ab6a29aac6063bf2c0acec11f301baf9376"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/rgb8/gradient-map.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb8/gradient-map.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "487b3bbc5ce633e2609f1f6acc986720e6b5c8fd800d90ece5c8439897f0d717"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/rgb8/invert.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb8/invert.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "ed6443b9fadfb7cf42a367a64f0d35e89ab7eb18336908f40977ab0ed02c963f"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/rgb8/levels.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb8/levels.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "cffca23ba5ea56c0ee534123a53fd4382bae8d4a2b3579057dacc8a6e1c9c6c4"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/rgb8/photo-filter.psd"
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb8/photo-filter.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "77862a1f7bca7e13ae4e8245e81d85fc017e2a7bd61bcb71a873bbd1c34cfa58"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/effects/bevel-emboss-chisel-hard.psd"
+path = "tests/fixtures/photocraft-corpus/effects/bevel-emboss-chisel-hard.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "bbbbb451d15296d5f8f9cc4c4428df70ceea5bd980df27f351e8c53282bcf435"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/effects/bevel-emboss-smooth-colored-normal.psd"
+path = "tests/fixtures/photocraft-corpus/effects/bevel-emboss-smooth-colored-normal.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "c6cfa46646584df02ac0bdb3916e789483cf690561b60766f623962ff1547fcd"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/effects/bevel-inner-smooth.psd"
+path = "tests/fixtures/photocraft-corpus/effects/bevel-inner-smooth.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "18386df1ac2289a0b663a9605f8da9c3f29a54fa0dbaf8383c2cabb8ad9ca3ea"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/effects/bevel-outer-smooth.psd"
+path = "tests/fixtures/photocraft-corpus/effects/bevel-outer-smooth.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "663d9ed575a2d2aa4c52a6d3ec7a5c213d27f0d8b7a42c866252307e4f191254"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/effects/outer-glow-soft.psd"
+path = "tests/fixtures/photocraft-corpus/effects/outer-glow-soft.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "f20c9ec307607a6e781fe583675434a81e233836aa4cfb56390c7bb950470daf"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/effects/satin-default.psd"
+path = "tests/fixtures/photocraft-corpus/effects/satin-default.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "ac79fa1c7ce6cd6e6db847bd2c5b3399569556caa1d2ee0783250069ba97fd7f"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/smart-filters/sf-curves.psd"
+path = "tests/fixtures/photocraft-corpus/smart-filters/sf-curves.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "466e24d095ffe47937d28a0022a14cf0c37d4c3aadf85b7fbffb8222c277a6af"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/smart-filters/sf-filter-mask-hard.psd"
+path = "tests/fixtures/photocraft-corpus/smart-filters/sf-filter-mask-hard.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "52a91cdaa77fcc98ef342d02d43fb56f5586c3ee335b0d72fe70deeadbb12cfd"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/smart-filters/sf-gaussian-blur-r4.psd"
+path = "tests/fixtures/photocraft-corpus/smart-filters/sf-gaussian-blur-r4.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "501cbf378b92b9c32f41344a551676c4ec39e516f02c50abe02633eb44017002"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/smart-filters/sf-none-plain.psd"
+path = "tests/fixtures/photocraft-corpus/smart-filters/sf-none-plain.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "5327015b70f1427e6ac28054131e166209dec4643aaa1d4bbf79de472dcbef5a"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/smart-filters/sf-stack-blend-and-mask.psd"
+path = "tests/fixtures/photocraft-corpus/smart-filters/sf-stack-blend-and-mask.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "3b1cab8cf7d539146df2beea4d4923e2dbcd2904c510a8867bbe352f94f2408f"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/text/antialias-smooth.psd"
+path = "tests/fixtures/photocraft-corpus/text/antialias-smooth.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "679d9cc50d447bc13dc6423cd9312c1aff00c015cdebd72fbdf106e2bcabf227"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/text/caps-all-caps.psd"
+path = "tests/fixtures/photocraft-corpus/text/caps-all-caps.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "12798bce71eb049a1c875d24a4f96b9319a028da06714a6a2167f39923ed0731"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/text/point-arial-24.psd"
+path = "tests/fixtures/photocraft-corpus/text/point-arial-24.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "ce30c40215d7a08581ff4be7937bca7e5fdf9a2faacffc77c0679861d94e4114"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/text/text-on-gradient-blend-multiply.psd"
+path = "tests/fixtures/photocraft-corpus/text/text-on-gradient-blend-multiply.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "8e24f354439757e18313a1cb5d627f80e2646bcdce6e71723599011a3ae97498"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/text/text-with-layer-styles.psd"
+path = "tests/fixtures/photocraft-corpus/text/text-with-layer-styles.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "4e5bd113f2b825df7d5385c51ebfbf3e05aba1fd4bf6fcdb7e5d7a3f657bb3e3"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/rgb8/baseline-layer-copy.psd"
+path = "tests/fixtures/photocraft/rgb8-baseline-layer-copy.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "9f8891cc875196eb26a91e91879bae1e59719cf7fb806d5d7c80301d0ca18914"
+note = "vendored by lane 76"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/rgb8/brightness-contrast.psd"
+path = "tests/fixtures/photocraft/rgb8-brightness-contrast.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "10074c81b1ce26fdbd263f2629e28b57781e28072cf2a8a01271827ff6fea7ab"
+note = "vendored by lane 76"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/cmyk8/baseline-layer-copy.psd"
+path = "tests/fixtures/photocraft/cmyk8-baseline-layer-copy.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "5ac999b8356d6a93917fbe0849db26d8bd6b208fba014414e6aef90efe836905"
+note = "vendored by lane 76"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "photoshop/adjustments/gray8/baseline-layer-copy.psd"
+path = "tests/fixtures/photocraft/gray8-baseline-layer-copy.psd"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the PhotoCraft contributors"
+sha256 = "6fa1540980ebb675830a6feccbc168dea55463391833be33406412bddba30723"
+note = "vendored by lane 76"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "docs/aep/CASES.md"
+path = "tests/fixtures/effectcraft/CASES.md"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the EffectCraft contributors"
+sha256 = "593bae010d07531172c294f3184f6a87bb766f559213f30a6df096cab89cec25"
+note = "vendored copy (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/3d.aep"
+path = "tests/fixtures/effectcraft/aep/3d.aep"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "4a51318c4b37fa95e2c02682183d3982fdfbe1870dc50ba729b776d1826f982e"
+note = "upstream SHA256SUMS"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/3d.aep.attribution"
+path = "tests/fixtures/effectcraft/aep/3d.aep.attribution"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "00ee5631334df3532c334d44f1164135cb191ea6013cc9dc4aa69b8520ea3b1c"
+note = "vendored copy (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/README.md"
+path = "tests/fixtures/effectcraft/aep/README.md"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the EffectCraft contributors"
+sha256 = "84583be2a27d1ffe88b07ed69b0dc6a15b15bdb7ab5d5d97b0b3c48bd618d834"
+note = "vendored copy (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/aepx-pair.aep"
+path = "tests/fixtures/effectcraft/aep/aepx-pair.aep"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "da8ba17d095ddb1576db658ad28a3966d7231244cf0391f77d71d7aa68c6e085"
+note = "upstream SHA256SUMS"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/aepx-pair.aep.attribution"
+path = "tests/fixtures/effectcraft/aep/aepx-pair.aep.attribution"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "2bf2de2bedf8c337e9e4d268cd4f5c31a8b0448caa01649a0603aca892ceaffe"
+note = "vendored copy (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/aepx-pair.aepx"
+path = "tests/fixtures/effectcraft/aep/aepx-pair.aepx"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "59e79c1621de108a4960d2bb6b14bc54e39df658f459af777b50fa95f2b7b32b"
+note = "upstream SHA256SUMS"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/aepx-pair.aepx.attribution"
+path = "tests/fixtures/effectcraft/aep/aepx-pair.aepx.attribution"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "520dd9145c1eea5d6099e3e51da0801847cfe76c89314d004f718d434cdc6232"
+note = "vendored copy (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/effects.aep"
+path = "tests/fixtures/effectcraft/aep/effects.aep"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "2e1a59562b52eb97ce32ccc7810a54f0671eae567d1d9869041b391d3cc4a20c"
+note = "upstream SHA256SUMS"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/effects.aep.attribution"
+path = "tests/fixtures/effectcraft/aep/effects.aep.attribution"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "00da82673e083fa942e0d9937befc4b4abaf556cd7eb43583be4c6e0e736dcb3"
+note = "vendored copy (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/empty.aep"
+path = "tests/fixtures/effectcraft/aep/empty.aep"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "1e10b8ee47f43c5cd6e19710fbab28f498f8b73dbfa1a8f830ae41ad3b1c19ef"
+note = "upstream SHA256SUMS"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/empty.aep.attribution"
+path = "tests/fixtures/effectcraft/aep/empty.aep.attribution"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "9a0b4961ed4c316fc56cf5212c25cbebece87c5d7a1f7b93a0a186e7b8898146"
+note = "vendored copy (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/footage-precomp.aep"
+path = "tests/fixtures/effectcraft/aep/footage-precomp.aep"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "b4ee29ebd0d46b6013efc05c0f8cce4be61ce2d5b8bc38c5a814b86bceeee286"
+note = "upstream SHA256SUMS"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/footage-precomp.aep.attribution"
+path = "tests/fixtures/effectcraft/aep/footage-precomp.aep.attribution"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "22c53ea5f160bc22df89372ccaebb9be47cd0b1e0e1fa5ac3f87a414ec7331fa"
+note = "vendored copy (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/fx-switch.aep"
+path = "tests/fixtures/effectcraft/aep/fx-switch.aep"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "7e162f536d422daffbe909b50fdd83d7160c6b150ce6c34216c65dba46ab87cb"
+note = "upstream SHA256SUMS"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/fx-switch.aep.attribution"
+path = "tests/fixtures/effectcraft/aep/fx-switch.aep.attribution"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "d17b8d8b7ad9fc791927782410bfe18fbcaac679ad5c8c2f382de88ae3e0142c"
+note = "vendored copy (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/inputs/README.md"
+path = "tests/fixtures/effectcraft/aep/inputs/README.md"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the EffectCraft contributors"
+sha256 = "d3aef2e1b9aebc93ece0dffd3859e6317613e86a490ea699a4880871e52999c3"
+note = "vendored copy (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/inputs/curves-red-mid-down.ffx"
+path = "tests/fixtures/effectcraft/aep/inputs/curves-red-mid-down.ffx"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "f6ce60a8ed0fa786625078f61995e1184ef0b016efaeeb0b4ae6337831697821"
+note = "upstream SHA256SUMS"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/inputs/curves-red-mid-down.ffx.attribution"
+path = "tests/fixtures/effectcraft/aep/inputs/curves-red-mid-down.ffx.attribution"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "d440f764b9250201ab45557a36ae8668d414ef372f1c0d9dca9cffce679c037f"
+note = "vendored copy (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/inputs/curves-rgb-two-points.ffx"
+path = "tests/fixtures/effectcraft/aep/inputs/curves-rgb-two-points.ffx"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "e3992190150366b01859e32adcb9bbe2e0ef492bd2259a8b7e85b571afeca24f"
+note = "upstream SHA256SUMS"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/inputs/curves-rgb-two-points.ffx.attribution"
+path = "tests/fixtures/effectcraft/aep/inputs/curves-rgb-two-points.ffx.attribution"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "5f6e1fec1bbae1a1a368d88da4b8a876d8de7d45a58b40739ea95c57e93276d5"
+note = "vendored copy (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/inputs/meshwarp-3x3-center-right.ffx"
+path = "tests/fixtures/effectcraft/aep/inputs/meshwarp-3x3-center-right.ffx"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "4a0cd5a0e52d8d14ee0f895b0a3e054199d399094b410a7b2a620eb484d5cba8"
+note = "upstream SHA256SUMS"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/inputs/meshwarp-3x3-center-right.ffx.attribution"
+path = "tests/fixtures/effectcraft/aep/inputs/meshwarp-3x3-center-right.ffx.attribution"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "db99c490534e2701d96890beecc5f88d045ef0931b5b833b806c84e64d644b69"
+note = "vendored copy (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/keyframes.aep"
+path = "tests/fixtures/effectcraft/aep/keyframes.aep"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "baad5a326f255797c03b3cc0a776524b7eabfb217fbc301b0596ac3e4e97d71b"
+note = "upstream SHA256SUMS"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/keyframes.aep.attribution"
+path = "tests/fixtures/effectcraft/aep/keyframes.aep.attribution"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "1cc18be6457fb80221f069dece26aa05ca2168868c34af6249a516a33c6cfb53"
+note = "vendored copy (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/layers-comps.aep"
+path = "tests/fixtures/effectcraft/aep/layers-comps.aep"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "57184fec75ec8892ac6c8ac360274fdaa4fc4ed39093f969f30a45fbf2afaf9e"
+note = "upstream SHA256SUMS"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/layers-comps.aep.attribution"
+path = "tests/fixtures/effectcraft/aep/layers-comps.aep.attribution"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "dece8f2ffe0616b5276b1d62ca6d8d1cd8cfe66bb643090cf958b99f82eaa832"
+note = "vendored copy (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/markers.aep"
+path = "tests/fixtures/effectcraft/aep/markers.aep"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "fca73b3e4f5398a0ab686b74d8eb3e1c2dd37c7db0e8a31b2e0f45ba0bb3c8ff"
+note = "upstream SHA256SUMS"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/markers.aep.attribution"
+path = "tests/fixtures/effectcraft/aep/markers.aep.attribution"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "f84fcfb071f42abef0fbe5af24fdfccb379ae0d1e1de2659089a952018948f98"
+note = "vendored copy (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/masks.aep"
+path = "tests/fixtures/effectcraft/aep/masks.aep"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "93d6a9f2a2980d999bcb628a4e7220d1922b1c535d535663f69043778322d72f"
+note = "upstream SHA256SUMS"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/masks.aep.attribution"
+path = "tests/fixtures/effectcraft/aep/masks.aep.attribution"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "a29fb10aeb6e71d8d8d6b081a629a03ee79d8670ba79e5af80cf48119458a8df"
+note = "vendored copy (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/media/README.md"
+path = "tests/fixtures/effectcraft/aep/media/README.md"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the EffectCraft contributors"
+sha256 = "771ed8ec2925659e68d7487caa939c63eb0dc8e0db3b493d576b6b98e6570411"
+note = "vendored copy (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/settings-a.aep"
+path = "tests/fixtures/effectcraft/aep/settings-a.aep"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "c3255249dd29279cc6a14c156a0acb82b0bc255a0be77c0178a9c4bc891206a5"
+note = "upstream SHA256SUMS"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/settings-a.aep.attribution"
+path = "tests/fixtures/effectcraft/aep/settings-a.aep.attribution"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "0a5999e9d6d4556e82a8a86a89da6fe5fc7f38862e14516ae9d64b7dd8ac1bae"
+note = "vendored copy (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/settings-b.aep"
+path = "tests/fixtures/effectcraft/aep/settings-b.aep"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "b4a61e988743b0f6b5a7ad6875f958ccf173fcf0d7d6097c441a0aa71c5e1fd7"
+note = "upstream SHA256SUMS"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/settings-b.aep.attribution"
+path = "tests/fixtures/effectcraft/aep/settings-b.aep.attribution"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "67d47d6b511dfbe25acb0bca1ad7cd4ae2258d2b7bbb43472d94d9240857afbf"
+note = "vendored copy (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/settings-c.aep"
+path = "tests/fixtures/effectcraft/aep/settings-c.aep"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "71ba74dade2ef411026a55a945d573cf059ff03aeb2d527fe2c6833e13174df3"
+note = "upstream SHA256SUMS"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/settings-c.aep.attribution"
+path = "tests/fixtures/effectcraft/aep/settings-c.aep.attribution"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "46bda23b9df7981b6db0d068d86521c21b22958ba180f52cd597d2999bbb3092"
+note = "vendored copy (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/shapes.aep"
+path = "tests/fixtures/effectcraft/aep/shapes.aep"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "9035039df7c34f04c33337719a2fef5ba93db5d2317434eb3476906571654d3b"
+note = "upstream SHA256SUMS"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/shapes.aep.attribution"
+path = "tests/fixtures/effectcraft/aep/shapes.aep.attribution"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "d44ed67c98f6de0364b46fa13db4a3bf94bd223483341a6b0f78f7dfa0a16f55"
+note = "vendored copy (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/styles.aep"
+path = "tests/fixtures/effectcraft/aep/styles.aep"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "5fe35e08d05e72583fdd19e02878cc974136736e39090fab9d84d132fb2b4d35"
+note = "upstream SHA256SUMS"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/styles.aep.attribution"
+path = "tests/fixtures/effectcraft/aep/styles.aep.attribution"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "3ec239cdbeda9f4193271f950d1aa6c92afa68c6139c8cfcf9eb1fef86cd5f8c"
+note = "vendored copy (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/text.aep"
+path = "tests/fixtures/effectcraft/aep/text.aep"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "fded434b54532f9001c53a3482deed0c157f76ee067b354a801ec9c2747002db"
+note = "upstream SHA256SUMS"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "aep/text.aep.attribution"
+path = "tests/fixtures/effectcraft/aep/text.aep.attribution"
+license = "MIT OR Apache-2.0"
+author = "vangel76 (contributor)"
+sha256 = "e007288c796266e5072c39932b4653d0e6653535fe0b7535f7f5dca8fc349907"
+note = "vendored copy (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/cadcraft-corpus"
+upstream_path = "cadcraft/sample-bracket.dxf"
+path = "tests/fixtures/cadcraft/sample-bracket.dxf"
+license = "MIT OR Apache-2.0"
+author = "CADCraft contributors"
+sha256 = "c8c97a604c84f0be1c114b41c180abe0ace641db6187060e6cb8335cdf37b734"
+
+[[assets]]
+repo = "storytold/cadcraft-corpus"
+upstream_path = "cadcraft/sample-bracket.dwg"
+path = "tests/fixtures/cadcraft/sample-bracket.dwg"
+license = "MIT OR Apache-2.0"
+author = "CADCraft contributors"
+sha256 = "fb2656000fbb1e62b416d3fe872e716241bd2ff4ee71bdb788672b9fcbd8b04a"
+
+[[assets]]
+repo = "storytold/cadcraft-corpus"
+upstream_path = "cadcraft/sample-floorplan.dxf"
+path = "tests/fixtures/cadcraft/sample-floorplan.dxf"
+license = "MIT OR Apache-2.0"
+author = "CADCraft contributors"
+sha256 = "3cc14ef2bcfbb77d7a9c311f3d8ecea71c39267202fd7cfb051c0ace9f944cf0"
+
+[[assets]]
+repo = "storytold/cadcraft-corpus"
+upstream_path = "cadcraft/sample-floorplan.dwg"
+path = "tests/fixtures/cadcraft/sample-floorplan.dwg"
+license = "MIT OR Apache-2.0"
+author = "CADCraft contributors"
+sha256 = "6b893bbc67ada5ed4b4375da46bd5a7682f154b0a3023e5e169af05b9d58380a"
+
+[[assets]]
+repo = "storytold/cadcraft-corpus"
+upstream_path = "LICENSES.tsv"
+path = "tests/fixtures/cadcraft/LICENSES.tsv"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team and the CADCraft contributors"
+sha256 = "c4dbacca85bb7a6ce7ccd3d1fb4d5164fffc4cd8e714ede63c34098f23b8fb20"
+note = "vendored copy (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "LICENSE-MIT"
+path = "tests/fixtures/corpora-licenses/photocraft-corpus/LICENSE-MIT"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team"
+sha256 = "1a8f66d8a86b146f5336fa0d4b1186576c8aa98e60823080c85c7811cfd810af"
+note = "licence text (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/photocraft-corpus"
+upstream_path = "LICENSE-APACHE"
+path = "tests/fixtures/corpora-licenses/photocraft-corpus/LICENSE-APACHE"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team"
+sha256 = "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+note = "licence text (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "LICENSE-MIT"
+path = "tests/fixtures/corpora-licenses/effectcraft-corpus/LICENSE-MIT"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team"
+sha256 = "7b6db9a363688683feacdf9b528f059637f2e5d2edbacd8720fc9b26781c9abe"
+note = "licence text (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/effectcraft-corpus"
+upstream_path = "LICENSE-APACHE"
+path = "tests/fixtures/corpora-licenses/effectcraft-corpus/LICENSE-APACHE"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team"
+sha256 = "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+note = "licence text (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/cadcraft-corpus"
+upstream_path = "LICENSE-MIT"
+path = "tests/fixtures/corpora-licenses/cadcraft-corpus/LICENSE-MIT"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team"
+sha256 = "54b0fc87ed7b61b59c20340070dd2b8c7f9d0b53795347819c3bd7c67ea2508a"
+note = "licence text (not in upstream SHA256SUMS)"
+
+[[assets]]
+repo = "storytold/cadcraft-corpus"
+upstream_path = "LICENSE-APACHE"
+path = "tests/fixtures/corpora-licenses/cadcraft-corpus/LICENSE-APACHE"
+license = "MIT OR Apache-2.0"
+author = "ArtCraft Team"
+sha256 = "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+note = "licence text (not in upstream SHA256SUMS)"

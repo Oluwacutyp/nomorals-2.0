@@ -1,0 +1,8 @@
+asset:        curves-rgb-two-points.ffx
+title:        Curves animation preset: RGB channel S-curve, a point at about 1/4 dragged down and one at 3/4 up (file curve (0,0) (62,24) (194,230) (255,255)); applied by case 964
+author:       vangel76 (contributor)
+source:       original work, made by hand in Adobe After Effects 2026 (Windows) on 2026-10-19: add the effect to a solid, set it as described, select the effect, Animation > Save Animation Preset, delete the effect (tools/aep/GENERATING.md, "The three preset cases")
+license:      MIT OR Apache-2.0
+license-file: ../../LICENSE-MIT, ../../LICENSE-APACHE
+added:        2026-11-03 by @vangel76
+notes:        Contains only the one effect with the values set by hand; no Adobe preset, sample or bundled asset was used or copied. XMP packet of After Effects (CreatorTool, timestamps, random document ids) only; no ICC profile, no paths or personal names (checked with tools/aep/inspect-embedded.py).

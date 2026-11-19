@@ -39,7 +39,6 @@ is the check.
 from __future__ import annotations
 
 import http.client
-import os
 import tempfile
 import threading
 import unittest
@@ -53,14 +52,6 @@ RGB8 = FIXTURES / "rgb8-baseline-layer-copy.psd"
 RGB8_ADJ = FIXTURES / "rgb8-brightness-contrast.psd"
 CMYK8 = FIXTURES / "cmyk8-baseline-layer-copy.psd"
 GRAY8 = FIXTURES / "gray8-baseline-layer-copy.psd"
-
-# Full 258-file corpus: the mining checkout on this box, or the env
-# override. The vendored fixtures above always run; the full-corpus
-# test skips honestly when the checkout is absent.
-CORPUS = Path(os.environ.get(
-    "NM_PHOTOCRAFT_CORPUS",
-    str(Path.home() / "workspace" / "echelon-mining" / "repos"
-        / "storytold" / "photocraft-corpus" / "photoshop")))
 
 
 def _read(path: Path) -> bytes:
@@ -308,32 +299,6 @@ class OracleTests(unittest.TestCase):
         self.assertEqual(adj[0]["status"], "differs")
         self.assertLessEqual(adj[0]["max_diff"], 1)
         self.assertTrue(adj[0]["adjustments_rendered"])
-
-    def test_oracle_full_corpus_when_present(self) -> None:
-        from nomorals.media.photo_editor.oracle import run_oracle
-
-        if not CORPUS.is_dir():
-            self.skipTest(f"no corpus checkout at {CORPUS}")
-        report = run_oracle(str(CORPUS))
-        summary = report["summary"]
-        self.assertEqual(summary["files"], 258)
-        # No file may crash the decoder: every file parses or fails
-        # with a named reason.
-        self.assertEqual(summary["failed"], 0, [
-            f for f in report["files"] if f["status"] == "failed"])
-        # Every file without an adjustment layer, a non-normal
-        # blend, a layer effect, live text or a smart object
-        # flattens exactly onto Photoshop's own composite.
-        exact_expected = [f for f in report["files"]
-                          if not f["adjustments"] and not f["blends"]
-                          and not f["effects"] and not f["text"]
-                          and not f["smartobjects"]
-                          and f["mode"] == "RGB"
-                          and f["depth"] == 8]
-        self.assertTrue(exact_expected)
-        bad = [f for f in exact_expected if not f["exact"]]
-        self.assertEqual(bad, [], f"{len(bad)} RGB8 files without "
-                         "adjustments differ from the composite")
 
     def test_oracle_roundtrip_all_fixtures(self) -> None:
         from nomorals.media.photo_editor.oracle import run_oracle

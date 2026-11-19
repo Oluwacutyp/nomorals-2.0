@@ -12,25 +12,25 @@ layer-state-only changes.
 
 Every test here drives the PRODUCTION path against REAL PSD files
 — the vendored fixtures in tests/fixtures/photocraft/ plus the
-full 258-file corpus when the mining checkout is present (the
-corpus test skips honestly when it is absent, never silently).
+vendored 43-file corpus in tests/fixtures/photocraft-corpus/
+(lane 118; corpus absence is a failure, never a skip — see
+tests/test_gapfix_corpora.py). The full 258-file corpus stays in
+the mining checkout for the extended manual run.
 A decoder proven only against fixtures written by the same hand
 as the decoder proves nothing; the oracle is the check.
 """
 
 from __future__ import annotations
 
-import os
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "photocraft"
-CORPUS = Path(os.environ.get(
-    "NM_PHOTOCRAFT_CORPUS",
-    str(Path.home() / "workspace" / "echelon-mining" / "repos"
-        / "storytold" / "photocraft-corpus" / "photoshop")))
+# Vendored corpus (lane 118): every gradient-map use below reads
+# this copy, so the suite no longer depends on the mining checkout.
+CORPUS = Path(__file__).resolve().parent / "fixtures" / "photocraft-corpus"
 
 
 def _read(path: Path) -> bytes:
@@ -303,25 +303,6 @@ class LayerStateTests(unittest.TestCase):
 
 
 class OracleTests(unittest.TestCase):
-    def test_oracle_full_corpus_when_present(self) -> None:
-        from nomorals.media.photo_editor.oracle import run_oracle
-
-        if not CORPUS.is_dir():
-            self.skipTest(f"no corpus checkout at {CORPUS}")
-        report = run_oracle(str(CORPUS))
-        summary = report["summary"]
-        self.assertEqual(summary["files"], 258)
-        self.assertEqual(summary["failed"], 0, report["files"])
-        # Lane 76: 80 exact / 55 differs-adjustment / 2
-        # differs-blend / 121 differs-unrendered. Lane 97
-        # renders every class; what remains is render gaps.
-        self.assertGreaterEqual(summary["exact"], 160)
-        self.assertEqual(summary["differs_adjustment"], 0)
-        self.assertEqual(summary["differs_blend"], 0)
-        self.assertEqual(summary["differs_unrendered"], 0)
-        self.assertEqual(summary["byte_stable"], 258)
-        self.assertEqual(summary["doc_byte_stable"], 258)
-
     def test_oracle_roundtrip_all_fixtures(self) -> None:
         from nomorals.media.photo_editor.oracle import run_oracle
 

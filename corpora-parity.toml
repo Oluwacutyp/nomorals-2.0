@@ -1,0 +1,530 @@
+# Corpora parity — pinned oracle numbers for the three vendored
+# storytold test corpora. Every number here was measured by the
+# lane against the vendored files; a test that moves a number
+# must update this file with the reason named, never silently.
+#
+# [photocraft] the oracle over tests/fixtures/photocraft/ (4 files)
+# plus tests/fixtures/photocraft-corpus/ (43 files). Statuses are
+# exact; max_diff is an upper bound (a worse render fails).
+# [effectcraft] the RIFX probe over tests/fixtures/effectcraft/aep/.
+# chunk_count / max_depth are the probe's structural walk; comps
+# are the CASES.md composition names the probe must recover.
+# [cadcraft] DXF import entity counts; DWG refusal substrings.
+
+[photocraft]
+files = 54
+exact = 29
+differs = 25
+differs_adjustment = 0
+differs_blend = 0
+differs_unrendered = 0
+failed = 0
+byte_stable = 54
+doc_byte_stable = 54
+roundtrip_ok = 52
+roundtrip_depth_reduced = 2
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft/cmyk8-baseline-layer-copy.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft/gray8-baseline-layer-copy.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft/rgb8-baseline-layer-copy.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft/rgb8-brightness-contrast.psd"
+status = "differs"
+max_diff = 1
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/cmyk16/baseline-layer-copy.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/cmyk16/levels.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/cmyk8/brightness-contrast-legacy.psd"
+status = "differs"
+max_diff = 27
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/cmyk8/photo-filter.psd"
+status = "differs"
+max_diff = 18
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/gray16/baseline-layer-copy.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/gray16/levels.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/gray32/baseline-layer-copy.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/gray32/levels.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/gray8/curves.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/gray8/exposure.psd"
+status = "differs"
+max_diff = 1
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/gray8/gradient-map.psd"
+status = "differs"
+max_diff = 1
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/gray8/levels.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/lab16/baseline-layer-copy.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/lab16/levels.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/lab8/baseline-layer-copy.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/lab8/curves.psd"
+status = "differs"
+max_diff = 41
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/lab8/hue-saturation.psd"
+status = "differs"
+max_diff = 153
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/lab8/invert.psd"
+status = "differs"
+max_diff = 16
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/lab8/levels.psd"
+status = "differs"
+max_diff = 32
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb16/baseline-layer-copy.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb16/levels.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb32/baseline-layer-copy.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb32/levels.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb8/brightness-contrast-legacy.psd"
+status = "differs"
+max_diff = 1
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb8/brightness-contrast.psd"
+status = "differs"
+max_diff = 1
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb8/channel-mixer.psd"
+status = "differs"
+max_diff = 1
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb8/clipped-hue-sat-blend-color.psd"
+status = "differs"
+max_diff = 62
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb8/color-balance.psd"
+status = "differs"
+max_diff = 1
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb8/curves.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb8/exposure.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb8/gradient-map.psd"
+status = "differs"
+max_diff = 1
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb8/invert.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb8/levels.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/adjustments/rgb8/photo-filter.psd"
+status = "differs"
+max_diff = 4
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/effects/bevel-emboss-chisel-hard.psd"
+status = "differs"
+max_diff = 106
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/effects/bevel-emboss-smooth-colored-normal.psd"
+status = "differs"
+max_diff = 3
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/effects/bevel-inner-smooth.psd"
+status = "differs"
+max_diff = 4
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/effects/bevel-outer-smooth.psd"
+status = "differs"
+max_diff = 5
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/effects/outer-glow-soft.psd"
+status = "differs"
+max_diff = 2
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/effects/satin-default.psd"
+status = "differs"
+max_diff = 27
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/smart-filters/sf-curves.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/smart-filters/sf-filter-mask-hard.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/smart-filters/sf-gaussian-blur-r4.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/smart-filters/sf-none-plain.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/smart-filters/sf-stack-blend-and-mask.psd"
+status = "differs"
+max_diff = 9
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/text/antialias-smooth.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/text/caps-all-caps.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/text/point-arial-24.psd"
+status = "exact"
+max_diff = 0
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/text/text-on-gradient-blend-multiply.psd"
+status = "differs"
+max_diff = 1
+
+[[photocraft.file]]
+path = "tests/fixtures/photocraft-corpus/text/text-with-layer-styles.psd"
+status = "differs"
+max_diff = 14
+
+[effectcraft]
+[effectcraft."3d.aep"]
+kind = "aep"
+form = "Egg!"
+file_size = 1425300
+chunk_count = 40876
+max_depth = 8
+trailing_bytes = 5780
+trailing_is_xmp = true
+import_supported = false
+comps = ["015-layer-3d", "039-comp-renderer-advanced3d", "251-camera-one-node", "252-light-point", "253-camera-position-100-200-m1000", "254-light-spot-intensity-50", "256-camera-two-node-default", "341-camera-zoom-2000", "342-camera-dof-800-30", "343-light-spot-color-red", "344-light-spot-coneangle-60", "345-light-spot-conefeather-30", "485-layer-3d-on", "486-layer-3d-rotx-30", "487-layer-3d-roty-45", "488-layer-3d-orientation-10-20-30", "535-camera-position-on-3d-rotx", "536-camera-one-node-position-on-3d-rotx", "537-camera-default-on-3d-rotx", "701-light-parallel-int80-color", "702-light-ambient-int50-color", "703-key-orientation-0-to-10-20-30-linear", "704-light-environment-default"]
+
+[effectcraft."aepx-pair.aep"]
+kind = "aep"
+form = "Egg!"
+file_size = 369340
+chunk_count = 10197
+max_depth = 7
+trailing_bytes = 5780
+trailing_is_xmp = true
+import_supported = false
+
+[effectcraft."aepx-pair.aepx"]
+kind = "aepx"
+form = ""
+file_size = 803478
+chunk_count = 0
+max_depth = 0
+trailing_bytes = 0
+trailing_is_xmp = false
+import_supported = false
+items = ["000-base", "058-key-opacity-2key", "060-expr-opacity-wiggle", "110-text-A", "124-precomp-Pre", "Pre", "Solids"]
+item_count = 8
+comps = ["000-base", "058-key-opacity-2key", "060-expr-opacity-wiggle", "110-text-A", "124-precomp-Pre"]
+
+[effectcraft."effects.aep"]
+kind = "aep"
+form = "Egg!"
+file_size = 5859690
+chunk_count = 162360
+max_depth = 9
+trailing_bytes = 5780
+trailing_is_xmp = true
+import_supported = false
+comps = ["071-fx-slider-value77", "073-fx-color-0.2-0.6-1", "077-fx-dropdown-default", "080-fx-dropshadow-default", "214-fx-gaussianblur-default", "215-fx-fill-default", "216-fx-gaussianblur-40", "217-fx-checkbox-on", "218-fx-point-111-222", "219-fx-angle-90", "220-fx-layercontrol-to-layer1", "221-fx-slider-2key", "300-fx-gaussianblur-0-explicit", "301-fx-gaussianblur-40-then-25", "302-fx-fill-opacity-100-explicit", "303-fx-fill-opacity-50-then-100", "304-fx-slider-0-explicit", "320-fx-layercontrol-self-explicit", "321-fx-layercontrol-none", "323-fx-dropdown-5items", "324-fx-dropdown-5items-select3", "356-fx-tint-default", "357-fx-tint-black-0.2-0.4-0.6", "361-fx-tint-amount-0", "363-fx-tint-amount-2key", "364-fx-tint-white-2key", "366-fx-blur-then-tint", "368-fx-ramp-default", "369-fx-ramp-start-100-200", "371-fx-ramp-startcolor-red", "374-fx-ramp-end-2000-m100", "377-fx-ramp-shape-radial", "378-fx-ramp-scatter-12", "380-fx-ramp-blend-25pct", "382-fx-ramp-start-2key", "383-fx-ramp-on-100x100-start-10-20", "389-fx-exposure-default", "390-fx-exposure-channels-individual", "391-fx-exposure-master-1.5", "393-fx-exposure-offset-0.1", "394-fx-exposure-gamma-2.2", "395-fx-exposure-individual-red-1", "396-fx-exposure-bypass-on", "397-fx-exposure-master-2key", "410-fx-invert-channel-2", "411-fx-invert-blend-50", "413-fx-fastbox-radius-20", "414-fx-fastbox-iterations-1", "416-fx-fastbox-repeatedge-off", "418-fx-gaussian-dimensions-3", "419-fx-gaussian-repeatedge-off", "422-fx-dropshadow-opacity-204", "426-fx-dropshadow-shadowonly-on", "427-fx-glow-default", "429-fx-glow-threshold-76.5", "438-fx-glow-midpoint-0.25", "444-fx-huesat-hue-90", "446-fx-huesat-light-m30", "448-fx-huesat-colorizehue-120", "512-fx-levels-inblack-0.1", "514-fx-levels-gamma-2", "516-fx-levels-outwhite-0.9", "529-fx-timewarp-default", "530-fx-timewarp-speed-25", "531-fx-timewarp-speed-keyed-50-200", "532-fx-timewarp-method-1", "533-fx-timewarp-sourceframe-12", "534-fx-slider-expression-time10", "610-fx-tint-named-My-Tint", "711-fx-directional-blur-30-40-on-M", "712-fx-eleven-effects-defaults-on-M", "713-fx-radial-blur-zoom-20-on-M", "714-fx-ccradial-type2-30-60-on-M", "715-fx-venetian-40-30-50-5-on-M", "716-fx-channel-blur-5-10-15-20-edge-horiz-on-M", "717-fx-blackwhite-set-tint-on-L", "718-fx-tritone-set-blend25-on-L", "719-fx-lumakey-darker-140-20-1-2.5-on-M", "720-fx-simplechoker-3.5-on-M", "721-fx-simplechoker-3.5-view-matte-on-M", "722-fx-mattechoker-set-on-M", "723-fx-transform-set-on-M", "905-fx-24-effects-set-one-comp"]
+
+[effectcraft."empty.aep"]
+kind = "aep"
+form = "Egg!"
+file_size = 9234
+chunk_count = 44
+max_depth = 2
+trailing_bytes = 4226
+trailing_is_xmp = true
+import_supported = false
+
+[effectcraft."footage-precomp.aep"]
+kind = "aep"
+form = "Egg!"
+file_size = 1235942
+chunk_count = 35118
+max_depth = 7
+trailing_bytes = 5780
+trailing_is_xmp = true
+import_supported = false
+comps = ["124-precomp-Pre", "126-footage-png-layer", "319-precomp-timeremap", "350-footage-wav-imported", "351-footage-wav-as-layer", "352-footage-pngseq-imported", "354-footage-pngseq-timeremap", "601-precomp-two-comps-in-C", "603-footage-exrseq-0101-as-layer", "645-footage-mp4-conform-30", "650-footage-tga-still-as-layer", "651-footage-psd-flat-as-layer", "652-footage-ai-as-layer", "653-footage-eps-as-layer"]
+
+[effectcraft."fx-switch.aep"]
+kind = "aep"
+form = "Egg!"
+file_size = 76900
+chunk_count = 1871
+max_depth = 8
+trailing_bytes = 5780
+trailing_is_xmp = true
+import_supported = false
+
+[effectcraft."inputs/curves-red-mid-down.ffx"]
+kind = "ffx"
+form = "FaFX"
+file_size = 10267
+chunk_count = 85
+max_depth = 5
+trailing_bytes = 3785
+trailing_is_xmp = true
+import_supported = false
+markers = ["(ADBE CurvesCustom"]
+
+[effectcraft."inputs/curves-rgb-two-points.ffx"]
+kind = "ffx"
+form = "FaFX"
+file_size = 10267
+chunk_count = 85
+max_depth = 5
+trailing_bytes = 3785
+trailing_is_xmp = true
+import_supported = false
+markers = ["(ADBE CurvesCustom"]
+
+[effectcraft."inputs/meshwarp-3x3-center-right.ffx"]
+kind = "ffx"
+form = "FaFX"
+file_size = 11225
+chunk_count = 105
+max_depth = 5
+trailing_bytes = 3785
+trailing_is_xmp = true
+import_supported = false
+markers = ["(ADBE MESH WARP"]
+
+[effectcraft."keyframes.aep"]
+kind = "aep"
+form = "Egg!"
+file_size = 1742082
+chunk_count = 49779
+max_depth = 9
+trailing_bytes = 5780
+trailing_is_xmp = true
+import_supported = false
+comps = ["018-layer-stretch200", "052-key-position-2key-ease", "053-key-position-2key-hold-key1", "054-key-position-2key-spatial-bezier", "055-key-position-3key-inserted-t2.5", "056-key-position-3key-roving-key2", "057-key-position-3key-label9-key2", "058-key-opacity-2key", "060-expr-opacity-wiggle", "202-key-out-hold-in-linear", "203-key-in-hold-out-linear", "204-key-ease-asymmetric", "205-key-opacity-ease-asymmetric", "206-key-scale-2key-linear", "210-key-fill-color-2key-linear", "213-expr-opacity-wiggle-disabled", "305-key-scale-bezier-ease", "307-key-fillcolor-bezier", "316-layer-stretch50", "317-layer-stretch150", "597-key-anchor-ease-out50-40-in30-60", "598-key-ramp-point-ease-color-bezier", "641-stretch-200-keys-position-1s-2s", "642-stretch-50-keys-position-1s-2s", "643-stretch-200-start-1-keys-position-2s-3s", "730-key-anchor-ease-on-400x800-solid", "981-layer-stretch-minus100-start5", "982-layer-stretch-minus100-opacity-keys", "983-layer-stretch-minus50-opacity-keys"]
+
+[effectcraft."layers-comps.aep"]
+kind = "aep"
+form = "Egg!"
+file_size = 3382668
+chunk_count = 97620
+max_depth = 8
+trailing_bytes = 5780
+trailing_is_xmp = true
+import_supported = false
+comps = ["000-base", "010-layer-name", "012-layer-shy", "013-layer-locked", "014-layer-solo", "016-layer-blend-multiply", "017-layer-motionblur", "019-layer-inpoint1", "021-layer-starttime0.5", "022-layer-parent-null", "023-layer-quality-draft", "024-layer-collapse", "025-layer-adjustment", "026-layer-guide", "030-comp-size-1280x720", "031-comp-fps30", "032-comp-duration10", "033-comp-bg-green", "034-comp-shutter90", "035-comp-workarea-1-2", "037-comp-pixelaspect2", "038-comp-motionblur", "040-static-position-100-200", "041-static-scale-50", "042-static-rotation-45", "043-static-opacity-25", "044-static-anchor-10-20", "211-anchor-100x100-solid-10-20", "212-anchor-400x300-solid-100-50", "222-layer-video-off", "223-layer-audio-off", "224-layer-effects-off", "225-layer-blend-screen", "226-layer-blend-add", "227-layer-blend-overlay", "228-layer-blend-difference", "229-comp-fps-29.97", "230-comp-fps-23.976", "231-comp-bg-grey-0.5", "259-solid-blue-0-0-1", "299-save-noise", "310-solid-100x100-pointcontrol", "311-position-default-explicit", "318-layer-inpoint-0.3333", "325-comp-pixelaspect-0.9091", "326-comp-shutterphase-m90", "327-comp-displaystartframe-100", "403-matte-L-alpha-M", "404-matte-L-alphainv-M", "405-matte-L-luma-M", "406-matte-L-lumainv-M", "407-matte-M-alpha-L-below", "408-matte-L-alpha-M-visible", "906-blendmodes-13-solids-on-steps"]
+
+[effectcraft."markers.aep"]
+kind = "aep"
+form = "Egg!"
+file_size = 522400
+chunk_count = 14891
+max_depth = 7
+trailing_bytes = 5780
+trailing_is_xmp = true
+import_supported = false
+comps = ["122-marker-comp-1s", "123-marker-layer-1s", "249-marker-layer-full", "347-marker-layer-label3", "348-marker-layer-navigation-cue", "349-marker-layer-event-cue-params", "509-marker-comp-two", "510-marker-layer-0.52-dur0.3"]
+
+[effectcraft."masks.aep"]
+kind = "aep"
+form = "Egg!"
+file_size = 1181518
+chunk_count = 33905
+max_depth = 10
+trailing_bytes = 5780
+trailing_is_xmp = true
+import_supported = false
+comps = ["090-mask-rect", "091-mask-rect-props", "093-mask-path-2keys", "208-key-mask-feather-2key-linear", "232-mask-ellipse", "233-mask-open-path", "234-mask-mode-intersect", "235-mask-mode-lighten", "236-mask-mode-darken", "237-mask-mode-difference", "306-key-maskfeather-bezier-ease", "309-solid-100x100-mask-rect", "328-mask-two-ellipse-rect", "329-mask-ellipse-mode-none", "599-key-mask-path-ease-infl75", "700-key-mask-path-ease-out20-in50", "706-mask-on-shape-rect-0-m150-100-150", "900-mask-added-no-path", "901-mask-no-path-expansion-m100"]
+
+[effectcraft."settings-a.aep"]
+kind = "aep"
+form = "Egg!"
+file_size = 405750
+chunk_count = 11488
+max_depth = 7
+trailing_bytes = 5780
+trailing_is_xmp = true
+import_supported = false
+comps = ["621-settings-bpc-8", "623-settings-workingspace-none", "625-settings-gamma-2.4", "628-settings-scene-compensation-off", "629-settings-time-display-frames", "630-settings-frame-start-1"]
+
+[effectcraft."settings-b.aep"]
+kind = "aep"
+form = "Egg!"
+file_size = 181008
+chunk_count = 4978
+max_depth = 7
+trailing_bytes = 5780
+trailing_is_xmp = true
+import_supported = false
+comps = ["632-settings-linearize-and-blend-linear", "633-settings-feet-frames-35"]
+
+[effectcraft."settings-c.aep"]
+kind = "aep"
+form = "Egg!"
+file_size = 263258
+chunk_count = 7350
+max_depth = 7
+trailing_bytes = 5780
+trailing_is_xmp = true
+import_supported = false
+comps = ["622-settings-bpc-16", "634-settings-feet-frames-16", "902-settings-rec709-16bpc-steps-png-grey-solid"]
+
+[effectcraft."shapes.aep"]
+kind = "aep"
+form = "Egg!"
+file_size = 2409434
+chunk_count = 69267
+max_depth = 12
+trailing_bytes = 5780
+trailing_is_xmp = true
+import_supported = false
+comps = ["238-shape-rect-rounded-corners", "239-shape-stroke-green-w8-round", "240-shape-custom-path-tangents", "241-shape-gradient-fill-linear", "242-shape-group-position-50-50", "330-shape-polystar-star-5-50-100", "331-shape-polystar-polygon-5-100", "332-shape-gradient-fill-radial", "333-shape-group-two-rects", "451-shape-ellipse-400x300-fill", "457-shape-group-scale-50-80", "462-shape-layer-anchor-10-20", "464-shape-stroke-opacity-50", "467-shape-trim-end-70", "469-shape-trim-type-2", "471-shape-rect-roundness-30", "473-shape-star-points-6", "482-shape-two-groups", "483-shape-nested-group-rect", "519-shape-all-items-default", "707-shape-merge-subtract-rect-ellipse", "708-shape-merge-intersect-rect-ellipse", "709-shape-repeater-3-pos150-60-rot10-scale90-80-op40", "710-shape-offset-paths-20-round", "731-shape-merge-offset-repeater-defaults", "828-shape-offset-paths-20-copies3-copyoffset1.5-stroke", "851-shape-key-trim-end-0-100-linear", "852-shape-key-trim-end-bezier-out0-60-in20-30", "853-shape-key-group-position-0-200-100-linear", "854-shape-key-fill-color-red-blue-linear", "855-shape-key-trim-offset-0-90-hold", "856-shape-trim-end-expression-time50", "857-shape-key-group-scale-100-50-150-linear", "986-shape-fill-switched-off-green"]
+
+[effectcraft."styles.aep"]
+kind = "aep"
+form = "Egg!"
+file_size = 1128414
+chunk_count = 31052
+max_depth = 10
+trailing_bytes = 5780
+trailing_is_xmp = true
+import_supported = false
+comps = ["340-text-range-two-styles", "734-text-box-byteedit-style68-1", "951-styles-all-nine-defaults-on-B", "963-curves-red-mid-down-on-S", "964-curves-rgb-s-curve-on-S", "966-style-drop-shadow-opacity50-distance20", "970-style-stroke-size10-color-green", "974-style-gradient-overlay-angle45-scale150", "975-style-fill-opacity0-with-drop-shadow", "976-style-drop-shadow-opacity-keyed-100-20-linear", "977-styles-all-params-changed", "979-style-inner-glow-source-2", "985-meshwarp-3x3-vertex-moved-on-S", "988-style-drop-shadow-switched-off"]
+
+[effectcraft."text.aep"]
+kind = "aep"
+form = "Egg!"
+file_size = 6060358
+chunk_count = 156450
+max_depth = 11
+trailing_bytes = 5780
+trailing_is_xmp = true
+import_supported = false
+comps = ["110-text-A", "113-text-Hello-size60-fillorange", "114-text-animator-opacity", "243-text-multiline-A-CR-B", "245-text-box-400x200-Hello", "246-text-box-center-align", "247-text-tracking-100", "248-text-range-fill-red-1-3", "334-text-box-right-align", "335-text-point-fauxbold", "336-text-point-fauxitalic", "337-text-point-allcaps", "338-text-point-smallcaps", "339-text-point-leading60", "385-text-anchor-10-20", "386-text-etx-A-B", "400-text-autoleading-on", "517-text-box-600x400-wrap", "526-text-point-HHHH-default", "527-text-point-HHHH-baseline-normal", "528-text-point-HHHH-baseline-subscript", "538-text-point-HHHH-normal-ref", "539-text-hscale-0.9", "540-text-vscale-1.5", "541-text-baselineshift-41", "542-text-autokern-none", "543-text-autokern-optical", "544-text-applystroke-on", "545-text-strokewidth-5", "546-text-applyfill-off", "548-text-linejoin-round", "550-text-strokeoverfill-off", "552-text-nobreak-on", "553-text-tsume-0.5", "554-text-kerning-50", "555-text-ligature-on", "556-text-autohyphenate-off", "558-text-hangingroman-on", "559-text-everyline-on", "560-text-firstlineindent-20", "561-text-startindent-30", "562-text-endindent-40", "563-text-spacebefore-10", "564-text-spaceafter-12", "565-text-justify-fullleft", "566-text-justify-fullcenter", "567-text-justify-fullright", "568-text-justify-fullall", "569-text-direction-rtl", "571-text-digitset-arabic", "572-text-leadingtype-japanese", "573-text-baselinedir-rotated", "575-text-vertical-rtl", "576-text-baselinedir-crossstream", "578-text-digitset-hindi", "579-textanim-position-0-m50", "580-textanim-start-25", "581-textanim-end-75", "582-textanim-offset-10", "583-textanim-units-index", "584-textanim-basedon-3-words", "585-textanim-mode-2-subtract", "586-textanim-amount-50", "587-textanim-shape-2-rampup", "588-textanim-smoothness-50", "589-textanim-easehigh-30", "590-textanim-easelow-40", "591-textanim-randomize-seed-7", "592-textanim-many-props", "593-textanim-start-keyed-ease-0-100", "594-textanim-position-start-keyed-ease", "595-text-stroke-scale-shift-combined", "596-text-combined-fill-over-stroke", "705-mask-on-text-rect-40-m70-160-10", "725-text-point-HHHH-normal-ref-S18", "727-text-reset-paragraph", "728-textanim-character-offset-3", "732-text-box-byteedit-para24-0", "733-text-box-byteedit-para35-0"]
+
+[cadcraft]
+[cadcraft."sample-bracket.dxf"]
+entities = 42
+kinds = {"CadText" = 7, "Circle" = 7, "Dimension" = 6, "Line" = 16, "Polyline" = 6}
+layers = ["Center", "Dimensions", "Hidden", "Notes", "Outline", "Title"]
+
+[cadcraft."sample-floorplan.dxf"]
+entities = 16
+kinds = {"Arc" = 1, "CadText" = 2, "Circle" = 1, "Dimension" = 1, "Line" = 7, "Polyline" = 4}
+layers = ["A-ANNO", "A-DOOR", "A-FURN", "A-GLAZ", "A-WALL"]
+
+[cadcraft.dwg]
+refusal = "DWG"
+files = ["sample-bracket.dwg", "sample-floorplan.dwg"]
