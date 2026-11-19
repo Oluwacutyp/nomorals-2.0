@@ -40,16 +40,41 @@ def _sort_key(page: Page) -> tuple[Any, ...]:
     """craft-wiki's sidebar rule: order, then label, troubleshooting last.
 
     Pages group by category (uncategorised last); inside a category
-    the troubleshooting pages sit at the end, the rest by order then
-    title. A page without an order comes after the ordered ones.
+    the overview — the category's landing page — sits first, then
+    the rest by order then title, troubleshooting at the end. A page
+    without an order comes after the ordered ones.
     """
     return (
         page.category == "",
         page.category.lower(),
+        page.type != "overview",
         page.type == "troubleshooting",
         page.order if page.order is not None else 1 << 30,
         page.title.lower(),
     )
+
+
+def _check_parent(pages: dict[str, Page], parent: str,
+                  self_slug: str = "") -> str:
+    """A parent must name a page that has no parent of its own.
+
+    craft-wiki's sidebar builder throws on the same rule; Devon
+    fails at create time instead of building a broken tree. An empty
+    parent is a top-level page.
+    """
+    parent = str(parent or "").strip().lower()
+    if not parent:
+        return ""
+    if parent == self_slug:
+        raise ValueError("wiki: a page cannot be its own parent")
+    target = pages.get(parent)
+    if target is None:
+        raise ValueError(f"wiki: parent {parent!r} names no page")
+    if target.parent:
+        raise ValueError(
+            f"wiki: parent {parent!r} itself has a parent "
+            f"({target.parent!r}) — a parent must be a top-level page")
+    return parent
 
 
 class WikiStore:
@@ -144,7 +169,9 @@ class WikiStore:
     def create(self, title: str, body: str, *,
                type: str = "guide", category: str = "",
                parent: str = "", order: int | None = None,
-               summary: str = "", tags: list[str] | None = None) -> Page:
+               summary: str = "", tags: list[str] | None = None,
+               subcategory: str = "", cover: str = "",
+               prev: str = "", next: str = "") -> Page:
         """Create a page. Empty title/body and unknown types are errors."""
         title = str(title or "").strip()
         body = str(body or "")
@@ -156,13 +183,21 @@ class WikiStore:
             raise ValueError(
                 f"wiki: unknown page type {type!r} — one of "
                 + ", ".join(sorted(PAGE_TYPES)))
+        from .pages import validate_cover
+
+        cover = validate_cover(cover)
+        parent = _check_parent(self._pages, parent)
         now = _now()
         page = Page(
             slug=self._unique_slug(title), title=title, body=body,
             type=type, category=str(category or "").strip(),
-            parent=str(parent or "").strip(), order=order,
+            parent=parent, order=order,
             summary=str(summary or "").strip(),
             tags=[str(t).strip() for t in (tags or []) if str(t).strip()],
+            subcategory=str(subcategory or "").strip(),
+            cover=cover,
+            prev=str(prev or "").strip().lower(),
+            next=str(next or "").strip().lower(),
             created_at=now, updated_at=now)
         self._pages[page.slug] = page
         self._save()
@@ -211,6 +246,22 @@ class WikiStore:
         return self.update(slug, str(wanted.get("body", "")),
                            note=f"reverted to revision {rev}")
 
+    def reparent(self, slug: str, parent: str) -> bool:
+        """Move a page under a new parent (or "" for top-level).
+
+        The same rule as create: the parent must name an existing
+        top-level page. A bad parent raises instead of silently
+        building a broken tree; a missing page returns False.
+        """
+        page = self.get(slug)
+        if page is None:
+            return False
+        parent = _check_parent(self._pages, parent, self_slug=page.slug)
+        page.parent = parent
+        page.updated_at = _now()
+        self._save()
+        return True
+
     def delete(self, slug: str) -> bool:
         page = self.get(slug)
         if page is None:
@@ -241,7 +292,11 @@ class WikiStore:
             parent=str(fields.get("parent", "") or ""),
             order=fields.get("order"),
             summary=str(fields.get("summary", "") or ""),
-            tags=[str(t) for t in (fields.get("tags") or [])])
+            tags=[str(t) for t in (fields.get("tags") or [])],
+            subcategory=str(fields.get("subcategory", "") or ""),
+            cover=str(fields.get("cover", "") or ""),
+            prev=str(fields.get("prev", "") or ""),
+            next=str(fields.get("next", "") or ""))
 
     def export_markdown(self, slug: str) -> str | None:
         """A page as a markdown document (frontmatter + body)."""

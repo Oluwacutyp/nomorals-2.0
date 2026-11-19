@@ -2929,6 +2929,11 @@ class RuntimeSystemMixin:
         /wiki from-memory <query> [| <title>] — page from memory recall
         /wiki board <slug>             — page on the board as nodes
         /wiki remove <slug>            — delete a page
+        /wiki nav <slug>               — previous/next neighbours
+        /wiki sitemap                 — every page as /wiki/<slug>
+        /wiki canonical [category]    — canonical five still missing
+        /wiki canonical-new <slug> [category] — scaffold one of the five
+        /wiki reparent <slug> <parent> — move a page under a parent
         """
         from ...wiki import links as wiki_links
         from ...wiki import render as wiki_render
@@ -3100,13 +3105,73 @@ class RuntimeSystemMixin:
             if not store.delete(rest):
                 return f"no page {rest!r}."
             return f"page {rest!r} removed."
+        if verb == "nav":
+            if not rest:
+                return "usage: /wiki nav <slug>"
+            page = store.get(rest)
+            if page is None:
+                return f"no page {rest!r}."
+            from ...wiki.nav import neighbors
+
+            prev, nxt = neighbors(store, page.slug)
+            lines = []
+            if prev is not None:
+                lines.append(f"Previous: {prev.title} — /wiki read {prev.slug}")
+            if nxt is not None:
+                lines.append(f"Next: {nxt.title} — /wiki read {nxt.slug}")
+            if not lines:
+                return f"{page.title} is alone in the wiki."
+            return "\n".join(lines)
+        if verb == "sitemap":
+            return wiki_surface.render_sitemap(store)
+        if verb == "canonical":
+            return wiki_surface.render_canonical(store, rest)
+        if verb == "canonical-new":
+            from ...wiki.nav import CANONICAL_PAGES
+            from ...wiki.templates import canonical_body
+
+            slug, _, category = rest.partition(" ")
+            slug = slug.strip().lower()
+            category = category.strip()
+            if slug not in CANONICAL_PAGES:
+                return ("usage: /wiki canonical-new <slug> [category] — "
+                        "slug is one of " + ", ".join(CANONICAL_PAGES))
+            if store.get(slug) is not None:
+                return f"page {slug!r} already exists."
+            title = slug.replace("-", " ").title()
+            type_ = ("overview" if slug == "overview"
+                     else "troubleshooting" if slug == "troubleshooting"
+                     else "guide")
+            try:
+                page = store.create(title, canonical_body(slug),
+                                    type=type_, category=category)
+            except ValueError as exc:
+                return str(exc)
+            return (f"page {page.slug!r} started from the {slug} "
+                    f"skeleton — /wiki edit {page.slug} | <body> to "
+                    "write it.")
+        if verb == "reparent":
+            slug, _, parent = rest.partition(" ")
+            slug = slug.strip().lower()
+            parent = parent.strip().lower()
+            if not slug:
+                return "usage: /wiki reparent <slug> <parent>"
+            try:
+                if not store.reparent(slug, parent):
+                    return f"no page {slug!r}."
+            except ValueError as exc:
+                return str(exc)
+            return (f"page {slug!r} now sits under "
+                    f"{parent!r}." if parent else f"page {slug!r} is top-level now.")
         return ("usage: /wiki [board] | list [category] | read <slug> | "
                 "search <query> | new <type> <title> | template <type> "
                 "<title> | edit <slug> | <body> | retitle <slug> "
                 "<title> | links <slug> | backlinks <slug> | orphans | "
                 "broken | history <slug> | revert <slug> <rev> | import "
                 "<path> | from-memory <query> [| <title>] | board <slug> "
-                "| remove <slug>")
+                "| remove <slug> | nav <slug> | sitemap | canonical "
+                "[category] | canonical-new <slug> [category] | "
+                "reparent <slug> <parent>")
 
     # ── ideas: /ideas (WS3 P5) ────────────────────────────────────────
     def _idea_tracker(self) -> Any:

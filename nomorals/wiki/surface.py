@@ -49,36 +49,82 @@ __all__ = [
     "parse_wiki_question",
     "render_board",
     "render_broken",
+    "render_canonical",
     "render_history",
     "render_orphans",
     "render_page_list",
     "render_search_results",
+    "render_sitemap",
 ]
 
 
 def render_board(store: Any) -> str:
-    """The wiki board: pages by category, counts, broken links named."""
+    """The wiki board: pages by category, counts, broken links named.
+
+    Rendered from the sidebar tree, so children nest under their
+    parent and category/subcategory groups show as groups — the
+    sidebar craft-wiki builds, in chat form.
+    """
+    from .nav import dangling_parents, sidebar_tree
+
     pages = store.list_pages()
     if not pages:
         return ("the wiki is empty — /wiki new <type> <title> to start "
                 "one, /wiki template <type> <title> for a skeleton.")
     lines = [f"Wiki — {len(pages)} page(s):"]
-    for category in store.categories():
-        lines.append(f"[{category}]")
-        for page in store.list_pages(category):
-            lines.append(f"• {page.title} [{page.type}]"
-                         f" — /wiki read {page.slug}")
-    uncategorised = [p for p in pages if not p.category]
-    if uncategorised:
-        lines.append("[uncategorised]")
-        for page in uncategorised:
-            lines.append(f"• {page.title} [{page.type}]"
-                         f" — /wiki read {page.slug}")
+
+    def _bullet(page: Any, indent: str) -> str:
+        return (f"{indent}• {page.title} [{page.type}]"
+                f" — /wiki read {page.slug}")
+
+    def _walk(items: list[dict[str, Any]], indent: str) -> None:
+        for item in items:
+            if "page" in item:
+                lines.append(_bullet(item["page"], indent))
+            else:
+                landing = item.get("landing")
+                lines.append(f"{indent}[{item['label']}]")
+                if landing is not None:
+                    lines.append(_bullet(landing, indent + "  "))
+                _walk(item["items"], indent + "  ")
+
+    for entry in sidebar_tree(store):
+        lines.append(_bullet(entry["page"], ""))
+        _walk(entry["items"], "  ")
+    dangling = dangling_parents(store)
+    if dangling:
+        lines.append(f"{len(dangling)} page(s) name a missing parent "
+                      "— /wiki nav names them.")
     broken = broken_links(store)
     if broken:
         lines.append(f"{len(broken)} broken link(s) — /wiki broken "
                       "names them.")
     return "\n".join(lines)
+
+
+def render_canonical(store: Any, category: str = "") -> str:
+    """Which of the five canonical pages a category still lacks."""
+    from .nav import canonical_missing
+
+    missing = canonical_missing(store, category)
+    where = f" in category {category!r}" if category else ""
+    if not missing:
+        return f"the canonical five are all present{where}."
+    lines = [f"canonical pages missing{where}:"]
+    for slug in missing:
+        lines.append(f"• {slug} — /wiki canonical-new {slug}"
+                     + (f" {category}" if category else ""))
+    return "\n".join(lines)
+
+
+def render_sitemap(store: Any) -> str:
+    """Every page as a ``/wiki/<slug>`` URL, in sidebar order."""
+    from .nav import sitemap
+
+    urls = sitemap(store)
+    if not urls:
+        return "the wiki is empty — no sitemap yet."
+    return "Wiki sitemap:\n" + "\n".join(f"• {url}" for url in urls)
 
 
 def render_page_list(store: Any, category: str = "") -> str:

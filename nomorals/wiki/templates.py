@@ -12,7 +12,16 @@ from __future__ import annotations
 
 from .pages import PAGE_TYPES
 
-__all__ = ["TEMPLATE_DESCRIPTIONS", "template_body"]
+__all__ = ["CANONICAL_PAGES", "TEMPLATE_DESCRIPTIONS", "canonical_body",
+           "template_body"]
+
+#: The five pages every topic has, in sidebar order — craft-wiki's
+#: ``guides`` list. A topic is complete when all five exist as slugs
+#: inside its category.
+CANONICAL_PAGES: tuple[str, ...] = (
+    "overview", "getting-started", "install-update", "workflows",
+    "troubleshooting",
+)
 
 TEMPLATE_DESCRIPTIONS = {
     "overview": "What a thing is, what it does, and where to read more.",
@@ -77,3 +86,37 @@ def template_body(type: str, title: str) -> str:
             f"wiki: unknown page type {type!r} — one of "
             + ", ".join(sorted(PAGE_TYPES)))
     return _TEMPLATES[type]
+
+
+_CANONICAL_TEMPLATES = {
+    "install-update": (
+        "## Install\n\n"
+        "## Update\n\n"
+        "## Uninstall\n\n"
+    ),
+    "workflows": (
+        "## Common workflows\n\n"
+        "## Tips\n\n"
+    ),
+}
+
+
+def canonical_body(slug: str) -> str:
+    """The skeleton body for one of the five canonical pages.
+
+    Overview, getting-started and troubleshooting reuse their type
+    skeletons; install-update and workflows have their own — the
+    per-app template craft-wiki's docs describe but its page types do
+    not cover. A slug outside the five is an error, never a guess.
+    """
+    if slug not in CANONICAL_PAGES:
+        raise ValueError(
+            f"wiki: {slug!r} is not a canonical page — one of "
+            + ", ".join(CANONICAL_PAGES))
+    if slug == "overview":
+        return _TEMPLATES["overview"]
+    if slug == "getting-started":
+        return _TEMPLATES["guide"]
+    if slug == "troubleshooting":
+        return _TEMPLATES["troubleshooting"]
+    return _CANONICAL_TEMPLATES[slug]

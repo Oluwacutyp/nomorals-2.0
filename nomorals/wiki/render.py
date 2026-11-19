@@ -45,9 +45,13 @@ def _plain_md(text: str) -> str:
 
 def render_chat(store: Any, page: Any) -> str:
     """A page as chat text: title, summary, body, links, backlinks."""
+    from .nav import neighbors
+
     lines = [page.title]
     if page.summary:
         lines.append(page.summary)
+    if page.cover:
+        lines.append(f"Cover: {page.cover}")
     lines.append("")
     lines.append(_plain_md(page.body))
     targets = extract_wikilinks(page.body)
@@ -63,6 +67,15 @@ def render_chat(store: Any, page: Any) -> str:
     if backs:
         lines.append("Backlinks: " + ", ".join(
             (store.get(slug) or page).title for slug in backs))
+    prev, nxt = neighbors(store, page.slug)
+    nav = []
+    if prev is not None:
+        nav.append(f"Previous: {prev.title} — /wiki read {prev.slug}")
+    if nxt is not None:
+        nav.append(f"Next: {nxt.title} — /wiki read {nxt.slug}")
+    if nav:
+        lines.append("")
+        lines.extend(nav)
     return "\n".join(lines)
 
 
@@ -119,6 +132,8 @@ def _sections(body: str) -> list[tuple[str, list[str]]]:
 
 def render_html(store: Any, page: Any) -> str:
     """A page as a standalone plain-HTML document (no scripts)."""
+    from .nav import neighbors
+
     parts = ["<!DOCTYPE html>", "<html lang=\"en\">", "<head>",
              "<meta charset=\"utf-8\">",
              f"<title>{_html.escape(page.title)} — Devon wiki</title>",
@@ -126,6 +141,10 @@ def render_html(store: Any, page: Any) -> str:
              f"<h1>{_html.escape(page.title)}</h1>"]
     if page.summary:
         parts.append(f"<p>{_html.escape(page.summary)}</p>")
+    if page.cover:
+        parts.append(
+            f"<img src=\"{_html.escape(page.cover)}\" "
+            f"alt=\"{_html.escape(page.title)}\">")
     for heading, lines in _sections(page.body):
         if heading:
             parts.append(f"<h2>{_html.escape(heading)}</h2>")
@@ -204,5 +223,18 @@ def render_html(store: Any, page: Any) -> str:
                     f'<a href="/wiki/{_html.escape(slug)}">'
                     f"{_html.escape((store.get(slug) or page).title)}</a>")
         parts.append("<p>Links: " + ", ".join(links) + "</p>")
+    prev, nxt = neighbors(store, page.slug)
+    nav = []
+    if prev is not None:
+        nav.append(
+            f'<a href="/wiki/{_html.escape(prev.slug)}">'
+            f"← {_html.escape(prev.title)}</a>")
+    if nxt is not None:
+        nav.append(
+            f'<a href="/wiki/{_html.escape(nxt.slug)}">'
+            f"{_html.escape(nxt.title)} →</a>")
+    if nav:
+        parts.append("<hr>")
+        parts.append("<p>" + " | ".join(nav) + "</p>")
     parts.extend(["</body>", "</html>"])
     return "\n".join(parts)

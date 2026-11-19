@@ -6,7 +6,9 @@ owns the pages, the links, the search and the history — this module
 is only the surface.
 
 ``action=create`` writes a page (``title=``, ``body=``, ``type=``,
-``category=``, ``parent=``, ``order=``, ``summary=``, ``tags=``);
+``category=``, ``parent=``, ``order=``, ``summary=``, ``tags=``,
+``subcategory=``, ``cover=`` — a cover must be an image under
+``/assets/uploads/<folder>/`` — ``prev=``, ``next=``);
 ``action=read`` shows one (``slug=``); ``action=edit`` replaces a
 body (``slug=``, ``body=``, ``note=``); ``action=retitle`` renames
 one (``slug=``, ``title=`` — the slug never moves, so links stay
@@ -21,7 +23,12 @@ names every broken link; ``action=history`` shows revisions
 frontmatter (``text=``); ``action=from-memory`` builds a page from
 memory recall (``query=``, ``title=``); ``action=board`` puts a page
 on the board as chained section nodes (``slug=``);
-``action=remove`` deletes one (``slug=``).
+``action=remove`` deletes one (``slug=``); ``action=nav`` shows a
+page's previous/next neighbours (``slug=``); ``action=sitemap``
+lists every page as ``/wiki/<slug>``; ``action=canonical`` names the
+canonical five pages a category still lacks (``category=``);
+``action=canonical-new`` scaffolds one of the five
+(``slug=``, ``category=``).
 
 The store lives under the process home (``<home>/wiki/wiki.json``),
 the same file the ``/wiki`` verb reads — one wiki, two surfaces.
@@ -34,21 +41,29 @@ from typing import Any
 from ..wiki import (
     backlinks_for,
     broken_links,
+    canonical_missing,
+    dangling_parents,
     export_to_board,
+    neighbors,
     orphan_pages,
     parse_wiki_question,
     render_broken,
+    render_canonical,
     render_chat,
     render_history,
     render_orphans,
     render_page_list,
     render_search_results,
+    render_sitemap,
     resolve_link,
     search_pages,
+    sitemap,
     template_body,
 )
+from ..wiki.nav import CANONICAL_PAGES
 from ..wiki.pages import PAGE_TYPES
 from ..wiki.store import WikiStore, wiki_path
+from ..wiki.templates import canonical_body
 
 __all__ = ["parse_wiki_question", "register"]
 
@@ -76,6 +91,10 @@ def _page_dict(page: Any) -> dict[str, Any]:
         "order": page.order,
         "summary": page.summary,
         "tags": list(page.tags),
+        "subcategory": page.subcategory,
+        "cover": page.cover,
+        "prev": page.prev,
+        "next": page.next,
         "body": page.body,
         "updated_at": page.updated_at,
         "revisions": len(page.revisions),
@@ -98,7 +117,8 @@ def register(registry: Any) -> None:
             "search, link, revise and export pages. action=create "
             "writes one (title=, body=, type= overview|guide|reference|"
             "troubleshooting|howto|decision|runbook, category=, "
-            "parent=, order=, summary=, tags=); action=read shows one "
+            "parent=, order=, summary=, tags=, subcategory=, cover=, "
+            "prev=, next=); action=read shows one "
             "(slug=); action=edit replaces a body (slug=, body=, "
             "note=); action=retitle renames one (slug=, title=); "
             "action=list lists pages (category=); action=search ranks "
@@ -110,7 +130,12 @@ def register(registry: Any) -> None:
             "title=); action=import takes markdown with frontmatter "
             "(text=); action=from-memory builds a page from memory "
             "recall (query=, title=); action=board puts a page on the "
-            "board (slug=); action=remove deletes one (slug=). Pages "
+            "board (slug=); action=remove deletes one (slug=); "
+            "action=nav shows a page's previous/next neighbours "
+            "(slug=); action=sitemap lists every page as /wiki/<slug>; "
+            "action=canonical names the canonical five pages a "
+            "category still lacks (category=); action=canonical-new "
+            "scaffolds one of the five (slug=, category=). Pages "
             "link with [[Title]]; a link naming no page is reported, "
             "never silently dropped."
         ),
@@ -131,6 +156,10 @@ def register(registry: Any) -> None:
         tags: str = "",
         note: str = "",
         rev: int = 0,
+        subcategory: str = "",
+        cover: str = "",
+        prev: str = "",
+        next: str = "",
     ) -> dict[str, Any]:
         store = _store(context)
         action = (action or "list").strip().lower()
@@ -145,7 +174,9 @@ def register(registry: Any) -> None:
                     title.strip(), body,
                     type=(type or "guide").strip().lower(),
                     category=category, parent=parent, order=order,
-                    summary=summary, tags=_split_tags(tags))
+                    summary=summary, tags=_split_tags(tags),
+                    subcategory=subcategory, cover=cover,
+                    prev=prev, next=next)
             except ValueError as exc:
                 return _err(str(exc))
             return {"ok": True, "slug": page.slug, "page": _page_dict(page)}
@@ -297,7 +328,64 @@ def register(registry: Any) -> None:
                 return _err(f"no page {slug!r}")
             return {"ok": True, "slug": slug, "removed": True}
 
+        if action == "reparent":
+            slug = (slug or "").strip().lower()
+            try:
+                if not store.reparent(slug, parent):
+                    return _err(f"no page {slug!r}")
+            except ValueError as exc:
+                return _err(str(exc))
+            page = store.get(slug)
+            assert page is not None
+            return {"ok": True, "slug": slug, "page": _page_dict(page)}
+
+        if action == "nav":
+            slug = (slug or "").strip().lower()
+            page = store.get(slug) if slug else None
+            if page is None:
+                return _err(f"no page {slug!r} — action=list shows what exists")
+            prev, nxt = neighbors(store, slug)
+            lines = []
+            if prev is not None:
+                lines.append(f"Previous: {prev.title} — /wiki read {prev.slug}")
+            if nxt is not None:
+                lines.append(f"Next: {nxt.title} — /wiki read {nxt.slug}")
+            return {"ok": True, "slug": slug,
+                    "prev": prev.slug if prev is not None else None,
+                    "next": nxt.slug if nxt is not None else None,
+                    "render": "\n".join(lines) or f"{page.title} is alone in the wiki."}
+
+        if action == "sitemap":
+            urls = sitemap(store)
+            return {"ok": True, "render": render_sitemap(store),
+                    "urls": urls}
+
+        if action == "canonical":
+            missing = canonical_missing(store, category)
+            return {"ok": True,
+                    "render": render_canonical(store, category),
+                    "missing": missing,
+                    "dangling_parents": dangling_parents(store)}
+
+        if action == "canonical-new":
+            slug = (slug or "").strip().lower()
+            if slug not in CANONICAL_PAGES:
+                return _err("give a canonical slug: action=canonical-new slug=<"
+                            + "|".join(CANONICAL_PAGES) + "> [category=]")
+            if store.get(slug) is not None:
+                return _err(f"page {slug!r} already exists")
+            title = slug.replace("-", " ").title()
+            type_ = ("overview" if slug == "overview"
+                     else "troubleshooting" if slug == "troubleshooting"
+                     else "guide")
+            try:
+                page = store.create(title, canonical_body(slug),
+                                    type=type_, category=category)
+            except ValueError as exc:
+                return _err(str(exc))
+            return {"ok": True, "slug": page.slug, "page": _page_dict(page)}
+
         return _err(f"unknown action {action!r} — list, read, create, "
                     "edit, search, links, backlinks, orphans, broken, "
                     "history, revert, template, import, from-memory, "
-                    "board, remove")
+                    "board, remove, nav, sitemap, canonical, canonical-new")
