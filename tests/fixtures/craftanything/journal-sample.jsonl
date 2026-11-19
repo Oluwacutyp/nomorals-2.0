@@ -1,0 +1,2 @@
+{"caller": "ui", "consent": "not_asked", "decision": "allow", "effects": ["idempotent"], "reason": "read-only or non-consent effects (idempotent); no consent needed", "rule": null, "tool": "cadcraft", "ts": 1793000000.0}
+{"caller": "agent", "consent": "not_asked", "decision": "consent_required", "effects": ["launches_process", "executes_foreign_code"], "reason": "shell needs consent for executes_foreign_code", "rule": "consent_required", "tool": "shell", "ts": 1793000001.0}

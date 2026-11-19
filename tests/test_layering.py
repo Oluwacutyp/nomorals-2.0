@@ -553,6 +553,12 @@ MODULE_PINS: dict[str, int] = {
     # document model of its own, only argument routing and reply
     # shaping.
     "nomorals.tools.anicraft": 5,
+    # The craftanything tool surface is the L5 composed tool over the
+    # L5 agents organ (nomorals/agents/craftanything/), the same shape
+    # as tools/texturecraft.py over the textures organ — it owns no
+    # registry of its own, only argument routing and reply shaping; the
+    # engine binds the live builtin registry at call time.
+    "nomorals.tools.craftanything": 5,
     # The prompt-compiler tool surface composes the L5 organs that own
     # the graded journals (games.npc_learn, characters.learn) into a
     # compile/status surface — it IS the L5 composition layer, not an

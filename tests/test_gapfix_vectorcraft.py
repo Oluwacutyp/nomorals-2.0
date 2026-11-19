@@ -488,8 +488,10 @@ class TestTool(unittest.TestCase):
         # after the materialcraft port (lane 109) added the
         # materialcraft tool, 729 after the texturecraft port
         # (lane 108) added the texturecraft tool, 730 after the
-        # anicraft port (lane 110) added the anicraft tool.
-        self.assertEqual(len(registry._tools), 730)
+        # anicraft port (lane 110) added the anicraft tool, 731
+        # after the craft-anything port (lane 111) added the
+        # craftanything tool.
+        self.assertEqual(len(registry._tools), 731)
 
     def test_tool_inspect_and_render(self) -> None:
         registry = self._registry()

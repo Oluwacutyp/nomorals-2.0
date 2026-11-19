@@ -1,0 +1,126 @@
+# Craft-Anything parity — real fixtures, real operations, expected outcomes.
+# A missing fixture FAILS its case, never a silent skip.
+schema_version = 1
+
+[[cases]]
+id = "effects-flags-distinct"
+fixture = "spec-readonly.json"
+ops = ["effects_flags"]
+[cases.expect]
+flags = 13
+distinct = true
+
+[[cases]]
+id = "effects-combos"
+fixture = "spec-readonly.json"
+ops = ["effects_combos"]
+[cases.expect]
+evidence = 513
+read_only = 512
+native_evidence = 521
+network_evidence = 529
+
+[[cases]]
+id = "effects-hints"
+fixture = "spec-readonly.json"
+ops = ["effects_hints"]
+[cases.expect]
+read_only_hint = true
+destructive_hint = false
+open_world_hint = false
+needs_consent = false
+
+[[cases]]
+id = "derive-read"
+fixture = "spec-readonly.json"
+ops = ["derive"]
+[cases.expect]
+effects = ["idempotent"]
+
+[[cases]]
+id = "derive-exec"
+fixture = "spec-exec.json"
+ops = ["derive"]
+[cases.expect]
+effects = ["launches_process", "executes_foreign_code"]
+
+[[cases]]
+id = "consent-owner-direct"
+ops = ["consent"]
+[cases.params]
+tool = "shell"
+effects = ["executes_foreign_code"]
+caller = "ui"
+[cases.expect]
+decision = "allow"
+
+[[cases]]
+id = "consent-agent-gated"
+ops = ["consent"]
+[cases.params]
+tool = "shell"
+effects = ["executes_foreign_code"]
+caller = "agent"
+[cases.expect]
+decision = "consent_required"
+reason_contains = "executes_foreign_code"
+
+[[cases]]
+id = "effect-refusal"
+ops = ["engine_call"]
+[cases.params]
+tool = "fs_read"
+[cases.params.call_params]
+path = "/etc/hostname"
+output = "/tmp/craftanything-should-not-exist.txt"
+[cases.expect]
+ok = false
+error_code = "effect_refused"
+
+[[cases]]
+id = "engine-real-call"
+fixture = "sample-bracket.dxf"
+ops = ["engine_call"]
+[cases.params]
+tool = "cadcraft"
+[cases.params.call_params]
+action = "inspect"
+sources = ["{fixture}"]
+[cases.expect]
+ok = true
+entities = 42
+
+[[cases]]
+id = "evidence-retention"
+fixture = "over-limit.json"
+ops = ["evidence_retention"]
+[cases.expect]
+over_limit = true
+retrieved = true
+reply_len = 5000
+
+[[cases]]
+id = "toolsets-cover"
+ops = ["toolsets_cover"]
+[cases.expect]
+unassigned = 0
+media_missing = []
+
+[[cases]]
+id = "agent-plan-bracket"
+fixture = "sample-bracket.dxf"
+ops = ["agent_plan"]
+[cases.params]
+goal = "import {fixture} with cadcraft, solve it, then render it to /tmp/craftanything-proof/bracket.png"
+[cases.expect]
+steps = 3
+tools = ["cadcraft", "cadcraft", "cadcraft"]
+actions = ["import", "solve", "render"]
+
+[[cases]]
+id = "registry-generalisation"
+ops = ["registry_generalisation"]
+[cases.expect]
+tools_ge = 730
+all_gettable = true
+schemas_ok = true

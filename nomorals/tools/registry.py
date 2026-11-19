@@ -200,6 +200,14 @@ class ToolSpec:
     # None = NEVER DECLARED; () = declared none; non-empty = declared
     # needs. The three states stay distinguishable end to end.
     lease_needs: tuple[str, ...] | None = None
+    # Craft-Anything (crates/engine/src/tool.rs Effects): the effects
+    # bitmask this tool declares (see nomorals/agents/craftanything/
+    # effects.py). None = NEVER DECLARED — callers derive the effects
+    # from kind/capability/annotations instead of trusting a hand-written
+    # mask, so an undeclared tool can never silently understate what it
+    # does. A declared mask is the tool's promise; the engine refuses a
+    # call that exceeds it. Distinct from 0 = declared no effects.
+    effects: int | None = None
 
     def __post_init__(self) -> None:
         # Accept a full JSON-Schema object as `parameters` (social.py /
@@ -230,6 +238,15 @@ class ToolSpec:
                     f"tool {self.name!r}: lease_needs entries must be "
                     f"non-empty resource names; got {self.lease_needs!r}")
             self.lease_needs = needs
+        # Craft-Anything: a declared effects mask is typed — a malformed
+        # mask is refused at registration, never silently coerced; a
+        # guessed mask would be a lie in the consent gate.
+        if self.effects is not None and (
+                not isinstance(self.effects, int)
+                or isinstance(self.effects, bool) or self.effects < 0):
+            raise ValidationError(
+                f"tool {self.name!r}: effects must be None or a "
+                f"non-negative effects bitmask; got {self.effects!r}")
 
     def resolved_annotations(self) -> dict[str, bool]:
         """Explicit annotations merged over kind-derived defaults."""
@@ -269,6 +286,9 @@ class ToolSpec:
             "cancellation": self.cancellation,
             "lease_needs": (list(self.lease_needs)
                             if self.lease_needs is not None else None),
+            # Craft-Anything: the declared effects bitmask (None when
+            # the tool never declared one — callers derive it instead).
+            "effects": self.effects,
             "annotations": self.resolved_annotations(),
             "parameters": {
                 "type": "object",
@@ -490,6 +510,9 @@ class ToolRegistry:
         result_protocol: str = "",
         cancellation: str = "",
         lease_needs: list[str] | tuple[str, ...] | None = None,
+        # Craft-Anything: the declared effects bitmask (None = never
+        # declared; the engine derives the effects instead).
+        effects: int | None = None,
     ) -> Callable[..., Any]:
         """Register a tool, usable directly or as a decorator."""
 
@@ -519,6 +542,7 @@ class ToolRegistry:
                 result_protocol=result_protocol,
                 cancellation=cancellation,
                 lease_needs=lease_needs,
+                effects=effects,
             )
             self._tools[name] = spec
             return func
@@ -675,6 +699,7 @@ class ToolRegistry:
             "materialcraft",  # design/cook/preview/export real PBR materials — node graph, node library, content-addressed cook cache, GGX preview, parity + attribution (MaterialCraft port)
             "texturecraft",  # open/edit/paint/tile/render real .tcraft — sparse 64x64 COW tiles, procedural patterns, layer compositor, mipmaps, normal derivation, parity + attribution (TextureCraft port)
             "anicraft",  # design/play/publish real 2D vector animations — document model, Penner easings, timeline evaluator, frame renderer, publish formats, XFL interchange, parity + attribution (AniCraft port)
+            "craftanything",  # ToolSpec effects + consent gates generalising the registry — list/inspect/call through one effect-checked, consent-gated dispatch, toolsets, standing rules, journals, plan + run multi-step tasks (Craft-Anything port)
             "workspace",
             "trading",
             "characters",

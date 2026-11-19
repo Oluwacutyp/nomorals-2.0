@@ -1,0 +1,109 @@
+# Craft-Anything attribution — SHA-256 provenance record.
+# Upstream: storytold/craft-anything, commit
+# 078cf0c4842c72d0b3d86a8c208515e2223510cc, dual MIT/Apache-2.0.
+# "upstream" entries are hash-pinned against the clone on disk;
+# "devon" entries name the upstream units they derive from.
+schema_version = 1
+upstream_commit = "078cf0c4842c72d0b3d86a8c208515e2223510cc"
+upstream_licence = "MIT OR Apache-2.0"
+
+[[assets]]
+source = "crates/engine/src/tool.rs"
+kind = "upstream"
+licence = "MIT OR Apache-2.0"
+sha256 = "fb4274043befd525def6d39402d656dd0edb288fd99e7e24875b67cd6f3d075c"
+lines = 425
+derives = "Effects bitflags + hints + combos, Toolset, Requires, Caller, Progress, Ctx, ToolOutput, ToolSpec struct, parse_params"
+
+[[assets]]
+source = "crates/engine/src/lib.rs"
+kind = "upstream"
+licence = "MIT OR Apache-2.0"
+sha256 = "fa1a042415d183396563cb7b14313dfc6037017ab8c94562448119ea57419392"
+lines = 400
+derives = "Consent, CallOptions, Availability, Engine::call / call_inner (journal, consent check, panic guard, evidence recording)"
+
+[[assets]]
+source = "crates/engine/src/registry.rs"
+kind = "upstream"
+licence = "MIT OR Apache-2.0"
+sha256 = "15600c95a13fc8b9ac935f347d5256ff65aaaf3ff0f6dec2b56a403dc6e5566d"
+lines = 236
+derives = "Registry: all/get/toolsets, runtime tools"
+
+[[assets]]
+source = "crates/mcp/src/lib.rs"
+kind = "upstream"
+licence = "MIT OR Apache-2.0"
+sha256 = "b91e2a0c1404beb9abd5bc0e240436024894b61e6329bdd18b67020485a262a4"
+lines = 763
+derives = "consent_required surface, allow-run, over-limit evidence pointer, toolsets listing / enable_toolset, progress + cancellation"
+
+[[assets]]
+source = "crates/ai/src/agent.rs"
+kind = "upstream"
+licence = "MIT OR Apache-2.0"
+sha256 = "2e0ff7bd7399c49642fc95033469b6f5df416a3ddb44669c90249a92912a038c"
+lines = 1577
+derives = "agent loop: ToolHost trait, registry_tools filtering by enabled toolsets, RESULT_BUDGET, turn budgets, consent flow"
+
+[[assets]]
+source = "crates/evidence/src/error.rs"
+kind = "upstream"
+licence = "MIT OR Apache-2.0"
+sha256 = "b7641680bad555f35ee4026be10bdb1934d2d422af4205f8dc5820ed378c2b3c"
+lines = 188
+derives = "ErrorCode incl. ConsentRequired, ToolError shape (code / message / remediation / details)"
+
+[[assets]]
+source = "crates/ai/src/key_tools.rs"
+kind = "upstream"
+licence = "MIT OR Apache-2.0"
+sha256 = "42a1efd6f17bde339940c0c6ea7c52de5188c65ca2a697073e49787c2d8ae9ae"
+lines = 153
+derives = "tool definition shape for the agent's key tools (name / schema / run)"
+
+[[assets]]
+source = "nomorals/agents/craftanything/effects.py"
+kind = "devon"
+derives_from = ["crates/engine/src/tool.rs (Effects, hints, combos)"]
+
+[[assets]]
+source = "nomorals/agents/craftanything/consent.py"
+kind = "devon"
+derives_from = ["crates/engine/src/lib.rs (Consent, consent check)", "crates/mcp/src/lib.rs (allow-run, consent_required)"]
+
+[[assets]]
+source = "nomorals/agents/craftanything/toolsets.py"
+kind = "devon"
+derives_from = ["crates/engine/src/tool.rs (Toolset)"]
+
+[[assets]]
+source = "nomorals/agents/craftanything/engine.py"
+kind = "devon"
+derives_from = ["crates/engine/src/lib.rs (Engine::call)", "crates/mcp/src/lib.rs (over-limit evidence, toolsets listing)"]
+
+[[assets]]
+source = "nomorals/agents/craftanything/agent.py"
+kind = "devon"
+derives_from = ["crates/ai/src/agent.rs (agent loop, ToolHost, turn budgets)"]
+
+[[assets]]
+source = "nomorals/agents/craftanything/specs.py"
+kind = "devon"
+derives_from = ["crates/engine/src/tool.rs (per-tool Effects declarations)"]
+
+[[assets]]
+source = "nomorals/agents/craftanything/parity.py"
+kind = "devon"
+derives_from = ["crates/engine/src/lib.rs (Engine::call behaviour under test)"]
+
+[[assets]]
+source = "nomorals/agents/craftanything/attribution.py"
+kind = "devon"
+derives_from = ["nomorals/media/cad/attribution.py (Devon attribution habit)"]
+
+[[assets]]
+source = "nomorals/tools/craftanything.py"
+kind = "devon"
+derives_from = ["crates/mcp/src/lib.rs (tool surface shape)", "nomorals/tools/cadcraft.py (Devon craft tool surface habit)"]
