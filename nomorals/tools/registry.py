@@ -669,6 +669,7 @@ class ToolRegistry:
             "gridcraft",  # open/edit/recalculate real .xlsx — workbook model, formula engine, calc graph, parity + attribution (GridCraft port)
             "deckcraft",  # open/edit/render/save real .pptx — presentation model, fidelity-preserving edits, slide renderer, parity + attribution (DeckCraft port)
             "designcraft",  # open/edit/lay out/render real .designcraft — page/layout model, flex engine, composer, renderer, parity + attribution (DesignCraft port)
+            "figcraft",  # open/edit/prototype/render/save real .figcraft — design model, auto-layout, components, collab core, frame renderer, parity + attribution (FigCraft port)
             "workspace",
             "trading",
             "characters",

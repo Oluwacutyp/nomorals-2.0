@@ -1,0 +1,147 @@
+# FigCraft attribution (lane 105). Upstream: storytold/figcraft,
+# dual MIT/Apache-2.0, commit 6f78021 ("fix(collab): build no repair
+# for a batch refused for lack of permission (#1980)").
+# Every upstream file below is pinned by the SHA-256 of the source
+# as read from the clone at ~/workspace/echelon-mining/repos/storytold/figcraft.
+
+[[assets]]
+id = "collab-protocol"
+upstream = "docs/collab-protocol.md"
+sha256 = "6fafdde007434583b5be3d9f1269070ab447adf2b9bb844fd486c0c6930e2c03"
+ported_to = "nomorals/media/design/collab.py, nomorals/media/design/session.py"
+
+[[assets]]
+id = "file-format-parity"
+upstream = "docs/file-format-parity.md"
+sha256 = "eb587f6dbedf7c2d5bf4df12877b8172c9aa415f4d73d71a0a86167eee85804e"
+ported_to = "nomorals/media/design/model.py"
+
+[[assets]]
+id = "auto-layout-parity"
+upstream = "docs/auto-layout-parity.md"
+sha256 = "900728cbe39c02b819461ffbfbdab6f13fec71b28d2d28094210c9201204b4d2"
+ported_to = "nomorals/media/design/layout.py"
+
+[[assets]]
+id = "collaboration-parity"
+upstream = "docs/collaboration-parity.md"
+sha256 = "55d4b66ba2d430f1cbc89a0c5d6c8280694e848bcf19822414c1c60fda7eaef8"
+ported_to = "nomorals/media/design/collab.py"
+
+[[assets]]
+id = "components-parity"
+upstream = "docs/components-parity.md"
+sha256 = "650bb4e8b7b8af8d0e115d216f1066b334d943e8ae5b36acc83eff451a213edf"
+ported_to = "nomorals/media/design/components.py"
+
+[[assets]]
+id = "collab-change"
+upstream = "crates/collab/src/change.rs"
+sha256 = "b12cd8e5226c6f8eb60e82ab445d533f2b87086a2a15a983b18810254b313897"
+ported_to = "nomorals/media/design/collab.py"
+
+[[assets]]
+id = "collab-client"
+upstream = "crates/collab/src/client.rs"
+sha256 = "04d489b70f100e8ece8a5512142c3bd715c0292a3639089047ce3162596649b2"
+ported_to = "nomorals/media/design/session.py"
+
+[[assets]]
+id = "collab-code"
+upstream = "crates/collab/src/code.rs"
+sha256 = "a0e4b6e69d6756629047ee17cb01e1774121d590520ab347e5401da67273cfa8"
+ported_to = "nomorals/media/design/session.py"
+
+[[assets]]
+id = "collab-net-sessions"
+upstream = "crates/collab-net/src/sessions.rs"
+sha256 = "b64d151931e590b8f1c45e96e2ee28f2471521897e21eff99d32a9114610aad5"
+ported_to = "nomorals/media/design/session.py"
+
+[[assets]]
+id = "collab-net-link"
+upstream = "crates/collab-net/src/link.rs"
+sha256 = "4237f149b57bfc0b1bbeba20832863d025cb5deff625fd851dab113af9481187"
+ported_to = "nomorals/media/design/session.py"
+
+[[assets]]
+id = "format-lib"
+upstream = "crates/format/src/lib.rs"
+sha256 = "3fa32e0dc86ac40b4d431f75a35d1f56e757e59ea2a03cc039c4673651957beb"
+ported_to = "nomorals/media/design/model.py"
+
+[[assets]]
+id = "layout-lib"
+upstream = "crates/layout/src/lib.rs"
+sha256 = "14c85c56e3072ab542b0a91b220d5cde18808b7a5ccc4838ee49edcbf0d4b15b"
+ported_to = "nomorals/media/design/layout.py"
+
+[[assets]]
+id = "render-lib"
+upstream = "crates/render/src/lib.rs"
+sha256 = "7163c4ee00edb930e4cd8c476be26ce2c0942836197a2b78eac707eb70daf508"
+ported_to = "nomorals/media/design/render.py"
+
+# Devon-authored modules (no upstream text copied; design follows the
+# upstream docs above). These must exist in the tree; they are not
+# hash-checked against upstream.
+
+[[devon]]
+id = "model"
+path = "nomorals/media/design/model.py"
+lineage = "Devon-authored; format follows docs/file-format-parity.md"
+
+[[devon]]
+id = "layout"
+path = "nomorals/media/design/layout.py"
+lineage = "Devon-authored; engine follows docs/auto-layout-parity.md"
+
+[[devon]]
+id = "components"
+path = "nomorals/media/design/components.py"
+lineage = "Devon-authored; semantics follow docs/components-parity.md"
+
+[[devon]]
+id = "proto"
+path = "nomorals/media/design/proto.py"
+lineage = "Devon-authored; flows follow the upstream prototype model"
+
+[[devon]]
+id = "collab"
+path = "nomorals/media/design/collab.py"
+lineage = "Devon-authored; protocol follows docs/collab-protocol.md"
+
+[[devon]]
+id = "session"
+path = "nomorals/media/design/session.py"
+lineage = "Devon-authored; in-process transport over the collab protocol"
+
+[[devon]]
+id = "render"
+path = "nomorals/media/design/render.py"
+lineage = "Devon-authored; Pillow renderer over the upstream paint model"
+
+[[devon]]
+id = "edit"
+path = "nomorals/media/design/edit.py"
+lineage = "Devon-authored; fidelity-preserving editor"
+
+[[devon]]
+id = "parity"
+path = "nomorals/media/design/parity.py"
+lineage = "Devon-authored; machine-checked parity runner"
+
+[[devon]]
+id = "attribution"
+path = "nomorals/media/design/attribution.py"
+lineage = "Devon-authored; SHA-256 attribution checker"
+
+[[devon]]
+id = "errors"
+path = "nomorals/media/design/errors.py"
+lineage = "Devon-authored; typed error kinds"
+
+[[devon]]
+id = "tool"
+path = "nomorals/tools/figcraft.py"
+lineage = "Devon-authored; brain tool surface"

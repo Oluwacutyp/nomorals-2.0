@@ -1,0 +1,100 @@
+# FigCraft parity cases (lane 105). Every case runs against a real
+# fixture in tests/fixtures/figcraft/. Missing fixture = fail, never skip.
+
+[[cases]]
+id = "roundtrip_simple"
+fixture = "simple.figcraft"
+operation = "roundtrip"
+
+[[cases]]
+id = "layout_vertical"
+fixture = "layout.figcraft"
+operation = "layout"
+root = 2
+
+[cases.expect]
+"3" = { y = 16.0 }
+"4" = { y = 46.4 }
+"5" = { y = 94.4 }
+
+[[cases]]
+id = "layout_fill_width"
+fixture = "layout.figcraft"
+operation = "layout"
+root = 2
+
+[cases.expect]
+"4" = { w = 368.0 }
+"5" = { w = 100.0 }
+
+[[cases]]
+id = "component_instance"
+fixture = "components.figcraft"
+operation = "instance"
+node = 10
+
+[cases.expect]
+exact = true
+root_name = "State=Default"
+
+[[cases]]
+id = "prototype_flow"
+fixture = "proto.figcraft"
+operation = "flows"
+start = 2
+
+[cases.expect]
+flows = [2, 5, 8]
+
+[[cases]]
+id = "fidelity_edit"
+fixture = "simple.figcraft"
+operation = "fidelity"
+
+[cases.edit]
+kind = "set_text"
+node = 4
+value = "Edited"
+
+[cases.expect]
+changed_count = 1
+
+[[cases]]
+id = "two_editors"
+fixture = "simple.figcraft"
+operation = "two_editors"
+
+[cases.edit_a]
+node = 4
+value = "Alice text"
+
+[cases.edit_b]
+node = 3
+value = "#ff0000"
+
+[[cases]]
+id = "render_simple"
+fixture = "simple.figcraft"
+operation = "render"
+node = 2
+
+[cases.expect]
+width = 400
+height = 300
+unrendered = []
+
+[[cases]]
+id = "render_gradient"
+fixture = "styled.figcraft"
+operation = "render"
+node = 2
+
+[cases.expect]
+width = 400
+height = 300
+unrendered_contains = "shadow"
+
+[[cases]]
+id = "broken_rejected"
+fixture = "broken.figcraft"
+operation = "open_fails"

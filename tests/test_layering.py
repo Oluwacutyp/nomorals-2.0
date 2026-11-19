@@ -521,6 +521,11 @@ MODULE_PINS: dict[str, int] = {
     # tools/wordcraft.py over the word organ — it owns no document
     # model of its own, only argument routing and reply shaping.
     "nomorals.tools.designcraft": 5,
+    # The figcraft tool surface is the L5 composed tool over the L4
+    # media organ (nomorals/media/design/), the same shape as
+    # tools/vectorcraft.py over the vector organ — it owns no design
+    # model of its own, only argument routing and reply shaping.
+    "nomorals.tools.figcraft": 5,
     # The prompt-compiler tool surface composes the L5 organs that own
     # the graded journals (games.npc_learn, characters.learn) into a
     # compile/status surface — it IS the L5 composition layer, not an
