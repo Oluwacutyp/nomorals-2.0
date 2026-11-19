@@ -169,6 +169,19 @@ from .tts import (
 )
 from .vits import list_configs, load_config, prepare_run
 from .vits.backend import VITSBackend, list_vits_models, vits_model_dir
+from .services import (
+    ContainerSpec,
+    ModelArtifact,
+    ModelServer,
+    ServiceDeclaration,
+    ServiceRegistry,
+    TensorSpec,
+    default_services_dir,
+    export_torchscript_service,
+    export_vits_probe_service,
+    health as service_health,
+    service_executor,
+)
 
 __all__ = [
     "CANONICAL_BURSTS",
@@ -283,4 +296,15 @@ __all__ = [
     "load_config",
     "prepare_run",
     "vits_model_dir",
+    "ContainerSpec",
+    "ModelArtifact",
+    "ModelServer",
+    "ServiceDeclaration",
+    "ServiceRegistry",
+    "TensorSpec",
+    "default_services_dir",
+    "export_torchscript_service",
+    "export_vits_probe_service",
+    "service_executor",
+    "service_health",
 ]

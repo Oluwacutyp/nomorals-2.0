@@ -2596,6 +2596,8 @@ def _parser() -> argparse.ArgumentParser:
                      "nm voice listen [--secs N] [--out PATH]\n"
                      "nm voice transcribe <file>\n"
                      "nm voice stats [--json]\n"
+                     "nm voice service list | serve <slug> --inputs JSON | "
+                     "health <slug> | export-vits-probe | status\n"
                      "nm voice consent [--grant|--revoke] [--device ID]\n"
                      "nm voice purge\n"
                      "nm voice decrypt <file.enc> --key-file PATH\n"
@@ -2744,6 +2746,72 @@ def _parser() -> argparse.ArgumentParser:
     v_live = voice_sub.add_parser(
         "live", help="live voice + video in a LiveKit room (WebRTC)")
     live_sub = v_live.add_subparsers(dest="voice_live_action", required=True)
+    v_svc = voice_sub.add_parser(
+        "service",
+        help="model services: export, register, serve TorchScript models",
+        description=("nm voice service list [--task T] [--json]\n"
+                     "nm voice service register --artifact PATH --task T "
+                     "[--name N] [--version V] [--entry E]\n"
+                     "nm voice service serve <slug[@version]> --inputs JSON\n"
+                     "nm voice service health <slug[@version]>\n"
+                     "nm voice service export-vits-probe [--owner O]\n"
+                     "nm voice service evict <slug[@version]>\n"
+                     "nm voice service status [--json]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    svc_sub = v_svc.add_subparsers(dest="voice_service_action", required=True)
+    v_svc_list = svc_sub.add_parser("list", help="list registered services")
+    v_svc_list.add_argument("--task", default="",
+                            help="only services for this task")
+    v_svc_list.add_argument("--json", action="store_true",
+                            help="Output as JSON")
+    v_svc_reg = svc_sub.add_parser(
+        "register", help="register a TorchScript artifact as a service")
+    v_svc_reg.add_argument("--artifact", required=True,
+                           help="path to the .pt TorchScript file")
+    v_svc_reg.add_argument("--task", required=True,
+                           help="service task, e.g. tts-mel")
+    v_svc_reg.add_argument("--name", default="",
+                           help="service slug (default: artifact stem)")
+    v_svc_reg.add_argument("--version", default="0.1.0",
+                           help="service version, semver core")
+    v_svc_reg.add_argument("--entry", default="forward",
+                           help="module entry method to call")
+    v_svc_reg.add_argument("--inputs", default="",
+                           help="JSON inputs spec: "
+                                "[{name, dtype, shape}] (default: none — "
+                                "serve validates names only)")
+    v_svc_reg.add_argument("--outputs", default="",
+                           help="JSON outputs spec: [{name, dtype, shape}]")
+    v_svc_reg.add_argument("--owner", default="",
+                           help="container registry owner for ghcr.io refs")
+    v_svc_reg.add_argument("--base-image", default="python:3.11-slim",
+                           help="container base image for the declaration")
+    v_svc_reg.add_argument("--json", action="store_true",
+                           help="Output as JSON")
+    v_svc_serve = svc_sub.add_parser(
+        "serve", help="run a registered service on JSON inputs")
+    v_svc_serve.add_argument("ref", help="slug[@version] (bare slug = latest)")
+    v_svc_serve.add_argument("--inputs", required=True,
+                             help="JSON: {name: {dtype, shape, values}}")
+    v_svc_serve.add_argument("--json", action="store_true",
+                             help="Output as JSON")
+    v_svc_health = svc_sub.add_parser(
+        "health", help="run a service's declared health probe")
+    v_svc_health.add_argument("ref", help="slug[@version] (bare slug = latest)")
+    v_svc_health.add_argument("--json", action="store_true",
+                              help="Output as JSON")
+    v_svc_probe = svc_sub.add_parser(
+        "export-vits-probe",
+        help="build, export, and register the VITS probe service "
+             "(real VITS architecture, random weights)")
+    v_svc_probe.add_argument("--owner", default="",
+                             help="container registry owner for ghcr.io refs")
+    v_svc_probe.add_argument("--json", action="store_true",
+                             help="Output as JSON")
+    v_svc_status = svc_sub.add_parser(
+        "status", help="registry + model-cache status")
+    v_svc_status.add_argument("--json", action="store_true",
+                              help="Output as JSON")
     v_live_start = live_sub.add_parser(
         "start", help="join a LiveKit room and talk live")
     v_live_start.add_argument("--room", required=True,

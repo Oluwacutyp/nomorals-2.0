@@ -116,7 +116,140 @@ def _cmd_voice(args: argparse.Namespace, context: Any) -> int:
         return _cmd_voice_probe(args, context)
     if action == "live":
         return _cmd_voice_live(args, context)
+    if action == "service":
+        return _cmd_voice_service(args, context)
     print(f"unknown voice action: {action}", file=sys.stderr)
+    return 2
+
+
+def _cmd_voice_service(args: argparse.Namespace, context: Any) -> int:
+    """Route `nm voice service` subcommands (storyteller-ml §3B.11)."""
+    from ...voice.services import (
+        ContainerSpec,
+        ModelArtifact,
+        ModelServer,
+        ServiceDeclaration,
+        ServiceRegistry,
+        TensorSpec,
+        export_vits_probe_service,
+    )
+    from ...voice.services import (
+        health as service_health,
+    )
+
+    action = args.voice_service_action
+    registry = ServiceRegistry()
+
+    def _emit(payload: Any) -> int:
+        if getattr(args, "json", False):
+            print(json.dumps(payload, indent=2, default=str))
+        elif isinstance(payload, dict) and "error" in payload:
+            print(f"error: {payload['error']}", file=sys.stderr)
+            return 1
+        elif isinstance(payload, dict) and payload.get("ok") is False:
+            print(f"error: {payload.get('error', 'failed')}",
+                  file=sys.stderr)
+            return 1
+        else:
+            print(json.dumps(payload, indent=2, default=str))
+        return 0
+
+    if action == "list":
+        rows = registry.list(task=getattr(args, "task", "") or "")
+        if getattr(args, "json", False):
+            return _emit({"services": [d.to_dict() for d in rows]})
+        if not rows:
+            print("no model services registered yet — "
+                  "nm voice service export-vits-probe")
+            return 0
+        for d in rows:
+            print(f"{d.slug}@{d.version} [{d.task}] "
+                  f"{d.artifact.format} {d.artifact.path}")
+        return 0
+
+    if action == "register":
+        import hashlib as _hashlib
+        import os as _os
+        path = _os.path.abspath(args.artifact)
+        if not _os.path.isfile(path):
+            print(f"no artifact file: {path}", file=sys.stderr)
+            return 1
+        digest = _hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                digest.update(chunk)
+        try:
+            inputs = [TensorSpec.from_dict(t)
+                      for t in json.loads(args.inputs or "[]")]
+            outputs = [TensorSpec.from_dict(t)
+                       for t in json.loads(args.outputs or "[]")]
+        except ValueError as exc:
+            print(f"bad inputs/outputs JSON: {exc}", file=sys.stderr)
+            return 1
+        name = args.name or _os.path.splitext(_os.path.basename(path))[0]
+        artifact = ModelArtifact(
+            name=name, version=args.version, task=args.task,
+            format="torchscript", path=path, sha256=digest.hexdigest(),
+            inputs=inputs, outputs=outputs, entry=args.entry)
+        decl = ServiceDeclaration(
+            slug=name, version=args.version, task=args.task,
+            artifact=artifact,
+            container=ContainerSpec(owner=args.owner or "",
+                                    base_image=args.base_image))
+        try:
+            registry.register(decl)
+        except (ValueError, FileNotFoundError) as exc:
+            print(f"register failed: {exc}", file=sys.stderr)
+            return 1
+        return _emit({"registered": decl.ref, "task": decl.task,
+                      "artifact": decl.artifact.path,
+                      "sha256": decl.artifact.sha256})
+
+    if action == "serve":
+        try:
+            inputs = json.loads(args.inputs)
+        except ValueError as exc:
+            print(f"bad --inputs JSON: {exc}", file=sys.stderr)
+            return 1
+        server = ModelServer(registry)
+        try:
+            result = server.execute(args.ref, inputs)
+        except Exception as exc:  # noqa: BLE001 — CLI reports, never traces
+            print(f"serve failed: {type(exc).__name__}: {exc}",
+                  file=sys.stderr)
+            return 1
+        if getattr(args, "json", False):
+            return _emit(result)
+        print(f"{result['service']}@{result['version']} served: "
+              + ", ".join(f"{n} {s}"
+                          for n, s in result["output_shapes"].items()))
+        return 0
+
+    if action == "health":
+        result = service_health(args.ref, registry=registry)
+        return _emit(result)
+
+    if action == "export-vits-probe":
+        print("building the VITS probe service "
+              "(real architecture, random weights)…", file=sys.stderr)
+        try:
+            decl = export_vits_probe_service(
+                owner=getattr(args, "owner", "") or "")
+        except Exception as exc:  # noqa: BLE001 — CLI reports, never traces
+            print(f"export failed: {type(exc).__name__}: {exc}",
+                  file=sys.stderr)
+            return 1
+        return _emit({"registered": decl.ref, "task": decl.task,
+                      "artifact": decl.artifact.path,
+                      "sha256": decl.artifact.sha256,
+                      "note": "probe service — random weights, "
+                              "not a trained voice"})
+
+    if action == "status":
+        server = ModelServer(registry)
+        return _emit(server.status())
+
+    print(f"unknown voice service action: {action}", file=sys.stderr)
     return 2
 
 

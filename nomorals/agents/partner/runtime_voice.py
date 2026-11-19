@@ -374,6 +374,8 @@ class RuntimeVoiceMixin:
         /voice talk on|off                       voice conversation mode
         /voice verify enroll                     enroll your voice (biometric)
         /voice rm <name>                         drop a catalogue voice
+        /voice service list | health <slug> | status
+                                                 model services (TorchScript)
         """
         from ...voice.catalogue import default_catalogue
 
@@ -388,6 +390,13 @@ class RuntimeVoiceMixin:
             from ...audio.pipeline import control_voice as _pipeline_control
             return _pipeline_control(tail or "", context=self.context,
                                      chat=chat_key)
+
+        # Model services (storyteller-ml §3B.11): list / health / status.
+        # Serve takes tensor JSON, which no one types in chat — health is
+        # the serve demonstration here (it runs the declared probe).
+        if verb == "service":
+            from ...voice.services import control_service as _service_control
+            return _service_control(rest)
 
         if verb in ("list", "ls"):
             voices = cat.list()
