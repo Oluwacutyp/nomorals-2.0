@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:custom="http://example.com/custom" width="200" height="100" viewBox="0 0 200 100">
+  <title>Unknown Fixture</title>
+  <rect x="10" y="10" width="80" height="60" fill="#00ff00"/>
+  <custom:widget data-note="keep me" custom:level="3"><custom:child>payload</custom:child></custom:widget>
+  <foreignObject x="110" y="10" width="80" height="60"><div xmlns="http://www.w3.org/1999/xhtml">html inside</div></foreignObject>
+</svg>

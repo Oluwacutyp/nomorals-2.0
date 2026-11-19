@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="200" height="200" viewBox="0 0 200 200">
+  <title>Layers Fixture</title>
+  <defs>
+    <rect id="stamp" x="0" y="0" width="30" height="30" fill="#123456"/>
+  </defs>
+  <g inkscape:groupmode="layer" inkscape:label="Background">
+    <rect x="0" y="0" width="200" height="200" fill="#eeeeee"/>
+  </g>
+  <g inkscape:groupmode="layer" inkscape:label="Foreground">
+    <g transform="rotate(45 100 100)">
+      <rect x="70" y="70" width="60" height="60" fill="#ff8800"/>
+    </g>
+    <use href="#stamp" x="10" y="150"/>
+    <use href="#stamp" x="160" y="150"/>
+  </g>
+</svg>

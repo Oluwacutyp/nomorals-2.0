@@ -1,0 +1,137 @@
+# VectorCraft attribution — SHA-256 provenance for the port of
+# storytold/vectorcraft (dual MIT/Apache-2.0). Upstream hashes are
+# pinned to the clone at the commit below and verified by
+# verify_attribution; devon entries name the upstream units they
+# derive from.
+upstream_commit = "a3ce20b88fff0eb80812b3ff0fca19fbfa1df8f5"
+upstream_repo = "storytold/vectorcraft"
+
+[[assets]]
+kind = "upstream"
+path = "crates/geom/src/path.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "ce5dc25850d92683c3eca7154fe33c986ee840e5d0a48edf9d69ab0b70932486"
+
+[[assets]]
+kind = "upstream"
+path = "crates/geom/src/bez.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "df7162503992c9f6be8053b971663ee7e2d259c1f192547112d861c2f30d7a2b"
+
+[[assets]]
+kind = "upstream"
+path = "crates/geom/src/arc.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "4b281128d8805b943b1546badfb5d86037be817fe24c866d8900af2fada39560"
+
+[[assets]]
+kind = "upstream"
+path = "crates/geom/src/shapes.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "6b527c3d2255737363bd5276dc7793006b970e36153b9fe69558d0497bf61982"
+
+[[assets]]
+kind = "upstream"
+path = "crates/doc/src/document.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "19c71741285c91a5217ab4d2b57cd450f5ee94bede1d5c37bf809a6e774e70a1"
+
+[[assets]]
+kind = "upstream"
+path = "crates/doc/src/artboard.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "ac6ab411689bf293d21fb9347f88779ba2baca32de9701bd7be4209b1f63fe7f"
+
+[[assets]]
+kind = "upstream"
+path = "crates/doc/src/appearance.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "b5a1c2480be13316d90cc1efcab62750026cc098b97ea8bf6fd0e7be4ed97859"
+
+[[assets]]
+kind = "upstream"
+path = "crates/svg/src/import.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "6959ae7197cce537264f68081f42aa63c8f6fab50c96d2ce17de17f68cc3b5d5"
+
+[[assets]]
+kind = "upstream"
+path = "crates/svg/src/export.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "193d9e5be7536f963037deb82dfdf3d87990499ef12ea02675f4bee1ed6474b2"
+
+[[assets]]
+kind = "upstream"
+path = "crates/svg/src/css.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "6788399a56578e58b3e7f02abc42b969073df55fc58ebc4c8164b1b5d5469fb1"
+
+[[assets]]
+kind = "upstream"
+path = "crates/pathops/src/boolean.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "59116af98c5d40011c665e7b9c8bcd3e9cf023eafc207704ed30478f73e9b47c"
+
+[[assets]]
+kind = "upstream"
+path = "crates/pathops/src/pathfinder.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "22cb64de50da7f81415ad09345346cb1456038b889e0e735493e86815db0df49"
+
+[[assets]]
+kind = "upstream"
+path = "crates/pathops/src/edit.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "a0df0c680e94c919614d44a4229794ac7559977736eff19df6204f7d3f321f68"
+
+[[assets]]
+kind = "upstream"
+path = "crates/render/src/encode/png.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "bb21ea7288c1ae9774a58db47d79930da24e555bf7412c6ae8ee53c6392dec51"
+
+[[assets]]
+kind = "upstream"
+path = "crates/render/src/bounds.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "bbff56c8c4ba2771d4a306b1009a9d130f671601415954164097ec7805242c5f"
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/vector/geom.py"
+derives_from = ["crates/geom/src/path.rs", "crates/geom/src/bez.rs", "crates/geom/src/arc.rs", "crates/geom/src/shapes.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/vector/model.py"
+derives_from = ["crates/doc/src/document.rs", "crates/doc/src/artboard.rs", "crates/doc/src/appearance.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/vector/svg.py"
+derives_from = ["crates/svg/src/import.rs", "crates/svg/src/export.rs", "crates/svg/src/css.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/vector/pathops.py"
+derives_from = ["crates/pathops/src/boolean.rs", "crates/pathops/src/pathfinder.rs", "crates/pathops/src/edit.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/vector/render.py"
+derives_from = ["crates/render/src/encode/png.rs", "crates/render/src/bounds.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/vector/edit.py"
+derives_from = ["crates/doc/src/document.rs", "crates/pathops/src/edit.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/vector/parity.py"
+derives_from = ["crates/doc/src/document.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/media/vector/attribution.py"
+derives_from = ["crates/doc/src/document.rs"]

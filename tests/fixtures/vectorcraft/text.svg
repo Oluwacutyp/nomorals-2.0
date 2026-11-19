@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="300" height="150" viewBox="0 0 300 150">
+  <title>Text Fixture</title>
+  <text x="10" y="40" font-family="DejaVuSans" font-size="24" font-weight="bold" fill="#111111">Bold Title</text>
+  <text x="10" y="80" font-family="DejaVuSans" font-size="16" font-style="italic" fill="#333333">italic line</text>
+  <text x="10" y="120" font-family="DejaVuSans" font-size="12" fill="#666666" opacity="0.5">faint line</text>
+</svg>

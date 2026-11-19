@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="300" height="200" viewBox="0 0 300 200">
+  <title>Boolean Fixture</title>
+  <rect id="a" x="20" y="20" width="120" height="120" fill="#ff0000"/>
+  <rect id="b" x="80" y="80" width="120" height="120" fill="#0000ff"/>
+  <circle id="c" cx="220" cy="60" r="40" fill="#00ff00"/>
+</svg>

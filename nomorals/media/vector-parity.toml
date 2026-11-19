@@ -1,0 +1,93 @@
+# VectorCraft parity cases — machine-checked against real SVG fixtures.
+# Schema version 1. Every [[cases]] names a real fixture in
+# tests/fixtures/vectorcraft/; a missing fixture FAILS its case.
+schema_version = 1
+
+[[cases]]
+id = "simple-inspect"
+fixture = "simple.svg"
+ops = ["inspect"]
+[cases.expect]
+nodes = 3
+title = "Simple Fixture"
+
+[[cases]]
+id = "styled-inspect"
+fixture = "styled.svg"
+ops = ["inspect"]
+[cases.expect]
+nodes = 4
+gradients = 2
+
+[[cases]]
+id = "paths-inspect"
+fixture = "paths.svg"
+ops = ["inspect"]
+[cases.expect]
+nodes = 7
+text_contains = ["hello vector", "along the curve"]
+
+[[cases]]
+id = "layers-inspect"
+fixture = "layers.svg"
+ops = ["inspect"]
+[cases.expect]
+layers = 2
+nodes = 4
+
+[[cases]]
+id = "simple-add-rect"
+fixture = "simple.svg"
+ops = ["add-rect"]
+[cases.params]
+rect = [200, 200, 50, 40, "#123456"]
+[cases.expect]
+nodes = 4
+untouched_nodes_changed = 0
+
+[[cases]]
+id = "simple-set-fill"
+fixture = "simple.svg"
+ops = ["set-fill"]
+[cases.params]
+fill = "#123456"
+[cases.expect]
+nodes = 3
+untouched_nodes_changed = 0
+changed_ids = 1
+
+[[cases]]
+id = "bool-union"
+fixture = "bool.svg"
+ops = ["boolean-union"]
+[cases.params]
+a = "a"
+b = "b"
+[cases.expect]
+nodes = 2
+area = 25200
+
+[[cases]]
+id = "bool-difference"
+fixture = "bool.svg"
+ops = ["boolean-difference"]
+[cases.params]
+a = "a"
+b = "b"
+[cases.expect]
+nodes = 2
+area = 10800
+
+[[cases]]
+id = "render-simple"
+fixture = "simple.svg"
+ops = ["render"]
+[cases.expect]
+render_png = true
+
+[[cases]]
+id = "broken-refused"
+fixture = "broken.svg"
+ops = ["open-refused"]
+[cases.expect]
+error_kind = "parse"

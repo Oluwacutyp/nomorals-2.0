@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" viewBox="0 0 400 300">
+  <title>Paths Fixture</title>
+  <defs>
+    <path id="curve" d="M 20 250 Q 200 100 380 250"/>
+  </defs>
+  <path d="M 20 20 C 80 80, 120 0, 180 40 S 260 80, 300 20" fill="none" stroke="#111111" stroke-width="2"/>
+  <path d="m 20 120 h 60 v 40 h -60 z" fill="#aa00aa"/>
+  <path d="M 220 120 a 40 40 0 1 0 80 0 a 40 40 0 1 0 -80 0" fill="#00aaaa"/>
+  <path d="M 20 200 T 100 200 T 180 200" fill="none" stroke="#222222" stroke-width="2"/>
+  <polyline points="220,200 260,240 300,200 340,240" fill="none" stroke="#333333" stroke-width="2"/>
+  <text x="20" y="290" font-family="DejaVuSans" font-size="16" fill="#000000">hello vector</text>
+  <text font-family="DejaVuSans" font-size="14" fill="#444444"><textPath href="#curve" startOffset="10">along the curve</textPath></text>
+</svg>

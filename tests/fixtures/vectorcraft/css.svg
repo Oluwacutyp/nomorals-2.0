@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="120" viewBox="0 0 200 120">
+  <title>CSS Fixture</title>
+  <style>
+    .hot { fill: #ff0000; stroke: #000000; stroke-width: 2; }
+    rect.cool { fill: #0000ff; }
+  </style>
+  <rect class="hot" x="10" y="10" width="80" height="60"/>
+  <rect class="cool" x="110" y="10" width="80" height="60" style="opacity: 0.5"/>
+</svg>
