@@ -1,0 +1,104 @@
+# WordCraft attribution — SHA-256 provenance for the port of
+# storytold/wordcraft (dual MIT/Apache-2.0). Upstream hashes are
+# pinned to the clone at the commit below and verified by
+# verify_attribution; devon entries name the upstream units they
+# derive from.
+upstream_commit = "92ecb40105f56b674c18e3e88557e1456591868b"
+upstream_repo = "storytold/wordcraft"
+
+[[assets]]
+kind = "upstream"
+path = "crates/doc/src/document.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "78b8f6c02307b09341aefac5fcadac281892f5ead4b8c55cdf5200dd2ce613c2"
+
+[[assets]]
+kind = "upstream"
+path = "crates/doc/src/edit.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "3d627e4ea2c3fa0d47bfa9394ea576b4d23f4d19ddc5262c887f004d962b8b4a"
+
+[[assets]]
+kind = "upstream"
+path = "crates/doc/src/styles.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "fb8a48f4cdad20d8df041596f1d3676282922886a0eb1dc13a3445e26c3c2e52"
+
+[[assets]]
+kind = "upstream"
+path = "crates/doc/src/numbering.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "0d51562c73f4451209916432250caa9594c86f2b1b9c9a9a6f3a5ba0541756f8"
+
+[[assets]]
+kind = "upstream"
+path = "crates/doc/src/table.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "d5df5c7dce9e6b3f925c26566260274969fb0ce726f532f5a8a8ec37cb9e3999"
+
+[[assets]]
+kind = "upstream"
+path = "crates/doc/src/section.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "466dd5320d217293438d71355d01509532c2fd1d3606787857780c5459f1c1ec"
+
+[[assets]]
+kind = "upstream"
+path = "crates/doc/src/para.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "88955d04339ea48f54c466e6e7350600431dd714e4a92efd79097300d2d08c58"
+
+[[assets]]
+kind = "upstream"
+path = "crates/doc/src/block.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "b1f8f5ca4e9238d339bd64216bb72cef7281a68398c451e31648760ce49eefad"
+
+[[assets]]
+kind = "upstream"
+path = "crates/docx/src/read.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "3dbb884ca4f7143a63a94e76aa5aa6b3b1c4e522a591e901fae9c0c2ae19ddf0"
+
+[[assets]]
+kind = "upstream"
+path = "crates/docx/src/write.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "c38c5a60f0a2cc3e0194260eed1b414cc32c828b31105784dbef0314e40e1550"
+
+[[assets]]
+kind = "upstream"
+path = "crates/docx/src/package.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "0d0baf9549aa23a1345b70f5f58b9a00e5f608db8d2f1ecf17e2c410f3d853cf"
+
+[[assets]]
+kind = "upstream"
+path = "crates/docx/src/xml.rs"
+license = "MIT OR Apache-2.0"
+sha256 = "900d8b593dcda591459a29fce096d2c00c3c77ac620fc486b6af7e24f49436bc"
+
+[[assets]]
+kind = "devon"
+path = "nomorals/documents/word/model.py"
+derives_from = ["crates/doc/src/document.rs", "crates/doc/src/block.rs", "crates/doc/src/para.rs", "crates/doc/src/table.rs", "crates/doc/src/section.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/documents/word/ooxml.py"
+derives_from = ["crates/docx/src/read.rs", "crates/docx/src/write.rs", "crates/docx/src/package.rs", "crates/docx/src/xml.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/documents/word/edit.py"
+derives_from = ["crates/doc/src/edit.rs", "crates/doc/src/styles.rs", "crates/doc/src/numbering.rs", "crates/docx/src/write.rs"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/documents/word/parity.py"
+derives_from = ["nomorals/documents/pdfcraft/parity.py"]
+
+[[assets]]
+kind = "devon"
+path = "nomorals/documents/word/attribution.py"
+derives_from = ["nomorals/documents/pdfcraft/attribution.py"]

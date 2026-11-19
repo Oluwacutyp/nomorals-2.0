@@ -1,0 +1,98 @@
+# WordCraft parity cases — machine-checked against real .docx fixtures.
+# Schema version 1. Every [[cases]] names a real fixture in
+# tests/fixtures/wordcraft/; a missing fixture FAILS its case.
+schema_version = 1
+
+[[cases]]
+id = "simple-inspect"
+fixture = "simple.docx"
+ops = ["inspect"]
+[cases.expect]
+paragraphs = 4
+title = "Simple Fixture"
+
+[[cases]]
+id = "styled-inspect"
+fixture = "styled.docx"
+ops = ["inspect"]
+[cases.expect]
+paragraphs = 7
+text_contains = ["Bold lead", "italic follow"]
+
+[[cases]]
+id = "table-inspect"
+fixture = "table.docx"
+ops = ["inspect"]
+[cases.expect]
+paragraphs = 4
+tables = 2
+text_contains = ["Ada", "Ikere"]
+
+[[cases]]
+id = "lists-inspect"
+fixture = "lists.docx"
+ops = ["inspect"]
+[cases.expect]
+paragraphs = 10
+text_contains = ["Apples", "Bake for forty minutes"]
+
+[[cases]]
+id = "headers-inspect"
+fixture = "headers.docx"
+ops = ["inspect"]
+[cases.expect]
+paragraphs = 3
+headers = 1
+footers = 1
+
+[[cases]]
+id = "image-inspect"
+fixture = "image.docx"
+ops = ["inspect"]
+[cases.expect]
+paragraphs = 4
+images = 1
+
+[[cases]]
+id = "replace-text"
+fixture = "simple.docx"
+ops = ["replace"]
+[cases.op_args]
+old = "First paragraph"
+new = "Opening paragraph"
+[cases.expect]
+text_contains = ["Opening paragraph"]
+parts_preserved = true
+untouched_paragraphs_changed = 0
+
+[[cases]]
+id = "add-heading-table"
+fixture = "styled.docx"
+ops = ["add-heading", "add-table"]
+[cases.op_args]
+text = "New Chapter"
+level = 1
+headers = ["A", "B"]
+rows = [["1", "2"]]
+[cases.expect]
+paragraphs = 8
+tables = 1
+text_contains = ["New Chapter"]
+parts_preserved = true
+
+[[cases]]
+id = "metadata-set"
+fixture = "simple.docx"
+ops = ["set-metadata"]
+[cases.op_args]
+title = "Renamed Fixture"
+[cases.expect]
+title = "Renamed Fixture"
+parts_preserved = true
+
+[[cases]]
+id = "broken-refused"
+fixture = "broken.docx"
+ops = ["open-refused"]
+[cases.expect]
+error_kind = "parse"

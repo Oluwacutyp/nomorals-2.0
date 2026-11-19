@@ -664,6 +664,7 @@ class ToolRegistry:
             "triage",  # issue triage over tracked GitHub repos (autocraft port)
             "filmcraft",  # video editor + motion compositor (FilmCraft + EffectCraft ports)
             "wiki",  # durable knowledge pages — links, search, history, board export (craft-wiki port)
+            "wordcraft",  # open/edit/save real .docx — document model, fidelity-preserving edits, parity + attribution (WordCraft port)
             "workspace",
             "trading",
             "characters",
