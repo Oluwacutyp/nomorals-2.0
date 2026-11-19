@@ -657,6 +657,7 @@ class ToolRegistry:
             "representation",  # "what did you tell X for me?" over the representation ledger
             "group_health",  # churn / growth / topic clusters for WhatsApp group health
             "photo_editor",  # Studio photo editor — PSD documents, ladder edits, Studio page (PhotoCraft port)
+            "artist",  # artist IDE — scene-before-generation over her own image/video rungs (ArtCraft port)
             "recruitment",  # per-vacancy recruitment jobs + tiering + /status board (B42)
             "studio_extensions",  # Studio extensions — themes, plug-ins, resource packs (craft-extensions port)
             "ticket_relay",  # Discord tickets ↔ GitHub issues (ticket-relay port)
