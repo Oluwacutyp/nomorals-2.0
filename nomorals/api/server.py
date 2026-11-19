@@ -78,7 +78,8 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from ..llm.brain import brain_for
 from ..core.errors import (
-    CapabilityDenied, NoMoralsError, RateLimited, classify)
+    CapabilityDenied, NoMoralsError, PaymentRequired, RateLimited,
+    classify)
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability, CapabilitySet
@@ -187,6 +188,7 @@ class ServiceUnavailable(NoMoralsError):
 _PROBLEM_TITLES = {
     400: "Bad Request",
     401: "Unauthorized",
+    402: "Payment Required",
     403: "Forbidden",
     404: "Not Found",
     405: "Method Not Allowed",
@@ -200,6 +202,7 @@ _PROBLEM_TITLES = {
 _PROBLEM_CODES = {
     400: "bad_request",
     401: "auth_required",
+    402: "insufficient_credits",
     403: "capability_denied",
     404: "not_found",
     405: "method_not_allowed",
@@ -329,6 +332,46 @@ def _open_timeline(context: Any) -> Any:
 
     db_path = getattr(getattr(context, "db", None), "path", None)
     return Timeline(db_path)
+
+
+def _inference_data_dir(server: Any) -> str | None:
+    """``<home>/data`` for the inference-job store, or ``None`` when
+    this server has no home (tests, in-memory contexts)."""
+    settings = getattr(server.context, "settings", None)
+    home = (getattr(settings, "home", "") or ""
+            or str(getattr(settings, "home_path", "") or ""))
+    if not home:
+        return None
+    return os.path.join(str(home), "data")
+
+
+def _inference_job_store(server: Any) -> Any:
+    """The inference-job store for this server, built lazily and kept
+    on the instance (one store per server, like the rate limiter).
+
+    Persisted under ``<home>/data/inference_jobs.json`` when the
+    server has a home, in-memory otherwise. The wallet starts
+    DETACHED (jobs run unbilled) unless a funded wallet file already
+    exists under the home — funding is a one-way switch: once the
+    owner funds the wallet (``POST /v1/jobs/wallet/credit``) the
+    402 gate stays live across restarts.
+    """
+    store = getattr(server, "_inference_job_store", None)
+    if store is not None:
+        return store
+    from ..core.inference_jobs import InferenceJobStore, WalletStore
+
+    data_dir = _inference_data_dir(server)
+    if data_dir is None:
+        store = InferenceJobStore()
+    else:
+        job_path = os.path.join(data_dir, "inference_jobs.json")
+        wallet_path = os.path.join(data_dir, "inference_wallet.json")
+        wallet = (WalletStore(wallet_path)
+                  if os.path.exists(wallet_path) else None)
+        store = InferenceJobStore(job_path, wallet=wallet)
+    server._inference_job_store = store
+    return store
 
 
 def _json_limit_error(
@@ -588,6 +631,16 @@ class APIServer:
             except CapabilityDenied as exc:
                 return 403, {"error": str(exc) or "capability denied",
                              "kind": "CapabilityDenied"}
+            except PaymentRequired as exc:
+                # 402: the wallet cannot cover the price. The amounts
+                # ride as extension members so a client can say
+                # exactly how much more is needed.
+                payload: dict[str, Any] = {
+                    "error": str(exc) or "payment required",
+                    "kind": "PaymentRequired",
+                }
+                payload.update(exc.details)
+                return 402, payload
             except ServiceUnavailable as exc:
                 return 503, {"error": str(exc) or "service unavailable",
                              "kind": "ServiceUnavailable"}
@@ -733,6 +786,157 @@ class APIServer:
                 raise NoMoralsError(str(exc)) from exc
             finally:
                 server._imggen_lock.release()
+
+        # ── Inference jobs (/v1/jobs) ─────────────────────────────
+        # Async generation jobs with tokens, polling, provider
+        # webhooks and wallet gating (core.inference_jobs — the
+        # artcraft-services job-system pattern). The router matches
+        # exact paths only, so the token rides in the query string
+        # (GET /v1/jobs?token=jinf_…) instead of a path parameter.
+        @self.route(
+            "POST", "/v1/jobs",
+            description="Submit an inference job: validate, price, bill "
+                        "the wallet, record the job and return its token "
+                        "(jinf_…). A wallet that cannot cover the price "
+                        "answers 402 with required/available/shortfall; a "
+                        "reused idempotency_token is rejected as a duplicate.")
+        def jobs_submit(body: dict[str, Any],
+                        query: dict[str, str]) -> dict[str, Any]:
+            store = _inference_job_store(server)
+            data = body or {}
+            params = dict(data.get("params") or {})
+            for key in ("duration_seconds", "aspect_ratio", "resolution",
+                        "generate_audio", "negative_prompt"):
+                if key in data and key not in params:
+                    params[key] = data[key]
+            try:
+                max_attempts = int(data.get("max_attempts") or 3)
+            except (TypeError, ValueError):
+                raise NoMoralsError(
+                    "max_attempts must be an integer") from None
+            job = store.submit(
+                str(data.get("category") or ""),
+                str(data.get("model") or ""),
+                str(data.get("prompt") or ""),
+                params=params,
+                idempotency_token=(str(data.get("idempotency_token") or "")
+                                   or None),
+                webhook_url=(str(data.get("webhook_url") or "") or None),
+                webhook_secret=(str(data.get("webhook_secret") or "")
+                                or None),
+                max_attempts=max_attempts,
+            )
+            return {"success": True,
+                    "inference_job_token": job.token,
+                    "all_job_tokens": [job.token]}
+
+        @self.route(
+            "GET", "/v1/jobs",
+            description="Poll inference-job status: ?token=jinf_… for one "
+                        "job, ?tokens=a,b for a batch. Keep polling while "
+                        "the state is pending, started or attempt_failed; "
+                        "complete_success, complete_failure, dead, "
+                        "cancelled_by_user and cancelled_by_system are "
+                        "terminal. A finished job's result carries the "
+                        "media links (cdn_url).")
+        def jobs_status(body: dict[str, Any],
+                        query: dict[str, str]) -> dict[str, Any]:
+            store = _inference_job_store(server)
+            tokens = (query.get("tokens") or "").strip()
+            if tokens:
+                asked = [t.strip() for t in tokens.split(",") if t.strip()]
+                if not asked:
+                    raise NoMoralsError("tokens must name at least one job")
+                return store.job_status_batch(asked)
+            token = (query.get("token") or "").strip()
+            if not token:
+                raise NoMoralsError(
+                    "token is required — GET /v1/jobs?token=jinf_…")
+            return store.job_status(token)
+
+        @self.route(
+            "POST", "/v1/jobs/cancel",
+            description="Cancel a live inference job: {token, by} with by "
+                        "one of 'user' (default) or 'system'. Terminal "
+                        "jobs cannot be cancelled.")
+        def jobs_cancel(body: dict[str, Any],
+                        query: dict[str, str]) -> dict[str, Any]:
+            store = _inference_job_store(server)
+            data = body or {}
+            token = str(data.get("token") or "").strip()
+            if not token:
+                raise NoMoralsError("token is required")
+            job = store.cancel(token, by=str(data.get("by") or "user"))
+            return {"success": True, "state": job.to_state()}
+
+        @self.route(
+            "POST", "/v1/jobs/webhook",
+            description="Provider webhook: a generation provider calls "
+                        "back when its work starts, progresses, succeeds "
+                        "or fails. Body names the provider, its job id and "
+                        "the event; when a secret is registered for the "
+                        "provider the X-Webhook-Signature header (HMAC-"
+                        "SHA256 over the raw body) is required. Delivery "
+                        "is idempotent by event id — a replay returns the "
+                        "first outcome without moving the job twice.")
+        def jobs_webhook(body: dict[str, Any],
+                         query: dict[str, str],
+                         raw_body: bytes = b"",
+                         headers: dict[str, str] | None = None
+                         ) -> dict[str, Any]:
+            store = _inference_job_store(server)
+            data = body or {}
+            provider = str(data.get("provider") or "").strip()
+            signature = (headers or {}).get("x-webhook-signature", "")
+            return store.receive_provider_webhook(
+                provider, data, signature=signature, raw_body=raw_body)
+
+        @self.route(
+            "GET", "/v1/jobs/wallet",
+            description="Inference-job wallet balance: attached (a funded "
+                        "wallet exists, so the 402 gate is live) or "
+                        "unavailable (no wallet attached — jobs run "
+                        "unbilled).")
+        def jobs_wallet(body: dict[str, Any],
+                        query: dict[str, str]) -> dict[str, Any]:
+            store = _inference_job_store(server)
+            wallet = store.wallet()
+            if wallet is None:
+                return {"success": True, "attached": False,
+                        "balance": None, "wallet": "unavailable"}
+            return {"success": True, "attached": True,
+                    "balance": wallet.balance(),
+                    "bills": wallet.bills()[-20:]}
+
+        @self.route(
+            "POST", "/v1/jobs/wallet/credit",
+            description="Fund the inference-job wallet: {amount, note}. "
+                        "Funding attaches the wallet — from then on every "
+                        "submit is billed and an empty wallet answers 402. "
+                        "Owner configuration (SYS_CONFIG).")
+        def jobs_wallet_credit(body: dict[str, Any],
+                               query: dict[str, str]) -> dict[str, Any]:
+            _require_capability(server._current_principal(),
+                                Capability.SYS_CONFIG)
+            from ..core.inference_jobs import WalletStore
+
+            store = _inference_job_store(server)
+            data = body or {}
+            try:
+                amount = int(data.get("amount"))
+            except (TypeError, ValueError):
+                raise NoMoralsError(
+                    "amount must be a positive integer") from None
+            wallet = store.wallet()
+            if wallet is None:
+                data_dir = _inference_data_dir(server)
+                path = (os.path.join(data_dir, "inference_wallet.json")
+                        if data_dir else None)
+                wallet = WalletStore(path)
+                store.attach_wallet(wallet)
+            entry = wallet.credit(amount, note=str(data.get("note") or ""))
+            return {"success": True, "balance": wallet.balance(),
+                    "credit": entry}
 
         @self.route("POST", "/site/publish",
                     description="Publish Devon's web presence (her page + "

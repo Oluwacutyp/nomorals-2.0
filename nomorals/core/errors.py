@@ -466,6 +466,27 @@ class MissingCredentialError(AuthError):
             self.details.setdefault("feature", feature)
 
 
+class PaymentRequired(NoMoralsError):
+    """Payment is required — the wallet cannot cover the price (HTTP 402).
+
+    The machine-readable amounts ride in ``details``: ``required``,
+    ``available``, ``shortfall``. The API server answers this with a
+    402 problem-details body; waiting will not help — only funding
+    the wallet does.
+    """
+
+    code = "payment.required"
+
+    def __init__(self, message: str = "payment required", *,
+                 details: dict[str, Any] | None = None,
+                 **kw: Any) -> None:
+        super().__init__(message, details=details, **kw)
+        for key in ("required", "available", "shortfall"):
+            value = (details or {}).get(key)
+            if isinstance(value, int):
+                setattr(self, key, value)
+
+
 class QuotaExceeded(NoMoralsError):
     """A quota (not a rate window) is exhausted — monthly tokens, seats, storage.
 
