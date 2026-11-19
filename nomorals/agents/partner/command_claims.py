@@ -106,6 +106,7 @@ def open_shared_claims_db(path: str | None = None):
         return None
 
 __all__ = [
+    "CLAIM_PROTOCOL_VERSION",
     "CommandClaimLedger",
     "DurableCommandClaimLedger",
     "DurableConversationClaimLedger",
@@ -113,12 +114,57 @@ __all__ = [
     "WINDOW_S",
     "ANSWER_WINDOW_S",
     "MAX_KEYS",
+    "claim_build_stamp",
     "command_claim_key",
+    "command_claim_key_variants",
     "load_bot_ids",
     "register_bot_id",
     "shared_claims_path",
     "open_shared_claims_db",
 ]
+
+#: The arbitration protocol this build speaks (dupfix6, 2026-11-19).
+#: Claims and answers carry the build's stamp (see
+#: :func:`claim_build_stamp`); a row with NO stamp was written by
+#: pre-dupfix6 code, which never writes answer claims — so the
+#: absence of an answer claim means nothing for it, and a surface
+#: on this build must never fail over onto one (it ends in an
+#: honest failure naming the stale build instead). Bump this
+#: number whenever the failover rules change shape, so a mixed
+#: pair can tell whose claim it is reading.
+CLAIM_PROTOCOL_VERSION = 2
+
+
+def claim_build_stamp() -> str:
+    """This build's claim stamp: the protocol it speaks. Stamped
+    on every claim and answer this runtime writes, so a twin
+    surface can tell a current claim from a pre-dupfix6 one."""
+    return f"dupfix6-p{CLAIM_PROTOCOL_VERSION}"
+
+
+def command_claim_key_variants(key: str) -> list[str]:
+    """Every key shape one command may have been claimed or
+    answered under (dupfix6, mode 4).
+
+    The canonical DM key names the sorted participant pair — but a
+    surface that had not learned its own account id yet falls
+    back to the perspective-split shape, so the SAME command may
+    sit under ``telegram:<owner>:<mid>`` (the bot's fallback) or
+    ``telegram:<bot>:<mid>`` (the userbot's fallback) instead of
+    the canonical ``telegram:dm:<lo>:<hi>:<mid>``. The two
+    fallback keys are derivable from the canonical one (its
+    participants are the pair), so a guard that only reads the
+    canonical key is blind to a primary that claimed under a
+    fallback. Non-DM keys have no fallback shape: [key]."""
+    key = str(key or "")
+    if not key:
+        return []
+    parts = key.split(":")
+    if len(parts) == 5 and parts[0] == "telegram" \
+            and parts[1] == "dm":
+        _fam, _dm, lo, hi, mid = parts
+        return [key, f"telegram:{lo}:{mid}", f"telegram:{hi}:{mid}"]
+    return [key]
 
 _log = logging.getLogger(__name__)
 
@@ -147,29 +193,33 @@ class CommandClaimLedger:
     def __init__(self, *, window_s: float = WINDOW_S) -> None:
         self._window_s = float(window_s)
         self._lock = threading.Lock()
-        # claim key -> (surface, ts)
-        self._claims: OrderedDict[str, tuple[str, float]] = \
+        # claim key -> (surface, ts, build_stamp)
+        self._claims: OrderedDict[str, tuple[str, float, str]] = \
             OrderedDict()
-        # answer key -> (surface, ts): the proof a surface
-        # ANSWERED the command, distinct from merely claiming it.
-        self._answers: OrderedDict[str, tuple[str, float]] = \
+        # answer key -> (surface, ts, build_stamp): the proof a
+        # surface ANSWERED the command, distinct from merely
+        # claiming it.
+        self._answers: OrderedDict[str, tuple[str, float, str]] = \
             OrderedDict()
 
     def record_answer(self, key: str, surface: str = "", *,
-                      now: float | None = None) -> None:
+                      now: float | None = None,
+                      build_stamp: str = "") -> None:
         """Record that ``surface`` answered the command ``key``.
 
         The answer is the proof the failover sweep needs: a
         "down" may stand down only when the owning surface
         provably answered, and a deferred command must never
         fail over onto a command that was already answered.
-        Never raises."""
+        ``build_stamp`` names the build that answered ("" =
+        pre-dupfix6, unknown). Never raises."""
         key = str(key or "")
         if not key:
             return
         ts = time.time() if now is None else float(now)
         with self._lock:
-            self._answers[key] = (str(surface or ""), ts)
+            self._answers[key] = (str(surface or ""), ts,
+                                  str(build_stamp or ""))
             self._answers.move_to_end(key)
             while len(self._answers) > MAX_KEYS:
                 self._answers.popitem(last=False)
@@ -178,16 +228,26 @@ class CommandClaimLedger:
                    now: float | None = None) -> bool:
         """True when a surface provably answered ``key`` inside
         the answer window. Never raises."""
+        return self.answer_info(key, now=now) is not None
+
+    def answer_info(self, key: str, *,
+                    now: float | None = None) -> \
+            tuple[str, float, str] | None:
+        """(surface, answered_at, build_stamp) for a fresh answer
+        on ``key``, or None when no answer is provable inside the
+        answer window. Never raises."""
         key = str(key or "")
         if not key:
-            return False
+            return None
         ts = time.time() if now is None else float(now)
         with self._lock:
             held = self._answers.get(key)
             if held is None:
-                return False
-            _surface, answered_ts = held
-            return ts - answered_ts <= ANSWER_WINDOW_S
+                return None
+            surface, answered_ts, stamp = held
+            if ts - answered_ts > ANSWER_WINDOW_S:
+                return None
+            return surface, answered_ts, stamp
 
     def claim_expires_at(self, key: str, *,
                          now: float | None = None) -> float:
@@ -201,13 +261,14 @@ class CommandClaimLedger:
             held = self._claims.get(key)
             if held is None:
                 return 0.0
-            _holder, held_ts = held
+            _holder, held_ts, _stamp = held
             if ts - held_ts > self._window_s:
                 return 0.0
             return held_ts + self._window_s
 
     def claim(self, key: str, surface: str, *,
-              now: float | None = None) -> bool:
+              now: float | None = None,
+              build_stamp: str = "") -> bool:
         """Try to own ``key`` for ``surface``.
 
         True when this surface owns the command — a fresh claim,
@@ -219,16 +280,20 @@ class CommandClaimLedger:
         if not key or not surface:
             return True  # unkeyable: legacy single-surface path
         ts = time.time() if now is None else float(now)
+        stamp = str(build_stamp or "")
         with self._lock:
             held = self._claims.get(key)
             if held is not None:
-                holder, held_ts = held
+                holder, held_ts, _old_stamp = held
                 if ts - held_ts <= self._window_s:
                     if holder == surface:
                         self._claims.move_to_end(key)
+                        if stamp and stamp != _old_stamp:
+                            self._claims[key] = (
+                                holder, held_ts, stamp)
                         return True
                     return False
-            self._claims[key] = (surface, ts)
+            self._claims[key] = (surface, ts, stamp)
             self._claims.move_to_end(key)
             while len(self._claims) > MAX_KEYS:
                 self._claims.popitem(last=False)
@@ -237,18 +302,43 @@ class CommandClaimLedger:
     def claimed_by(self, key: str, *,
                    now: float | None = None) -> str:
         """The surface holding a live claim on ``key``, or ""."""
+        return self.claim_info(key, now=now)[0]
+
+    def claim_info(self, key: str, *,
+                   now: float | None = None) -> tuple[str, float, str]:
+        """(holder, claimed_at, build_stamp) for a LIVE claim on
+        ``key``, or ("", 0.0, "") when no live claim is held.
+        Never raises."""
         key = str(key or "")
         if not key:
-            return ""
+            return "", 0.0, ""
         ts = time.time() if now is None else float(now)
         with self._lock:
             held = self._claims.get(key)
             if held is None:
-                return ""
-            holder, held_ts = held
+                return "", 0.0, ""
+            holder, held_ts, stamp = held
             if ts - held_ts > self._window_s:
-                return ""
-            return holder
+                return "", 0.0, ""
+            return holder, held_ts, stamp
+
+    def last_claim_info(self, key: str) -> \
+            tuple[str, float, str] | None:
+        """(holder, claimed_at, build_stamp) for the most recent
+        claim row on ``key``, LIVE OR EXPIRED — or None when the
+        key was never claimed. The sweep reads this at claim
+        expiry: a row stamped "" is a pre-dupfix6 claim whose
+        missing answer proves nothing, while a stamped row is a
+        current build that would have recorded its answer. Never
+        raises."""
+        key = str(key or "")
+        if not key:
+            return None
+        with self._lock:
+            held = self._claims.get(key)
+            if held is None:
+                return None
+            return held[0], held[1], held[2]
 
 
 def command_claim_key(message: Any, own_account_id: str = "") -> str:
@@ -294,7 +384,8 @@ _CLAIMS_DDL = """
 CREATE TABLE IF NOT EXISTS command_claims (
   claim_key TEXT PRIMARY KEY,
   surface TEXT NOT NULL DEFAULT '',
-  claimed_at REAL NOT NULL DEFAULT 0
+  claimed_at REAL NOT NULL DEFAULT 0,
+  build_stamp TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -302,7 +393,8 @@ _ANSWERS_DDL = """
 CREATE TABLE IF NOT EXISTS command_answers (
   answer_key TEXT PRIMARY KEY,
   surface TEXT NOT NULL DEFAULT '',
-  answered_at REAL NOT NULL DEFAULT 0
+  answered_at REAL NOT NULL DEFAULT 0,
+  build_stamp TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -338,6 +430,14 @@ class DurableCommandClaimLedger:
         self._broken = False
         self._answers_broken = False
         self._last_sweep = 0.0
+        # Whether each table carries the build_stamp column
+        # (dupfix6). Fresh tables have it from the DDL above; a
+        # table created by an older build gains it from the ALTER
+        # below — a shared file both builds write stays readable
+        # by both (old code never selects the column; its inserts
+        # take the '' default).
+        self._stamp_cols = {"command_claims": False,
+                            "command_answers": False}
         try:
             self._db.executescript(_CLAIMS_DDL)
         except Exception:  # noqa: BLE001 - degraded, never fatal
@@ -351,15 +451,77 @@ class DurableCommandClaimLedger:
                          "answer proofs degrade to unproven",
                          exc_info=True)
             self._answers_broken = True
+        if not self._broken:
+            try:
+                self._db.execute(
+                    "ALTER TABLE command_claims ADD COLUMN"
+                    " build_stamp TEXT NOT NULL DEFAULT ''")
+            except Exception:  # noqa: BLE001 - column exists already
+                _log.debug("command claims: build_stamp column "
+                           "already present (or unalterable)",
+                           exc_info=True)
+            self._stamp_cols["command_claims"] = \
+                self._has_stamp_col("command_claims")
+        if not self._answers_broken:
+            try:
+                self._db.execute(
+                    "ALTER TABLE command_answers ADD COLUMN"
+                    " build_stamp TEXT NOT NULL DEFAULT ''")
+            except Exception:  # noqa: BLE001 - column exists already
+                _log.debug("command claims: answers build_stamp "
+                           "column already present (or unalterable)",
+                           exc_info=True)
+            self._stamp_cols["command_answers"] = \
+                self._has_stamp_col("command_answers")
+
+    def _has_stamp_col(self, table: str) -> bool:
+        """True when ``table`` really carries build_stamp (schema
+        probe — the flag is never assumed from the DDL path, so a
+        store the ALTER could not touch keeps its old reads)."""
+        try:
+            row = self._db.query_one(
+                "SELECT name FROM pragma_table_info(?)"
+                " WHERE name = 'build_stamp'", (table,))
+        except Exception:  # noqa: BLE001 - unprovable: no column
+            return False
+        return row is not None
 
     # -- internals ----------------------------------------------------
-    def _row(self, key: str) -> tuple[str, float] | None:
-        row = self._db.query_one(
-            "SELECT surface, claimed_at FROM command_claims"
-            " WHERE claim_key = ?", (key,))
+    def _row(self, key: str) -> tuple[str, float, str] | None:
+        if self._stamp_cols.get("command_claims"):
+            row = self._db.query_one(
+                "SELECT surface, claimed_at, build_stamp"
+                " FROM command_claims WHERE claim_key = ?", (key,))
+        else:
+            row = self._db.query_one(
+                "SELECT surface, claimed_at FROM command_claims"
+                " WHERE claim_key = ?", (key,))
         if row is None:
             return None
-        return str(row["surface"] or ""), float(row["claimed_at"] or 0)
+        try:
+            stamp = str(row["build_stamp"] or "")
+        except Exception:  # noqa: BLE001 - a pre-stamp table
+            stamp = ""
+        return (str(row["surface"] or ""),
+                float(row["claimed_at"] or 0), stamp)
+
+    def _answer_row(self, key: str) -> tuple[str, float, str] | None:
+        if self._stamp_cols.get("command_answers"):
+            row = self._db.query_one(
+                "SELECT surface, answered_at, build_stamp"
+                " FROM command_answers WHERE answer_key = ?", (key,))
+        else:
+            row = self._db.query_one(
+                "SELECT surface, answered_at FROM command_answers"
+                " WHERE answer_key = ?", (key,))
+        if row is None:
+            return None
+        try:
+            stamp = str(row["build_stamp"] or "")
+        except Exception:  # noqa: BLE001 - a pre-stamp table
+            stamp = ""
+        return (str(row["surface"] or ""),
+                float(row["answered_at"] or 0), stamp)
 
     def _sweep(self, ts: float) -> None:
         """Drop expired rows, throttled — the table stays tiny
@@ -375,54 +537,86 @@ class DurableCommandClaimLedger:
             _log.debug("command claims: sweep failed", exc_info=True)
 
     def _steal_expired(self, key: str, surface: str, ts: float,
-                       held_ts: float) -> bool:
+                       held_ts: float, build_stamp: str = "") -> bool:
         """Compare-and-swap an expired row to this surface."""
-        cursor = self._db.execute(
-            "UPDATE command_claims SET surface = ?, claimed_at = ?"
-            " WHERE claim_key = ? AND claimed_at = ?",
-            (surface, ts, key, held_ts))
+        if self._stamp_cols.get("command_claims"):
+            cursor = self._db.execute(
+                "UPDATE command_claims SET surface = ?,"
+                " claimed_at = ?, build_stamp = ?"
+                " WHERE claim_key = ? AND claimed_at = ?",
+                (surface, ts, str(build_stamp or ""), key, held_ts))
+        else:
+            cursor = self._db.execute(
+                "UPDATE command_claims SET surface = ?, claimed_at = ?"
+                " WHERE claim_key = ? AND claimed_at = ?",
+                (surface, ts, key, held_ts))
         return bool(getattr(cursor, "rowcount", 0))
 
     # -- the claim contract -------------------------------------------
     def claim(self, key: str, surface: str, *,
-              now: float | None = None) -> bool:
+              now: float | None = None,
+              build_stamp: str = "") -> bool:
         """Try to own ``key`` for ``surface`` (see the class
-        docstring). True = this surface owns the command."""
+        docstring). True = this surface owns the command.
+        ``build_stamp`` names the claiming build ("" = pre-dupfix6,
+        unknown); it rides the row so a twin surface can tell a
+        current claim from one whose missing answer proves
+        nothing."""
         key = str(key or "")
         surface = str(surface or "")
         if not key or not surface or self._broken:
             return True  # unkeyable / degraded: legacy path
         ts = time.time() if now is None else float(now)
+        stamp = str(build_stamp or "")
         with self._lock:
             try:
                 self._sweep(ts)
                 row = self._row(key)
                 if row is not None:
-                    holder, held_ts = row
+                    holder, held_ts, old_stamp = row
                     if ts - held_ts <= self._window_s:
-                        return holder == surface
-                    if self._steal_expired(key, surface, ts, held_ts):
+                        if holder == surface:
+                            if stamp and stamp != old_stamp \
+                                    and self._stamp_cols.get(
+                                        "command_claims"):
+                                self._db.execute(
+                                    "UPDATE command_claims SET"
+                                    " build_stamp = ?"
+                                    " WHERE claim_key = ?",
+                                    (stamp, key))
+                            return True
+                        return False
+                    if self._steal_expired(key, surface, ts, held_ts,
+                                           stamp):
                         return True
                     row = self._row(key)  # lost the steal race
                     if row is None:
                         return True
-                    holder, held_ts = row
+                    holder, held_ts, _s = row
                     return (holder == surface
                             and ts - held_ts <= self._window_s)
-                cursor = self._db.execute(
-                    "INSERT INTO command_claims"
-                    " (claim_key, surface, claimed_at)"
-                    " VALUES (?, ?, ?)"
-                    " ON CONFLICT(claim_key) DO NOTHING",
-                    (key, surface, ts))
+                if self._stamp_cols.get("command_claims"):
+                    cursor = self._db.execute(
+                        "INSERT INTO command_claims"
+                        " (claim_key, surface, claimed_at, build_stamp)"
+                        " VALUES (?, ?, ?, ?)"
+                        " ON CONFLICT(claim_key) DO NOTHING",
+                        (key, surface, ts, stamp))
+                else:
+                    cursor = self._db.execute(
+                        "INSERT INTO command_claims"
+                        " (claim_key, surface, claimed_at)"
+                        " VALUES (?, ?, ?)"
+                        " ON CONFLICT(claim_key) DO NOTHING",
+                        (key, surface, ts))
                 if getattr(cursor, "rowcount", 0):
                     return True
                 row = self._row(key)  # a twin inserted first
                 if row is None:
                     return True
-                holder, held_ts = row
+                holder, held_ts, _s = row
                 if ts - held_ts > self._window_s and self._steal_expired(
-                        key, surface, ts, held_ts):
+                        key, surface, ts, held_ts, stamp):
                     return True
                 return holder == surface
             except Exception:  # noqa: BLE001 - never eats a turn
@@ -434,47 +628,92 @@ class DurableCommandClaimLedger:
     def claimed_by(self, key: str, *,
                    now: float | None = None) -> str:
         """The surface holding a live claim on ``key``, or ""."""
+        return self.claim_info(key, now=now)[0]
+
+    def claim_info(self, key: str, *,
+                   now: float | None = None) -> tuple[str, float, str]:
+        """(holder, claimed_at, build_stamp) for a LIVE claim on
+        ``key``, or ("", 0.0, "") when no live claim is held.
+        Never raises."""
         key = str(key or "")
         if not key or self._broken:
-            return ""
+            return "", 0.0, ""
         ts = time.time() if now is None else float(now)
         try:
             row = self._row(key)
         except Exception:  # noqa: BLE001 - a probe, never fatal
             _log.debug("command claims: claimed_by failed",
                        exc_info=True)
-            return ""
+            return "", 0.0, ""
         if row is None:
-            return ""
-        holder, held_ts = row
+            return "", 0.0, ""
+        holder, held_ts, stamp = row
         if ts - held_ts > self._window_s:
-            return ""
-        return holder
+            return "", 0.0, ""
+        return holder, held_ts, stamp
+
+    def last_claim_info(self, key: str) -> \
+            tuple[str, float, str] | None:
+        """(holder, claimed_at, build_stamp) for the most recent
+        claim row on ``key``, LIVE OR EXPIRED — or None when the
+        key was never claimed. The sweep reads this at claim
+        expiry: a row stamped "" is a pre-dupfix6 claim whose
+        missing answer proves nothing, while a stamped row is a
+        current build that would have recorded its answer. Never
+        raises."""
+        key = str(key or "")
+        if not key or self._broken:
+            return None
+        try:
+            row = self._row(key)
+        except Exception:  # noqa: BLE001 - a probe, never fatal
+            _log.debug("command claims: last_claim_info failed",
+                       exc_info=True)
+            return None
+        if row is None:
+            return None
+        return row[0], row[1], row[2]
 
     # -- the answer proof ---------------------------------------------
     def record_answer(self, key: str, surface: str = "", *,
-                      now: float | None = None) -> None:
+                      now: float | None = None,
+                      build_stamp: str = "") -> None:
         """Record that ``surface`` answered the command ``key``.
 
         The answer is the proof the failover sweep needs: a
         "down" may stand down only when the owning surface
         provably answered, and a deferred command must never
         fail over onto a command that was already answered.
-        Never raises; a store fault degrades to unproven."""
+        ``build_stamp`` names the build that answered ("" =
+        pre-dupfix6, unknown). Never raises; a store fault
+        degrades to unproven."""
         key = str(key or "")
         if not key or self._answers_broken:
             return
         ts = time.time() if now is None else float(now)
+        stamp = str(build_stamp or "")
         with self._lock:
             try:
-                self._db.execute(
-                    "INSERT INTO command_answers"
-                    " (answer_key, surface, answered_at)"
-                    " VALUES (?, ?, ?)"
-                    " ON CONFLICT(answer_key) DO UPDATE SET"
-                    " surface = excluded.surface,"
-                    " answered_at = excluded.answered_at",
-                    (key, str(surface or ""), ts))
+                if self._stamp_cols.get("command_answers"):
+                    self._db.execute(
+                        "INSERT INTO command_answers"
+                        " (answer_key, surface, answered_at,"
+                        " build_stamp)"
+                        " VALUES (?, ?, ?, ?)"
+                        " ON CONFLICT(answer_key) DO UPDATE SET"
+                        " surface = excluded.surface,"
+                        " answered_at = excluded.answered_at,"
+                        " build_stamp = excluded.build_stamp",
+                        (key, str(surface or ""), ts, stamp))
+                else:
+                    self._db.execute(
+                        "INSERT INTO command_answers"
+                        " (answer_key, surface, answered_at)"
+                        " VALUES (?, ?, ?)"
+                        " ON CONFLICT(answer_key) DO UPDATE SET"
+                        " surface = excluded.surface,"
+                        " answered_at = excluded.answered_at",
+                        (key, str(surface or ""), ts))
             except Exception:  # noqa: BLE001 - never eats a turn
                 _log.debug("command claims: record_answer failed",
                            exc_info=True)
@@ -484,22 +723,31 @@ class DurableCommandClaimLedger:
         """True when a surface provably answered ``key`` inside
         the answer window. Never raises; a store fault reads as
         unproven (the sweep then falls back to the claim)."""
+        return self.answer_info(key, now=now) is not None
+
+    def answer_info(self, key: str, *,
+                    now: float | None = None) -> \
+            tuple[str, float, str] | None:
+        """(surface, answered_at, build_stamp) for a fresh answer
+        on ``key``, or None when no answer is provable inside the
+        answer window. Never raises; a store fault reads as
+        unproven."""
         key = str(key or "")
         if not key or self._answers_broken:
-            return False
+            return None
         ts = time.time() if now is None else float(now)
         try:
-            row = self._db.query_one(
-                "SELECT answered_at FROM command_answers"
-                " WHERE answer_key = ?", (key,))
+            row = self._answer_row(key)
         except Exception:  # noqa: BLE001 - a probe, never fatal
             _log.debug("command claims: has_answer failed",
                        exc_info=True)
-            return False
+            return None
         if row is None:
-            return False
-        answered_ts = float(row["answered_at"] or 0)
-        return ts - answered_ts <= ANSWER_WINDOW_S
+            return None
+        surface, answered_ts, stamp = row
+        if ts - answered_ts > ANSWER_WINDOW_S:
+            return None
+        return surface, answered_ts, stamp
 
     def claim_expires_at(self, key: str, *,
                          now: float | None = None) -> float:
@@ -517,7 +765,7 @@ class DurableCommandClaimLedger:
             return 0.0
         if row is None:
             return 0.0
-        _holder, held_ts = row
+        _holder, held_ts, _stamp = row
         if ts - held_ts > self._window_s:
             return 0.0
         return held_ts + self._window_s

@@ -1846,6 +1846,26 @@ class PartnerRuntime(
                 if _echo_cmd is not None and (
                         self._is_operator(message)
                         or bool((message.meta or {}).get("from_owner"))):
+                    # dupfix6: the primary may already have
+                    # answered in the room BEFORE this echo
+                    # arrived (fast bot, late echo) — an answer
+                    # observed in-room stands the echo down
+                    # WITHOUT arming a failover for it. Arming
+                    # one here is the shape that now doubles:
+                    # the sweep would fire on an answer nobody
+                    # can prove, because the proof already
+                    # landed and was dropped for want of a
+                    # pending record.
+                    if self._already_answered_in_room(
+                            message.chat.key,
+                            str(getattr(message, "message_id", "")
+                                or "")):
+                        _log.info(
+                            "dupfix6: echo /%s in %s already "
+                            "answered in-room — standing down "
+                            "without arming failover",
+                            _echo_cmd.kind, message.chat.key)
+                        return
                     # Read-only verdict: the echo must never TAKE
                     # the command key — the primary's incoming
                     # copy claims and handles it, and an echo
@@ -6676,11 +6696,11 @@ class PartnerRuntime(
         # the command anyway, duplicating it).
         peer_bot_id = self._peer_bot_dm(message)
         if peer_bot_id is not None:
-            from .command_claims import command_claim_key
-
-            key = command_claim_key(
-                message, self._surface_account_id(platform))
-            if key and self._command_claims().has_answer(key):
+            # A proven answer under ANY key shape stands this
+            # surface down (dupfix6, mode 4); a claim alone
+            # never does.
+            proven, _stamp = self._answer_proof(message)
+            if proven:
                 return "down"
             return "defer"
         # (3) In a group where the bot's standing is VERIFIED
@@ -6710,12 +6730,10 @@ class PartnerRuntime(
                 # bot may be down even though it was admin when
                 # probed. Defer and watch for its answer; the
                 # sweep fails over if none comes. Only a proven
-                # answer stands this surface down at once.
-                from .command_claims import command_claim_key
-
-                key = command_claim_key(
-                    message, self._surface_account_id(platform))
-                if key and self._command_claims().has_answer(key):
+                # answer stands this surface down at once — under
+                # any key shape (dupfix6, mode 4).
+                proven, _stamp = self._answer_proof(message)
+                if proven:
                     return "down"
                 return "defer"
             if not self._claims_are_shared():
@@ -6749,13 +6767,21 @@ class PartnerRuntime(
             # able to claim and handle it. A live claim by
             # another surface means defer (watch for its
             # answer); a free key, or this surface's own claim,
-            # means handle.
-            holder = self._command_claims().claimed_by(key)
-            if holder and holder != self._claim_surface(platform):
+            # means handle. The live-claim check covers every
+            # key shape (dupfix6, mode 4): a primary that
+            # claimed under a fallback key still owns it.
+            if self._live_foreign_claim(message, key) is not None:
                 return "defer"
             return "handle"
+        # A live foreign claim under ANY key shape defers first:
+        # claiming the canonical key while a twin holds a
+        # fallback key would succeed wrongly and double-handle
+        # at intake (dupfix6, mode 4).
+        if self._live_foreign_claim(message, key) is not None:
+            return "defer"
         if not self._command_claims().claim(
-                key, self._claim_surface(platform)):
+                key, self._claim_surface(platform),
+                build_stamp=self._claim_build_stamp()):
             # Another surface holds a live claim — but a claim
             # is not proof of an answer. Defer and watch for it;
             # the sweep re-arms at claim expiry and fails over
@@ -6797,13 +6823,248 @@ class PartnerRuntime(
         except Exception:  # noqa: BLE001 - unkeyable: gate stays open
             return ""
 
+    # ── dupfix6: failover only on provable absence ──────────────
+    # The f624063a silence fix made a deferring surface fail over
+    # whenever it could not PROVE the primary answered — and the
+    # proof has two guards (the shared answer claim, the observed
+    # answer in the room), both of which can fail while the
+    # primary is alive and answering. The helpers below read the
+    # guard state instead of guessing it: every candidate key
+    # shape (a primary that had not learned its own id claims
+    # under a perspective-split fallback), the build stamp on
+    # every claim and answer, and the shared-store state. The
+    # sweep decides on this state and logs it, so a double is
+    # never a silent "the bot never answered" again.
+
+    def _claim_build_stamp(self) -> str:
+        """This build's claim stamp (dupfix6): stamped on every
+        claim and answer this runtime writes, so a twin surface
+        can tell a current claim from a pre-dupfix6 one (whose
+        missing answer proves nothing). Never raises."""
+        try:
+            from .command_claims import claim_build_stamp
+
+            return str(claim_build_stamp() or "")
+        except Exception:  # noqa: BLE001 - unstamped is the old shape
+            return ""
+
+    def _candidate_claim_keys(self, message, stored_key: str = "") -> list[str]:
+        """Every key shape this command may have been claimed or
+        answered under (dupfix6, mode 4): the canonical key
+        derived fresh from the message (its own account id may
+        have been learned since intake), the stored key the
+        deferral registered under, and each one's DM fallback
+        variants. Deduplicated, canonical first. [] when the
+        message is unkeyable under every shape. Never raises."""
+        try:
+            from .command_claims import (
+                command_claim_key,
+                command_claim_key_variants,
+            )
+
+            platform = str(getattr(message.chat, "platform", "") or "")
+            out: list[str] = []
+            for base in (
+                    command_claim_key(
+                        message, self._surface_account_id(platform)),
+                    str(stored_key or "")):
+                for cand in command_claim_key_variants(base):
+                    if cand and cand not in out:
+                        out.append(cand)
+            return out
+        except Exception:  # noqa: BLE001 - unkeyable: no candidates
+            return []
+
+    def _claim_key_reliable(self, message) -> bool:  # type: ignore[no-untyped-def]
+        """True when the canonical claim key for ``message`` is
+        trustworthy (dupfix6, mode 4): a Telegram DM key needs
+        this runtime's own account id — without it the key is the
+        perspective-split fallback and store evidence under it
+        proves nothing about the primary's copy. Every other
+        shape is perspective-independent and always reliable.
+        Never raises."""
+        try:
+            chat = message.chat
+            platform = str(getattr(chat, "platform", "") or "")
+            family = ("telegram" if platform.startswith("telegram")
+                      else platform)
+            if family != "telegram":
+                return True
+            if getattr(chat, "kind", None) != ChatKind.DM:
+                return True
+            own = str(self._surface_account_id(platform) or "").strip()
+            return bool(own)
+        except Exception:  # noqa: BLE001 - unproven: unreliable
+            return False
+
+    def _answer_proof(self, message, stored_key: str = "", *,
+                      now: float | None = None) -> tuple[bool, str]:
+        """(proven, answering build stamp) — True when ANY
+        candidate key carries a fresh answer claim. A proven
+        answer stands a failover down whatever key shape the
+        primary answered under. Never raises."""
+        try:
+            ledger = self._command_claims()
+            if ledger is None:
+                return False, ""
+            for key in self._candidate_claim_keys(message, stored_key):
+                info = ledger.answer_info(key, now=now)
+                if info is not None:
+                    return True, str(info[2] or "")
+            return False, ""
+        except Exception:  # noqa: BLE001 - unproven on a probe fault
+            return False, ""
+
+    def _live_foreign_claim(self, message, stored_key: str = "", *,
+                            now: float | None = None) -> dict[str, Any] | None:
+        """The live claim by ANOTHER surface on any candidate
+        key — {"holder", "expires_at", "stamp", "key"} — or None.
+        A claim by this surface is not foreign (its own re-check
+        still owns it). Never raises."""
+        try:
+            platform = str(getattr(message.chat, "platform", "") or "")
+            own = self._claim_surface(platform)
+            ledger = self._command_claims()
+            if ledger is None:
+                return None
+            for key in self._candidate_claim_keys(message, stored_key):
+                holder, _claimed_at, stamp = ledger.claim_info(
+                    key, now=now)
+                if holder and holder != own:
+                    return {"holder": holder,
+                            "expires_at": ledger.claim_expires_at(
+                                key, now=now),
+                            "stamp": str(stamp or ""),
+                            "key": key}
+            return None
+        except Exception:  # noqa: BLE001 - unproven on a probe fault
+            return None
+
+    def _last_claim(self, message, stored_key: str = "") -> \
+            tuple[str, float, str] | None:
+        """(holder, claimed_at, build_stamp) for the most recent
+        claim row on any candidate key, live or expired — or None
+        when the command was never claimed under any shape. The
+        sweep reads this at claim expiry to tell a current claim
+        from a pre-dupfix6 one. Never raises."""
+        try:
+            ledger = self._command_claims()
+            if ledger is None:
+                return None
+            best: tuple[str, float, str] | None = None
+            for key in self._candidate_claim_keys(message, stored_key):
+                row = ledger.last_claim_info(key)
+                if row is None:
+                    continue
+                if best is None or row[1] > best[1]:
+                    best = row
+            return best
+        except Exception:  # noqa: BLE001 - unproven on a probe fault
+            return None
+
+    def _note_peer_answer_observed(self, message) -> None:  # type: ignore[no-untyped-def]
+        """Remember a peer post that answered a command, keyed by
+        (chat, reply_to) (dupfix6): the fast-bot/late-echo race —
+        the primary's answer can land BEFORE the echo registers
+        its deferral, and the observation is otherwise dropped
+        with no pending record to resolve. The memory lets a
+        later echo stand down without arming a failover for a
+        command that is already answered. Exact reply_to match
+        only: a bot post that does not quote the command is not
+        proof it answered it. Entries live 300s. Never raises."""
+        try:
+            reply_to = str((message.meta or {}).get("reply_to") or "")
+            if not reply_to:
+                return
+            chat_key = str(getattr(message.chat, "key", "") or "")
+            if not chat_key:
+                return
+            now = time.time()
+            mem = getattr(self, "_recent_peer_answers", None)
+            if mem is None:
+                mem = self._recent_peer_answers = {}
+            mem[(chat_key, reply_to)] = now
+            for old_key in [k for k, ts in mem.items()
+                            if now - ts > 300.0]:
+                mem.pop(old_key, None)
+        except Exception as exc:  # noqa: BLE001 - memory never dies
+            record_failure(
+                "runtime.PartnerRuntime._note_peer_answer_observed",
+                exc)
+
+    def _already_answered_in_room(self, chat_key: str,
+                                  message_id: str) -> bool:
+        """True when a peer post quoting ``message_id`` was
+        observed in ``chat_key`` inside the memory window
+        (dupfix6): the primary already answered this command in
+        the room, so a deferral for it must never be armed.
+        Never raises."""
+        try:
+            mem = getattr(self, "_recent_peer_answers", None)
+            if not mem:
+                return False
+            ts = mem.get((str(chat_key or ""),
+                          str(message_id or "")))
+            if ts is None:
+                return False
+            return time.time() - float(ts) <= 300.0
+        except Exception:  # noqa: BLE001 - unproven: not answered
+            return False
+
+    def _honest_failover_failure(self, record, message, *,  # type: ignore[no-untyped-def]
+                                 reason: str) -> None:
+        """End a blind deferral in an honest failure (dupfix6):
+        the command was never answered and this surface cannot
+        prove the primary is down, so it must not answer — but
+        the owner ordered that a command never vanish silently.
+        One line in the room, naming the reason (a down shared
+        store, an unreliable key, or a stale build that cannot
+        prove its answers), plus the failure journal. Never
+        raises."""
+        kind = str(record.get("kind") or "command")
+        chat_key = str(record.get("chat_key") or "")
+        if reason == "stale_build":
+            why = ("the other surface runs an older build that "
+                   "can't prove whether it answered")
+        elif reason == "key_unreliable":
+            why = ("I couldn't pin this command to one claim — "
+                   "my own account id was unknown when it arrived")
+        else:
+            why = ("the shared claims store is unreachable from "
+                   "here")
+        text = (f"⚠️ I couldn't tell whether the bot already "
+                f"answered /{kind} — {why}, so I won't risk "
+                f"replying twice. If you don't see an answer "
+                f"above, send it again.")
+        _log.warning(
+            "dupfix6 honest failure: deferred /%s in %s ends "
+            "unanswered — reason=%s shared=%s key=%s",
+            kind, chat_key, reason, self._claims_are_shared(),
+            str(record.get("claim_key") or ""))
+        with contextlib.suppress(Exception):  # noqa: BLE001 - journaling never dies
+            record_failure(
+                "runtime.PartnerRuntime._sweep_peer_deferrals:"
+                "honest_failure",
+                RuntimeError(
+                    f"deferred /{kind} in {chat_key} ended "
+                    f"unanswered: {reason}"))
+        try:
+            platform = str(record.get("platform") or "")
+            self.gateway.send(platform, message.chat, text)
+        except Exception as exc:  # noqa: BLE001 - the line is best-effort
+            record_failure(
+                "runtime.PartnerRuntime._sweep_peer_deferrals:"
+                "honest_failure_send", exc)
+
     def _command_claim_lost(self, claim_key: str, chat) -> bool:  # type: ignore[no-untyped-def]
         """True when ANOTHER surface now holds a live claim on
         ``claim_key`` (dupfix4 D4): an async answer must stand
         down. False when this surface holds it, when no surface
         holds it (expired, or never claimed), or when no ledger
-        exists — all fail open, the download proceeds. Never
-        raises."""
+        exists — all fail open, the download proceeds. The check
+        covers every key shape (dupfix6, mode 4): a primary that
+        claimed under a perspective-split fallback key still owns
+        the command. Never raises."""
         try:
             if not claim_key:
                 return False
@@ -6811,10 +7072,14 @@ class PartnerRuntime(
             if ledger is None:
                 return False
             platform = str(getattr(chat, "platform", "") or "")
-            holder = str(ledger.claimed_by(claim_key) or "")
-            if not holder:
-                return False
-            return holder != self._claim_surface(platform)
+            own = self._claim_surface(platform)
+            from .command_claims import command_claim_key_variants
+
+            for key in command_claim_key_variants(claim_key):
+                holder = str(ledger.claimed_by(key) or "")
+                if holder and holder != own:
+                    return True
+            return False
         except Exception:  # noqa: BLE001 - probe fault: fail open
             return False
 
@@ -6859,6 +7124,20 @@ class PartnerRuntime(
                     if platform in BOT_PLATFORMS
                     else GROUP_PEER_ANSWER_WINDOW_S),
             }
+            # dupfix6: the sibling's answer may already have been
+            # observed in the room before this deferral was
+            # registered (fast sibling, late turn) — then no
+            # failover must ever be armed for it. Standing down
+            # here is safe: the answer exists. True without
+            # registering.
+            if self._already_answered_in_room(
+                    str(record.get("chat_key") or ""),
+                    str(record.get("message_id") or "")):
+                _log.info(
+                    "dupfix6: group text in %s already answered "
+                    "in-room — standing down without arming "
+                    "failover", record.get("chat_key"))
+                return True
             # Keyability is decided BEFORE register(): the registry
             # refuses an unkeyable record (no chat_key or no
             # message_id) and returns False — but a duplicate
@@ -6941,6 +7220,40 @@ class PartnerRuntime(
             # Keyability is decided BEFORE register(): the registry
             # refuses an unkeyable record (no chat_key or no
             # message_id) and returns False — but a duplicate
+            # dupfix6: the primary's answer may already have been
+            # observed in the room before this deferral was
+            # registered (fast bot, late echo) — then no failover
+            # must ever be armed for it. Standing down here is
+            # safe: the answer exists. True without registering.
+            if self._already_answered_in_room(
+                    str(record.get("chat_key") or ""),
+                    str(record.get("message_id") or "")):
+                _log.info(
+                    "dupfix6: /%s in %s already answered in-room "
+                    "— standing down without arming failover",
+                    record.get("kind"), record.get("chat_key"))
+                return True
+            # dupfix6: stamp the guard state at registration, so
+            # the sweep and the log can tell what this deferral
+            # knew when it armed — whether the shared store was
+            # open, whether the claim key is reliable (a Telegram
+            # DM key without this runtime's own id is the
+            # perspective-split fallback), and which bot peer
+            # owns the room.
+            try:
+                record["shared_at_register"] = \
+                    self._claims_are_shared()
+                record["key_reliable"] = self._claim_key_reliable(
+                    message)
+                record["peer_bot_id"] = str(
+                    self._peer_bot_dm(message) or "")
+            except Exception:  # noqa: BLE001 - stamps never die
+                record["shared_at_register"] = False
+                record["key_reliable"] = False
+                record["peer_bot_id"] = ""
+            # Keyability is decided BEFORE register(): the registry
+            # refuses an unkeyable record (no chat_key or no
+            # message_id) and returns False — but a duplicate
             # (already pending) ALSO returns False, and those are
             # opposites. A duplicate IS registered (by the earlier
             # identical command), so standing down is safe: the
@@ -6971,6 +7284,12 @@ class PartnerRuntime(
         (personal-surface law: the stop stays sticky across both
         surfaces). Never raises."""
         try:
+            # dupfix6: remember the observation even when no
+            # deferral is pending — the answer may have landed
+            # before the echo registered one (fast bot, late
+            # echo), and the memory is what stands that echo
+            # down without arming a failover.
+            self._note_peer_answer_observed(message)
             chat_key = message.chat.key
             reply_to = str((message.meta or {}).get("reply_to") or "")
             resolved = self._peer_deferral().resolve_for_chat(
@@ -6994,32 +7313,55 @@ class PartnerRuntime(
                 "runtime.PartnerRuntime._peer_post_observed", exc)
 
     def _sweep_peer_deferrals(self, *, now: float | None = None) -> list[dict[str, Any]]:  # type: ignore[no-untyped-def]
-        """Failover clock: deferred commands whose window expired
-        with no primary answer are claimed (when a claim exists
-        to take — a late primary claim stands this one down) and
-        handled here. A record whose command was PROVABLY
-        answered is dropped, never failed over (the answer claim
-        is the proof the claim alone never was). A record stood
-        down on another surface's still-live claim is RE-ARMED
-        to that claim's expiry, not dropped — the old code
-        dropped it, so a claimant that never answered silenced
-        the command forever. Returns the records that were due."""
+        """Failover clock (dupfix6): a deferred command fails over
+        ONLY on positive evidence the primary is absent — never
+        merely on unprovable absence. The guard state decides,
+        and every outcome is logged with it (claim visible /
+        invisible, answer proven / unproven, store state, build
+        stamp), so the live state reads off the log instead of
+        being guessed:
+
+        * a PROVEN answer (any key shape) stands the failover
+          down for good;
+        * a live claim by another surface RE-ARMS to the claim's
+          expiry (the primary may still be working) — the claim
+          is read in REAL time, as the old code did: the pinned
+          silence tests seed claims in real time and cross
+          expiry with a real sleep, so an injected sweep time
+          must never decide claim liveness;
+        * with the shared store OPEN and a reliable key, no live
+          claim and no answer at the short window means the
+          primary never claimed — fail over; at a re-armed
+          firing, a claim stamped by a pre-dupfix6 build (""
+          — a build that never writes answer claims, so its
+          missing answer proves nothing) ends in an honest
+          failure naming the stale build, never in a failover
+          onto an answer it cannot prove;
+        * with the store DOWN, or an unreliable key, an ECHO
+          deferral is BLIND: it waits to the claim window's
+          bound and then ends in an honest failure naming the
+          store, never in a second answer — a blind echo
+          failover is the double the owner screenshotted (DM
+          20s, group 3s/8s, and the ~601s claim-expiry re-arm
+          alike). An INCOMING deferral is not blinded: both
+          surfaces saw it directly and neither handled it, so
+          the stagger (fast side fires, slow side observes)
+          orders the race — the pinned group game test
+          requires the fast side to fail over on a broken
+          store, and the observation channel is that path's
+          guard. The echo is the shape that doubled live.
+        The silence law still holds: every deferred command ends
+        answered, failed over, or honestly failed — never silent.
+        Returns the records that were due."""
+        from .command_claims import WINDOW_S
+
         sweep_now = time.time() if now is None else float(now)
         due = self._peer_deferral().expire(now=now)
         for record in due:
             try:
-                # A proven answer stands the failover down for
-                # good — answered is answered, whatever the
-                # claim says (a slow primary whose claim lapsed
-                # before it answered still counts).
+                message = record.get("message")
                 answer_key = str(record.get("claim_key") or "")
-                if answer_key and self._command_claims().has_answer(
-                        answer_key):
-                    _log.info(
-                        "deferred /%s in %s already answered — "
-                        "standing down", record.get("kind"),
-                        record.get("chat_key"))
-                    continue
+                platform = str(record.get("platform") or "")
                 if record.get("turn_kind") == "text":
                     # Plain-text failover (dupfix4 fix 2): the
                     # sibling never answered, so this surface
@@ -7029,7 +7371,11 @@ class PartnerRuntime(
                     # turn never re-defers — it claims fresh at
                     # the conversational seam, and a sibling that
                     # claimed meanwhile stands it down there.
-                    message = record.get("message")
+                    # Unchanged by dupfix6 (its tests pin it, and
+                    # plain text carries no silence law): the
+                    # re-queue is the pre-existing behaviour, and
+                    # its blind case is recorded in the survey as
+                    # the known remainder, not silently kept.
                     if message is None:
                         continue
                     meta = getattr(message, "meta", None)
@@ -7045,34 +7391,164 @@ class PartnerRuntime(
                     self.on_message(message)
                     _log.info(
                         "deferred group text in %s failed over — "
-                        "the sibling never answered",
-                        record.get("chat_key"))
+                        "the sibling never answered "
+                        "[dupfix6 shared=%s]",
+                        record.get("chat_key"),
+                        self._claims_are_shared())
                     continue
-                key = str(record.get("claim_key") or "")
-                platform = str(record.get("platform") or "")
-                if key and not self._command_claims().claim(
-                        key, self._claim_surface(platform)):
-                    # Another surface still holds a live claim —
-                    # but a claim is not an answer. Re-arm the
-                    # deferral to the claim's expiry (plus one
-                    # second) and retry then; dropping it here
-                    # is the silence hole. A re-arm refused
-                    # (superseded by a newer command) drops it.
-                    expires = self._command_claims().claim_expires_at(
-                        key)
+                if message is None:
+                    _log.warning(
+                        "dupfix6: deferred /%s in %s has no "
+                        "message — dropping without answering",
+                        record.get("kind"), record.get("chat_key"))
+                    continue
+                # (1) A proven answer stands the failover down
+                # for good — answered is answered, whatever the
+                # claim says (a slow primary whose claim lapsed
+                # before it answered still counts). Checked
+                # under every key shape (dupfix6, mode 4). The
+                # ledger is read in REAL time (no injected now):
+                # the pinned silence tests seed claims in real
+                # time and cross expiry with a real sleep, so
+                # the sweep's injected clock must never decide
+                # whether a claim is live — threading it through
+                # here failed S2/S4 over (a claim seeded 595s
+                # ago reads expired at injected +25s while it
+                # is live for 5 more real seconds).
+                proven, ans_stamp = self._answer_proof(
+                    message, answer_key)
+                if proven:
+                    _log.info(
+                        "deferred /%s in %s already answered — "
+                        "standing down [dupfix6 shared=%s "
+                        "answer_stamp=%s]",
+                        record.get("kind"), record.get("chat_key"),
+                        self._claims_are_shared(), ans_stamp)
+                    continue
+                # (2) A live claim by another surface — but a
+                # claim is not an answer. Re-arm the deferral to
+                # the claim's expiry (plus one second) and retry
+                # then; dropping it here is the silence hole. A
+                # re-arm refused (superseded by a newer command)
+                # drops it. The holder's build stamp rides the
+                # record, so the expiry decision below can tell
+                # a current claim from a pre-dupfix6 one even
+                # after the row itself is swept.
+                live = self._live_foreign_claim(
+                    message, answer_key)
+                if live is not None:
+                    record["holder"] = live["holder"]
+                    record["holder_stamp"] = live["stamp"]
+                    expires = float(live.get("expires_at") or 0.0)
                     deadline = ((expires + 1.0) if expires > 0
-                                else sweep_now + 600.0)
+                                else sweep_now + WINDOW_S)
                     rearmed = self._peer_deferral().rearm(
                         record, deadline=deadline, now=sweep_now)
                     _log.info(
                         "deferred /%s in %s expired but another "
-                        "surface claimed it meanwhile — %s",
+                        "surface claimed it meanwhile — %s "
+                        "[dupfix6 shared=%s holder=%s stamp=%s]",
                         record.get("kind"), record.get("chat_key"),
                         "re-armed to claim expiry" if rearmed
-                        else "superseded, dropping")
+                        else "superseded, dropping",
+                        self._claims_are_shared(),
+                        live["holder"], live["stamp"])
                     continue
-                message = record.get("message")
-                if message is None:
+                # (3) No live claim. The claim window bounds the
+                # wait: a primary that claimed at intake had
+                # until its claim's expiry to answer.
+                created = float(record.get("created_at") or sweep_now)
+                bound = created + WINDOW_S + 1.0
+                post_expiry = sweep_now >= created + WINDOW_S
+                shared = self._claims_are_shared()
+                key_ok = self._claim_key_reliable(message)
+                # An echo is a backup, not a race: this surface's
+                # copy exists only because the primary received
+                # the same message as an incoming copy and is
+                # expected to handle it. With the store down (or
+                # an unreliable key) this surface is BLIND — no
+                # store evidence here proves the primary is down,
+                # and failing over would be the double. Wait to
+                # the claim window's bound, then end in an honest
+                # failure naming the store. An INCOMING deferral
+                # is not blinded (see the docstring: the pinned
+                # game stagger orders that race).
+                is_echo = not bool(
+                    getattr(message, "incoming", True))
+                if (not shared or not key_ok) and is_echo:
+                    if sweep_now < bound:
+                        rearmed = self._peer_deferral().rearm(
+                            record, deadline=bound, now=sweep_now)
+                        _log.warning(
+                            "dupfix6 blind wait: deferred /%s in "
+                            "%s has no shared store (shared=%s) "
+                            "or an unreliable key "
+                            "(key_reliable=%s) — waiting to the "
+                            "claim window, never failing over "
+                            "blind (%s)",
+                            record.get("kind"),
+                            record.get("chat_key"), shared, key_ok,
+                            "re-armed to bound" if rearmed
+                            else "superseded, dropping")
+                        continue
+                    self._honest_failover_failure(
+                        record, message,
+                        reason=("store_down" if not shared
+                                else "key_unreliable"))
+                    continue
+                # A claim stamped by a pre-dupfix6 build ("") is a
+                # build that never writes answer claims — its
+                # missing answer proves nothing, so this surface
+                # must not fail over onto it. End in an honest
+                # failure naming the stale build. A stamped
+                # (current) claim, or no claim ever, fails over
+                # below: a current build would have recorded its
+                # answer. This fires whenever step (2) found no
+                # live claim in real time — the claim, if any,
+                # has genuinely expired — not on the record's
+                # age: the pinned S2/S4 sweeps re-fire at
+                # injected +25s after a real sleep, long before
+                # the record is 600s old.
+                own = self._claim_surface(platform)
+                stale = False
+                if "holder_stamp" in record:
+                    stale = str(
+                        record.get("holder_stamp") or "") == ""
+                else:
+                    last = self._last_claim(message, answer_key)
+                    if last is not None and last[0] != own:
+                        stale = str(last[2] or "") == ""
+                if stale:
+                    self._honest_failover_failure(
+                        record, message, reason="stale_build")
+                    continue
+                # (4) Fail over: the shared store says nobody
+                # holds this command and nobody answered it, on a
+                # reliable key. Take the canonical key (a twin
+                # that took it between the check and the claim
+                # re-arms instead) and run the command. The
+                # claim is taken in REAL time, as the old code
+                # did — an injected sweep time must never stamp
+                # the claim into the future.
+                key = self._command_claim_key_for(message) \
+                    or answer_key
+                if key and not self._command_claims().claim(
+                        key, self._claim_surface(platform),
+                        build_stamp=self._claim_build_stamp()):
+                    expires = self._command_claims().claim_expires_at(
+                        key)
+                    deadline = ((expires + 1.0) if expires > 0
+                                else sweep_now + WINDOW_S)
+                    rearmed = self._peer_deferral().rearm(
+                        record, deadline=deadline, now=sweep_now)
+                    _log.info(
+                        "deferred /%s in %s expired but another "
+                        "surface claimed it meanwhile — %s "
+                        "[dupfix6 shared=%s]",
+                        record.get("kind"), record.get("chat_key"),
+                        "re-armed to claim expiry" if rearmed
+                        else "superseded, dropping",
+                        self._claims_are_shared())
                     continue
                 from ...social.chat.control import parse_control
 
@@ -7082,8 +7558,10 @@ class PartnerRuntime(
                 self._run_control_command(message, parsed)
                 _log.info(
                     "deferred /%s in %s failed over — the bot "
-                    "never answered", record.get("kind"),
-                    record.get("chat_key"))
+                    "never answered [dupfix6 shared=%s "
+                    "key_reliable=%s post_expiry=%s]",
+                    record.get("kind"), record.get("chat_key"),
+                    shared, key_ok, post_expiry)
             except Exception as exc:  # noqa: BLE001 - a sweep never dies
                 record_failure(
                     "runtime.PartnerRuntime._sweep_peer_deferrals", exc)
@@ -8517,7 +8995,8 @@ class PartnerRuntime(
             if not key:
                 return
             self._command_claims().record_answer(
-                key, self._claim_surface(platform))
+                key, self._claim_surface(platform),
+                build_stamp=self._claim_build_stamp())
         except Exception as exc:  # noqa: BLE001 - bookkeeping never eats a reply
             record_failure(
                 "runtime.PartnerRuntime._record_command_answer", exc)

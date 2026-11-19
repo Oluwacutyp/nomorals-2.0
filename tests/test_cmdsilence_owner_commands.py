@@ -23,7 +23,10 @@ from pathlib import Path
 import pytest
 
 from nomorals.agents.context import build_context
-from nomorals.agents.partner.command_claims import command_claim_key
+from nomorals.agents.partner.command_claims import (
+    claim_build_stamp,
+    command_claim_key,
+)
 from nomorals.agents.partner.failures import clear_failures
 from nomorals.agents.partner_runtime import PartnerRuntime
 from nomorals.core.config import load_settings
@@ -290,9 +293,16 @@ def test_peer_bot_dm_claim_without_answer_fails_over(
         echo = _echo_copy("/ping", "s2-1")
         key = command_claim_key(echo, own_account_id=OWNER_ID)
         # The sibling bot claimed the command 595s ago and never
-        # answered; its claim expires 5s from now.
+        # answered; its claim expires 5s from now. The seed is
+        # STAMPED (dupfix6): it simulates a CURRENT primary, and
+        # current builds stamp every claim — an unstamped seed
+        # would simulate a pre-dupfix6 primary, whose missing
+        # answer proves nothing and must end in an honest
+        # failure, not a failover (see test_gapfix_dupfix6's
+        # stale-build test).
         assert rt._command_claims().claim(
-            key, "telegram-personal:888", now=base - 595.0)
+            key, "telegram-personal:888", now=base - 595.0,
+            build_stamp=claim_build_stamp())
         rt._process_inner(echo)
         assert _texts(ad["telegram"]) == []
         assert _texts(ad["telegram-personal"]) == []
@@ -361,8 +371,14 @@ def test_claim_race_fails_over_at_expiry(split_homes,
         base = time.time()
         msg = _bot_copy("/ping", "s4-1")
         key = command_claim_key(msg, own_account_id=str(PERSONAL_BOT_ID))
+        # STAMPED (dupfix6): it simulates a CURRENT primary, and
+        # current builds stamp every claim — an unstamped seed
+        # would simulate a pre-dupfix6 primary, whose missing
+        # answer proves nothing (see test_gapfix_dupfix6's
+        # stale-build test).
         assert rt._command_claims().claim(
-            key, f"telegram-bot:{MAIN_BOT_ID}", now=base - 595.0)
+            key, f"telegram-bot:{MAIN_BOT_ID}", now=base - 595.0,
+            build_stamp=claim_build_stamp())
         rt._process_inner(msg)
         assert _texts(ad["telegram-personal"]) == []
         assert _pending(rt) == 1, "the raced command must defer"
