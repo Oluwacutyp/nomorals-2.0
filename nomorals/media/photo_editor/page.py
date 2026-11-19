@@ -69,12 +69,29 @@ def photo_page_html(doc: Any, *, doc_id: str = "", theme: Any = None,
     for i, layer in enumerate(doc.layers):
         name = _html.escape(layer.name)
         kind = _html.escape(layer.kind)
+        row = layer.to_dict()
+        feats = []
+        if row.get("adjustment"):
+            feats.append(
+                f"adjustment {_html.escape(row['adjustment'])}")
+        if row.get("fill"):
+            feats.append(f"fill {_html.escape(row['fill'])}")
+        if row.get("effects"):
+            feats.append("effects " + ", ".join(
+                _html.escape(e) for e in row["effects"]))
+        if row.get("text"):
+            feats.append(f"text {_html.escape(row['text'])}")
+        if row.get("smart_filters"):
+            feats.append("smart " + ", ".join(
+                _html.escape(f) for f in row["smart_filters"]))
+        detail = (" — " + "; ".join(feats)) if feats else ""
         lines.append(
             f"<li>{i}. {name} — {kind} "
             f"{layer.width}×{layer.height} at "
             f"({layer.left},{layer.top}) "
             f"opacity {layer.opacity}"
             + ("" if layer.visible else " (hidden)")
+            + detail
             + "</li>")
     lines.append("</ol>")
     if doc.history:
@@ -99,6 +116,9 @@ def photo_page_html(doc: Any, *, doc_id: str = "", theme: Any = None,
         "<p>Edit it in chat: "
         "<code>/photo edit &lt;id&gt; crop 0 0 128 128</code> · "
         "<code>/photo edit &lt;id&gt; enhance brightness 1.2</code> · "
+        "<code>/photo layer &lt;id&gt; 0 hide</code> · "
+        "<code>/photo layer &lt;id&gt; Background opacity 128</code> · "
+        "<code>/photo info &lt;id&gt;</code> · "
         "<code>/photo save &lt;id&gt; &lt;path&gt;</code></p>")
     lines.append("</body></html>")
     return "\n".join(lines)

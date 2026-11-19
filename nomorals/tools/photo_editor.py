@@ -128,13 +128,16 @@ def register(registry: Any) -> None:
             "profile.id — or a whole settings dict under "
             "'settings'; layer=<index> picks the layer, default "
             "the topmost visible one). "
-            "action=undo|redo steps the op history. action=show "
-            "reports a document; action=list lists open documents. "
-            "action=save writes the document as PSD (path, or the "
-            "store copy when omitted). action=render writes the "
-            "current composite PNG. action=page writes the Studio "
-            "photo page (plain HTML). Documents persist under "
-            "<home>/data/photo_editor/."
+            "action=undo|redo steps the op history. action=layer "
+            "toggles a layer (layer=<index|name>, visible=<bool>, "
+            "opacity=<0-255>). action=info reports each layer's "
+            "adjustments, effects, text and smart filters. "
+            "action=show reports a document; action=list lists "
+            "open documents. action=save writes the document as "
+            "PSD (path, or the store copy when omitted). action="
+            "render writes the current composite PNG. action=page "
+            "writes the Studio photo page (plain HTML). Documents "
+            "persist under <home>/data/photo_editor/."
         ),
         capability=Capability.MEDIA,
     )
@@ -180,6 +183,48 @@ def register(registry: Any) -> None:
             result = _summary(doc, ident)
             result["ok"] = True
             result["edit"] = name
+            return result
+        if verb == "layer":
+            ref = params.get("layer", "") if params else ""
+            if ref == "" or ref is None:
+                raise ValueError(
+                    "photo_editor layer needs layer=<index|name>")
+            try:
+                visible = params.get("visible") \
+                    if params else None
+                opacity = params.get("opacity") \
+                    if params else None
+                doc.set_layer_state(
+                    ref,
+                    visible=(None if visible is None
+                             else bool(visible)),
+                    opacity=(None if opacity is None
+                             else int(opacity)))
+            except PhotoEditorError as exc:
+                raise ValueError(str(exc)) from exc
+            store.save(doc, doc_id=ident)
+            result = _summary(doc, ident)
+            result["ok"] = True
+            result["layer"] = ref
+            return result
+        if verb == "info":
+            features = []
+            for layer in doc.layers:
+                row = layer.to_dict()
+                features.append({
+                    "name": row["name"],
+                    "kind": row["kind"],
+                    "visible": row["visible"],
+                    "opacity": row["opacity"],
+                    "adjustment": row.get("adjustment"),
+                    "fill": row.get("fill"),
+                    "effects": row.get("effects"),
+                    "text": row.get("text"),
+                    "smart_filters": row.get("smart_filters"),
+                })
+            result = _summary(doc, ident)
+            result["ok"] = True
+            result["features"] = features
             return result
         if verb == "undo":
             entry = doc.undo()

@@ -113,10 +113,12 @@ class PsdDecodeTests(unittest.TestCase):
             self.assertLessEqual(diff, 2, f"{path.name}: flatten "
                                  f"differs from composite by {diff}")
 
-    def test_adjustment_layer_is_parsed_and_named(self) -> None:
+    def test_adjustment_layer_is_parsed_and_rendered(self) -> None:
         """An adjustment layer is data, not a silent drop: it is
-        parsed, its kind recorded, and the flatten reports it as
-        unrendered rather than pretending the pixels include it."""
+        parsed, its kind recorded, and the flatten RENDERS it —
+        lane 97 closed the lane-76 gap, so the brightness-contrast
+        adjustment is applied and the flatten lands within one
+        level of Photoshop's own composite."""
         from nomorals.media.photo_editor.psd import PsdFile
 
         psd = PsdFile.from_bytes(_read(RGB8_ADJ))
@@ -125,8 +127,10 @@ class PsdDecodeTests(unittest.TestCase):
         self.assertTrue(adj, "expected an adjustment layer")
         flat = psd.flatten_layers()
         self.assertEqual(flat.size, (96, 96))
-        self.assertTrue(psd.unrendered_adjustments(),
-                        "adjustment must be reported, not hidden")
+        self.assertEqual(psd.unrendered_adjustments(), [],
+                         "the adjustment is rendered, not reported")
+        comp = psd.composite_rgba()
+        self.assertLessEqual(_max_diff(flat, comp), 1)
 
     def test_roundtrip_preserves_pixels_and_layers(self) -> None:
         from nomorals.media.photo_editor.document import PhotoDocument
@@ -294,13 +298,16 @@ class OracleTests(unittest.TestCase):
         self.assertEqual(summary["files"], 4)
         self.assertEqual(summary["failed"], 0, report["files"])
         self.assertEqual(summary["exact"], 3, report["files"])
-        # the adjustment-layer fixture is the honest exception:
-        # parsed, flatten reported, diff attributed to the
-        # unrendered adjustment, never counted as exact.
+        # The adjustment-layer fixture is rendered now (lane 97):
+        # parsed, applied, and within one level of Photoshop's
+        # composite — a render gap of a single level, not an
+        # unrendered adjustment.
         adj = [f for f in report["files"]
                if f["adjustments"]]
         self.assertEqual(len(adj), 1)
-        self.assertEqual(adj[0]["status"], "differs-adjustment")
+        self.assertEqual(adj[0]["status"], "differs")
+        self.assertLessEqual(adj[0]["max_diff"], 1)
+        self.assertTrue(adj[0]["adjustments_rendered"])
 
     def test_oracle_full_corpus_when_present(self) -> None:
         from nomorals.media.photo_editor.oracle import run_oracle

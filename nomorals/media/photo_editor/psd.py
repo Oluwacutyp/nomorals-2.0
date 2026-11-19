@@ -172,6 +172,11 @@ class _Reader:
         self._pos += count
         return out
 
+    def raw_slice(self, start: int, end: int) -> bytes:
+        """The source bytes in [start, end) — the stable writer's
+        verbatim material."""
+        return self._data[start:end]
+
     def u8(self) -> int:
         return self.take(1)[0]
 
@@ -496,6 +501,17 @@ class LayerRecord:
         #: group marker: "start", "end", or "".
         self.group = ""
         self.group_open = True
+        #: set by an editor that changed this layer — the stable
+        #: writer re-encodes a dirty layer and writes every other
+        #: layer's bytes back verbatim.
+        self.dirty = False
+        #: the record's bytes as read (rect, channel sizes,
+        #: blend, opacity, flags, extra data) — the stable
+        #: writer's verbatim material for a clean layer.
+        self._raw_record: bytes = b""
+        #: the layer's channel image data as read (compression
+        #: + row counts + packed planes), in channel order.
+        self._raw_channels: bytes = b""
 
     @property
     def width(self) -> int:
@@ -574,7 +590,10 @@ def _parse_layer_record(reader: _Reader, depth: int,
                                                list[tuple[int, int]]]:
     """One layer record (no channel data — that follows ALL the
     records, in layer order; see :func:`_read_layer_channels`).
-    Returns the record and its (channel id, byte size) list."""
+    Returns the record and its (channel id, byte size) list. The
+    record's source bytes are kept on the record for the stable
+    writer."""
+    start = reader.pos
     record = LayerRecord()
     record.top = reader.i32()
     record.left = reader.i32()
@@ -649,17 +668,30 @@ def _parse_layer_record(reader: _Reader, depth: int,
     # PhotoCraft crates/psd/src/layer.rs LayerInfo::read_body reads
     # every record first, then every channel). It is read by
     # _read_layer_channels once the caller has all the records.
+    record._raw_record = reader.raw_slice(start, reader.pos)
     return record, channel_sizes
 
 
 def _read_layer_channels(reader: _Reader, record: LayerRecord,
                          channel_sizes: list[tuple[int, int]],
                          depth: int) -> None:
-    """Decode one layer's channel image data, in channel order."""
+    """Decode one layer's channel image data, in channel order.
+    The layer mask (channel -2) is mask-rect-sized, not
+    layer-rect-sized — an adjustment layer's rect is 0x0
+    while its mask covers the document. The channel bytes as
+    read are kept on the record for the stable writer."""
+    start = reader.pos
     height = record.height
     width = record.width
     for channel_id, size in channel_sizes:
         blob = reader.take(size)
+        # The mask plane's dimensions come from the mask rect.
+        if channel_id == -2 and record.mask_rect is not None:
+            mtop, mleft, mbottom, mright = record.mask_rect
+            width, height = (max(0, mright - mleft),
+                             max(0, mbottom - mtop))
+        else:
+            width, height = record.width, record.height
         if size == 0 or width == 0 or height == 0:
             record.channels[channel_id] = b""
             continue
@@ -672,6 +704,7 @@ def _read_layer_channels(reader: _Reader, record: LayerRecord,
     # The mask plane, when the layer carries one (channel -2).
     if -2 in record.channels and record.mask_rect is not None:
         record.mask = record.channels[-2]
+    record._raw_channels = reader.raw_slice(start, reader.pos)
 
 
 # ---------------------------------------------------------------------------
@@ -695,10 +728,35 @@ class PsdFile:
         #: raw global-layer-mask bytes (kept, written back).
         self.global_mask = b""
         self.layers: list[LayerRecord] = []
+        #: raw additional-layer-information section bytes
+        #: (kept, written back verbatim).
+        self.additional_raw = b""
+        #: parsed global additional blocks: (signature, key,
+        #: data). Global blocks pad their data to a multiple
+        #: of four (the FEid smart-filter cache lives here).
+        self.additional_blocks: list[tuple[bytes, bytes,
+                                           bytes]] = []
+        #: cached FEid items, parsed on first use.
+        self._feid_items: list[dict] | None = None
         #: (compression, decoded 8-bit planes) for the composite.
         self._composite: tuple[int, list[bytes]] | None = None
         #: composite channel count (incl. alpha when present).
         self.composite_channels = 0
+        #: the exact bytes this file was parsed from (None for a
+        #: file built in code) — the stable writer returns them
+        #: verbatim when no layer is dirty.
+        self._source: bytes | None = None
+        #: offset of the layer-and-mask section's length field.
+        self._section_len_pos = 0
+        #: offset just past the layer-and-mask section.
+        self._section_end = 0
+        #: the layer count was negative: the first alpha channel
+        #: is the transparency mask.
+        self._negative_count = False
+        #: the composite section as read (compression + counts +
+        #: packed planes), written back verbatim by the stable
+        #: writer.
+        self._composite_raw: bytes = b""
 
     # -- parse ---------------------------------------------------------
     @classmethod
@@ -721,6 +779,7 @@ class PsdFile:
             raise PsdError(f"unsupported PSD version {version}")
         reader.take(6)  # reserved
         psd = cls()
+        psd._source = bytes(data)
         psd.version = version
         psd.channels = reader.u16()
         psd.height = reader.u32()
@@ -755,8 +814,10 @@ class PsdFile:
         res_len = reader.u32()
         psd.image_resources = reader.take(res_len)
         # Layer and mask information.
+        psd._section_len_pos = reader.pos
         section_len = reader.u32()
         section_end = reader.pos + section_len
+        psd._section_end = section_end
         if section_end > len(data):
             raise PsdError("layer section runs past the file")
         if section_len:
@@ -779,18 +840,41 @@ class PsdFile:
                 for record, sizes in pending:
                     _read_layer_channels(
                         reader, record, sizes, psd.depth)
-                if negative and psd.layers:
+                if negative:
                     # First alpha channel is the transparency mask:
                     # Photoshop marks it by negating the count.
-                    pass
+                    psd._negative_count = True
             reader.seek(layer_info_end)
             # Global layer mask info (kept raw).
             global_len = reader.u32()
             psd.global_mask = reader.take(global_len)
-            # Additional layer information: tagged blocks to the
-            # section end (kept raw — skipped, not parsed).
+            # Additional layer information: tagged blocks to
+            # the section end (kept raw for write-back, and
+            # parsed for the FEid smart-filter cache).
+            # Global blocks pad their data to a multiple of
+            # four; a block that does not start with a known
+            # signature ends the walk (the raw bytes are
+            # still kept verbatim).
+            add_start = reader.pos
+            psd.additional_raw = data[add_start:section_end]
+            p = add_start
+            while p + 12 <= section_end:
+                sig = data[p:p + 4]
+                if sig not in (_SIG_8BIM, b"8B64"):
+                    break
+                key = data[p + 4:p + 8]
+                ln = struct.unpack(
+                    ">I", data[p + 8:p + 12])[0]
+                if p + 12 + ln > section_end:
+                    break
+                psd.additional_blocks.append(
+                    (sig, key, data[p + 12:p + 12 + ln]))
+                pad = (4 - ln % 4) % 4
+                p += 12 + ln + pad
             reader.seek(section_end)
-        # Image data: the merged composite.
+        # Image data: the merged composite. Its source bytes are
+        # kept for the stable writer.
+        psd._composite_raw = data[section_end:]
         compression = reader.u16()
         body = data[reader.pos:]
         color_planes = _MODE_COLOR_CHANNELS[psd.mode]
@@ -877,61 +961,234 @@ class PsdFile:
             return bits.convert("RGBA")
         raise PsdError(f"mode {self.mode} has no composite render")
 
+    def feid_items(self) -> list[dict]:
+        """The FEid/FXid smart-filter cache items (placed id,
+        rect, unfiltered RGBA, filter mask), parsed on first
+        use from the additional layer information."""
+        if self._feid_items is None:
+            from .smart import parse_feid
+
+            items: list[dict] = []
+            for _sig, key, blob in self.additional_blocks:
+                if key in (b"FEid", b"FXid"):
+                    items.extend(
+                        parse_feid(blob, self.mode, self.depth))
+            self._feid_items = items
+        return self._feid_items
+
+    def _apply_feid(self, rgba: Any,
+                    layer: LayerRecord) -> Any:
+        """A smart object's stored pixels are the filtered
+        result WITHOUT its filter mask: Photoshop blends
+        filtered/unfiltered by the FEid mask at render time
+        (the mask is white beyond its bounds). Without a
+        matching FEid item the stored pixels stand."""
+        import numpy as np
+
+        from .smart import parse_plld, parse_sold
+
+        blocks = dict(layer.raw_blocks)
+        placed: set[str] = set()
+        sold = blocks.get("SoLd")
+        if sold is not None:
+            try:
+                rec = parse_sold(bytes(sold))
+            except Exception:
+                rec = None
+            if rec:
+                placed.add(rec.get("placed") or "")
+                placed.add(rec.get("idnt") or "")
+        plld = blocks.get("PlLd")
+        if plld is not None:
+            try:
+                rec = parse_plld(bytes(plld))
+            except Exception:
+                rec = None
+            if rec:
+                placed.add(rec.get("idnt") or "")
+        placed.discard("")
+        if not placed:
+            return rgba
+        item = None
+        for cand in self.feid_items():
+            if cand.get("id") in placed:
+                item = cand
+                break
+        if item is None or item.get("mask") is None \
+                or item.get("rgba") is None:
+            return rgba
+        top, left, bottom, right = layer.rect
+        height = bottom - top
+        width = right - left
+        if height <= 0 or width <= 0:
+            return rgba
+        mask = np.ones((height, width), dtype=np.float64)
+        mrect = item.get("mask_rect")
+        marr = item["mask"]
+        if mrect is not None and marr is not None:
+            mtop, mleft, mbot, mright = mrect
+            y0 = max(mtop, top) - top
+            y1 = min(mbot, bottom) - top
+            x0 = max(mleft, left) - left
+            x1 = min(mright, right) - left
+            if y1 > y0 and x1 > x0:
+                mask[y0:y1, x0:x1] = marr[
+                    y0 - (mtop - top):y1 - (mtop - top),
+                    x0 - (mleft - left):x1 - (mleft - left)]
+        unfiltered = rgba.copy()
+        frect = item.get("rect")
+        farr = item["rgba"]
+        if frect is not None and farr is not None:
+            ftop, fleft, fbot, fright = frect
+            y0 = max(ftop, top) - top
+            y1 = min(fbot, bottom) - top
+            x0 = max(fleft, left) - left
+            x1 = min(fright, right) - left
+            if y1 > y0 and x1 > x0:
+                unfiltered[y0:y1, x0:x1] = farr[
+                    y0 - (ftop - top):y1 - (ftop - top),
+                    x0 - (fleft - left):x1 - (fleft - left)]
+        m = mask[..., None]
+        return rgba * m + unfiltered * (1.0 - m)
+
     def flatten_layers(self) -> Any:
-        """Devon's own compositor over the parsed layers: normal
-        blend, per-layer opacity, visibility, and layer masks.
-        Non-normal blend keys, adjustment layers, fill layers,
-        layer effects, live text and smart objects are NOT
-        rendered — see :meth:`unrendered` — so the flatten is
-        honest about what it did. A layerless file flattens to
-        its merged composite: the composite IS the document."""
-        from PIL import Image
+        """The shared numpy compositor over the parsed layers:
+        blend modes, per-layer opacity and fill, layer masks,
+        clipping, groups, adjustment layers, fill layers, layer
+        effects, live text (stored raster, vector re-render only
+        where a layer has no raster) and smart objects (their
+        stored pixels — the smart filters are already baked in
+        by Photoshop). What it could not render is reported by
+        :meth:`unrendered`. A layerless file flattens to its
+        merged composite: the composite IS the document."""
+        from .blend import mode_name
+        from .compose import (
+            apply_mask,
+            composite_layers,
+            describe_layer,
+            mask_to_canvas,
+            pil_to_array,
+        )
 
         if not self.layers:
-            # A layerless PSD is a flat image: the merged composite
-            # IS the document — there is no stack to composite.
             return self.composite_rgba()
-        canvas = Image.new("RGBA", (self.width, self.height),
-                           (0, 0, 0, 0))
-        # PSD stores layers bottom-first (file order); compositing
-        # runs in that order, each layer over the last.
+        depth = {8: "u8", 16: "u16", 32: "f32"}.get(
+            self.depth, "u8")
+        dicts: list[dict] = []
+        for layer in self.layers:
+            if layer.is_group_start:
+                dicts.append(describe_layer(
+                    kind="group-start",
+                    blend=mode_name(layer.blend_key),
+                    name=layer.display_name))
+                continue
+            if layer.is_group_end:
+                dicts.append(describe_layer(kind="group-end",
+                                            name=""))
+                continue
+            if layer.is_adjustment:
+                dicts.append(describe_layer(
+                    kind="adjustment",
+                    raw_blocks=layer.raw_blocks,
+                    name=layer.display_name,
+                    visible=layer.visible,
+                    opacity=layer.opacity,
+                    blend=mode_name(layer.blend_key),
+                    clipping=layer.clipping,
+                    mask=mask_to_canvas(
+                        layer.mask, layer.mask_rect,
+                        self.width, self.height,
+                        mask_default=layer.mask_default,
+                        disabled=layer.mask_disabled)))
+                continue
+            if layer.is_fill:
+                dicts.append(describe_layer(
+                    kind="fill",
+                    raw_blocks=layer.raw_blocks,
+                    name=layer.display_name,
+                    visible=layer.visible,
+                    opacity=layer.opacity,
+                    blend=mode_name(layer.blend_key),
+                    clipping=layer.clipping,
+                    mask=mask_to_canvas(
+                        layer.mask, layer.mask_rect,
+                        self.width, self.height,
+                        mask_default=layer.mask_default,
+                        disabled=layer.mask_disabled)))
+                continue
+            if layer.width == 0 or layer.height == 0:
+                # A zero-size layer has no raster of its own; a
+                # text layer still renders from its TySh spec.
+                if "TySh" not in dict(layer.raw_blocks):
+                    continue
+                rgba = None
+            else:
+                pil = _layer_rgba(layer, self.mode)
+                if pil is None:
+                    if "TySh" not in dict(layer.raw_blocks):
+                        continue
+                    rgba = None
+                else:
+                    rgba = apply_mask(
+                        pil_to_array(pil), layer.mask,
+                        layer.mask_rect, layer.rect,
+                        mask_default=layer.mask_default,
+                        disabled=layer.mask_disabled)
+                    rgba = self._apply_feid(rgba, layer)
+            dicts.append(describe_layer(
+                rgba=rgba, left=layer.left, top=layer.top,
+                width=layer.width, height=layer.height,
+                opacity=layer.opacity,
+                blend=mode_name(layer.blend_key),
+                visible=layer.visible,
+                clipping=layer.clipping,
+                kind="pixels", name=layer.display_name,
+                raw_blocks=layer.raw_blocks,
+                doc_width=self.width, doc_height=self.height))
+        result = composite_layers(dicts, self.width, self.height,
+                                  depth=depth, mode=self.mode)
+        return result.image
+
+    def unrendered(self) -> list[str]:
+        """What the flatten could not render, as human lines:
+        unparsable adjustments, unparsable fills, and layers
+        whose effects or text could not be rendered. Rendered
+        adjustments, fills, blends and effects are NOT listed
+        here — they are in the flatten."""
+        from .blend import mode_name
+        from .compose import composite_layers, describe_layer
+
+        lines: list[str] = []
+        if not self.layers:
+            return lines
+        depth = {8: "u8", 16: "u16", 32: "f32"}.get(
+            self.depth, "u8")
+        dicts: list[dict] = []
         for layer in self.layers:
             if layer.is_group_start or layer.is_group_end:
                 continue
-            if not layer.visible:
+            if layer.is_adjustment:
+                dicts.append(describe_layer(
+                    kind="adjustment",
+                    raw_blocks=layer.raw_blocks,
+                    name=layer.display_name))
                 continue
-            if layer.is_adjustment or layer.is_fill:
+            if layer.is_fill:
+                dicts.append(describe_layer(
+                    kind="fill", raw_blocks=layer.raw_blocks,
+                    name=layer.display_name))
                 continue
-            if layer.width == 0 or layer.height == 0:
-                continue
-            rgba = _layer_rgba(layer, self.mode)
-            if rgba is None:
-                continue
-            if layer.opacity < 255:
-                alpha = rgba.split()[3].point(
-                    lambda v, o=layer.opacity: v * o // 255)
-                rgba.putalpha(alpha)
-            canvas.alpha_composite(
-                rgba, (layer.left, layer.top))
-        return canvas
-
-    def unrendered(self) -> list[str]:
-        """What the flatten deliberately did not render, as human
-        lines: adjustment layers, fill layers, non-normal blends."""
-        lines: list[str] = []
-        for layer in self.layers:
-            for key in layer.adjustment_keys:
-                lines.append(
-                    f"adjustment layer {layer.display_name!r} "
-                    f"({ADJUSTMENT_KEYS[key]}) is not rendered")
-            for key in layer.fill_keys:
-                lines.append(
-                    f"fill layer {layer.display_name!r} "
-                    f"({FILL_KEYS[key]}) is not rendered")
-            if layer.blend_key not in ("norm", "pass"):
-                lines.append(
-                    f"layer {layer.display_name!r} uses blend "
-                    f"{layer.blend_key!r} — rendered as normal")
+            dicts.append(describe_layer(
+                rgba=None, left=layer.left, top=layer.top,
+                width=layer.width, height=layer.height,
+                blend=mode_name(layer.blend_key),
+                name=layer.display_name,
+                raw_blocks=layer.raw_blocks,
+                doc_width=self.width, doc_height=self.height))
+        result = composite_layers(dicts, self.width, self.height,
+                                  depth=depth, mode=self.mode)
+        for line in result.unrendered:
+            lines.append(line)
         return lines
 
     def unrendered_adjustments(self) -> list[str]:
@@ -940,9 +1197,63 @@ class PsdFile:
 
     # -- encode ---------------------------------------------------------
     def to_bytes(self) -> bytes:
-        """Write this parsed file back as PSD v1. Channel data is
-        re-encoded (RLE); resources, color-mode data and the global
-        mask are written back verbatim."""
+        """Write this parsed file back as PSD v1, byte-stable:
+        a file with no dirty layer writes back byte-identical
+        to the bytes it was parsed from; a file with dirty
+        layers re-encodes only those layers (their records and
+        channel data) and writes every other layer, the header,
+        the resources, the global mask, the additional layer
+        information and the composite back verbatim. A file
+        built in code (no source bytes) falls back to a full
+        re-encode; a dirty layer in a non-8-bit file does too
+        (its planes are decoded to 8-bit, so the header depth
+        must be rewritten)."""
+        if self._source is not None \
+                and not any(layer.dirty for layer in self.layers):
+            return self._source
+        if self._source is not None and self.depth == 8 \
+                and any(layer.dirty for layer in self.layers):
+            return self._to_bytes_spliced()
+        return self._to_bytes_reencoded()
+
+    def _to_bytes_spliced(self) -> bytes:
+        """The stable splice: clean layers verbatim, dirty layers
+        re-encoded, everything outside the layer-and-mask section
+        verbatim."""
+        records = bytearray()
+        blobs = bytearray()
+        count = len(self.layers)
+        records += struct.pack(
+            ">h", -count if self._negative_count else count)
+        for layer in self.layers:
+            if layer.dirty or not layer._raw_record:
+                record, channel_blobs = _encode_layer_record(
+                    layer, self.mode)
+            else:
+                record = layer._raw_record
+                channel_blobs = layer._raw_channels
+            records += record
+            blobs += channel_blobs
+        layer_info = (struct.pack(
+            ">I", len(records) + len(blobs))
+            + bytes(records) + bytes(blobs))
+        section = bytearray()
+        section += layer_info
+        section += struct.pack(">I", len(self.global_mask))
+        section += self.global_mask
+        section += self.additional_raw
+        out = bytearray()
+        out += self._source[:self._section_len_pos]
+        out += struct.pack(">I", len(section))
+        out += section
+        out += self._source[self._section_end:]
+        return bytes(out)
+
+    def _to_bytes_reencoded(self) -> bytes:
+        """The full re-encode (a file built in code, or a dirty
+        layer in a non-8-bit file). Channel data is re-encoded
+        (RLE); resources, color-mode data and the global mask
+        are written back verbatim."""
         out = bytearray()
         out += _MAGIC
         out += struct.pack(">H", 1)
@@ -1104,6 +1415,10 @@ def _encode_layer_info(psd: PsdFile) -> bytes:
     section += layer_info
     section += struct.pack(">I", len(psd.global_mask))
     section += psd.global_mask
+    # The additional layer information (FEid smart-filter cache
+    # included) rides along verbatim — dropping it loses the
+    # smart-filter masks on re-encode.
+    section += psd.additional_raw
     return bytes(section)
 
 
@@ -1134,14 +1449,18 @@ def _encode_layer_record(layer: LayerRecord, mode: str
             encoded = struct.pack(">H", 1) + encode_planes(
                 1, plane, 1, width, height, 8)
             channel_data.append((-1, encoded))
-        if layer.mask is not None and layer.mask_rect is not None:
-            mtop, mleft, mbottom, mright = layer.mask_rect
-            mw = max(0, mright - mleft)
-            mh = max(0, mbottom - mtop)
-            if mw and mh and len(layer.mask) >= mw * mh:
-                encoded = struct.pack(">H", 1) + encode_planes(
-                    1, layer.mask[:mw * mh], 1, mw, mh, 8)
-                channel_data.append((-2, encoded))
+    # The mask channel rides on the mask rect's own dimensions,
+    # not the layer rect — an adjustment layer is 0x0 yet carries
+    # a full-document mask, and dropping its -2 channel leaves a
+    # mask rect with no pixels behind it.
+    if layer.mask is not None and layer.mask_rect is not None:
+        mtop, mleft, mbottom, mright = layer.mask_rect
+        mw = max(0, mright - mleft)
+        mh = max(0, mbottom - mtop)
+        if mw and mh and len(layer.mask) >= mw * mh:
+            encoded = struct.pack(">H", 1) + encode_planes(
+                1, layer.mask[:mw * mh], 1, mw, mh, 8)
+            channel_data.append((-2, encoded))
     extra = bytearray()
     # Layer mask data: none on encode (mask pixels ride channel
     # -2; the mask rect is rebuilt from the layer rect).
@@ -1194,22 +1513,69 @@ def _encode_layer_record(layer: LayerRecord, mode: str
     return bytes(record), bytes(blobs)
 
 
+def _rgba_planes_native(rgba, mode: str) -> list[bytes]:
+    """Split an RGBA PIL image into the document mode's planes.
+
+    The last plane is always alpha. RGB returns R/G/B/alpha;
+    CMYK returns C/M/Y/K/alpha (naive conversion, the same one the
+    decoder uses); Lab returns L/a/b/alpha; L returns grey/alpha.
+    """
+    import numpy as np
+
+    from .blend import rgb_to_cmyk_arr, rgb_to_lab
+
+    arr = np.asarray(rgba.convert("RGBA")).astype(np.float32) / 255.0
+    alpha = (arr[..., 3] * 255.0).round().astype(np.uint8).tobytes()
+    if mode == "CMYK":
+        cmyk = rgb_to_cmyk_arr(arr[..., :3])
+        return [
+            (cmyk[..., i] * 255.0).round().astype(np.uint8).tobytes()
+            for i in range(4)] + [alpha]
+    if mode == "Lab":
+        lab = rgb_to_lab(arr[..., :3])
+        return [
+            (lab[..., 0] * 255.0).round().astype(np.uint8).tobytes(),
+            lab[..., 1].round().astype(np.uint8).tobytes(),
+            lab[..., 2].round().astype(np.uint8).tobytes()] + [alpha]
+    if mode == "L":
+        grey = (arr[..., 0] * 255.0).round().astype(np.uint8).tobytes()
+        return [grey, alpha]
+    return [
+        (arr[..., i] * 255.0).round().astype(np.uint8).tobytes()
+        for i in range(3)] + [alpha]
+
+
 def encode_psd(document: Any) -> bytes:
     """Write a :class:`PhotoDocument` as PSD v1 bytes: header,
     layer records (RLE channels), and the RLE composite from the
-    document's own flatten."""
+    document's own flatten.
+
+    The document's mode is preserved (CMYK/Lab/grey documents stay
+    CMYK/Lab/grey — their pixel planes are converted back to the
+    native space), and the source file's additional layer info
+    (FEid smart-filter cache included), global mask, colour-mode
+    data and image resources ride along verbatim."""
     width, height = document.width, document.height
     if width < 1 or width > MAX_DIMENSION \
             or height < 1 or height > MAX_DIMENSION:
         raise PsdError(
             f"cannot write a {width}x{height} PSD (limit "
             f"{MAX_DIMENSION})")
+    mode = getattr(document, "mode", "RGB")
+    if mode not in ("RGB", "CMYK", "Lab", "L"):
+        mode = "RGB"
     psd = PsdFile()
     psd.width = width
     psd.height = height
     psd.depth = 8
-    psd.mode = "RGB"
-    psd.channels = 4
+    psd.mode = mode
+    psd.channels = {"RGB": 4, "CMYK": 5, "Lab": 4, "L": 2}[mode]
+    src = getattr(document, "_psd", None)
+    if src is not None:
+        psd.additional_raw = src.additional_raw
+        psd.global_mask = src.global_mask
+        psd.color_mode_data = src.color_mode_data
+        psd.image_resources = src.image_resources
     layers: list[LayerRecord] = []
     for layer in document.layers:
         record = LayerRecord()
@@ -1219,26 +1585,36 @@ def encode_psd(document: Any) -> bytes:
         record.right = layer.left + layer.width
         record.blend_key = layer.blend or "norm"
         record.opacity = layer.opacity
-        record.clipping = 0
+        record.clipping = getattr(layer, "clipping", 0)
         record.flags = 0 if layer.visible else 0x02
         record.name = layer.name
         record.raw_blocks = list(layer.raw_blocks)
         if layer.kind == "pixels" and layer.width and layer.height:
-            rgba = layer.to_pil()
-            r, g, b, a = rgba.split()
-            record.channels = {
-                0: r.tobytes(),
-                1: g.tobytes(),
-                2: b.tobytes(),
-                -1: a.tobytes(),
-            }
-            if layer.mask is not None:
-                mask_img = layer.mask_to_pil()
-                record.mask_rect = (layer.top, layer.left,
-                                    layer.top + layer.height,
-                                    layer.left + layer.width)
-                record.mask = mask_img.tobytes()
-                record.mask_default = 255
+            native = getattr(layer, "_native_channels", None)
+            if native and not layer.dirty:
+                # Unedited: the source planes go back verbatim, so
+                # a CMYK/Lab file round-trips exactly instead of
+                # through a lossy native -> RGB -> native turn.
+                record.channels = dict(native)
+            else:
+                planes = _rgba_planes_native(layer.to_pil(), mode)
+                if mode == "CMYK":
+                    record.channels = {
+                        0: planes[0], 1: planes[1], 2: planes[2],
+                        3: planes[3], -1: planes[4],
+                    }
+                elif mode == "L":
+                    record.channels = {0: planes[0], -1: planes[1]}
+                else:
+                    record.channels = {
+                        0: planes[0], 1: planes[1], 2: planes[2],
+                        -1: planes[3],
+                    }
+        if layer.mask is not None and layer.mask_rect is not None:
+            record.mask_rect = layer.mask_rect
+            record.mask = layer.mask
+            record.mask_default = layer.mask_default
+            record.mask_disabled = layer.mask_disabled
         layers.append(record)
     # PSD stores layers bottom-first (file order) — the document
     # is bottom-first too, so the records go in as they are.
@@ -1246,8 +1622,7 @@ def encode_psd(document: Any) -> bytes:
     flat = document.flatten()
     if flat.mode != "RGBA":
         flat = flat.convert("RGBA")
-    r, g, b, a = flat.split()
-    psd._composite = (1, [r.tobytes(), g.tobytes(), b.tobytes(),
-                          a.tobytes()])
-    psd.composite_channels = 4
+    planes = _rgba_planes_native(flat, mode)
+    psd._composite = (1, planes)
+    psd.composite_channels = len(planes)
     return psd.to_bytes()

@@ -1566,6 +1566,11 @@ class RuntimeMetaMixin:
         dotted keys (light.exposure, wb.temp, curve.master,
         mixer.red.hue, geometry.rotate, profile.id, wb.mode,
         treatment, geometry.upright).
+        ``/photo layer <id> <index|name> [hide|show] [opacity
+        <n>]`` toggles a layer's visibility / opacity (a state
+        change writes back through the source splice, not a full
+        re-encode). ``/photo info <id>`` reports each layer's
+        adjustments, effects, text and smart filters.
         ``/photo undo|redo <id>`` steps the op history.
         ``/photo show <id>`` and ``/photo list`` read documents.
         ``/photo save <id> [path]`` writes the PSD back.
@@ -1581,8 +1586,9 @@ class RuntimeMetaMixin:
                  "<n>] [contrast <n>] | edit <id> develop "
                  "[brightness <n>] [contrast <n>] | edit <id> "
                  "develop light.exposure <n> wb.mode <name> ... | "
-                 "undo|redo <id> | show <id> | list | save <id> "
-                 "[path] | render <id> <png path> | page <id> "
+                 "layer <id> <index|name> [hide|show] [opacity <n>] | "
+                 "info <id> | undo|redo <id> | show <id> | list | save "
+                 "<id> [path] | render <id> <png path> | page <id> "
                  "<html path>")
         try:
             words = shlex.split(tail or "")
@@ -1590,7 +1596,8 @@ class RuntimeMetaMixin:
             return usage
         verb = words[0].lower() if words else "list"
         if verb not in ("open", "edit", "undo", "redo", "show",
-                        "list", "save", "render", "page"):
+                        "list", "save", "render", "page", "layer",
+                        "info"):
             return usage
 
         def _call(action: str, **kwargs: Any) -> tuple[bool, dict]:
@@ -1730,6 +1737,60 @@ class RuntimeMetaMixin:
                 return f"photo save failed: {value['error']}"
             return (f"saved as PSD: {value.get('saved')}\n"
                     + _describe(value))
+        if verb == "layer":
+            if len(words) < 3:
+                return usage
+            layer_ref = words[2]
+            params: dict[str, Any] = {"layer": layer_ref}
+            rest = words[3:]
+            i = 0
+            while i < len(rest):
+                key = rest[i].lower()
+                if key in ("hide", "show"):
+                    params["visible"] = key == "show"
+                    i += 1
+                    continue
+                if key == "opacity" and i + 1 < len(rest):
+                    try:
+                        params["opacity"] = int(rest[i + 1])
+                    except ValueError:
+                        return ("/photo layer opacity needs an "
+                                "integer 0..255.")
+                    i += 2
+                    continue
+                return usage
+            if "visible" not in params and "opacity" not in params:
+                return usage
+            ok, value = _call("layer", doc_id=ref, params=params)
+            if not ok:
+                return f"photo layer failed: {value['error']}"
+            return _describe(value)
+        if verb == "info":
+            if not ref:
+                return usage
+            ok, value = _call("info", doc_id=ref)
+            if not ok:
+                return f"photo info failed: {value['error']}"
+            lines = [f"photo {value.get('id', '')[:8]} — "
+                     f"{value.get('title') or 'untitled'}"]
+            for feat in value.get("features") or []:
+                parts = [f"  {feat.get('name')} — "
+                         f"{feat.get('kind')}"]
+                if feat.get("adjustment"):
+                    parts.append(
+                        f"adjustment {feat['adjustment']}")
+                if feat.get("fill"):
+                    parts.append(f"fill {feat['fill']}")
+                if feat.get("effects"):
+                    parts.append(
+                        "effects " + ", ".join(feat["effects"]))
+                if feat.get("text"):
+                    parts.append(f"text {feat['text']!r}")
+                if feat.get("smart_filters"):
+                    parts.append("smart " + ", ".join(
+                        feat["smart_filters"]))
+                lines.append(", ".join(parts))
+            return "\n".join(lines)
         if verb in ("render", "page"):
             if len(words) < 3:
                 return usage

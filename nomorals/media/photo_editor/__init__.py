@@ -10,6 +10,25 @@ The organ:
   harness (real PSDs, vendor composite as the truth).
 * :mod:`nomorals.media.photo_editor.store` — durable sessions.
 * :mod:`nomorals.media.photo_editor.page` — the Studio photo page.
+* :mod:`nomorals.media.photo_editor.compose` — the shared
+  compositor (layers, blends, masks, clipping, effects).
+* :mod:`nomorals.media.photo_editor.adjust` — all 15 adjustment
+  layers, parsed and evaluated.
+* :mod:`nomorals.media.photo_editor.blend` — the 27 Photoshop
+  blend modes.
+* :mod:`nomorals.media.photo_editor.effects` — layer effects
+  (bevel, stroke, glow, satin, shadow).
+* :mod:`nomorals.media.photo_editor.text` — TySh live text.
+* :mod:`nomorals.media.photo_editor.smart` — smart objects and
+  smart filters (FEid unfiltered pixels included).
+* :mod:`nomorals.media.photo_editor.fill` — solid/gradient/
+  pattern fill layers.
+* :mod:`nomorals.media.photo_editor.gradient` — the gradient
+  model (Catmull-Rom bake, Oklab/Linear/Classic/Smooth).
+* :mod:`nomorals.media.photo_editor.distance` — distance fields
+  for effects (Euclidean + chamfer).
+* :mod:`nomorals.media.photo_editor.descriptor` — the Photoshop
+  descriptor (OSType) parser.
 
 License basis (see the survey): PhotoCraft is dual MIT OR
 Apache-2.0 ("Copyright (c) 2026 ArtCraft Team and the PhotoCraft

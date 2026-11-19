@@ -168,11 +168,19 @@ class PhotoLayer:
     and an optional mask (bytes + rect, as the PSD carries it).
 
     ``kind`` is "pixels" for a real picture layer, "adjustment" /
-    "fill" for layers whose pixels are parameters (their effect is
-    not rendered in this build — see the notes), and
-    "group-start" / "group-end" for section markers. Non-pixel
+    "fill" for layers whose pixels are parameters, and
+    "group-start" / "group-end" for section markers. The parsed
+    features live on the layer too — ``adjustment`` (a parsed
+    adjustment dict), ``fill_spec``, ``effects``, ``text_spec``
+    (the TySh spec), ``smart`` (the SoLd/PlLd spec) — so the
+    tool and the page can describe what a layer IS, and the
+    flatten renders it through the shared compositor. Non-pixel
     layers keep their tagged blocks so a save writes them back
-    instead of silently dropping them."""
+    instead of silently dropping them.
+
+    ``dirty`` marks a layer the editor changed since load; a
+    document with no dirty layer writes back byte-identical to
+    the file it was opened from."""
 
     def __init__(self, name: str, left: int, top: int,
                  width: int, height: int, *,
@@ -183,7 +191,18 @@ class PhotoLayer:
                  mask_rect: tuple[int, int, int, int] | None = None,
                  layer_id: str = "",
                  kind: str = "pixels",
-                 raw_blocks: list[tuple[str, bytes]] | None = None
+                 raw_blocks: list[tuple[str, bytes]] | None = None,
+                 adjustment: dict | None = None,
+                 fill_spec: dict | None = None,
+                 effects: dict | None = None,
+                 text_spec: dict | None = None,
+                 smart: dict | None = None,
+                 fill_opacity: float = 1.0,
+                 mask_default: int = 255,
+                 mask_disabled: bool = False,
+                 advanced: dict | None = None,
+                 clipping: int = 0,
+                 dirty: bool = False,
                  ) -> None:
         self.id = layer_id or new_id()
         self.name = name
@@ -201,6 +220,30 @@ class PhotoLayer:
         self.kind = kind
         self.raw_blocks: list[tuple[str, bytes]] = list(
             raw_blocks or [])
+        self.adjustment = adjustment
+        self.fill_spec = fill_spec
+        self.effects = effects
+        self.text_spec = text_spec
+        self.smart = smart
+        self.fill_opacity = fill_opacity
+        self.mask_default = mask_default
+        self.mask_disabled = mask_disabled
+        self.advanced: dict = dict(advanced or {})
+        self.clipping = clipping
+        self.dirty = dirty
+        # Opacity/visibility changed only (no pixel edit) — the
+        # save can splice the source file instead of re-encoding.
+        self._state_dirty = False
+        # The source layer's native channel bytes (colour + alpha,
+        # in the document's mode), kept so an unedited layer writes
+        # back its original planes verbatim — a CMYK/Lab file
+        # round-trips exactly instead of through a lossy
+        # native -> RGB -> native conversion.
+        self._native_channels: dict | None = None
+        #: the source PSD layer record this layer came from
+        #: (None for a layer built in the editor) — the flatten
+        #: uses it for the FEid smart-filter mask.
+        self._record: Any | None = None
 
     @property
     def right(self) -> int:
@@ -230,7 +273,7 @@ class PhotoLayer:
             "L", (mw, mh), self.mask[:mw * mh])
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "id": self.id,
             "name": self.name,
             "kind": self.kind,
@@ -242,7 +285,24 @@ class PhotoLayer:
             "visible": self.visible,
             "blend": self.blend,
             "has_mask": self.mask is not None,
+            "dirty": self.dirty,
         }
+        if self.adjustment is not None:
+            out["adjustment"] = self.adjustment.get("kind")
+        if self.fill_spec is not None:
+            out["fill"] = self.fill_spec.get("kind")
+        if self.effects is not None:
+            out["effects"] = sorted(
+                k for k, v in self.effects.items()
+                if isinstance(v, dict) and v.get("present"))
+        if self.text_spec is not None:
+            out["text"] = self.text_spec.get("text", "")[:80]
+        if self.smart is not None:
+            filters = (self.smart.get("filters") or [])
+            out["smart_filters"] = [
+                f.get("name") for f in filters
+                if isinstance(f, dict)]
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +319,8 @@ class PhotoDocument:
 
     def __init__(self, width: int, height: int, *,
                  title: str = "",
-                 layers: list[PhotoLayer] | None = None) -> None:
+                 layers: list[PhotoLayer] | None = None,
+                 mode: str = "RGB", depth: int = 8) -> None:
         self.width = width
         self.height = height
         self.title = title
@@ -268,11 +329,27 @@ class PhotoDocument:
         self._undone: list[dict] = []
         self._snapshots: list[dict] = []
         self.notes: list[str] = []
+        #: the PSD colour mode / depth the document came from
+        #: (the compositor's mode + depth rules).
+        self.mode = mode
+        self.depth = depth
+        #: the exact bytes the document was opened from, when it
+        #: was opened from a PSD — a document with no dirty layer
+        #: and no structural change writes these back verbatim.
+        self._source_psd: bytes | None = None
+        #: the parsed source file (for the FEid smart-filter
+        #: cache and the stable writer).
+        self._psd: Any | None = None
+        #: set by a canvas op (crop) — the document's shape
+        #: changed, so no verbatim write-back is possible.
+        self._structure_dirty = False
 
     # -- open / save ----------------------------------------------------
     @classmethod
     def from_psd_bytes(cls, data: bytes,
                        title: str = "") -> PhotoDocument:
+        from .compose import describe_layer
+
         psd = PsdFile.from_bytes(data)
         layers: list[PhotoLayer] = []
         notes_flat = False
@@ -281,26 +358,53 @@ class PhotoDocument:
         # Adjustment, fill and group layers are kept as zero-size
         # layers of their kind (their tagged blocks ride along so
         # a save writes them back) — never silently dropped.
+        # The parsed features (adjustment / fill / effects / text
+        # / smart) are read off describe_layer's parse of the
+        # layer's own blocks, so the layer describes what it is.
         for record in psd.layers:
+            kind = "pixels"
+            if record.is_group_start or record.is_group_end:
+                kind = "group-start" if record.is_group_start \
+                    else "group-end"
+            elif record.is_adjustment:
+                kind = "adjustment"
+            elif record.is_fill:
+                kind = "fill"
+            parsed = describe_layer(
+                kind=kind, raw_blocks=record.raw_blocks,
+                name=record.display_name,
+                # No document size: the load only needs the
+                # PARSED features (adjustment / fill / effects /
+                # text / smart) — passing the size would render
+                # every text layer's glyphs here and throw them
+                # away; the flatten renders them when needed.
+                doc_width=0, doc_height=0)
             if record.is_group_start or record.is_group_end:
                 layers.append(PhotoLayer(
                     record.display_name, record.left, record.top,
                     record.width, record.height,
                     opacity=record.opacity, visible=record.visible,
-                    blend=record.blend_key,
-                    kind="group-start" if record.is_group_start
-                    else "group-end",
-                    raw_blocks=record.raw_blocks))
+                    blend=record.blend_key, kind=kind,
+                    raw_blocks=record.raw_blocks,
+                    clipping=record.clipping,
+                    effects=parsed.get("effects")))
+                layers[-1]._record = record
                 continue
             if record.is_adjustment or record.is_fill:
                 layers.append(PhotoLayer(
                     record.display_name, record.left, record.top,
                     record.width, record.height,
                     opacity=record.opacity, visible=record.visible,
-                    blend=record.blend_key,
-                    kind="adjustment" if record.is_adjustment
-                    else "fill",
-                    raw_blocks=record.raw_blocks))
+                    blend=record.blend_key, kind=kind,
+                    raw_blocks=record.raw_blocks,
+                    clipping=record.clipping,
+                    adjustment=parsed.get("adjustment"),
+                    fill_spec=parsed.get("fill_spec"),
+                    effects=parsed.get("effects"),
+                    mask=record.mask, mask_rect=record.mask_rect,
+                    mask_default=record.mask_default,
+                    mask_disabled=record.mask_disabled))
+                layers[-1]._record = record
                 continue
             if record.width == 0 or record.height == 0:
                 # A zero-size pixel layer (text on a path: its
@@ -313,7 +417,12 @@ class PhotoDocument:
                     0, 0, opacity=record.opacity,
                     visible=record.visible,
                     blend=record.blend_key,
-                    raw_blocks=record.raw_blocks))
+                    raw_blocks=record.raw_blocks,
+                    clipping=record.clipping,
+                    effects=parsed.get("effects"),
+                    text_spec=parsed.get("text"),
+                    smart=parsed.get("smart")))
+                layers[-1]._record = record
                 continue
             rgba = _layer_rgba(record, psd.mode)
             if rgba is None:
@@ -324,8 +433,16 @@ class PhotoDocument:
                 record.width, record.height,
                 opacity=record.opacity, visible=record.visible,
                 blend=record.blend_key, surface=surface,
+                clipping=record.clipping,
                 mask=record.mask, mask_rect=record.mask_rect,
-                raw_blocks=record.raw_blocks))
+                mask_default=record.mask_default,
+                mask_disabled=record.mask_disabled,
+                raw_blocks=record.raw_blocks,
+                effects=parsed.get("effects"),
+                text_spec=parsed.get("text"),
+                smart=parsed.get("smart")))
+            layers[-1]._native_channels = dict(record.channels)
+            layers[-1]._record = record
         if not layers:
             # A flat file (no layers at all — the 16/32-bit
             # corpus files, and any flattened PSD) opens as one
@@ -337,7 +454,10 @@ class PhotoDocument:
                 "Background", 0, 0, psd.width, psd.height,
                 surface=Surface.from_pil(flat)))
             notes_flat = True
-        doc = cls(psd.width, psd.height, title=title, layers=layers)
+        doc = cls(psd.width, psd.height, title=title, layers=layers,
+                  mode=psd.mode, depth=psd.depth)
+        doc._source_psd = bytes(data)
+        doc._psd = psd
         if notes_flat:
             doc.notes.append(
                 "flat image — opened as a single Background layer")
@@ -363,6 +483,29 @@ class PhotoDocument:
             data, title=title or p.stem)
 
     def to_psd_bytes(self) -> bytes:
+        """Write the document as PSD bytes. A document opened
+        from a PSD with no dirty layer and no structural change
+        writes back byte-identical to the file it was opened
+        from; a document whose only changes are layer opacity /
+        visibility splices the source file (clean layers verbatim,
+        changed layers re-encoded); anything else goes through
+        the encoder."""
+        if self._source_psd is not None \
+                and not self._structure_dirty \
+                and not any(layer.dirty or layer._state_dirty
+                            for layer in self.layers):
+            return self._source_psd
+        if self._psd is not None and not self._structure_dirty \
+                and not any(layer.dirty for layer in self.layers) \
+                and any(layer._state_dirty for layer in self.layers):
+            for layer in self.layers:
+                if not layer._state_dirty or layer._record is None:
+                    continue
+                record = layer._record
+                record.opacity = layer.opacity
+                record.flags = 0 if layer.visible else 0x02
+                record.dirty = True
+            return self._psd.to_bytes()
         return encode_psd(self)
 
     def save_psd(self, path: str | os.PathLike[str]) -> str:
@@ -391,6 +534,8 @@ class PhotoDocument:
                                      layer.surface.height),
                     "mask": layer.mask,
                     "mask_rect": layer.mask_rect,
+                    "dirty": layer.dirty,
+                    "state_dirty": layer._state_dirty,
                 }
                 for layer in self.layers
             ],
@@ -412,6 +557,8 @@ class PhotoDocument:
             layer.surface.restore(saved["tiles"])
             layer.mask = saved["mask"]
             layer.mask_rect = saved["mask_rect"]
+            layer.dirty = saved["dirty"]
+            layer._state_dirty = saved.get("state_dirty", False)
 
     def undo(self) -> dict | None:
         if not self.history:
@@ -464,6 +611,35 @@ class PhotoDocument:
         self._undone.clear()
         return entry
 
+    def set_layer_state(self, ref: str | int, *,
+                        visible: bool | None = None,
+                        opacity: int | None = None) -> dict:
+        """Toggle a layer's visibility / opacity, journaled like
+        an edit (undoable). ``ref`` is a layer index or name.
+        Opacity is 0..255. A state-only change writes back through
+        the source splice, not a full re-encode."""
+        if visible is None and opacity is None:
+            raise PhotoEditorError(
+                "layer state needs visible and/or opacity")
+        if opacity is not None and not 0 <= int(opacity) <= 255:
+            raise PhotoEditorError(
+                f"opacity {opacity!r} is outside 0..255")
+        params: dict[str, Any] = {"layer": ref}
+        if visible is not None:
+            params["visible"] = bool(visible)
+        if opacity is not None:
+            params["opacity"] = int(opacity)
+        entry = {"op": "layer", "params": params}
+        self._snapshots.append(self._take_snapshot())
+        try:
+            self._apply_layer_state(params)
+        except Exception:
+            self._snapshots.pop()
+            raise
+        self.history.append(entry)
+        self._undone.clear()
+        return entry
+
     def _apply(self, op: str, params: dict, *, record: bool) -> None:
         if op == "crop":
             self._apply_crop(params)
@@ -471,8 +647,32 @@ class PhotoDocument:
             self._apply_pixel("enhance", params)
         elif op == "develop":
             self._apply_pixel("develop", params)
+        elif op == "layer":
+            self._apply_layer_state(params)
         else:  # pragma: no cover - guarded by apply_edit
             raise PhotoEditorError(f"unknown photo edit {op!r}")
+
+    def _apply_layer_state(self, params: dict) -> None:
+        ref = params.get("layer")
+        target: PhotoLayer | None = None
+        if isinstance(ref, int) or (
+                isinstance(ref, str) and str(ref).isdigit()):
+            index = int(ref)
+            if 0 <= index < len(self.layers):
+                target = self.layers[index]
+        else:
+            name = str(ref).strip().lower()
+            for layer in self.layers:
+                if layer.name.lower() == name:
+                    target = layer
+                    break
+        if target is None:
+            raise PhotoEditorError(f"no layer {ref!r}")
+        if "visible" in params:
+            target.visible = bool(params["visible"])
+        if "opacity" in params:
+            target.opacity = int(params["opacity"])
+        target._state_dirty = True
 
     def _apply_crop(self, params: dict) -> None:
         box = params.get("box")
@@ -517,6 +717,11 @@ class PhotoDocument:
                     min(layer.mask_rect[3], right) - left)
         self.width = right - left
         self.height = bottom - top
+        # A crop changes the document's shape and every layer's
+        # geometry — no verbatim write-back is possible after it.
+        self._structure_dirty = True
+        for layer in self.layers:
+            layer.dirty = True
 
     def _apply_pixel(self, op: str, params: dict) -> None:
         index = params.get("layer")
@@ -551,41 +756,110 @@ class PhotoDocument:
             else:
                 out = develop_image(img, **clean)
         layer.surface.replace_with_pil(out)
+        layer.dirty = True
 
     # -- render -----------------------------------------------------------
     def flatten(self) -> Any:
-        """The composited document: layers bottom-up, normal blend,
-        opacity, visibility, masks."""
-        from PIL import Image
+        """The composited document through the shared numpy
+        compositor — the same render the PSD flatten runs:
+        blend modes, opacity, masks, clipping, groups,
+        adjustments, fills, effects, live text and smart
+        objects. A layerless document flattens to its merged
+        composite."""
 
-        canvas = Image.new("RGBA", (max(1, self.width),
-                                    max(1, self.height)),
-                           (0, 0, 0, 0))
+        from .blend import mode_name
+        from .compose import (
+            apply_mask,
+            composite_layers,
+            describe_layer,
+            mask_to_canvas,
+            pil_to_array,
+        )
+
+        if not self.layers:
+            from PIL import Image
+
+            if self._psd is not None:
+                return self._psd.composite_rgba()
+            return Image.new("RGBA", (max(1, self.width),
+                                      max(1, self.height)),
+                             (0, 0, 0, 0))
+        depth = {8: "u8", 16: "u16", 32: "f32"}.get(self.depth,
+                                                   "u8")
+        dicts: list[dict] = []
+        psd = self._psd
         for layer in self.layers:
-            if not layer.visible:
+            if layer.kind == "group-start":
+                dicts.append(describe_layer(
+                    kind="group-start",
+                    blend=mode_name(layer.blend),
+                    name=layer.name))
+                continue
+            if layer.kind == "group-end":
+                dicts.append(describe_layer(kind="group-end",
+                                            name=""))
+                continue
+            if layer.kind == "adjustment":
+                dicts.append(describe_layer(
+                    kind="adjustment",
+                    raw_blocks=layer.raw_blocks,
+                    name=layer.name, visible=layer.visible,
+                    opacity=layer.opacity,
+                    blend=mode_name(layer.blend),
+                    mask=mask_to_canvas(
+                        layer.mask, layer.mask_rect,
+                        self.width, self.height,
+                        mask_default=layer.mask_default,
+                        disabled=layer.mask_disabled)))
+                continue
+            if layer.kind == "fill":
+                dicts.append(describe_layer(
+                    kind="fill",
+                    raw_blocks=layer.raw_blocks,
+                    name=layer.name, visible=layer.visible,
+                    opacity=layer.opacity,
+                    blend=mode_name(layer.blend),
+                    mask=mask_to_canvas(
+                        layer.mask, layer.mask_rect,
+                        self.width, self.height,
+                        mask_default=layer.mask_default,
+                        disabled=layer.mask_disabled)))
                 continue
             if not layer.width or not layer.height:
-                continue
-            rgba = layer.to_pil()
-            if layer.opacity < 255:
-                alpha = rgba.split()[3].point(
-                    lambda v, o=layer.opacity: v * o // 255)
-                rgba.putalpha(alpha)
-            if layer.mask is not None:
-                mask_img = layer.mask_to_pil()
-                if mask_img.size != rgba.size:
-                    full = Image.new("L", rgba.size, 255)
-                    mtop, mleft, _, _ = layer.mask_rect or (0, 0, 0, 0)
-                    full.paste(mask_img,
-                               (mleft - layer.left,
-                                mtop - layer.top))
-                    mask_img = full
-                from PIL import ImageChops
-
-                rgba.putalpha(ImageChops.multiply(
-                    rgba.split()[3], mask_img))
-            canvas.alpha_composite(rgba, (layer.left, layer.top))
-        return canvas
+                # A zero-size layer has no raster of its own; a
+                # text layer still renders from its TySh spec.
+                if layer.text_spec is None:
+                    continue
+                rgba = None
+            else:
+                pil = layer.to_pil()
+                rgba = apply_mask(
+                    pil_to_array(pil), layer.mask,
+                    layer.mask_rect,
+                    (layer.top, layer.left, layer.bottom,
+                     layer.right),
+                    mask_default=layer.mask_default,
+                    disabled=layer.mask_disabled)
+                if psd is not None and layer._record is not None:
+                    # The stored pixels of a smart object are
+                    # the filtered render; the FEid mask blends
+                    # filtered/unfiltered at render time.
+                    rgba = psd._apply_feid(rgba, layer._record)
+            dicts.append(describe_layer(
+                rgba=rgba, left=layer.left, top=layer.top,
+                width=layer.width, height=layer.height,
+                opacity=layer.opacity,
+                blend=mode_name(layer.blend),
+                visible=layer.visible, kind="pixels",
+                name=layer.name, raw_blocks=layer.raw_blocks,
+                doc_width=self.width, doc_height=self.height))
+        result = composite_layers(dicts, self.width, self.height,
+                                  depth=depth, mode=self.mode)
+        self.notes = [n for n in self.notes
+                      if not n.startswith("unrendered: ")]
+        for line in result.unrendered:
+            self.notes.append(f"unrendered: {line}")
+        return result.image
 
     def render_png_bytes(self) -> bytes:
         buf = io.BytesIO()
