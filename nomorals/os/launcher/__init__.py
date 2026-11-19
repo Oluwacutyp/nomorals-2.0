@@ -20,6 +20,17 @@ from .journal import Journal
 from .package import build_package, read_package, verify_package
 from .parity import run_parity
 from .pipeline import LauncherPipeline, PipelineResult
+from .screenshots import (
+    SCREENSHOTS_REV,
+    SHOTS,
+    ScreenshotError,
+    check_use,
+    fetch_all,
+    prepare_picture,
+    read_manifest,
+    screenshot_url,
+    terms_for,
+)
 from .version import Version, is_newer, is_stable
 
 __all__ = [
@@ -30,18 +41,27 @@ __all__ = [
     "LauncherError",
     "LauncherPipeline",
     "PipelineResult",
+    "SCREENSHOTS_REV",
+    "SHOTS",
+    "ScreenshotError",
     "Source",
     "TrustError",
     "VerificationError",
     "Version",
     "VersionTrack",
     "build_package",
+    "check_use",
     "choose_version",
     "default_catalog",
+    "fetch_all",
     "is_newer",
     "is_stable",
+    "prepare_picture",
+    "read_manifest",
     "read_package",
     "run_parity",
+    "screenshot_url",
+    "terms_for",
     "verify_attribution",
     "verify_package",
 ]

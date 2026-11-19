@@ -94,6 +94,25 @@ derives_from = "lanes 99-111 habit: machine-checked parity TOML runner"
 file = "attribution.py"
 derives_from = "lanes 99-111 habit: SHA-256 attribution verifier"
 
+[[upstream]]
+file = "crates/core/src/details.rs"
+sha256 = "150a313edb04fec5ee3210d86c7122cfc6c5ef5368fbf8d5e1ae71156553f824"
+ported_to = "nomorals/os/launcher/screenshots.py"
+
+[[upstream]]
+file = "crates/native/src/screenshots.rs"
+sha256 = "6865a1f9e025f868cc8cef1ce6f4f4c09a54b2e85f1bfa290230387906ad7832"
+ported_to = "nomorals/os/launcher/screenshots.py"
+
+[[upstream]]
+file = "crates/native/src/paths.rs"
+sha256 = "8799ae4f61ca4e15419307bd2b9b58f74a480a9ed1f0fb77aa8b56cdbc9ad8ee"
+ported_to = "nomorals/os/launcher/screenshots.py"
+
+[[devon]]
+file = "screenshots.py"
+derives_from = "crates/core/src/details.rs URL shape + JPEG checks + budgets, crates/native/src/screenshots.rs fetch/cache semantics, crates/native/src/paths.rs cache layout; manifest + publish-side prepare are Devon's own"
+
 [[noted]]
 file = "craft_update crate (craft-libs, rev 4323a0f90e69e6e7a064607daacc25d081f58e1d)"
 reason = "upstream's self-update engine arrives as a git dependency and is not in the launcher clone, so no hash is claimed for it; the pipeline's swap/restart behaviour is ported from the launcher's own delegation in crates/native/src/self_update.rs"
