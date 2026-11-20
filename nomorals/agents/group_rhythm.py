@@ -335,6 +335,13 @@ def run_group_rhythm_tick_once(*, context: Any = None,
         if send is None:
             # Cannot deliver here: leave the cycle for the turn
             # path, which always has a live adapter for the room.
+            # video-defects 2026-11-19: this used to be a SILENT
+            # skip, so a tick with no live sender looked healthy
+            # while nothing ever posted on its own clock — record
+            # the failure with its reason in the summary instead.
+            summary["sender_error"] = (
+                "group rhythm tick has no live sender (no gateway "
+                "in context); every group left for the turn path")
             summary["skipped"] += 1
             continue
         if adapters is not None and adapter is None:

@@ -542,6 +542,34 @@ class RuntimeGroupMixin:
                 wait = (self._BOT_CLAIM_WAIT_S if bot_wait_s is None
                         else float(bot_wait_s))
                 chat_key = str(getattr(chat, "key", "") or "")
+                # Bot-first deferral (video-defects, 2026-11-19):
+                # the poll below reads the bot's CLAIM, but the bot's
+                # processing latency for the same message can exceed
+                # the 5s wait, so "bot slow" read as "bot absent" and
+                # the owner surface sent as the userbot. Check the
+                # bot's TICK MARKER first — a live marker in the
+                # current or previous 5-minute bucket, held by any
+                # surface but this runtime's own, means the bot's
+                # rhythm tick ran, so the bot is alive: HOLD even
+                # when no claim has landed yet. Only when the marker
+                # is absent (or held by this runtime, whose own tick
+                # only claims it after proving the bot down) for both
+                # buckets may the owner claim and send.
+                try:
+                    from ..group_rhythm import TICK_BUCKET_S
+                    probe = getattr(ledger, "claimed_by", None)
+                    if callable(probe) and own:
+                        bucket = int(time.time() // TICK_BUCKET_S)
+                        marker_key = group_key or chat_key
+                        for marker_bucket in (bucket, bucket - 1):
+                            marker = (
+                                "system:rhythm-tick:"
+                                f"{marker_key}:{marker_bucket}")
+                            holder = str(probe(marker) or "")
+                            if holder and holder != own:
+                                return False
+                except Exception:  # noqa: BLE001 - marker unreadable
+                    pass  # fall through to the claim poll below
                 absent_until = getattr(self, "_bot_absent_until",
                                        None)
                 if absent_until is None:

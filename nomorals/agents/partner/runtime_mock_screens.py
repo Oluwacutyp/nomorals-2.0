@@ -119,6 +119,55 @@ class RuntimeMockScreensMixin:
                 msg.media = path
         return ""
 
+    def _mock_usage_text(self, message) -> str:  # type: ignore[no-untyped-def]
+        """The /mock usage as a composed menu card (video-defects,
+        2026-11-19): the raw USAGE string was a giant plain wall.
+        The card carries the same routes, sectioned — screen demos,
+        bulk, fake data, build one — through the designed renderer.
+        """
+        from ...social.chat.typography import Card, render_card
+        platform = (
+            getattr(getattr(message, "chat", None), "platform", None)
+            or "telegram-bot")
+        card = Card("menu", title="Mock screens — how to build one",
+                    icon="📱")
+        card.line("pick a route below — or say what you want in "
+                  "plain words.")
+        card.block_lines(
+            ["demo whatsapp — one built-in demo screen",
+             "demo whatsapp-list · whatsapp-calls · "
+             "whatsapp-status-list",
+             "demo instagram-list · telegram-list · snapchat-list",
+             "demo whatsapp-status · whatsapp-status-text · "
+             "whatsapp-status-views",
+             "demo call · call-incoming · whatsapp-call · "
+             "facebook-call · instagram-call",
+             "demo facebook-post · instagram-post · threads-post · "
+             "x-tweet · tiktok-post",
+             "demo youtube-video · youtube-channel · instagram-story"],
+            title="🎬 Screen demos")
+        card.block_lines(
+            ["demo bulk-list whatsapp 12 [seed N] [flavor chats] "
+             "[iphone|android] [dark]",
+             "demo bulk-calls · bulk-status-list · bulk-history",
+             "demo bulk-chat whatsapp 12 [group] · bulk-views"],
+            title="📚 Bulk demos")
+        card.block_lines(
+            ["/mock data identity 3 — names, phones, emails, addresses",
+             "/mock data creative whatsapp 2 — seeded demo identities",
+             "/mock data … json | csv | xml | text"],
+            title="🧪 Fake data")
+        card.block_lines(
+            ["whatsapp [iphone|android] [with <Name>] me: hi ;; "
+             "Adaeze: hello",
+             "families: whatsapp · telegram · messenger · snapchat · "
+             "imessage · sms · instagram (add -group)",
+             "me: [photo] uses an image attached to your message",
+             "me: [voice] a voice note with its real waveform"],
+            title="🛠 Build one")
+        card.note("/mock demo whatsapp — the fastest way in")
+        return render_card(card, platform=platform).text
+
     def _control_mock(self, kind: str, tail: str,
                       message=None) -> str:  # type: ignore[no-untyped-def]
         """One /mock command: author a screen, render it,
@@ -136,7 +185,7 @@ class RuntimeMockScreensMixin:
 
         tail = str(tail or "").strip()
         if not tail:
-            return USAGE
+            return self._mock_usage_text(message)
         if message is None:
             return ("usage: /mock in a chat — the screen "
                     "needs somewhere to land.")
@@ -155,6 +204,11 @@ class RuntimeMockScreensMixin:
         try:
             screen, mode = parse_mock_tail(tail)
         except MockScreensError as exc:
+            # A usage-shaped failure renders the same composed card
+            # as the empty tail (video-defects, 2026-11-19); any other
+            # mock error keeps its own text.
+            if str(exc) == USAGE:
+                return self._mock_usage_text(message)
             return str(exc)
         service = self._mock_screens_service()
         audience = self._makers_audience(message)

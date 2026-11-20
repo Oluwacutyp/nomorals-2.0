@@ -356,7 +356,12 @@ def test_command_is_owner_gated(tmp_path):
 def test_command_answers_usage_without_a_tail(tmp_path):
     runtime = _Runtime(tmp_path)
     reply = runtime._control_mock("mock", "", _message())
-    assert reply.startswith("usage: /mock")
+    # The usage is a composed menu card now, not a dumped block
+    # (video-defects, 2026-11-19): sections, not a wall — pin the
+    # shape, not the words.
+    assert "Mock screens" in reply
+    assert "/mock demo whatsapp" in reply
+    assert "/mock data" in reply
 
 
 # ── registry ─────────────────────────────────────────────

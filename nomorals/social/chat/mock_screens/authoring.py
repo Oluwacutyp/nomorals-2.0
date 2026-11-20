@@ -1533,6 +1533,16 @@ def parse_mock_tail(tail: str) -> tuple:
         raise MockScreensError(USAGE)
     platform, group = _PLATFORMS[head]
     rest = words[1] if len(words) > 1 else ""
+    # Bare family ("/mock WhatsApp", "/mock whatsapp iphone"): the
+    # obvious intent is that family's demo screen, not the usage wall
+    # (video-defects, 2026-11-19). Only when the tail carries no
+    # script at all — a ":" means the built form follows, and any
+    # non-style word falls through to it the same way.
+    if ":" not in rest and ";;" not in rest:
+        opts = rest.lower().split()
+        if all(w in ("iphone", "android", "dark") for w in opts):
+            style = "iphone" if "iphone" in opts else "android"
+            return demo_screen(head, style, dark="dark" in opts), "demo"
     style = "android"
     dark = False
     title = ""

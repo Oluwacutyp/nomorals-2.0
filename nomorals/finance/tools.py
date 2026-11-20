@@ -369,6 +369,37 @@ def register(registry: Any) -> None:
         override_warning: bool = False,
     ) -> dict[str, Any]:
         from .send import send_money
+        # video-defects 2026-11-19: the brain's tool loop gives the
+        # LLM the full registry with no per-tool intent check, so a
+        # stray finance_send call with an empty recipient (the LLM
+        # inventing a transfer after an unrelated turn — "/play cheap
+        # thrills" — with a hallucinated amount) reached
+        # resolve_recipient's slot-fill ask "who should I send it
+        # to?" in a 1:1 DM. A transfer executes only when the turn
+        # carries money intent (the turn text parses as a transfer
+        # via the shared voice-money parser, which never guesses) OR
+        # the args are complete (both to and amount — preserves
+        # legitimate slot-fill continuations, e.g. "send 5k" → ask
+        # for the recipient, and direct non-brain callers). Anything
+        # else is a structured refusal, never a question.
+        if not str(to or "").strip():
+            turn_text = ""
+            if isinstance(context, dict):
+                turn_text = str(context.get("turn_text", "") or "")
+            intent = None
+            try:
+                from ..voice.money import parse_voice_money
+                intent = parse_voice_money(turn_text)
+            except Exception:  # noqa: BLE001 - unparseable: refuse
+                intent = None
+            if intent is None or getattr(intent, "kind", None) != "transfer":
+                return {
+                    "ok": False,
+                    "error": (
+                        "No money transfer was requested in this "
+                        "turn, so nothing was sent."
+                    ),
+                }
         return send_money(to, amount, note=note, context=context,
                           override_warning=bool(override_warning))
 

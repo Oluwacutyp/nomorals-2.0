@@ -239,6 +239,85 @@ def _parts_from_tool_loop_result(result: Any, *, is_owner: bool) -> list[str]:
     return parts
 
 
+_LOOP_STOPWORDS = frozenset({
+    "the", "a", "an", "any", "working", "proper", "real", "good",
+    "own", "such", "that", "this", "my", "your", "his", "her", "its",
+    "our", "their", "able", "to", "do", "have", "has", "had", "not",
+    "no", "tool", "tools", "capability", "capabilities", "feature",
+    "function", "functionality", "way", "means", "ability", "right",
+    "suitable", "appropriate", "needed", "necessary", "required",
+    "use", "used", "using", "available", "access", "built", "in",
+    "on", "at", "for", "of", "and", "or", "but", "so", "yet", "with",
+    "without", "here", "there", "currently", "still", "even", "just",
+    "only", "really", "actually", "direct", "native",
+})
+
+
+def _loop_claims_missing_tool(text: str, registry: Any) -> bool:
+    """True when ``text`` claims a tool/capability is missing that the
+    LIVE registry actually has (video-defects, 2026-11-19): the digest
+    curator folds the LLM's own loop texts in without validating
+    capability claims, so a stale refusal ("I don't have an image
+    generation tool") was re-reported even though ``image_generate``
+    and ``artist`` are registered. A loop that claims a missing tool
+    is dropped at store time and at feed time when any capability
+    word in the claim matches a registered tool's name token, or the
+    whole capability phrase appears in a tool's description. Vague
+    claims ("I don't have the right tool for this") match nothing
+    and are kept — the filter only drops what the registry proves
+    wrong. Fails safe: no registry, no claim, or no match → False.
+    """
+    if not text or registry is None:
+        return False
+    low = str(text).lower()
+    match = re.search(
+        r"(?:don't|do not|doesn't|does not|can't|cannot|haven't|have not)"
+        r"\s+(?:have|do|offer|support|got)\b[^.;\n]{0,60}?\btool\b"
+        r"|\b(?:no|lack|lacking|missing|without)\b[^.;\n]{0,60}?\btool\b",
+        low)
+    capability = ""
+    if match is not None:
+        span = match.group(0)
+        span = re.sub(
+            r"^(?:don't|do not|doesn't|does not|can't|cannot|haven't|have not)"
+            r"\s+(?:have|do|offer|support|got)\b", "", span)
+        span = re.sub(r"^(?:no|lack|lacking|missing|without)\b", "", span)
+        span = re.sub(r"\btools?\b\s*$", "", span)
+        capability = span
+    if not capability.strip():
+        # "tool for X" shape — the capability follows the word tool.
+        after = re.search(r"\btools?\s+(?:for|of)\s+([a-z][a-z ]{2,40})",
+                          low)
+        if after is not None:
+            capability = after.group(1)
+    words = [w for w in re.findall(r"[a-z][a-z\-]{2,}", capability)
+             if w not in _LOOP_STOPWORDS]
+    if not words:
+        return False
+    phrase = " ".join(words)
+
+    def _loop_stem(word: str) -> str:
+        return word[:-1] if word.endswith("s") and not word.endswith("ss") else word
+
+    try:
+        names = registry.names()
+    except Exception:  # noqa: BLE001 - no registry read: keep the loop
+        return False
+    for name in names or []:
+        tokens = {_loop_stem(tok) for tok in str(name or "").lower().split("_")
+                  if tok}
+        if any(_loop_stem(w) in tokens for w in words):
+            return True
+        try:
+            spec = registry.get(name)
+            desc = str(getattr(spec, "description", "") or "").lower()
+        except Exception:  # noqa: BLE001 - one bad spec: skip it
+            desc = ""
+        if phrase and phrase in desc:
+            return True
+    return False
+
+
 class PartnerBrain:
     """All the cognition. The runtime calls :meth:`handle_message` per message."""
 
@@ -810,6 +889,11 @@ class PartnerBrain:
             # re-applying. Empty when the adapter supplied no id — the
             # loop then runs unkeyed rather than inventing one.
             "message_id": str(getattr(message, "message_id", "") or ""),
+            # The turn's own text, so a tool that must only fire on
+            # a matching intent (finance_send) can check what the
+            # owner actually asked — the LLM's args alone are not
+            # evidence of intent (video-defects, 2026-11-19).
+            "turn_text": message.text or "",
         }
         result = loop.run(
             message.text or "",
@@ -1408,7 +1492,11 @@ class PartnerBrain:
             for loop in fresh[-3:]:
                     platform = loop.get("platform", "somewhere")
                     text = str(loop.get("text", "")).strip()
-                    if text:
+                    # A loop claiming a missing tool the live registry
+                    # actually has is a stale refusal, not an open
+                    # thread — never feed it back (video-defects).
+                    if text and not _loop_claims_missing_tool(
+                            text, getattr(self.context, "tools", None)):
                         lines.append(f"open thread from {platform}: {text[:90]}")
         except Exception as e:
             record_failure("brain.PartnerBrain._continuity_lines:993", e)
@@ -1664,6 +1752,12 @@ class PartnerBrain:
             if not isinstance(text, str) or not text.strip():
                 continue
             text = text.strip()[:140]
+            # A loop claiming a missing tool the live registry
+            # actually has is a stale refusal, not an open thread —
+            # never store it (video-defects, 2026-11-19).
+            if _loop_claims_missing_tool(
+                    text, getattr(self.context, "tools", None)):
+                continue
             for loop in fresh:
                 if str(loop.get("text", "")).lower() == text.lower():
                     loop["ts"] = now

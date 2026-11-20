@@ -2230,7 +2230,20 @@ class PartnerRuntime(
                     # when the deferral was never registered — handle
                     # it here instead of vanishing. Treat the verdict
                     # as "handle" so the stand-down below does not
-                    # swallow it.
+                    # swallow it. EXCEPT in an identified peer bot's
+                    # DM (video-defects, 2026-11-19): the peer IS
+                    # the DM's other participant and its own intake
+                    # handles the command — handling here as well is
+                    # the double the owner screenshotted, so the
+                    # verdict stands down instead.
+                    if self._peer_dm_owns_command(message):
+                        _log.warning(
+                            "command /%s in %s is unkeyable — "
+                            "deferral refused, but the peer owns "
+                            "this DM — standing down without "
+                            "handling", command.kind,
+                            message.chat.key)
+                        return
                     _log.warning(
                         "command /%s in %s is unkeyable — deferral "
                         "refused, handling at once instead of "
@@ -2651,7 +2664,20 @@ class PartnerRuntime(
                     # safely. A "defer" verdict is NOT a stand-down
                     # when the deferral was never registered — fall
                     # through to _run_control_command below instead
-                    # of vanishing.
+                    # of vanishing. EXCEPT in an identified peer
+                    # bot's DM (video-defects, 2026-11-19): the peer
+                    # IS the DM's other participant and its own
+                    # intake handles the command — handling here as
+                    # well is the double the owner screenshotted, so
+                    # the verdict stands down instead.
+                    if self._peer_dm_owns_command(message):
+                        _log.warning(
+                            "command /%s in %s is unkeyable — "
+                            "deferral refused, but the peer owns "
+                            "this DM — standing down without "
+                            "handling", _parsed.kind,
+                            message.chat.key)
+                        return
                     _log.warning(
                         "command /%s in %s is unkeyable — deferral "
                         "refused, handling at once instead of "
@@ -6388,6 +6414,12 @@ class PartnerRuntime(
             return peer
         if peer in self._bot_account_ids():
             return peer
+        # Sibling adapters (video-defects, 2026-11-19): the bot
+        # adapter attached to THIS gateway owns the peer id even
+        # when the companion/registry seeding has missed — the
+        # registry is a cache of a live fact, not the fact itself.
+        if self._sibling_bot_owns(peer):
+            return peer
         return None
 
     def _sibling_bot_owns(self, peer_id: str) -> bool:
@@ -6401,6 +6433,20 @@ class PartnerRuntime(
             if bot_id is not None and str(bot_id) == str(peer_id):
                 return True
         return False
+
+    def _peer_dm_owns_command(self, message) -> bool:  # type: ignore[no-untyped-def]
+        """True when a deferred command belongs to an identified peer
+        bot's DM, so an unkeyable deferral stands down instead of
+        handling (video-defects, 2026-11-19): the peer IS the DM's
+        other participant and its own intake handles the command —
+        handling here as well is the double the owner screenshotted.
+        A "defer" verdict on any other surface keeps the old
+        fall-through to handle (the command could vanish with no
+        sibling to take it)."""
+        try:
+            return self._peer_bot_dm(message) is not None
+        except Exception:  # noqa: BLE001 - unproven: do not stand down
+            return False
 
     def _is_peer_dm_sender(self, message) -> bool:  # type: ignore[no-untyped-def]
         """True when a DM message's sender is the peer surface,
