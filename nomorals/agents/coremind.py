@@ -217,6 +217,9 @@ GAME_ALIASES: dict[str, str] = {
     "connect4": "connect4",
     "battleship": "battleship",
     "sea battle": "battleship",
+    # arcade (§3C.5 laser-asteroids): the laser projector game
+    "laser asteroids": "laser",
+    "laser": "laser",
     # casino
     "blackjack": "blackjack",
     "roulette": "roulette",
@@ -246,7 +249,7 @@ COMMAND_STARTABLE = [
     # wild / arcade / casino / inbox — every engine game is NL-startable
     # in the owner's DM (wave F2)
     "poker", "ttt", "bulls", "craps", "memory", "mines", "wordle",
-    "2048", "snake", "connect4", "battleship",
+    "2048", "snake", "connect4", "battleship", "laser",
     "blackjack", "roulette", "slots",
     "gomoku", "reversi", "checkers",
     # puzzles (gamesbooks-1.0)

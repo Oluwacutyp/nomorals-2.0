@@ -146,6 +146,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "show": [],
     "vtuber": ["vt"],
     "smarthome": ["smh"],
+    "game": [],
     "audio": ["au"],
     "weather": ["wx"],
     "workspace": ["ws"],
@@ -4029,6 +4030,32 @@ def _parser() -> argparse.ArgumentParser:
                            help="device id or friendly name")
     sm_bright.add_argument("--value", type=int, default=None,
                            help="brightness percent 0-100")
+
+    game = sub.add_parser("game", aliases=CLI_ALIASES["game"],
+        help="Play the engine games — list, start, move, state, quit, render",
+        description=("nm game list\n"
+                     "nm game start <name>\n"
+                     "nm game move <text...>\n"
+                     "nm game state\n"
+                     "nm game quit\n"
+                     "nm game render [--png PATH]\n"
+                     "The same rooms the chat games play (local:cli), so a "
+                     "game started here can be continued in chat."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    game.add_argument("--json", action="store_true",
+                      help="Output as JSON")
+    game_sub = game.add_subparsers(dest="game_action", required=True)
+    game_sub.add_parser("list", help="list the playable games")
+    g_start = game_sub.add_parser("start", help="start a game")
+    g_start.add_argument("game_name", help="game name, e.g. laser")
+    g_move = game_sub.add_parser("move", help="play a move")
+    g_move.add_argument("game_move", nargs="+", help="move text, e.g. fire")
+    game_sub.add_parser("state", help="show the live table")
+    game_sub.add_parser("quit", help="leave the live game")
+    g_render = game_sub.add_parser("render", help="show the live board")
+    g_render.add_argument("--png", default="",
+                          help="also save one frame as a PNG (laser only)")
 
     inbox = sub.add_parser("inbox", aliases=CLI_ALIASES["inbox"],
         help="Drop-in inbox: drop a file, link, or note — Devon acts",

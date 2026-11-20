@@ -206,7 +206,7 @@ SURFACES: tuple[Surface, ...] = (
             "font library — her stocked typefaces",
             "chat & privacy — your chats · your accounts",
             "memory & thinking",
-            "games — 41, DM + group, start them directly",
+            "games — 45, DM + group, start them directly",
             "voice & vision",
             "tools & automation",
             "platform control — updates & restarts",

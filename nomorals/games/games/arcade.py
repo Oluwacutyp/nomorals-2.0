@@ -17,6 +17,7 @@ from ..ai import GameMind, battleship_shot, connect4_move
 from ..players import Player
 from .base import (DIFFICULTY_LEVELS, MultiGame, Room,
                    normalize_difficulty)
+from .laser import LaserAsteroidsGame
 
 __all__ = ["ARCADE_GAMES"]
 
@@ -611,4 +612,5 @@ ARCADE_GAMES: tuple[MultiGame, ...] = (
     SnakeGame(),
     ConnectFourGame(),
     BattleshipGame(),
+    LaserAsteroidsGame(),
 )

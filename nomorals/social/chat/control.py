@@ -129,6 +129,8 @@ GAME_COMMANDS = (
     "poker", "ttt", "bulls", "craps", "memory", "mines", "wordle",
     # arcade (wave 97)
     "2048", "snake", "connect4", "battleship",
+    # arcade (§3C.5 laser-asteroids)
+    "laser",
     # casino (wave 98)
     "blackjack", "roulette", "slots",
     # inbox (wave F2): async, one message per turn, no clock
@@ -535,6 +537,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "memory": (0, 0), "mines": (0, 0), "wordle": (0, 0),
     # arcade (wave 97)
     "2048": (0, 0), "snake": (0, 0), "connect4": (0, 0), "battleship": (0, 0),
+    "laser": (0, 0),
     # casino (wave 98)
     "blackjack": (0, 1), "roulette": (0, 0), "slots": (0, 1),  # optional bet arg — /slots <amount> quick-starts (bet + first spin in one command); /blackjack <amount> deals at that stake
     # inbox (wave F2): async, one message per turn, no clock
@@ -1192,7 +1195,7 @@ _HELP_TEXT = "\n".join(
         "  /subscriptions [list | upcoming [days] | used <merchant> [YYYY-MM-DD] | cancel <merchant>]   detected subscriptions, renewals, unused flags, draft cancel notes",
         "  /backup status | verify                backup health (read-only; runs need the vault, stay scheduled)",
         "  — expansion —",
-        "  /game [list|<name>|quit]                41 games (DM + group): /game list",
+        "  /game [list|<name>|quit]                43 games (DM + group): /game list",
         "  /hangman /mafia /rpg /trivia /spy /wordchain /duel\n"
         "   /king /story /case /world /escape /political /auction\n"
         "   /shop /wyrr /two_truths /numberguess   start any of the 41 (every chat)",
@@ -1736,7 +1739,7 @@ _MENU_SECTION_ORDER: list[tuple[str, str]] = [
     ("media system — music · playback · video · podcast", "media"),
     ("search & research", "search"),
     ("wisdom keeper — corpus · history · practice", "wisdom"),
-    ("games — 41, DM + group, start them directly", "games"),
+    ("games — 45, DM + group, start them directly", "games"),
     ("memory & thinking", "memory"),
     ("building for real — code & missions", "build"),
     ("tools & automation", "tools"),
@@ -2758,7 +2761,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "identity": {"what": "the profile bank for signups: your name/email/phone stored once, used by account creation flows.",
               "usage": "/identity [show|set <name|email|phone> <value>|clear]",
               "example": "/identity set name Death", "related": "/trial"},
-    "game": {"what": "the social game engine — 41 games across DM, group and "
+    "game": {"what": "the social game engine — 45 games across DM, group and "
                      "channel, with a shared economy, items and leaderboards. "
                      "Works for every participant in every chat; in a group a "
                      "new player is seated the moment they speak.",
@@ -5078,7 +5081,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "benchmark", "redteam", "review", "representations", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion", "immune", "impossible", "scene", "board", "photo", "extensions", "wiki", "filmcraft", "effect", "artist", "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "family", "show", "life", "prefs", "presence", "publicface"]),
     ("money & spending", ["spend", "budget", "spending", "mandate",
                           "balances", "goal", "goals", "careers", "recruit", "ticket", "triage", "ideas", "insights", "subscriptions", "recurring", "trade", "import", "alert"]),
-    ("games — 41, DM + group, start them directly",
+    ("games — 45, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
       "wordchain", "hangman", "numberguess", "two_truths", "wyrr",
@@ -5413,7 +5416,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
       "review", "representations", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion",
       "immune", "impossible", "scene", "board", "photo", "extensions", "wiki", "filmcraft", "effect", "artist", "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "family", "show", "life", "prefs", "presence", "publicface"]),
-    ("games — 41, DM + group, start them directly",
+    ("games — 45, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
       "wordchain", "hangman", "numberguess", "two_truths", "wyrr",
@@ -5469,7 +5472,7 @@ _GROUP_EMOJI = {
     "media system — music · playback · video · podcast": "🎬",
     "anime — lookup · schedules · pictures": "🎌",
     "memory & thinking": "🧠",
-    "games — 41, DM + group, start them directly": "🎮",
+    "games — 45, DM + group, start them directly": "🎮",
     "voice & vision": "🎙️",
     "tools & automation": "⚙️",
     "platform control — updates & restarts": "🔄",
@@ -5507,8 +5510,8 @@ _LIST_GROUP_ALIASES = {
     "music": "media system — music · playback · video · podcast",
     "audio": "media system — music · playback · video · podcast",
     "wisdom": "wisdom keeper — corpus · history · practice",
-    "games": "games — 41, DM + group, start them directly",
-    "predict": "games — 41, DM + group, start them directly",
+    "games": "games — 45, DM + group, start them directly",
+    "predict": "games — 45, DM + group, start them directly",
     "discovery": "discovery",
 }
 
@@ -5781,7 +5784,7 @@ LIST_ONELINERS: dict[str, str] = {
     "party": "group parties: /party new <title> | start | request | vote | trivia | wall | end (+ quick)",
     "ajo": "rotating savings circles: /ajo new <amount> <name> | join | pay | payout | balance",
     "panel": "persistent live-data panels: track fitness, finance, … and ask questions",
-    "game": "the social game engine — 41 games, DM + group + channel, with economy and leaderboards",
+    "game": "the social game engine — 45 games, DM + group + channel, with economy and leaderboards",
     "math": "math class — adaptive maths problems, duels, streaks, leaderboard",
     "skill": "learnable battle skills — martial arts for the arena (/skill learn <name>, /skill combos)",
     "title": "earnable titles — flair with battle buffs (/title set <name>)",

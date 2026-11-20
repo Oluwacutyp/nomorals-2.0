@@ -70,7 +70,8 @@ class GomokuPlayTests(unittest.TestCase):
         return room
 
     def test_counts(self):
-        self.assertEqual(len(self.engine.games), 44)
+        # 45 after §3C.5 registered the laser-asteroids game.
+        self.assertEqual(len(self.engine.games), 45)
 
     def test_move_and_house_replies(self):
         room = self._start()
@@ -494,7 +495,8 @@ class QuitClearsEveryGameTests(unittest.TestCase):
     def test_registry_count(self):
         engine, _db, _sent = make_engine()
         try:
-            self.assertEqual(len(engine.games), 44)
+            # 45 after §3C.5 registered the laser-asteroids game.
+            self.assertEqual(len(engine.games), 45)
         finally:
             engine.shutdown()
 

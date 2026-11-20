@@ -28,7 +28,7 @@ FEATURES: dict[str, tuple[bool, str]] = {
     "search": (True, "web research: /search, /searchdeep, /searchleads + the web_research tool"),
     "research": (True, "always-on research & suggestions (lifestyle / tech / cyber domains)"),
     "news": (True, "news sub-agent: fetch feeds, summarize, deliver digests"),
-    "games": (True, "the social game engine: /game — 41 games across DM, group "
+    "games": (True, "the social game engine: /game — 45 games across DM, group "
                     "and channel, with a shared economy, items and leaderboards"),
     "notifier": (True, "deliver alerts (arena builds, research, news, tasks) to your chats"),
     "voice": (True, "voice-note ping-pong: transcribe inbound voice notes, reply with voice"),
