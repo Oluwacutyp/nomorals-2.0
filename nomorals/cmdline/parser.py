@@ -143,6 +143,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "scene": ["sc"],
     "sceneproject": ["sproj"],
     "show": [],
+    "vtuber": ["vt"],
     "audio": ["au"],
     "weather": ["wx"],
     "workspace": ["ws"],
@@ -3576,6 +3577,74 @@ def _parser() -> argparse.ArgumentParser:
                  show_export, show_attach_rig, show_attach_cc,
                  show_load_take, show_create,
                  show_sub.choices["drop"]):
+        _sub.add_argument("--session", default="default",
+                          help="show name (default 'default')")
+
+    vtuber = sub.add_parser("vtuber", aliases=CLI_ALIASES["vtuber"],
+        help="a scripted character performance on a stage",
+        description=("nm vtuber character [<path.json>] [--name NAME]\\n"
+                     "nm vtuber act [<path.vtact.json>] [--name NAME]\\n"
+                     "nm vtuber perform [--session NAME] --act NAME "
+                     "--character NAME\\n"
+                     "nm vtuber cue [--session NAME] --kind say|expression|"
+                     "gesture|camera --value VALUE [--duration SECONDS]\\n"
+                     "nm vtuber live [--session NAME] --receiver NAME | "
+                     "--detach\\n"
+                     "nm vtuber status [--session NAME]\\n"
+                     "nm vtuber tick [--session NAME]\\n"
+                     "nm vtuber stop [--session NAME]\\n"
+                     "nm vtuber list\\n"
+                     "nm vtuber drop [--session NAME]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    vtuber.add_argument("--json", action="store_true",
+                        help="Output as JSON")
+    vtuber_sub = vtuber.add_subparsers(dest="vtuber_action",
+                                       required=True)
+    vtuber_character = vtuber_sub.add_parser(
+        "character", help="load a character JSON (or list them)")
+    vtuber_character.add_argument("path", nargs="?", default="",
+                                  help="character JSON path")
+    vtuber_character.add_argument("--name", default="",
+                                  help="load name (default: file name)")
+    vtuber_act = vtuber_sub.add_parser(
+        "act", help="load a .vtact.json act (or list them)")
+    vtuber_act.add_argument("path", nargs="?", default="",
+                            help="act .vtact.json path")
+    vtuber_act.add_argument("--name", default="",
+                            help="load name (default: file name)")
+    vtuber_perform = vtuber_sub.add_parser(
+        "perform", help="attach an act to a show and start it")
+    vtuber_perform.add_argument("--act", default="",
+                                help="act name")
+    vtuber_perform.add_argument("--character", default="",
+                                help="character name")
+    vtuber_cue = vtuber_sub.add_parser(
+        "cue", help="an audience cue into a running show")
+    vtuber_cue.add_argument("--kind", default="",
+                            choices=("", "say", "expression",
+                                    "gesture", "camera"),
+                            help="cue kind")
+    vtuber_cue.add_argument("--value", default="",
+                            help="what the cue says / names")
+    vtuber_cue.add_argument("--duration", type=float, default=0.0,
+                            help="seconds (default: natural)")
+    vtuber_live = vtuber_sub.add_parser(
+        "live", help="attach a live MVN receiver (or detach it)")
+    vtuber_live.add_argument("--receiver", default="",
+                             help="MVN receiver session name")
+    vtuber_live.add_argument("--detach", action="store_true",
+                             help="detach the live receiver")
+    vtuber_sub.add_parser("status", help="one show's performance")
+    vtuber_sub.add_parser("tick", help="one schedule step")
+    vtuber_sub.add_parser("stop", help="detach the act, stop the show")
+    vtuber_sub.add_parser("list", help="characters, acts, shows")
+    vtuber_sub.add_parser("drop", help="stop and drop a show")
+    for _sub in (vtuber_sub.choices["status"],
+                 vtuber_sub.choices["tick"],
+                 vtuber_sub.choices["stop"],
+                 vtuber_perform, vtuber_cue, vtuber_live,
+                 vtuber_sub.choices["drop"]):
         _sub.add_argument("--session", default="default",
                           help="show name (default 'default')")
 

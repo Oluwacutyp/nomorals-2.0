@@ -12608,6 +12608,9 @@ class PartnerRuntime(
         if kind == "facemesh":
             return self._control_facemesh(command.tail, chat_key,
                                           message=message)
+        if kind == "vtuber":
+            return self._control_vtuber(command.tail, chat_key,
+                                        message=message)
         if kind == "live":
             return self._control_live(command.tail, chat_key,
                                       message=message)

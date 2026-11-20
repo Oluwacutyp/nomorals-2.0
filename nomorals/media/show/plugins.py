@@ -47,6 +47,10 @@ def _play_take(show: Any) -> None:
     take = show.take
     if take is None:
         return
+    if getattr(show, "_hold_take", False):
+        # A live capture source owns the skeleton channel — the
+        # recorded take holds, it never fights the live stream.
+        return
     frame = take.next()
     if frame is None:
         if not show._take_finished_noted:
@@ -116,7 +120,8 @@ def _read_face(show: Any) -> tuple[Any, dict[str, Any], bool]:
     means no face — a show without a face take drives exactly
     as before. A malformed payload is refused by name (the
     tick's system-error handling records it, it never kills
-    the show)."""
+    the show). A frame may also carry ``text`` — a line the
+    rig's text→viseme path speaks (a VTuber act's say beat)."""
     try:
         view = show.store.read("face")
     except MocapError:
@@ -129,13 +134,17 @@ def _read_face(show: Any) -> tuple[Any, dict[str, Any], bool]:
             kind="bad_face")
     blend = payload.get("blendshapes")
     bones = payload.get("bones")
-    if blend is None and bones is None:
+    text = payload.get("text")
+    if blend is None and bones is None and text is None:
         return None, {}, bool(view.get("stale", False))
     face = None
-    if isinstance(blend, dict):
-        face = FaceInput(blendshapes={
-            str(name): float(value)
-            for name, value in blend.items()})
+    if isinstance(blend, dict) or isinstance(text, str):
+        face = FaceInput(
+            blendshapes={
+                str(name): float(value)
+                for name, value in blend.items()}
+            if isinstance(blend, dict) else None,
+            text=(text if isinstance(text, str) else None))
     face_bones: dict[str, tuple[float, float, float]] = {}
     if isinstance(bones, dict):
         for name, values in bones.items():

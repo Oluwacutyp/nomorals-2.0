@@ -300,7 +300,7 @@ class RealRepoTests(unittest.TestCase):
         missing = old_runs - new_runs
         self.assertEqual(missing, set())
 
-    # 775 after this lane (B.19) added scene_spawn. 776 after this lane (B.20) added cloudcam. 777 after this lane (B.22) added show. 778 after this lane (B.26) added scene_project. 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh.
+    # 775 after this lane (B.19) added scene_spawn. 776 after this lane (B.20) added cloudcam. 777 after this lane (B.22) added show. 778 after this lane (B.26) added scene_project. 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber.
     def test_tool_count_still_778(self):
         from types import SimpleNamespace
 
@@ -308,8 +308,8 @@ class RealRepoTests(unittest.TestCase):
 
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        # 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh.
-        self.assertEqual(len(registry._tools), 780)
+        # 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber.
+        self.assertEqual(len(registry._tools), 781)
 
 
 class CliTests(unittest.TestCase):

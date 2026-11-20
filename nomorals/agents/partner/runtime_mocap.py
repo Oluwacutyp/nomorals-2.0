@@ -706,6 +706,182 @@ class RuntimeMocapMixin:
     def _control_facemesh_help(self) -> str:
         return ("/facemesh capture <path> [name] | "
                 "landmarks <path> [n] | status")
+    # ── vtuber show: /vtuber ───────────────────────────────────────
+    def _control_vtuber(self, tail: str, chat_key: str,
+                        message: Any = None) -> str:
+        """A scripted character performance on a stage.
+
+        /vtuber character <path.json> [name]  load a character
+        /vtuber act <path.vtact.json> [name]   load an act
+        /vtuber perform <show> <act> <character>  perform an act
+        /vtuber cue <show> <kind> <value> [seconds]  an audience cue
+        /vtuber live <show> <receiver>        attach a live MVN
+        /vtuber live-detach <show>            detach the live MVN
+        /vtuber status [show]                  one show's performance
+        /vtuber tick [show]                     one schedule step
+        /vtuber stop [show]                     detach the act, stop
+        /vtuber list                           characters, acts, shows
+        /vtuber drop [show]                     stop and drop a show
+        """
+        from ...media.show import (
+            drop_show,
+            get_show,
+            list_shows,
+            load_show,
+        )
+        from ...media.show.errors import ShowError
+        from ...media.vtuber import (
+            attach_live,
+            attach_performance,
+            detach_live,
+            detach_performance,
+            get_act,
+            get_character,
+            list_acts,
+            list_characters,
+            load_act,
+            load_character,
+        )
+        from ...media.vtuber.errors import VtuberError
+        from ...tools.mocap import _STORE
+        from ...tools.show import ensure_defaults
+
+        parts = (tail or "").split()
+        if not parts:
+            return self._control_vtuber_help()
+        verb = parts[0]
+        rest = parts[1:]
+        name = "default"
+        if verb in ("status", "tick", "stop", "drop", "live",
+                    "live-detach", "cue", "perform") and rest:
+            name = rest[0]
+            rest = rest[1:]
+        try:
+            if verb == "character":
+                if not rest:
+                    return self._control_vtuber_help()
+                load_name = rest[1] if len(rest) > 1 else ""
+                character = load_character(load_name, rest[0])
+                return (f"vtuber {character.name} loaded: "
+                        f"{len(character.expressions)} expressions, "
+                        f"{len(character.gestures)} gestures, "
+                        f"rig {character.rig}")
+            if verb == "act":
+                if not rest:
+                    return self._control_vtuber_help()
+                load_name = rest[1] if len(rest) > 1 else ""
+                act = load_act(load_name, rest[0])
+                return (f"vtuber {act.name} loaded: "
+                        f"{len(act.beats)} beats, character "
+                        f"{act.character}, {act.fps}fps")
+            if verb == "list":
+                characters = [c["name"] for c in list_characters()]
+                acts = [a["name"] for a in list_acts()]
+                lines = ["vtuber characters: "
+                         + (", ".join(characters) or "(none)"),
+                         "vtuber acts: "
+                         + (", ".join(acts) or "(none)"),
+                         "shows:"]
+                for entry in list_shows():
+                    lines.append(
+                        f"  {entry['name']}: {entry['state']} "
+                        f"(tick {entry['tick']}, "
+                        f"{entry['posed']} poses, "
+                        f"rig {entry['rig'] or 'none'})")
+                return "\n".join(lines)
+            if verb == "perform":
+                if len(rest) < 2:
+                    return self._control_vtuber_help()
+                try:
+                    show = get_show(name)
+                except ShowError:
+                    show = load_show(name, _STORE)
+                attached = ensure_defaults(show)
+                if getattr(show, "_vtuber_player", None) is not None:
+                    detach_performance(show)
+                act = get_act(rest[0])
+                character = get_character(rest[1])
+                attach_performance(show, act, character)
+                status = show.start()
+                extra = (f" (auto-attached "
+                         f"{', '.join(attached)})" if attached else "")
+                return (f"vtuber {name} performing {act.name} as "
+                        f"{character.name} — {status['state']}"
+                        f" (tick {status['tick']}){extra}")
+            if verb not in ("status", "tick", "cue", "live",
+                            "live-detach", "stop", "drop"):
+                return self._control_vtuber_help()
+            show = get_show(name)
+            if verb == "status":
+                status = show.status()
+                player = getattr(show, "_vtuber_player", None)
+                live = getattr(show, "_live_mvn", None)
+                if player is not None:
+                    status.update(player.state())
+                status["live"] = (
+                    live["name"] if live is not None else None)
+                return json.dumps(status, indent=2)
+            if verb == "tick":
+                receipt = show.step()
+                return (f"vtuber {name}: tick {receipt['tick']} "
+                        f"({receipt['state']})"
+                        + (" — holding" if receipt["held"] else ""))
+            if verb == "cue":
+                if len(rest) < 2:
+                    return self._control_vtuber_help()
+                player = getattr(show, "_vtuber_player", None)
+                if player is None or not player._attached:
+                    return (f"vtuber {name} performs nothing — "
+                            f"perform an act first")
+                duration = None
+                value_parts = list(rest[1:])
+                if len(value_parts) > 1:
+                    try:
+                        duration = float(value_parts[-1])
+                        value_parts = value_parts[:-1]
+                    except ValueError:
+                        duration = None
+                result = player.cue(rest[0],
+                                    " ".join(value_parts), duration)
+                return (f"vtuber {name}: cue {result['cue']} "
+                        f"{result['value']}")
+            if verb == "live":
+                if not rest:
+                    return self._control_vtuber_help()
+                from ...media.mocap.mvn import get_receiver
+                receiver = get_receiver(rest[0])
+                attach_live(show, receiver, rest[0])
+                return (f"vtuber {name} live from MVN receiver "
+                        f"{rest[0]} — the recorded take holds")
+            if verb == "live-detach":
+                detach_live(show)
+                return (f"vtuber {name} live detached — the recorded "
+                        f"take resumes")
+            if verb == "stop":
+                if getattr(show, "_vtuber_player", None) is not None:
+                    detach_performance(show)
+                show.stop()
+                return f"vtuber {name} stopped"
+            if verb == "drop":
+                drop_show(name)
+                return f"vtuber {name} dropped"
+        except (ShowError, VtuberError) as exc:
+            record_failure(
+                "runtime_mocap.RuntimeMocapMixin._control_vtuber", exc)
+            return f"vtuber: {exc}"
+        except Exception as exc:  # noqa: BLE001 - chat never dies
+            record_failure(
+                "runtime_mocap.RuntimeMocapMixin._control_vtuber", exc)
+            return f"vtuber failed: {exc}"
+        return self._control_vtuber_help()
+
+    def _control_vtuber_help(self) -> str:
+        return (
+            "/vtuber perform <show> <act> <character> | character "
+            "<path.json> [name] | act <path.vtact.json> [name] | "
+            "cue <show> <kind> <value> [seconds] | live <show> "
+            "<receiver> | live-detach <show> | status [show] | "
+            "tick [show] | stop [show] | list | drop [show]")
 
     # ── show: /live ───────────────────────────────────────────────
     def _control_live(self, tail: str, chat_key: str,

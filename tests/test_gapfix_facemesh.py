@@ -473,11 +473,11 @@ def test_ensure_model_refuses_without_download(tmp_path, monkeypatch):
 # Wiring: tool count, CLI, chat
 # ---------------------------------------------------------------------------
 
-def test_tool_count_is_780_after_facemesh():
+def test_tool_count_is_781_after_facemesh():
     from nomorals.tools.registry import ToolRegistry
     registry = ToolRegistry(SimpleNamespace())
     registry.register_builtins()
-    assert len(registry._tools) == 780
+    assert len(registry._tools) == 781
     assert "facemesh" in registry._tools
 
 

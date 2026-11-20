@@ -8,8 +8,8 @@ JSON/PLY, mocap state store, ZMQ refusal when pyzmq is missing), the
 texture-upload staging (hidden sentinel, placeholder, bounds), the
 PLY/PNG renderers, the session worker lifecycle, the session registry,
 the cloudcam brain tool, the `nm cloudcam` CLI, and the /cloudcam chat
-verb — with the tool count pinned at 780 (775 after B.19 added
-scene_spawn; 776 after this lane (B.20) added cloudcam). 777 after this lane (B.22) added show. 778 after this lane (B.26) added scene_project. 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh.
+verb — with the tool count pinned at 781 (775 after B.19 added
+scene_spawn; 776 after this lane (B.20) added cloudcam). 777 after this lane (B.22) added show. 778 after this lane (B.26) added scene_project. 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber.
 """
 
 from __future__ import annotations
@@ -97,11 +97,11 @@ def _registry(tmp_path):
     return registry
 
 
-def test_tool_count_is_780_after_cloudcam():
-    # 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh.
+def test_tool_count_is_781_after_cloudcam():
+    # 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber.
     registry = ToolRegistry(SimpleNamespace())
     registry.register_builtins()
-    assert len(registry._tools) == 780
+    assert len(registry._tools) == 781
     assert "cloudcam" in registry._tools
 
 

@@ -403,8 +403,8 @@ class RegistryTests(unittest.TestCase):
         from nomorals.tools.registry import ToolRegistry
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        # 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh.
-        self.assertEqual(len(registry._tools), 780)
+        # 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber.
+        self.assertEqual(len(registry._tools), 781)
 
     def test_vits_backend_registered_but_unavailable_here(self):
         from nomorals.voice.tts import (
