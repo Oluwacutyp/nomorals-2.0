@@ -158,6 +158,7 @@ from .commands.mocap import _cmd_mocap
 from .commands.cloudcam import _cmd_cloudcam
 from .commands.facemcap import _cmd_facemcap
 from .commands.facemesh import _cmd_facemesh
+from .commands.g2p import _cmd_g2p
 from .commands.show import _cmd_show
 from .commands.vtuber import _cmd_vtuber
 from .commands.sceneproject import _cmd_sceneproject
@@ -551,6 +552,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "cloudcam": _CommandSpec(_cmd_cloudcam),
     "facemcap": _CommandSpec(_cmd_facemcap),
     "facemesh": _CommandSpec(_cmd_facemesh),
+    "g2p": _CommandSpec(_cmd_g2p),
     "show": _CommandSpec(_cmd_show),
     "vtuber": _CommandSpec(_cmd_vtuber),
     "sceneproject": _CommandSpec(_cmd_sceneproject),

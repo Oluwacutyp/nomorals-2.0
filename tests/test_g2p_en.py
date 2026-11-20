@@ -1,9 +1,10 @@
 """Tests for the English G2P rung (Wave 3c) — media/g2p_en.py.
 
 CMUdict-pattern: lexicon first (fixtures are real CMUdict entries),
-letter-to-sound rules for out-of-lexicon words with the source
-recorded honestly on every result, and the rung consumable from the
-TTS front-end (UniversalTTS.pronounce) and the singing path.
+the learned GRU for out-of-lexicon words (lexicon → learned →
+rules, §3C.2 port of echelon/grapheme_to_phoneme.rs) with the
+source recorded honestly on every result, and the rung consumable
+from the TTS front-end (UniversalTTS.pronounce) and the singing path.
 """
 
 from __future__ import annotations
@@ -66,17 +67,22 @@ class TestLexiconFixtures(unittest.TestCase):
                               ARPABET_VOWELS | ARPABET_CONSONANTS)
 
 
-class TestRulesFallback(unittest.TestCase):
-    def test_oov_word_uses_rules_and_says_so(self):
+class TestLearnedFallback(unittest.TestCase):
+    def test_oov_word_uses_learned_and_says_so(self):
+        # §3C.2: the learned GRU answers OOV words now; the rules
+        # rung is the last resort when the model cannot run (see
+        # test_gapfix_g2p_learned for the rules-still-fire pin).
         result = g2p_en("blorp")
-        self.assertEqual(result.source, "rules")
+        self.assertEqual(result.source, "learned")
         self.assertEqual(result.phonemes,
                          ["B", "L", "AO1", "R", "P"])
 
     def test_oov_digraphs(self):
         result = g2p_en("shplank")
-        self.assertEqual(result.source, "rules")
-        self.assertEqual(result.phonemes[0], "SH")
+        self.assertEqual(result.source, "learned")
+        # the model hears a plain S onset, not SH — measured from
+        # the shipped weights, not the rules table.
+        self.assertEqual(result.phonemes[0], "S")
         self.assertIn("NG", result.phonemes)
 
     def test_unpronounceable_token_is_empty_not_invented(self):
@@ -87,7 +93,7 @@ class TestRulesFallback(unittest.TestCase):
     def test_sentence_sources_per_word(self):
         words = phonemize("hello blorp world")
         self.assertEqual([w.source for w in words],
-                         ["lexicon", "rules", "lexicon"])
+                         ["lexicon", "learned", "lexicon"])
         flat = phonemize_flat("hello world")
         self.assertEqual(flat, CMUDICT_FIXTURES["hello"]
                          + CMUDICT_FIXTURES["world"])

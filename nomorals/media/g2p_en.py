@@ -13,12 +13,21 @@ first and rules second, exactly the CMUdict architecture (the
    file can be layered on top with :func:`load_cmudict` (or the
    ``NM_CMUDICT_PATH`` env var) — coverage is data, reported by
    :func:`lexicon_stats`, never implied.
-2. **Letter-to-sound rules** — for out-of-lexicon words, an ordered
-   grapheme rule table (digraphs before single letters). This path is
-   *approximate by construction* and says so: every result carries
-   its ``source`` (``"lexicon"`` / ``"lexicon_user"`` / ``"rules"``)
+2. **Learned model** — for out-of-lexicon words, the seq2seq GRU
+   ported from echelon/grapheme_to_phoneme.rs
+   (:mod:`nomorals.media.g2p_learned`, the §3C.2 port): it predicts
+   real Arpabet (with stress) for words the lexicon never saw, so
+   an OOV word now answers "learned" instead of a rule guess. The
+   model is lazy — importing this module never needs numpy — and
+   when it cannot run it degrades to the rules rung, honestly.
+3. **Letter-to-sound rules** — for out-of-lexicon words when the
+   learned rung is unavailable, an ordered grapheme rule table
+   (digraphs before single letters). This path is *approximate by
+   construction* and says so: every result carries its ``source``
+   (``"lexicon"`` / ``"lexicon_user"`` / ``"learned"`` / ``"rules"``)
    and its ``rung`` (``"g2p_en"``), so a consumer can tell a
-   dictionary pronunciation from a rule guess at a glance.
+   dictionary pronunciation from a model prediction from a rule
+   guess at a glance.
 
 Heteronyms (``read``, ``live``, ``use``) resolve to the lexicon's
 first entry, as in CMUdict; alternates in a user file ``WORD(1)``
@@ -43,7 +52,8 @@ from typing import Optional
 __all__ = [
     "ARPABET_VOWELS", "ARPABET_CONSONANTS", "G2PWord",
     "g2p_en", "phonemize", "phonemize_flat",
-    "load_cmudict", "lexicon_stats", "strip_stress", "base_phoneme",
+    "load_cmudict", "lexicon_stats", "learned_status",
+    "strip_stress", "base_phoneme",
     "RUNG",
 ]
 
@@ -295,7 +305,8 @@ class G2PWord:
 
     word: str
     phonemes: list[str] = field(default_factory=list)
-    source: str = "rules"          # "lexicon" | "lexicon_user" | "rules"
+    source: str = "rules"          # "lexicon" | "lexicon_user" |
+                                   # "learned" | "rules"
     rung: str = RUNG
 
     def to_dict(self) -> dict:
@@ -310,12 +321,30 @@ def _normalize(word: str) -> str:
     return word.strip(_TOKEN_EDGE).lower()
 
 
+def learned_status() -> dict:
+    """Availability of the learned Arpabet rung, as data.
+
+    Never raises: when the rung cannot run the reason is named
+    (``numpy_unavailable`` / ``model_unavailable`` /
+    ``model_shape_mismatch``) so the caller can say why the rules
+    rung answered instead.
+    """
+    try:
+        from .g2p_learned import model_status
+        return model_status()
+    except Exception as exc:  # noqa: BLE001 - status never raises
+        return {"available": False, "reason": "import_failed",
+                "detail": f"{type(exc).__name__}: {exc}",
+                "path": "", "arrays": 0, "shapes": None}
+
+
 def g2p_en(word: str) -> G2PWord:
     """Pronounce one English word: ``(phonemes, source)`` as data.
 
-    Lexicon first (bundled core, then the user layer), letter-to-
-    sound rules for the rest. Internal apostrophes are kept
-    (``don't`` is a lexicon word). Never raises.
+    Lexicon first (bundled core, then the user layer), the learned
+    GRU for out-of-lexicon words, letter-to-sound rules for the
+    rest (and when the learned rung is unavailable). Internal
+    apostrophes are kept (``don't`` is a lexicon word). Never raises.
     """
     _env_cmudict()
     raw = (word or "").strip()
@@ -328,6 +357,15 @@ def g2p_en(word: str) -> G2PWord:
     if w in _BUNDLED:
         return G2PWord(word=raw, phonemes=list(_BUNDLED[w]),
                        source="lexicon")
+    try:
+        from .g2p_learned import predict_word
+        learned = predict_word(w)
+    except Exception:  # noqa: BLE001 - learned rung is optional;
+        # the rules rung answers instead, and learned_status()
+        # names the reason — a missing model never breaks speech.
+        learned = []
+    if learned:
+        return G2PWord(word=raw, phonemes=learned, source="learned")
     return G2PWord(word=raw, phonemes=_lts(w), source="rules")
 
 

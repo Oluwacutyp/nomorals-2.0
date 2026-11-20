@@ -19,7 +19,7 @@ viseme, text G2P, acoustic heuristic labeled), the renderer emits
 exact RGB24 bytes that change with the viseme and the blink, a
 full driven frame round-trips through the LiveKit frame source and
 through BVH export, the mocap tool's rig actions, the CLI parses,
-and the chat control kind — with the tool count pinned at 781.
+and the chat control kind — with the tool count pinned at 782.
 """
 
 from __future__ import annotations
@@ -602,16 +602,16 @@ class ToolTest(unittest.TestCase):
         registry.register_builtins()
         return registry.call("mocap", **kwargs)
 
-    def test_tool_count_is_781(self):
+    def test_tool_count_is_782(self):
         # 774 at B.18 (this lane added the mocap tool, no new tool
         # count move of its own); 775 after B.19 added scene_spawn
         # (the B.19 rebase carried this file in with the pin still
         # at 774 — stale on main, fixed here); 776 after B.20 added
         # cloudcam; 777 after B.22 added show; 778 after B.26 added scene_project; 779 after this lane
-        # (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber.
+        # (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber. 782 after this lane (C.2) registered tonal_g2p.
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 781)
+        self.assertEqual(len(registry._tools), 782)
         self.assertIn("mocap", registry._tools)
 
     def test_rig_list_load_status_pose(self):

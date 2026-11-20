@@ -94,6 +94,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "cloudcam": ["cc"],
     "facemcap": ["fc"],
     "facemesh": ["fm"],
+    "g2p": ["gp"],
     "code": ["c"],
     "graph": [],
     "commands": ["cmd"],
@@ -3894,6 +3895,23 @@ def _parser() -> argparse.ArgumentParser:
                  facemesh_sub.choices["status"]):
         _sub.add_argument("--session", default="default",
                           help="face take name (default 'default')")
+
+    g2p = sub.add_parser("g2p", aliases=CLI_ALIASES["g2p"],
+        help="Pronounce English words in Arpabet",
+        description=("nm g2p pronounce <word> [word ...]\\n"
+                     "nm g2p status"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    g2p.add_argument("--json", action="store_true",
+                     help="Output as JSON")
+    g2p_sub = g2p.add_subparsers(dest="g2p_action", required=True)
+    g2p_pronounce = g2p_sub.add_parser(
+        "pronounce", help="pronounce words: lexicon → learned GRU "
+        "→ rules, with the source named per word")
+    g2p_pronounce.add_argument("words", nargs="+",
+                               help="words to pronounce")
+    g2p_sub.add_parser("status", help="learned-rung availability "
+                        "+ lexicon stats")
 
     inbox = sub.add_parser("inbox", aliases=CLI_ALIASES["inbox"],
         help="Drop-in inbox: drop a file, link, or note — Devon acts",

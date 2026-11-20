@@ -1046,7 +1046,9 @@ def register(registry: Any) -> None:
             "Global tonal G2P + tone↔melody (tone languages are the moat; "
             "Yoruba is the first/hardest test case): action=g2p (word, "
             "language → phonemes) | tones | detect | check | fix | units "
-            "(text, language → language-agnostic ToneUnits). "
+            "(text, language → language-agnostic ToneUnits) | arpabet "
+            "(word → English Arpabet via the lexicon → learned-GRU → "
+            "rules rung, source named). "
         ),
         capability=Capability.FS_WRITE,
     )
@@ -1055,6 +1057,14 @@ def register(registry: Any) -> None:
                   melody: str = "") -> dict:
         import json as _json
         action = (action or "g2p").lower()
+        if action == "arpabet":
+            from .g2p_en import g2p_en as _g2p_en
+            from .g2p_en import learned_status as _learned_status
+            result = _g2p_en(word)
+            return {"ok": True, "word": result.word,
+                    "phonemes": result.phonemes,
+                    "source": result.source, "rung": result.rung,
+                    "learned": _learned_status()}
         if action == "g2p":
             return {"ok": True, "phonemes": g2p(word, language),
                     "syllables": syllabify(word, language),

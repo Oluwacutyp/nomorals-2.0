@@ -177,6 +177,47 @@ class RuntimeVoiceMixin:
                      "engine renders them. Explicit tags are always preserved.")
         return "\n".join(lines)
 
+    def _control_g2p(self, tail: str, chat_key: str,
+                     message: Any = None) -> str:
+        """Pronounce English words in Arpabet.
+
+        /g2p <word> [word ...]  phonemes per word, source named
+                                (lexicon / learned / rules)
+        /g2p status             learned-rung availability +
+                                lexicon stats
+        """
+        from ...media.g2p_en import g2p_en, learned_status, lexicon_stats
+
+        parts = (tail or "").split()
+        if not parts:
+            return self._control_g2p_help()
+        if parts[0].lower() == "status":
+            learned = learned_status()
+            stats = lexicon_stats()
+            lines = ["g2p status:"]
+            lines.append("  learned: "
+                         + ("available" if learned["available"]
+                            else "unavailable ("
+                            + str(learned["reason"]) + ")"))
+            lines.append(f"  lexicon: {stats['bundled']} bundled + "
+                         f"{stats['user']} user")
+            return "\n".join(lines)
+        try:
+            lines = []
+            for word in parts:
+                result = g2p_en(word)
+                phones = " ".join(result.phonemes) or "(unpronounceable)"
+                lines.append(f"{result.word} → {phones} "
+                             f"({result.source})")
+            return "\n".join(lines)
+        except Exception as exc:  # noqa: BLE001 - chat never dies
+            record_failure(
+                "runtime_voice.RuntimeVoiceMixin._control_g2p", exc)
+            return f"g2p failed: {exc}"
+
+    def _control_g2p_help(self) -> str:
+        return "/g2p <word> [word ...] | status"
+
     def _control_stt(self, tail: str) -> str:
         """Transcribe an audio file with the best available STT backend."""
         path = (tail or "").strip()

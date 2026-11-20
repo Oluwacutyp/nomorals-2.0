@@ -784,12 +784,13 @@ class ToolRegistry:
             from ..media import trellis as _trellis
             from ..media import unirig as _unirig
             from ..media import blender_live as _blender_live
+            from ..media import tonal_g2p as _tonal_g2p
 
             for _mod in (_music, _playback, _library, _video,
                          _ace_step, _vocals, _distribute,
                          _musicgen_chain, _global_rhythm, _explore_tool,
                          _sonic_bible, _music_critique, _lora_global,
-                         _trellis, _unirig, _blender_live):
+                         _trellis, _unirig, _blender_live, _tonal_g2p):
                 try:
                     _mod.register(self)
                 except Exception as exc:  # noqa: BLE001 — module-level opt-out
