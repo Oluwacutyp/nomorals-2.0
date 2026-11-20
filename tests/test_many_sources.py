@@ -7,6 +7,9 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+import pytest
+
+from nomorals.media import download_failures as _df
 from nomorals.media import resolver as resolver_mod
 from nomorals.media.resolver import SourceResolver
 from nomorals.media.sources import MUSIC_SEARCH_SOURCES
@@ -14,6 +17,17 @@ from nomorals.agents.news import FEED_CATEGORIES, NewsAgent, parse_feed
 from nomorals.search.federated import federated_search
 from nomorals.search.model import SearchResult
 from nomorals.tools import web as webmod
+
+
+@pytest.fixture(autouse=True)
+def _isolated_download_failure_home(tmp_path, monkeypatch):
+    # The sweep reads the durable search-failure memory — a bot
+    # block recorded by an earlier test in the run would change
+    # what this file's sweeps return.  Each test gets its own home.
+    monkeypatch.setenv("NM_HOME", str(tmp_path / "home"))
+    _df.clear_failures()
+    yield
+    _df.clear_failures()
 
 
 # ── /play: MANY sources ────────────────────────────────────────────────
@@ -96,7 +110,16 @@ class PlayManySourcesTests(unittest.TestCase):
         ctx = SimpleNamespace(settings=SimpleNamespace(workspace_dir="/nonexistent"))
         cand = SimpleNamespace(url="https://x/y", title="T", artist="A",
                                duration=0.0, direct_url="", extra={})
-        with mock.patch("nomorals.media.sources.NetNaijaSource.search",
+        # MP3.pm + MP3Juice run BEFORE netnaija now (owner order
+        # 2026-11-19 — both at the top), so they must be mocked like
+        # every other source here: an unmocked mp3.pm search hits
+        # the live site and fills the limit before netnaija is
+        # reached, and the file's contract is "no live network".
+        with mock.patch("nomorals.media.sources.MP3PMSource.search",
+                        return_value=[]), \
+             mock.patch("nomorals.media.sources.MP3JuiceSource.search",
+                        return_value=[]), \
+             mock.patch("nomorals.media.sources.NetNaijaSource.search",
                         return_value=[cand]), \
              mock.patch("nomorals.media.sources.NotJustOkSource.search",
                         return_value=[]), \

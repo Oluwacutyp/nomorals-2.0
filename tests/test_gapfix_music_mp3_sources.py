@@ -138,17 +138,18 @@ class ChainMembershipTests(unittest.TestCase):
         self.assertIn("mp3pm-search", chain_names)
         self.assertIn("mp3juice-search", chain_names)
 
-    def test_order_after_regional_blogs_not_first(self):
-        # Owner order 2026-11-18 (supersedes 2026-11-17 "after the
-        # big globals"): mdundo moved to the BOTTOM of the
-        # audio-capable sources — below every real download source
-        # including mp3.pm, YouTube Music, Archive.org, Deezer and
-        # Spotify — after it filled a whole /play run with its own
-        # copies while its direct leg was failing.  It stays above
-        # the metadata-only sources.  mp3pm/mp3juice keep their
-        # 2026-11-16 placement (after the regional blogs, before
-        # SoundCloud).
+    def test_order_mp3pm_and_mp3juice_first(self):
+        # Owner order 2026-11-19 (supersedes the 2026-11-16
+        # placement "after the regional blogs"): mp3.pm AND the
+        # MP3Juice mirror (service-et-reception.fr) sit at the top
+        # of the music sources — he named mp3.pm first five times
+        # Nov 16–18, and on Nov 15 "mp3.pm should be at the top of
+        # source for music same with this one".  Mdundo stays at
+        # the bottom of the audio-capable sources (owner order
+        # 2026-11-18) and above the metadata-only sources.
         self.assertEqual(MUSIC_SEARCH_SOURCES[0], "workspace-scan")
+        self.assertEqual(MUSIC_SEARCH_SOURCES[1], "mp3pm-search")
+        self.assertEqual(MUSIC_SEARCH_SOURCES[2], "mp3juice-search")
         mdundo = MUSIC_SEARCH_SOURCES.index("mdundo-search")
         self.assertLess(MUSIC_SEARCH_SOURCES.index("mp3pm-search"),
                         mdundo)

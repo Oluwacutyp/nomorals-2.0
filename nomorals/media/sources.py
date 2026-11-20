@@ -607,18 +607,56 @@ class MP3PMSource(BaseScrapeSource):
         return direct[0] if direct else ""
 
 
-class MP3JuiceSource(BaseScrapeSource):
-    """MP3Juice mirror (service-et-reception.fr).  Keyless anonymous
-    POST with the form field ``query`` returns server-rendered rows
-    carrying ``data-id``; a download endpoint then serves the file.
+#: A YouTube video id inside a URL (watch?v=, youtu.be/, /embed/,
+#: /shorts/) or an iframe src (button.php?id=<yt-id>).
+_YT_ID_RE = re.compile(
+    r"(?:[?&]v=|youtu\.be/|/embed/|/shorts/|button(?:-2)?\.php\?id=)"
+    r"([A-Za-z0-9_-]{11})")
 
-    PINNED-BY-PROBE: ``_DOWNLOAD_PATHS`` is a guess list — the probe
-    disambiguates which one the site actually answers.
+
+class MP3JuiceSource(BaseScrapeSource):
+    """MP3Juice mirror (service-et-reception.fr) — the owner's
+    2026-11-15 source ("Music source....", "can't we rea it?",
+    "mp3.pm should be at the top of source for music same with
+    this one").  Keyless anonymous POST with the form field
+    ``query`` returns server-rendered rows; a typed song name
+    works, not only a pasted link.
+
+    REA 2026-11-16 (parent's record — used, not re-done): the
+    site holds NO catalogue of its own.  Plain server-rendered
+    HTML + jQuery behind Cloudflare; /vendor/main1.js does the
+    real work — autocomplete via suggestqueries.google.com
+    (YouTube suggestions), Download MP3/MP4 buttons embedding
+    iframes from downloader-ytjar.online/button.php?id=<yt-id>
+    and button-2.php?id=<yt-id>, and a save-to-cloud call to
+    https://mp3juice.metrolagu.site/api/json/mp3/<yt-id>
+    returning vidInfo[0].dloadUrl + vidTitle.
+
+    WALLS (probed 2026-11-20, this box):
+    - The mp3juice API answers HTTP 403 here — access denied —
+      so the dloadUrl route is NOT wired.  Not retried.
+    - downloader-ytjar.online is unreachable here (DNS/timeout/
+      connection refused, no HTTP status) — the iframe route is
+      NOT wired either; its shape is unverified from here, so
+      guessing its parse would be a fake success.
+    The wired download is the next-best real route: the search
+    yields the YouTube video id, and the candidate IS the
+    YouTube watch URL — Devon's yt-dlp direct stage downloads
+    the audio from it, the same path every YouTube candidate
+    takes.  A typed name reaches a real downloadable MP3; the
+    site's contribution is its own search (its ranking over
+    YouTube/SoundCloud), not its converter.
     """
 
     name = "mp3juice"
     _BASE = "https://service-et-reception.fr"
     _DOWNLOAD_PATHS = ("/download?id={}", "/api/mp3/{}", "/download/{}")
+
+    @staticmethod
+    def _yt_id(text: str) -> str:
+        """A YouTube video id found in *text*, or ""."""
+        m = _YT_ID_RE.search(text or "")
+        return m.group(1) if m else ""
 
     def _post(self, path: str, form: dict[str, str]) -> str:
         body = urllib.parse.urlencode(form).encode()
@@ -631,14 +669,42 @@ class MP3JuiceSource(BaseScrapeSource):
 
     def search(self, query: str, limit: int = 5) -> list[SourceCandidate]:
         out: list[SourceCandidate] = []
+        q = (query or "").strip()
+        if not q:
+            return out
+        # A pasted YouTube URL goes straight to its video id — no
+        # POST needed.  (Typed names take the POST route below;
+        # pasted-links-only would misunderstand "universal" —
+        # owner order 2026-11-16.)
+        yt_id = self._yt_id(q)
+        if yt_id:
+            return [SourceCandidate(
+                source=self.name, title="", artist="",
+                url=f"https://www.youtube.com/watch?v={yt_id}",
+                extra={"yt_id": yt_id})]
         try:
-            html = self._post("/", {"query": query})   # POST, not GET
+            html = self._post("/", {"query": q})   # POST, not GET
         except Exception as exc:  # noqa: BLE001
             _log.info("mp3juice: search failed: %s", exc)
             return out
-        ids = re.findall(r'data-id="(\d+)"', html)
         titles = [self._clean(re.sub(r"<[^>]+>", "", t))
                   for t in re.findall(r"<h3[^>]*>(.*?)</h3>", html, re.S)]
+        # The Download buttons carry the YouTube id — those rows
+        # are real downloadable MP3s (watch URL + yt-dlp, see the
+        # class docstring).  The buttons are the result rows, so
+        # when they exist the numeric data-ids are the SAME rows
+        # and are not emitted twice.  The MP3 + MP4 buttons for
+        # one video carry the SAME id — dedupe, keeping order.
+        yt_ids = list(dict.fromkeys(_YT_ID_RE.findall(html)))
+        if yt_ids:
+            for n, vid in enumerate(yt_ids[:limit]):
+                out.append(SourceCandidate(
+                    source=self.name,
+                    title=titles[n] if n < len(titles) else "",
+                    url=f"https://www.youtube.com/watch?v={vid}",
+                    extra={"yt_id": vid}))
+            return out
+        ids = re.findall(r'data-id="(\d+)"', html)
         for n, sid in enumerate(ids[:limit]):
             out.append(SourceCandidate(
                 source=self.name,
@@ -648,6 +714,16 @@ class MP3JuiceSource(BaseScrapeSource):
         return out
 
     def download_url(self, candidate: SourceCandidate) -> str:
+        # A YouTube-backed candidate downloads through the watch
+        # URL — Devon's yt-dlp direct stage fetches the audio.
+        # (The site's own converter API 403s from here and its
+        # iframe host is unreachable here — see the class
+        # docstring — so the watch URL is the wired route.)
+        yt_id = str((candidate.extra or {}).get("yt_id") or "")
+        if not yt_id:
+            yt_id = self._yt_id(candidate.url or "")
+        if yt_id:
+            return f"https://www.youtube.com/watch?v={yt_id}"
         sid = str(candidate.extra.get("id") or "")
         if not sid:
             return ""
@@ -1689,24 +1765,32 @@ class DiscoveredBlogSource(NetNaijaSource):
 
 # ── the chain ─────────────────────────────────────────────────────────────
 
-#: Text-search priority for /play.  Regional blogs first (direct MP3s
-#: beat metadata), proven globals next, metadata-only last.
-#: Mdundo sits LAST among the audio-capable sources by the owner's
-#: order 2026-11-18 (it was "after the big globals" by his order
-#: 2026-11-17; his live report 2026-11-18 countermanded it — "move
-#: it down" below every real download source, mp3.pm included — after
-#: it filled a whole /play run with its own copies while its direct
-#: leg was failing).  It stays ABOVE the metadata-only sources so a
-#: "find anything" fallback can still reach it; it is demoted, not
-#: deleted.  Deezer/Spotify sit with the audio-capable block (they
-#: serve preview audio) rather than after the metadata block.
+#: Text-search priority for /play.  MP3.pm AND the MP3Juice mirror
+#: (service-et-reception.fr) first among the remote sources (owner
+#: order 2026-11-19 — he named mp3.pm first five times, Nov 16–18:
+#: "let real shits run like mp3.pm and the likes"; Nov 15: "mp3.pm
+#: should be at the top of source for music same with this one".
+#: The Nov 16 demotion only ever moved mdundo down, it never moved
+#: mp3.pm up, so mp3.pm sat fourth in the effective sweep behind
+#: netnaija / notjustok / tooxclusive while the owner kept asking
+#: why it was not first).  Regional blogs next (direct MP3s beat
+#: metadata), proven globals after them, metadata-only last.  Mdundo sits LAST among the audio-capable
+#: sources by the owner's order 2026-11-18 (it was "after the big
+#: globals" by his order 2026-11-17; his live report 2026-11-18
+#: countermanded it — "move it down" below every real download
+#: source, mp3.pm included — after it filled a whole /play run
+#: with its own copies while its direct leg was failing).  It stays
+#: ABOVE the metadata-only sources so a "find anything" fallback
+#: can still reach it; it is demoted, not deleted.  Deezer/Spotify
+#: sit with the audio-capable block (they serve preview audio)
+#: rather than after the metadata block.
 #: Each entry: (strategy name, source instance or None for legacy paths).
 SOURCE_CHAIN: list[tuple[str, AudioSource]] = [
+    ("mp3pm-search", MP3PMSource()),
+    ("mp3juice-search", MP3JuiceSource()),
     ("netnaija-search", NetNaijaSource()),
     ("notjustok-search", NotJustOkSource()),
     ("tooxclusive-search", TooXclusiveSource()),
-    ("mp3pm-search", MP3PMSource()),
-    ("mp3juice-search", MP3JuiceSource()),
     ("bandcamp-search", BandcampSource()),
     ("archiveorg-search", ArchiveOrgSource()),
     ("jamendo-search", JamendoSource()),
@@ -1728,18 +1812,22 @@ SOURCE_CHAIN: list[tuple[str, AudioSource]] = [
 #: Every text-search source /play tries, in chain order.  The resolver
 #: builds its chain from this list so the count is single-sourced and
 #: testable — the owner rule is MANY sources, never 1–2.
-#: Mdundo is last among the audio-capable sources (owner order
-#: 2026-11-18 — see SOURCE_CHAIN above): below mp3.pm, mp3juice,
-#: SoundCloud, Bandcamp, YouTube, YouTube Music, Archive.org, Jamendo,
-#: FMA, JioSaavn, Boomplay, Deezer and Spotify; above the
-#: metadata-only sources (MusicBrainz, Openverse, Wikimedia, iTunes).
+#: MP3.pm AND the MP3Juice mirror are first among the remote
+#: sources (owner order 2026-11-19 — see SOURCE_CHAIN above);
+#: the owner's own files (workspace-scan) stay ahead of every
+#: network source.  Mdundo is last among the
+#: audio-capable sources (owner order 2026-11-18 — see SOURCE_CHAIN
+#: above): below mp3.pm, mp3juice, SoundCloud, Bandcamp, YouTube,
+#: YouTube Music, Archive.org, Jamendo, FMA, JioSaavn, Boomplay,
+#: Deezer and Spotify; above the metadata-only sources (MusicBrainz,
+#: Openverse, Wikimedia, iTunes).
 MUSIC_SEARCH_SOURCES: tuple[str, ...] = (
     "workspace-scan",
+    "mp3pm-search",
+    "mp3juice-search",
     "netnaija-search",
     "notjustok-search",
     "tooxclusive-search",
-    "mp3pm-search",
-    "mp3juice-search",
     "soundcloud-search",
     "bandcamp-search",
     "youtube-search",
@@ -1757,6 +1845,27 @@ MUSIC_SEARCH_SOURCES: tuple[str, ...] = (
     "wikimedia-search",
     "itunes-search",
 )
+
+#: Sources the owner has explicitly pinned FIRST in the chain order
+#: (2026-11-19: mp3.pm first, named five times Nov 16–18 — "let
+#: real shits run like mp3.pm and the likes" — and the MP3Juice
+#: mirror with it, Nov 15: "mp3.pm should be at the top of source
+#: for music same with this one").  The static lists
+#: above are only the tiebreak: the learned ordering in
+#: :meth:`nomorals.media.resolver.SourceResolver._order_music`
+#: sorts active sources by registry score, so without this a high
+#: learned score would float netnaija / notjustok / tooxclusive
+#: back above mp3.pm on a box where they have served often — the
+#: exact gap the Nov 19 audit named (the effective order was not
+#: the listed order).  A pinned source sorts before every
+#: non-pinned ACTIVE source, in pinned order, and only when it is
+#: itself active — a stood-down / dead pinned source leaves the
+#: active ordering like any other, it never heads a chain it
+#: cannot serve.  The mirror of ``DEMOTED_CHAIN_SOURCES`` below:
+#: pinning holds a source up, demotion holds one down, and the
+#: learned score only ever orders the unpinned middle.
+PINNED_CHAIN_SOURCES: tuple[str, ...] = ("mp3pm-search",
+                                           "mp3juice-search")
 
 #: Sources the owner has explicitly demoted in the chain order
 #: (2026-11-18: mdundo to the bottom of the audio-capable sources).

@@ -108,6 +108,15 @@ from typing import Any
 
 from ..core.logging_setup import get_logger
 from .cookies import BOT_COOKIE_HELP, is_bot_detection_error
+from .download_failures import (
+    classify_failure as _classify_download_failure,
+)
+from .download_failures import (
+    dead_kind_for_url as _dead_kind_for_url,
+)
+from .download_failures import (
+    record_url_failure as _record_url_failure,
+)
 from .downloader_failures import record_failure
 from .site_descriptors import CHAIN_STAGES
 
@@ -221,6 +230,26 @@ _NETWORK_MARKERS = (
     "bad gateway",
     "service unavailable",
     "gateway timeout",
+)
+
+#: Text proving the LINK itself is gone (not the route, not the
+#: box): a stage log carrying one of these with a SITE_ERROR class
+#: means the track/page was deleted, made private, or is DRM —
+#: no later rung can resurrect it, so the chain stops instead of
+#: re-fetching the same dead URL through proxy / rendered /
+#: browser (owner report 2026-11-17 — SoundCloud hammering).
+#: Deliberately tight: a generic "site error" or a timeout is NOT
+#: here — those may be transient, and the later rungs exist for
+#: exactly that case.
+_DEAD_LINK_MARKERS = (
+    "404",
+    "410",
+    "not found",
+    "private",
+    "deleted",
+    "removed",
+    "drm",
+    "no longer available",
 )
 
 #: Text of a LOCAL write failure (yt-dlp's HTTP downloader failing
@@ -1356,6 +1385,26 @@ class MediaDownloader:
         except Exception as e:  # bookkeeping never breaks downloads
             record_failure("_learn_from_success", e)
 
+    @staticmethod
+    def _stage_proved_dead_link(report: DownloadReport,
+                                since: int) -> bool:
+        """True when a stage log appended since index *since*
+        proves the LINK dead: a SITE_ERROR log whose error text
+        carries a :data:`_DEAD_LINK_MARKERS` marker (404 /
+        deleted / private / DRM).  Only logs appended since
+        *since* are read, so a stale log from an earlier stage
+        can never stop the chain.  Never raises."""
+        try:
+            for entry in report.stages[since:]:
+                if entry.error_class != FailureKind.SITE_ERROR.value:
+                    continue
+                text = (entry.error or "").lower()
+                if any(m in text for m in _DEAD_LINK_MARKERS):
+                    return True
+            return False
+        except Exception:  # noqa: BLE001 — the check never breaks a chain
+            return False
+
     def _attempt_stage(self, stage: str, report: DownloadReport,
                        url: str, target_dir: Path, audio_only: bool,
                        format_spec: str, timeout: float,
@@ -1659,6 +1708,31 @@ class MediaDownloader:
             report.failure = FailureKind.SITE_ERROR
             report.likely_cause = "no URL to download"
             return report
+        # Dead-link memory (owner report 2026-11-17 — /play kept
+        # hammering the same dead SoundCloud link, minutes apart):
+        # a URL that failed to download recently is refused fast,
+        # before any stage fetches it again — the bound is the
+        # memory's 6h TTL and the refusal names the recorded kind.
+        # The play loop used to be the only writer and the only
+        # reader, which left every other download() caller
+        # unbound; the engine is the choke point, so the bound
+        # lives here.  A local write failure is NOT a dead link
+        # (evidence about this box, never the URL) and never
+        # triggers this guard.
+        dead_kind = _dead_kind_for_url(url)
+        if dead_kind is not None and dead_kind != "local_error":
+            report.failure = FailureKind.SITE_ERROR
+            report.likely_cause = (
+                f"this link failed recently ({dead_kind}) — not "
+                f"re-fetched")
+            report.hint = ("the next source is tried instead; "
+                           "the link becomes tryable again when "
+                           "the failure memory expires")
+            report.stages.append(StageLog(
+                stage="guard", url=url,
+                error_class=FailureKind.SITE_ERROR.value,
+                error=report.likely_cause))
+            return self._finish(report, started)
         target_dir = self._dest_dir(dest_dir)
         budget = {"deadline": started + min(timeout, self.stage_timeout * 3)}
 
@@ -1862,6 +1936,7 @@ class MediaDownloader:
                         "rule=%s — trying the learned path first",
                         learned_desc.domain, learned_rule.stage,
                         learned_rule.extraction_rule)
+                    stage_log_mark = len(report.stages)
                     if self._attempt_stage(
                             learned_rule.stage, report, work_url,
                             target_dir, audio_only, format_spec,
@@ -1874,13 +1949,40 @@ class MediaDownloader:
                     self._note_rule_failure(learned_desc)
                     rule_failure_recorded = True
                     skip_stages.add(learned_rule.stage)
+                    if self._stage_proved_dead_link(
+                            report, stage_log_mark):
+                        # The learned-first attempt already proved
+                        # the link dead — the canonical loop below
+                        # breaks on its first check instead of
+                        # re-fetching the dead URL through other
+                        # rungs.  Fall through to failure handling.
+                        _dead_link_proved = True
+                    else:
+                        _dead_link_proved = False
+                else:
+                    stage_log_mark = len(report.stages)
+                    _dead_link_proved = False
+            else:
+                stage_log_mark = len(report.stages)
+                _dead_link_proved = False
             for stage_name in chain:
+                if _dead_link_proved:
+                    break
                 if report.block_reason:
                     # A classified login block already set the
                     # LOGIN failure fields (up-front gate or the
                     # connector retry) — the chain stops here and
                     # never burns another anonymous rung.
                     break
+                if self._stage_proved_dead_link(report, stage_log_mark):
+                    # A previous stage proved the LINK dead (404 /
+                    # deleted / private / DRM): no later rung can
+                    # resurrect it, and re-fetching it through
+                    # proxy / rendered / browser is just hammering
+                    # the same dead URL (owner report 2026-11-17
+                    # — SoundCloud).  The chain stops here.
+                    break
+                stage_log_mark = len(report.stages)
                 if stage_name in skip_stages:
                     continue
                 if self._attempt_stage(
@@ -1924,6 +2026,41 @@ class MediaDownloader:
         self._record_download_outcome(
             report, ok=False, error_class=report.failure.value,
             latency_s=time.perf_counter() - started)
+        # The failure memory (owner report 2026-11-17): the
+        # exhausted chain remembers this URL, so no later caller
+        # re-runs the whole chain against the same dead link — the
+        # play loop used to be the only writer, which left every
+        # other download() caller unbound, and the engine is the
+        # choke point.  Only remote-shaped stage failures are
+        # recorded: a run whose stages all failed locally (disk
+        # full, missing directory, yt-dlp absent) is evidence
+        # about this box, never the link, and records nothing.
+        # A login block is not recorded either — those return
+        # before this point.
+        stage_kinds = [s.error_class for s in report.stages
+                       if s.error_class]
+        recordable = [k for k in stage_kinds
+                      if k not in (FailureKind.LOCAL_WRITE_ERROR.value,
+                                   FailureKind.DEPENDENCY_MISSING.value)]
+        if recordable:
+            if FailureKind.BOT_BLOCK.value in recordable:
+                _mem_kind = "bot_block"
+            elif FailureKind.NO_MEDIA_FOUND.value in recordable:
+                _mem_kind = "no_media"
+            elif FailureKind.SITE_ERROR.value in recordable:
+                # The failure taxonomy already classified the run:
+                # a free-text re-classification of the human
+                # likely-cause ("the site refused...") falls
+                # through to "download_error", which is not a dead
+                # kind and would never condemn the URL.
+                _mem_kind = "site_error"
+            else:
+                _mem_kind = _classify_download_failure(
+                    report.likely_cause or report.failure.value)
+            _record_url_failure(
+                url, _mem_kind,
+                source=(site_desc.site if site_desc is not None
+                        else ""))
         # A total failure through a chain the learned rule governed
         # (its stage ran in canonical position, or the learned-first
         # attempt already recorded it — never twice) degrades the

@@ -16,6 +16,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+from nomorals.media import download_failures as _df
 from nomorals.media.downloader import (
     DownloadReport,
     FailureKind,
@@ -33,6 +36,18 @@ def _ctx(tmpdir):
     ctx.db = MagicMock()
     ctx.settings = None  # safe_path falls back to cwd/workspace
     return ctx
+
+
+@pytest.fixture(autouse=True)
+def _isolated_download_failure_home(tmp_path, monkeypatch):
+    # The engine now writes durable failure memory (a dead URL is
+    # remembered and refused fast) — tests that reuse fixture URLs
+    # must not share one home, or one test's recorded failure
+    # refuses the next test's download at the door.
+    monkeypatch.setenv("NM_HOME", str(tmp_path / "home"))
+    _df.clear_failures()
+    yield
+    _df.clear_failures()
 
 
 class TaxonomyTests(unittest.TestCase):

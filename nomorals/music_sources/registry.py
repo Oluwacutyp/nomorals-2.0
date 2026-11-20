@@ -464,10 +464,13 @@ MUSIC_REGISTRY: List[MusicSource] = [
        etiquette=OPEN_POLITE,
        notes="Mobile-first MP3 archive. Server-rendered /top/ charts, "
              "per-song pages under <artist>.mp3.pm/song/<id>-<slug>/ "
-             "carrying a direct file. Search is XHR-only — /search/?q= "
-             "returns the shell with zero rows — so the source reads the "
-             "JSON search endpoint pinned by tools/probe_new_sources.py "
-             "and takes the file off the song page. No key, no yt-dlp. "
+             "carrying a direct file. Search reads the live "
+             "server-rendered page /search?q= (verified live "
+             "2026-11-20: 50 cplayer rows, each with a direct "
+             "listen + download MP3) — the old /api/search?q= route "
+             "404s and never existed as a JSON search endpoint, and "
+             "the XHR POST /public/api.search.php returns only a "
+             "redirect URL, never song JSON. No key, no yt-dlp. "
              "Hostile to bursts: one request per second.",
        pack={"platform": "MP3.pm"}),
     _M(id="mp3juice_fr", name="MP3Juice (service-et-reception.fr)",
@@ -476,13 +479,20 @@ MUSIC_REGISTRY: List[MusicSource] = [
        licence="Aggregator; rights stay with the host it indexes",
        volatility="commercial", bulk=False, api=False, bot_wall=False,
        etiquette=OPEN_POLITE,
-       notes="MP3Juice mirror. Keyless anonymous POST to / with the form "
-             "field `query` (method is POST, not GET — a GET returns the "
-             "marketing page only) yields server-rendered rows with "
-             "data-id, then a download endpoint per row. Nine language "
-             "subtrees (/fr/ /es/ /id/ …) resolve the same catalogue. "
-             "Aggregator over YouTube and SoundCloud, so the bitrate is "
-             "whatever it re-encoded.",
+       notes="MP3Juice mirror (service-et-reception.fr — the owner's "
+             "2026-11-15 source). Keyless anonymous POST to / with the "
+             "form field `query` (method is POST, not GET — a GET "
+             "returns the marketing page only) yields server-rendered "
+             "rows; the Download buttons embed downloader-ytjar.online "
+             "iframes carrying the YouTube id (REA 2026-11-16). The "
+             "mp3juice.metrolagu.site JSON API answers HTTP 403 from "
+             "this box (probed 2026-11-20) and downloader-ytjar.online "
+             "is unreachable from here, so the wired download is the "
+             "YouTube watch URL via yt-dlp — the site's search still "
+             "does the finding. Nine language subtrees (/fr/ /es/ /id/ "
+             "…) resolve the same catalogue. Aggregator over YouTube "
+             "and SoundCloud, so the bitrate is whatever it "
+             "re-encoded.",
        pack={"platform": "MP3Juice"}),
     _M(id="palcomp3", name="Palco MP3", source_class="open", auth="none",
        formats=["MP3"], quality_ceiling="MP3 via GraphQL mp3File (unverified live — endpoint 403s plain fetch from this box)",

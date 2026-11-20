@@ -603,6 +603,47 @@ class PlaybackEngine:
     def _youtube_watch_url(video_id: str) -> str:
         return f"https://www.youtube.com/watch?v={video_id}"
 
+    @staticmethod
+    def _youtube_search_source_name(prefix: str) -> str:
+        """The failure-memory source name for a YouTube search leg:
+        ``"youtube"`` for ``ytsearch``, ``"youtube-music"`` for
+        ``ytmsearch`` — the names the sweep looks failures up by."""
+        return "youtube-music" if str(prefix or "") == "ytmsearch" \
+            else "youtube"
+
+    @staticmethod
+    def _youtube_bot_blocked() -> str | None:
+        """A YouTube bot block still inside its window, or None.
+
+        The two YouTube search legs share one wall (same yt-dlp,
+        same cookies, same IP): a bot check on either means the
+        other will hit it too, so one recorded block gates both
+        legs — the bound is the search-failure memory's 10-min
+        TTL.  Never raises."""
+        try:
+            from .download_failures import last_search_failure
+            for _name in ("youtube", "youtube-music"):
+                if last_search_failure(_name) == "bot_block":
+                    return _name
+            return None
+        except Exception:  # noqa: BLE001 — the check never breaks a search
+            return None
+
+    @staticmethod
+    def _record_youtube_bot_block(prefix: str) -> None:
+        """Remember a YouTube bot check in the search-failure
+        memory, so the sweep reports ``"failed: bot_block"``
+        instead of ``"no results"`` and the other legs skip
+        instead of re-running yt-dlp into the same wall.  Never
+        raises."""
+        try:
+            from .download_failures import record_search_failure
+            record_search_failure(
+                PlaybackEngine._youtube_search_source_name(prefix),
+                "bot_block")
+        except Exception:  # noqa: BLE001 — the memory never breaks a play
+            pass
+
     @classmethod
     def _youtube_search_id(cls, query: str, prefix: str = "ytsearch") -> str:
         """Top video id for a query (yt-dlp search).
@@ -616,12 +657,26 @@ class PlaybackEngine:
         per-URL cookies (Devon's own browser-profile estate export
         included), not just the user-provided file.
 
+        A bot check recorded by an earlier leg (same operation or
+        within the last 10 minutes) is honoured WITHOUT invoking
+        yt-dlp again: one wall, one invocation, then every later
+        leg fails fast with the block named (owner report
+        2026-11-17 — the YouTube multisearch legs all died on the
+        same song, each re-running yt-dlp into the same bot check).
+
         Raises ToolError naming the missing dependency when yt-dlp is
         absent — never a silent empty result.
         """
         query = (query or "").strip()
         if not query:
             raise ToolError("youtube search needs a query")
+        blocked = cls._youtube_bot_blocked()
+        if blocked is not None:
+            from .cookies import BOT_COOKIE_SHORT_HELP as _short_help
+            raise ToolError(
+                "youtube search failed: bot-blocked right now "
+                f"(recorded {blocked} bot check) — YouTube is "
+                f"refusing automated searches; {_short_help}")
         target, cookie_url = _youtube_search_target(query, 1, prefix)
         # python module first, CLI fallback
         try:
@@ -646,6 +701,9 @@ class PlaybackEngine:
                     with yt_dlp.YoutubeDL(_opts) as ydl:
                         info = ydl.extract_info(target, download=False)
             except Exception as exc:  # noqa: BLE001
+                from .cookies import is_bot_detection_error as _is_bot
+                if _is_bot(exc):
+                    cls._record_youtube_bot_block(prefix)
                 raise ToolError(f"youtube search failed: {exc}") from exc
             entries = ((info or {}).get("entries") or [])
             if entries and entries[0].get("id"):
@@ -666,6 +724,9 @@ class PlaybackEngine:
             vid = vid[0].strip() if vid else ""
             if proc.returncode == 0 and vid:
                 return vid
+            from .cookies import is_bot_detection_error as _is_bot2
+            if _is_bot2(proc.stderr or ""):
+                cls._record_youtube_bot_block(prefix)
             raise ToolError(
                 f"youtube search failed: "
                 f"{(proc.stderr or '').strip()[-200:] or 'no results'}")
@@ -701,6 +762,16 @@ class PlaybackEngine:
         limit = max(1, min(int(limit or 8), 25))
         if not query:
             return []
+        # A bot check recorded by an earlier leg (same operation
+        # or within the last 10 minutes) is honoured WITHOUT
+        # invoking yt-dlp again — one wall, one invocation (owner
+        # report 2026-11-17: the YouTube multisearch legs all died
+        # on the same song, each re-running yt-dlp into the same
+        # bot check).  The sweep reads the recorded failure back
+        # as "failed: bot_block" instead of "no results".
+        if cls._youtube_bot_blocked() is not None:
+            _log.info("youtube multi-search skipped: bot-block recorded")
+            return []
         target, cookie_url = _youtube_search_target(query, limit, prefix)
         try:
             import yt_dlp  # noqa: F401
@@ -724,6 +795,9 @@ class PlaybackEngine:
                 entries = (info or {}).get("entries") or []
             except Exception as exc:  # noqa: BLE001
                 _log.info("youtube multi-search failed: %s", exc)
+                from .cookies import is_bot_detection_error as _is_bot3
+                if _is_bot3(exc):
+                    PlaybackEngine._record_youtube_bot_block(prefix)
                 return []
         else:
             import shutil
@@ -742,6 +816,9 @@ class PlaybackEngine:
                 _log.info("youtube multi-search failed: %s", exc)
                 return []
             if proc.returncode != 0:
+                from .cookies import is_bot_detection_error as _is_bot4
+                if _is_bot4(proc.stderr or ""):
+                    PlaybackEngine._record_youtube_bot_block(prefix)
                 return []
             for line in (proc.stdout or "").splitlines():
                 parts = line.split("\t")

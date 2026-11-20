@@ -40,8 +40,13 @@ from typing import Any, Callable
 
 from ..core.logging_setup import get_logger
 from ..tools.media import probe
-from .cookies import BOT_COOKIE_HELP, YTDLP_INSTALL_HELP
-from .download_failures import is_url_dead, last_search_failure, normalize_url
+from .cookies import BOT_COOKIE_HELP, YTDLP_INSTALL_HELP, is_bot_detection_error
+from .download_failures import (
+    is_url_dead,
+    last_search_failure,
+    normalize_url,
+    record_search_failure,
+)
 from .failures import record_failure
 
 _log = get_logger(__name__)
@@ -137,6 +142,7 @@ def ensure_ytdlp() -> bool:
 from .sources import (  # noqa: E402
     DEMOTED_CHAIN_SOURCES,
     MUSIC_SOURCE_DOMAINS,
+    PINNED_CHAIN_SOURCES,
 )
 from .sources import MUSIC_SEARCH_SOURCES as PLAY_TEXT_STRATEGY_NAMES  # noqa: E402
 
@@ -338,6 +344,9 @@ class SourceResolver:
           an error class, feeding the circuit breaker;
         * everything else (no results, preview-only catalogue hits)
           → a no-result: weak evidence, score-only.
+
+        A bot check is ALSO written into the download-failure
+        search memory (see the failure branch below).
         """
         try:
             if desc is None:
@@ -359,6 +368,21 @@ class SourceResolver:
                     "search_failed" if "search" in msg
                     else "resolve_failed",
                     latency_s)
+                if is_bot_detection_error(exc.message or ""):
+                    # A bot check is ALSO written into the
+                    # download-failure search memory (``bot_block``,
+                    # 10-min TTL): the sweep reads it back as
+                    # ``"failed: bot_block"`` instead of the
+                    # dishonest ``"no results"`` a swallowed yt-dlp
+                    # error used to produce, and the YouTube search
+                    # legs skip while it stands instead of re-running
+                    # yt-dlp into the same wall on every /play.
+                    # The sweep looks the failure up by the source
+                    # name without its "-search" suffix.
+                    record_search_failure(
+                        name[:-len("-search")] if name.endswith(
+                            "-search") else name,
+                        "bot_block")
             else:
                 self._record_no_result(reg, desc)
         except Exception:  # noqa: BLE001
@@ -405,6 +429,16 @@ class SourceResolver:
           the active ordering (the #86 vocabulary) but the chain
           still tries them last rather than pretending they do not
           exist — the attempt log stays truthful.
+        * sources the owner explicitly pinned FIRST
+          (``PINNED_CHAIN_SOURCES`` — mp3.pm, 2026-11-19) sort
+          before every non-pinned ACTIVE source, in pinned order:
+          a high learned score never floats netnaija / notjustok /
+          tooxclusive back above mp3.pm on a box where they have
+          served often — the Nov 19 audit's exact gap (the
+          effective order was not the listed order).  Pinning is
+          an order, not a health verdict — a pinned source that
+          is itself stood-down / dead leaves the active ordering
+          like any other and never heads a chain it cannot serve.
         * sources the owner explicitly demoted
           (``DEMOTED_CHAIN_SOURCES`` — mdundo, 2026-11-18) sort
           after every non-demoted ACTIVE source, in chain order,
@@ -431,11 +465,15 @@ class SourceResolver:
                         if it[2] is not None and not reg.is_active(it[2])]
             demoted = [it for it in active
                        if it[0] in DEMOTED_CHAIN_SOURCES]
-            active.sort(key=lambda it: -reg.score(it[2])
+            pinned = [it for it in active
+                      if it[0] in PINNED_CHAIN_SOURCES]
+            pinned.sort(key=lambda it: PINNED_CHAIN_SOURCES.index(it[0]))
+            middle = [it for it in active
+                      if it[0] not in DEMOTED_CHAIN_SOURCES
+                      and it[0] not in PINNED_CHAIN_SOURCES]
+            middle.sort(key=lambda it: -reg.score(it[2])
                         if it[2] is not None else 0.0)
-            kept = [it for it in active
-                    if it[0] not in DEMOTED_CHAIN_SOURCES]
-            return kept + demoted + inactive
+            return pinned + middle + demoted + inactive
         except Exception:  # noqa: BLE001
             return items
 
@@ -548,13 +586,15 @@ class SourceResolver:
         if not q:
             return out, attempts
         limit = max(1, min(int(limit or 8), 25))
-        # Regional blogs first (direct MP3s), then the global catalogs.
+        # MP3.pm first among the remote sources (owner order
+        # 2026-11-19 — see MUSIC_SEARCH_SOURCES), regional blogs
+        # next, then the global catalogs.
         fns: list[tuple[str, Any]] = [
+            ("mp3pm-search", self._mp3pm_search_many),
+            ("mp3juice-search", self._mp3juice_search_many),
             ("netnaija-search", self._netnaija_search_many),
             ("notjustok-search", self._notjustok_search_many),
             ("tooxclusive-search", self._tooxclusive_search_many),
-            ("mp3pm-search", self._mp3pm_search_many),
-            ("mp3juice-search", self._mp3juice_search_many),
             ("soundcloud-search", self._soundcloud_search_many),
             ("bandcamp-search", self._bandcamp_search_many),
             ("youtube-search", self._youtube_search_many),
@@ -1124,10 +1164,14 @@ class SourceResolver:
     def _resolve_text(self, query: str,
                       result: ResolvedAudio) -> ResolvedAudio:
         # MANY sources, in chain order (see MUSIC_SEARCH_SOURCES).
-        # Downloadable/full-track sources first; regional blogs before
-        # globals; metadata-only (MusicBrainz) + 30s-preview APIs
-        # (iTunes/Deezer) + Spotify last. Boomplay is back in the
-        # chain via browser-backed search (verified live 2026-10-18).
+        # Downloadable/full-track sources first; MP3.pm and the
+        # MP3Juice mirror first among the remote sources (owner
+        # order 2026-11-19 — he named mp3.pm first five times Nov
+        # 16–18, and Nov 15: "mp3.pm should be at the top of source
+        # for music same with this one"), regional blogs next,
+        # metadata-only (MusicBrainz) + 30s-preview APIs (iTunes/
+        # Deezer) + Spotify last. Boomplay is back in the chain via
+        # browser-backed search (verified live 2026-10-18).
         # Mdundo sits last among the audio-capable sources by the
         # owner's order 2026-11-18 (it was "after the big globals"
         # by his order 2026-11-17; his live report 2026-11-18
@@ -1139,15 +1183,15 @@ class SourceResolver:
         # going through ALL of them.
         strategies: list[tuple[str, Callable[[], ResolvedAudio]]] = [
             ("workspace-scan", lambda: self._s_workspace_scan(query)),
+            ("mp3pm-search", lambda: self._s_blog_search(
+                query, "MP3PMSource", "mp3pm")),
+            ("mp3juice-search", lambda: self._s_blog_search(
+                query, "MP3JuiceSource", "mp3juice")),
             ("netnaija-search", lambda: self._s_netnaija_search(query)),
             ("notjustok-search", lambda: self._s_blog_search(
                 query, "NotJustOkSource", "notjustok")),
             ("tooxclusive-search", lambda: self._s_blog_search(
                 query, "TooXclusiveSource", "tooxclusive")),
-            ("mp3pm-search", lambda: self._s_blog_search(
-                query, "MP3PMSource", "mp3pm")),
-            ("mp3juice-search", lambda: self._s_blog_search(
-                query, "MP3JuiceSource", "mp3juice")),
             ("soundcloud-search",
              lambda: self._s_soundcloud_search(query)),
             ("bandcamp-search", lambda: self._s_bandcamp_search(query)),

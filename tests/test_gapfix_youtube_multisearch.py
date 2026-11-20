@@ -23,7 +23,20 @@ import types
 
 import pytest
 
+from nomorals.media import download_failures as _df
 from nomorals.media.playback import PlaybackEngine
+
+
+@pytest.fixture(autouse=True)
+def _isolated_download_failure_home(tmp_path, monkeypatch):
+    # The YouTube search legs now record a bot check in the durable
+    # search-failure memory — tests that simulate one must not share
+    # a home with the CLI tests, or the recorded block gates every
+    # later search in the run.
+    monkeypatch.setenv("NM_HOME", str(tmp_path / "home"))
+    _df.clear_failures()
+    yield
+    _df.clear_failures()
 
 
 class _FakeYDL:

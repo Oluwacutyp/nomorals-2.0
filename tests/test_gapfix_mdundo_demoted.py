@@ -124,10 +124,15 @@ class TestMdundoOrder(unittest.TestCase):
         out, _attempts = resolver.search_candidates_detailed(
             "armed and dangerous", limit=25)
         self.assertEqual(out, [])
+        # Owner order 2026-11-19: mp3.pm AND the MP3Juice mirror
+        # (service-et-reception.fr) sit at the top of the sweep,
+        # before the regional blogs; mdundo stays last among the
+        # audio-capable sources.
         self.assertEqual(called, [
+            "mp3pm-search", "mp3juice-search",
             "netnaija-search", "notjustok-search",
-            "tooxclusive-search", "mp3pm-search", "mp3juice-search",
-            "soundcloud-search", "bandcamp-search", "youtube-search",
+            "tooxclusive-search", "soundcloud-search",
+            "bandcamp-search", "youtube-search",
             "youtube-music-search", "archiveorg-search",
             "jamendo-search", "fma-search", "jiosaavn-search",
             "deezer-search", "mdundo-search", "musicbrainz-search",
