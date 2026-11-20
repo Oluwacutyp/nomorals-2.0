@@ -676,10 +676,10 @@ class TestCliAndChat:
 # -- tool count -------------------------------------------------------------------
 
 class TestToolCount:
-    def test_tool_count_is_784_after_c4_added_camwall(self):
-        # 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall.
+    def test_tool_count_is_785_after_c4_added_camwall(self):
+        # 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall; 785 after this lane (C.8) added robot.
         from nomorals.tools.registry import ToolRegistry
 
         count = len(ToolRegistry(SimpleNamespace()).register_builtins()
                     ._tools)
-        assert count == 784
+        assert count == 785

@@ -12,7 +12,7 @@ Proves: the store (write/read, ownership, staleness, deltas +
 missed, subscribers, late-joiner snapshot, save/load), the router
 (configured/unconfigured/unknown), the BVH round trip, the Kinect
 fixture bridge, the BVH export loop, and the mocap brain tool — with
-the tool count pinned at 784 (748 at the lane's base 0733f79a, +1
+the tool count pinned at 785 (748 at the lane's base 0733f79a, +1
 mocap tool, +25 secprobe tools, +1 scene_spawn (B.19), +1 cloudcam
 (B.20), +1 show (B.22), +1 scene_project (B.26), +1 facemcap (B.23) — the B.19 sed had mangled this line,
 rewritten by B.20).
@@ -454,15 +454,15 @@ class BridgeTest(unittest.TestCase):
 
 
 class ToolTest(unittest.TestCase):
-    def test_tool_count_is_784_after_mocap(self):
+    def test_tool_count_is_785_after_mocap(self):
         # 774 after the secprobe wire-up (749 after the mocap tool): no existing tool reaches the
         # cross-engine state store (Kinect has no tool, anicraft is
         # 2D vector animation, media is downloads), so the store
         # needs its own action-dispatched entry.
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        # 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber. 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall.
-        self.assertEqual(len(registry._tools), 784)
+        # 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber. 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall; 785 after this lane (C.8) added robot.
+        self.assertEqual(len(registry._tools), 785)
         self.assertIn("mocap", registry._tools)
 
     def _call(self, **kwargs):

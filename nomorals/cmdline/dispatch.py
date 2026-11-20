@@ -163,6 +163,7 @@ from .commands.show import _cmd_show
 from .commands.smarthome import _cmd_smarthome
 from .commands.camwall import _cmd_camwall
 from .commands.env import _cmd_env
+from .commands.robot import _cmd_robot
 from .commands.game import _cmd_game
 from .commands.vtuber import _cmd_vtuber
 from .commands.sceneproject import _cmd_sceneproject
@@ -561,6 +562,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "smarthome": _CommandSpec(_cmd_smarthome),
     "camwall": _CommandSpec(_cmd_camwall),
     "env": _CommandSpec(_cmd_env),
+    "robot": _CommandSpec(_cmd_robot),
     "game": _CommandSpec(_cmd_game),
     "vtuber": _CommandSpec(_cmd_vtuber),
     "sceneproject": _CommandSpec(_cmd_sceneproject),

@@ -148,6 +148,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "smarthome": ["smh"],
     "camwall": ["cw"],
     "env": [],
+    "robot": ["rb"],
     "game": [],
     "audio": ["au"],
     "weather": ["wx"],
@@ -4196,6 +4197,120 @@ def _parser() -> argparse.ArgumentParser:
         "dotenv", help="show what a .env file would load")
     e_dotenv.add_argument("path", nargs="?", default="",
                           help=".env file (default: first candidate)")
+
+    robot = sub.add_parser("robot", aliases=CLI_ALIASES["robot"],
+        help="Robot daemon — drive a robot, map where it is, find it again",
+        description=("nm robot list | create [NAME] | status [NAME] | "
+                     "drive <left> [right] [--seconds S] [NAME] | stop "
+                     "[NAME] | start [NAME] | tick [NAME] | scan "
+                     "[--ranges JSON | --source cloudcam|depth] [NAME] | "
+                     "map [NAME] | localize [--ranges JSON] [NAME] | plan "
+                     "--steps JSON [NAME] | serve [NAME] | unserve [NAME] | "
+                     "served | blink [NAME] | battery [NAME] | attach "
+                     "--kind loopback|serial [--port PATH] [NAME] | detach "
+                     "[NAME] | drop [NAME] | export --output DIR [NAME]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    robot.add_argument("--json", action="store_true",
+                       help="Output as JSON")
+    robot_sub = robot.add_subparsers(dest="robot_action", required=True)
+    robot_sub.add_parser("list", help="robots now")
+    r_create = robot_sub.add_parser("create", help="make a robot")
+    r_create.add_argument("robot", nargs="?", default="",
+                          help="robot name (default default)")
+    r_status = robot_sub.add_parser("status", help="one robot's state")
+    r_status.add_argument("robot", nargs="?", default="",
+                          help="robot name (default default)")
+    r_drive = robot_sub.add_parser("drive", help="mogo motor speeds")
+    r_drive.add_argument("left", type=int, help="left motor -100..100")
+    r_drive.add_argument("right", type=int, nargs="?", default=None,
+                         help="right motor -100..100 (default = left)")
+    r_drive.add_argument("--seconds", type=float, default=None,
+                         help="drive for this long, then stop")
+    r_drive.add_argument("robot", nargs="?", default="",
+                         help="robot name (default default)")
+    r_stop = robot_sub.add_parser("stop", help="stop motors + plan")
+    r_stop.add_argument("robot", nargs="?", default="",
+                        help="robot name (default default)")
+    r_start = robot_sub.add_parser("start", help="start the tick loop")
+    r_start.add_argument("robot", nargs="?", default="",
+                         help="robot name (default default)")
+    r_tick = robot_sub.add_parser("tick", help="one manual step")
+    r_tick.add_argument("robot", nargs="?", default="",
+                        help="robot name (default default)")
+    r_tick.add_argument("--dt", type=float, default=0.05,
+                        help="step length in seconds (default 0.05)")
+    r_scan = robot_sub.add_parser("scan", help="fold a scan into the map")
+    r_scan.add_argument("robot", nargs="?", default="",
+                        help="robot name (default default)")
+    r_scan.add_argument("--ranges", default="",
+                        help="scan JSON: {angles:[deg...], ranges:[m...]}")
+    r_scan.add_argument("--source", default="",
+                        help="cloudcam | depth (instead of --ranges)")
+    r_scan.add_argument("--session", default="",
+                        help="cloudcam session name")
+    r_scan.add_argument("--depths", default="",
+                        help="depth row JSON: [metres...]")
+    r_scan.add_argument("--fov", type=float, default=None,
+                        help="field of view in degrees (depth rows)")
+    r_map = robot_sub.add_parser("map", help="counts + ascii map")
+    r_map.add_argument("robot", nargs="?", default="",
+                       help="robot name (default default)")
+    r_map.add_argument("--width", type=int, default=80,
+                       help="ascii width (default 80)")
+    r_loc = robot_sub.add_parser("localize", help="re-find the robot")
+    r_loc.add_argument("robot", nargs="?", default="",
+                       help="robot name (default default)")
+    r_loc.add_argument("--ranges", default="",
+                       help="scan JSON: {angles:[deg...], ranges:[m...]}")
+    r_loc.add_argument("--source", default="",
+                       help="cloudcam (instead of --ranges)")
+    r_loc.add_argument("--session", default="",
+                       help="cloudcam session name")
+    r_plan = robot_sub.add_parser("plan", help="scripted drive")
+    r_plan.add_argument("--steps", required=True,
+                        help="plan JSON: [{m1, m2, seconds}...]")
+    r_plan.add_argument("robot", nargs="?", default="",
+                        help="robot name (default default)")
+    r_serve = robot_sub.add_parser("serve", help="loopback TCP control")
+    r_serve.add_argument("robot", nargs="?", default="",
+                         help="robot name (default default)")
+    r_serve.add_argument("--host", default="127.0.0.1",
+                         help="bind host (default 127.0.0.1; loopback only)")
+    r_serve.add_argument("--port", type=int, default=0,
+                         help="port (default ephemeral)")
+    r_unserve = robot_sub.add_parser("unserve", help="stop serving")
+    r_unserve.add_argument("robot", nargs="?", default="",
+                           help="robot name (default default)")
+    robot_sub.add_parser("served", help="servers running now")
+    r_blink = robot_sub.add_parser("blink", help="set the LEDs")
+    r_blink.add_argument("robot", nargs="?", default="",
+                         help="robot name (default default)")
+    r_blink.add_argument("--l1", type=int, default=1, help="left LED 0/1")
+    r_blink.add_argument("--l2", type=int, default=0, help="right LED 0/1")
+    r_battery = robot_sub.add_parser("battery", help="read the battery")
+    r_battery.add_argument("robot", nargs="?", default="",
+                           help="robot name (default default)")
+    r_attach = robot_sub.add_parser("attach", help="attach hardware")
+    r_attach.add_argument("--kind", required=True,
+                          help="loopback | serial")
+    r_attach.add_argument("--port", default="",
+                          help="serial device path (serial only)")
+    r_attach.add_argument("--baud", type=int, default=9600,
+                          help="serial baud (default 9600)")
+    r_attach.add_argument("robot", nargs="?", default="",
+                          help="robot name (default default)")
+    r_detach = robot_sub.add_parser("detach", help="drop the hardware")
+    r_detach.add_argument("robot", nargs="?", default="",
+                          help="robot name (default default)")
+    r_drop = robot_sub.add_parser("drop", help="forget the robot")
+    r_drop.add_argument("robot", nargs="?", default="",
+                        help="robot name (default default)")
+    r_export = robot_sub.add_parser("export", help="write map files")
+    r_export.add_argument("--output", required=True,
+                          help="directory to write map.pgm + map.json + map.txt")
+    r_export.add_argument("robot", nargs="?", default="",
+                          help="robot name (default default)")
 
     inbox = sub.add_parser("inbox", aliases=CLI_ALIASES["inbox"],
         help="Drop-in inbox: drop a file, link, or note — Devon acts",

@@ -927,6 +927,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "smarthome": (0, None),  # /smarthome … — WeMo + Z-Wave home devices: discover, read, control (gated), subscribe
     "camwall": (0, None),    # /camwall … — IP cameras wall: load, start, status, export, serve (owner-only)
     "env": (0, None),        # /env … — environment variables, read-only inspection (owner-only)
+    "robot": (0, None),      # /robot … — robot daemon: drive, map, localize (owner-only)
     "clonevoice": (1, 1),  # /clonevoice <name> — attach a voice note, clone it
     "voices": (0, 0),      # /voices — list every voice, cloned vs built-in
     "bet": (0, None),        # /bet analyze <home> vs <away> [odds…] | bankroll | backtest
@@ -4624,6 +4625,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/env get <NAME> | list [PREFIX] | check <NAME...> [--as bool|int|float|seconds|path] | status | dotenv [PATH]",
             "example": "/env status",
             "related": "/doctor /deploy"},
+    "robot": {"what": "Robot daemon — drive a robot, map where it is, find it again (echelon/robot pattern, AGPL, pattern only): one named robot holds its pose, its motors and its occupancy-grid map. Differential-drive kinematics integrate the pose exactly; range scans carve free space and mark hits on a log-odds grid; a fresh scan re-finds the robot in its own map. Scans come from explicit ranges, a live cloudcam point-cloud session, or a depth row. With no hardware attached the daemon drives its own model and says so (backend: none, simulated: true) — a simulated drive is never a real one. (The `robot` brain tool and `nm robot` CLI drive the same robots.) Owner only.",
+              "usage": "/robot list | create [name] | status [name] | drive <left> [right] [seconds] [name] | stop [name] | start [name] | tick [name] | scan <ranges-json> [name] | scan cloudcam [session] [name] | map [name] | localize <ranges-json> [name] | plan <steps-json> [name] | serve [name] | unserve [name] | served | blink [l1] [l2] [name] | battery [name] | attach loopback|serial <port> [name] | detach [name] | drop [name] | export <dir> [name]",
+              "example": "/robot drive 100 100 2",
+              "related": "/mocap /live /cloudcam /map"},
     "shorts": {"what": "Devon's short-form content empire: niche → script → voiceover → AI visuals → beat-synced edit → captions → publish.",
               "usage": "/shorts make <niche> \"<topic>\" [--now] | /shorts niches | /shorts status | /shorts calendar | /shorts ledger",
               "example": "/shorts make motivation \"discipline beats motivation\" --now",
@@ -5109,7 +5114,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("decoding & crypto", ["decode", "cookies", "cookielab", "structure", "cipher",
                            "monitor", "investigate", "breach"]),
     ("media system", ["music", "distribute", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
-                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "g2p", "vtuber", "sham", "musicnote", "smarthome", "camwall",
+                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "g2p", "vtuber", "sham", "musicnote", "smarthome", "camwall", "robot",
                       "steal", "sticker", "convert", "gif", "emoji", "customemoji", "emojiart", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "models", "mcp", "a2a", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion",
@@ -5377,7 +5382,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("media system — music · playback · video · podcast",
      ["music", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
       "distribute", "dj", "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "produce", "like", "dislike",
-      "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "g2p", "vtuber", "sham", "musicnote", "smarthome", "camwall",
+      "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "g2p", "vtuber", "sham", "musicnote", "smarthome", "camwall", "robot",
       "steal", "sticker", "convert", "gif", "emoji", "customemoji",
       "emojiart", "react", "create",
       "awoo", "baka", "bite", "blush", "bonk", "bored",
@@ -5849,6 +5854,7 @@ LIST_ONELINERS: dict[str, str] = {
     "smarthome": "smart home devices — WeMo + Z-Wave — /smarthome discover | status | on | off | toggle | subscribe | health",
     "camwall": "IP cameras wall — constantly refreshing cameras — /camwall load | status | start | export | serve",
     "env": "environment variables, read-only — /env get | list | check | status | dotenv",
+    "robot": "robot daemon — drive, map, localize — /robot drive 100 100 2 | scan | map | localize",
     "image": "look up an image (format, dims, seen-before) — or generate one from a prompt",
     "lens": "reverse image search",
     "schedule": "cron-style in-process jobs",

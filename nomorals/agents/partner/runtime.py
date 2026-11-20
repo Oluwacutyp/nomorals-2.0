@@ -42,6 +42,7 @@ from .runtime_mocap import RuntimeMocapMixin
 from .runtime_smarthome import RuntimeSmarthomeMixin
 from .runtime_camwall import RuntimeCamwallMixin
 from .runtime_env import RuntimeEnvMixin
+from .runtime_robot import RuntimeRobotMixin
 from .runtime_memory import RuntimeMemoryMixin
 from .runtime_games import RuntimeGamesMixin
 from .runtime_provision import RuntimeProvisionMixin
@@ -414,6 +415,7 @@ class PartnerRuntime(
     RuntimeSmarthomeMixin,
     RuntimeCamwallMixin,
     RuntimeEnvMixin,
+    RuntimeRobotMixin,
     RuntimeMemoryMixin,
     RuntimeGamesMixin,
     RuntimeSystemMixin,
@@ -12626,6 +12628,9 @@ class PartnerRuntime(
         if kind == "env":
             return self._control_env(command.tail, chat_key,
                                      message=message)
+        if kind == "robot":
+            return self._control_robot(command.tail, chat_key,
+                                       message=message)
         if kind == "vtuber":
             return self._control_vtuber(command.tail, chat_key,
                                         message=message)
