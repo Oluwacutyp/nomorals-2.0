@@ -806,8 +806,23 @@ def _split_homes():
 
 def test_help_answered_exactly_once_across_two_runtimes(_split_homes):
     """The 4:29 PM /help, replayed in the live shape: ONE menu
-    with its category grid, from the primary — the echo defers,
-    the primary's answer resolves it, the sweep stays silent."""
+    with its category grid, from the primary — the echo stands
+    down at once on the primary's proven answer in the shared
+    claims ledger, the peer post and the sweep stay silent.
+
+    Pin correction 2026-11-19: the intermediate expectation used
+    to be pending == 1 (the pre-dupfix6 shape, where the echo
+    deferred and the primary's answer resolved it). dupfix6's
+    answer proof (runtime rule 2, mode 4 — a proven answer under
+    ANY key shape in shared/claims.db) stands the echo down
+    immediately, so no deferral is ever armed and pending is 0
+    from the start. The property the test pins — exactly one
+    menu, from the primary, nothing from the echo — is
+    unchanged; only the intermediate deferral expectation is
+    stale. Do NOT change dupfix6's behaviour to fit the old
+    expectation: standing down at once is the intended design
+    (arming a deferral for an already-answered command is the
+    shape that doubles)."""
     (rt_a, ad_a, _ctx_a), (rt_b, ad_b, _ctx_b) = _split_homes
     rt_a._process_inner(_rt_bot_copy("/help", "300"))
     assert len(_rt_texts(ad_a["telegram-personal"])) == 1
@@ -816,7 +831,10 @@ def test_help_answered_exactly_once_across_two_runtimes(_split_homes):
     assert buttons, "the one menu carries its category grid"
     rt_b._process_inner(_rt_echo_copy("/help", "300"))
     assert _rt_texts(ad_b["telegram"]) == []
-    assert rt_b._peer_deferral().pending_count() == 1
+    # dupfix6: the echo stands down at once on the primary's
+    # proven answer in the shared claims ledger — no deferral
+    # is armed for a command that is already answered.
+    assert rt_b._peer_deferral().pending_count() == 0
     rt_b._process_inner(_rt_peer_post(text, "301", reply_to="300"))
     assert _rt_texts(ad_b["telegram"]) == []
     assert rt_b._peer_deferral().pending_count() == 0
