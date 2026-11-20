@@ -112,8 +112,26 @@ def ensure_schema(db: Any) -> None:
                 fetched_at REAL NOT NULL
             )
             """)
+        # (2026-11-19 stall) the morning reads below used to full-scan
+        # both tables on every firing — no WHERE, no LIMIT.  The
+        # indexes make the bounded reads seeks: candidates by their
+        # 24h live window, served items by recency.
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_teachings_candidates_fetched "
+            "ON teachings_candidates(fetched_at)")
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_teachings_items_created "
+            "ON teachings_items(created_at)")
     except Exception:  # noqa: BLE001 - schema is best-effort at import
         _log.debug("teachings: schema ensure failed", exc_info=True)
+
+
+#: Cap on served items any one read returns (2026-11-19 stall): the old
+#: ``served_items`` fetched the whole table newest-first with no LIMIT —
+#: every cooldown check paid a full scan of all serves ever.  2000 covers
+#: years of serves at the morning/evening cadence, and every caller only
+#: ever needs the recent window (30-day cooldown, 7-day mix).
+_SERVED_ITEMS_LIMIT = 2000
 
 
 def item_key(source_type: str, source_ref: str, passage: str) -> str:
@@ -526,12 +544,22 @@ class TeachingsLedger:
         self._mem_served: list[dict[str, Any]] = []
 
     # ── storage primitives ──
-    def _candidate_rows(self) -> list[tuple[dict[str, Any], float]]:
+    def _candidate_rows(self, *, now: float | None = None,
+                        ) -> list[tuple[dict[str, Any], float]]:
+        """Live candidates only (2026-11-19 stall): the old read fetched
+        the whole table with no WHERE and no LIMIT, and the callers then
+        dropped every row older than the 24h TTL in Python.  The TTL
+        filter is pushed into SQL (seek on the fetched_at index), so the
+        read returns exactly the rows the callers keep."""
+        now = time.time() if now is None else now
+        live_since = now - CANDIDATE_TTL_S
         rows: list[tuple[dict[str, Any], float]] = []
         if self.db is not None:
             try:
                 stored = self.db.query(
-                    "SELECT item_json, fetched_at FROM teachings_candidates"
+                    "SELECT item_json, fetched_at FROM teachings_candidates "
+                    "WHERE fetched_at >= ?",
+                    (live_since,),
                 ) or []
                 for r in stored:
                     try:
@@ -542,7 +570,9 @@ class TeachingsLedger:
             except Exception:  # noqa: BLE001
                 return []
         else:
-            rows = list(self._mem_candidates.values())
+            rows = [(item, fetched)
+                    for item, fetched in self._mem_candidates.values()
+                    if fetched >= live_since]
         # read-side hygiene, both stores: rows stocked before
         # the sentence-boundary rule clean up here
         for item, _fetched in rows:
@@ -597,13 +627,21 @@ class TeachingsLedger:
 
     def served_items(self, *, since: float | None = None,
                      surface_prefix: str = "") -> list[dict[str, Any]]:
-        """Served items (newest first), optionally filtered."""
+        """Served items (newest first), optionally filtered.
+
+        Bounded (2026-11-19 stall): the old read fetched the whole
+        table newest-first with no LIMIT, so every cooldown check paid
+        a full scan of all serves ever.  The cap is newest-first, so
+        the recent windows every caller needs (30-day cooldown, 7-day
+        mix) sit far inside it.
+        """
         items: list[dict[str, Any]] = []
         if self.db is not None:
             try:
                 rows = self.db.query(
                     "SELECT * FROM teachings_items "
-                    "ORDER BY created_at DESC") or []
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (_SERVED_ITEMS_LIMIT,)) or []
                 for r in rows:
                     try:
                         served = json.loads(r.get("served_json") or "[]")
@@ -624,7 +662,11 @@ class TeachingsLedger:
             except Exception:  # noqa: BLE001
                 items = []
         else:
-            items = [dict(it) for it in self._mem_served]
+            # Newest first, capped like the SQL path: _mem_served is
+            # appended in serve order, so the tail is the newest.
+            items = [dict(it) for it in
+                     self._mem_served[-_SERVED_ITEMS_LIMIT:]]
+            items.reverse()
         out = []
         for it in items:
             served = it.get("served") or []
@@ -669,7 +711,7 @@ class TeachingsLedger:
             batches.append(("memory", []))
         for name, items in batches:
             counts[name] = self._store_candidates(items, now)
-        counts["pool"] = len(self._candidate_rows())
+        counts["pool"] = len(self._candidate_rows(now=now))
         return counts
 
     # ── cooldown views ──
@@ -707,9 +749,7 @@ class TeachingsLedger:
         now = time.time() if now is None else now
         served_keys = self._served_keys_since(now - ITEM_COOLDOWN_S)
         out = []
-        for item, fetched_at in self._candidate_rows():
-            if now - fetched_at > CANDIDATE_TTL_S:
-                continue
+        for item, _ in self._candidate_rows(now=now):
             if item.get("_key") in served_keys:
                 continue
             out.append(item)

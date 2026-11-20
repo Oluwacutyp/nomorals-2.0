@@ -1127,6 +1127,34 @@ class Scheduler:
             )
         return self._format_job(self._find(ref))
 
+    def set_overlap_policy(self, ref: str, policy: str) -> dict[str, Any]:
+        """Set a job's overlap policy (2026-11-19 stall).
+
+        Mirrors :meth:`set_routine`: the stored row is the whole story,
+        so the new policy takes effect on the NEXT tick's overlap gate
+        with no restart.  Registrars call this to reconcile a persisted
+        row with the policy the code now declares — ``add()`` only ever
+        sets the policy on a fresh row, so without it a job registered
+        months ago keeps the policy it was born with forever (the news
+        poll kept ``concurrent`` and stacked a second ghost behind the
+        first, 1 → 2 abandoned workers).
+        """
+        policy = (policy or "concurrent").strip().lower()
+        if policy not in OVERLAP_POLICIES:
+            raise ValueError(
+                f"overlap_policy must be one of {sorted(OVERLAP_POLICIES)}, "
+                f"got {policy!r}")
+        row = self._find(ref)
+        if not row:
+            raise LookupError(f"no job {ref!r}")
+        with self.db.transaction():
+            self.db.execute(
+                "UPDATE schedule_jobs SET overlap_policy = ?, "
+                "updated_at = ? WHERE id = ?",
+                (policy, time.time(), row["id"]),
+            )
+        return self._format_job(self._find(ref))
+
     def set_blackout_dates(self, ref: str,
                            dates: list[str] | str | None) -> dict[str, Any]:
         """Replace a job's exclusion-calendar blackout dates.
@@ -1474,6 +1502,14 @@ class Scheduler:
             record_failure("scheduler.tick_query", exc)
             return []
         defer_heavy, pressure_reasons = self._pressure_gate()
+        # Ghosts first: a worker abandoned by an earlier run is still a
+        # live thread doing that job's work.  Prod each live one (its run
+        # already recorded failed, so aborting its current SQLite step
+        # discards nothing) — one prod at abandonment is not enough: the
+        # job's own error handling catches the abort and moves on to the
+        # next DB call, where it can wedge again.  Best-effort, never
+        # raises; a worker in network/LLM work is unaffected.
+        self._prod_abandoned_workers()
         results: list[dict[str, Any]] = []
         runnable: list[dict[str, Any]] = []
         ran_job_ids: set[str] = set()
@@ -1500,13 +1536,32 @@ class Scheduler:
                     _log.exception("scheduler missed-fire handling crashed: %s",
                                    job_id)
                 continue
-            # overlap: a previous run of THIS job is still executing
+            # overlap: a previous run of THIS job is still executing —
+            # or was abandoned while still alive.  An abandoned worker
+            # is a live thread, not a finished run: _execute drops the
+            # job from _active the moment the guarded run returns, so
+            # without this check the next tick starts a second worker
+            # while the first still runs, and the abandoned count grows
+            # (2026-11-19: news poll 1 → 2 abandoned workers across two
+            # firings four minutes apart).  A ghost counts exactly like
+            # an active run under the job's own policy — skip skips,
+            # queue defers, concurrent still runs alongside.
             with self._lock:
                 overlapping = job_id in self._active
+            ghost = False
+            if not overlapping:
+                # abandoned_count() takes self._lock itself (a plain
+                # Lock), so this runs outside the with-block above.
+                ghost = self.abandoned_count(job_id) > 0
+                overlapping = ghost
             if overlapping:
                 policy = str(row.get("overlap_policy") or "concurrent").strip().lower()
                 if policy == "skip":
-                    self._skip_overlap(row, now)
+                    self._skip_overlap(
+                        row, now,
+                        reason=("skipped: previous run abandoned, worker "
+                                "still alive (overlap_policy=skip)")
+                        if ghost else None)
                     continue
                 if policy == "queue":
                     # leave it for the next tick rather than dropping it
@@ -1577,7 +1632,8 @@ class Scheduler:
             record_failure("scheduler.tick_heartbeat", exc)
         return results
 
-    def _skip_overlap(self, row: dict[str, Any], now: float) -> None:
+    def _skip_overlap(self, row: dict[str, Any], now: float,
+                      *, reason: str | None = None) -> None:
         """Drop this firing because the previous run is still active
         (``overlap_policy=skip``); the schedule advances normally."""
         job_id = row["id"]
@@ -1588,11 +1644,44 @@ class Scheduler:
                 "updated_at = ? WHERE id = ?",
                 (next_run, 1 if still_enabled else 0, time.time(), job_id),
             )
-        reason = "skipped: previous run still active (overlap_policy=skip)"
+        reason = reason or ("skipped: previous run still active "
+                            "(overlap_policy=skip)")
         self._record_run(job_id, now, 0.0, False, reason, 0, "tick",
                          status="skipped")
         self._ledger("skipped", job_id, f"{row.get('name')}: {reason}")
         _log.info("scheduler: job %s (%s) %s", job_id, row.get("name"), reason)
+
+    def _prod_abandoned_workers(self) -> int:
+        """Re-interrupt every live abandoned worker, once per tick.
+
+        One prod at abandonment aborts the worker's current SQLite
+        step, but the job's own error handling catches that abort and
+        moves on to the next DB call — where it can wedge again.  A
+        ghost that is still stepping gets prodded on every tick until
+        it unwinds or dies; a ghost in network/LLM work is unaffected
+        (the interrupt only aborts a SQLite step).  Best-effort, never
+        raises.  Returns how many workers were prodded.
+        """
+        prodded = 0
+        try:
+            job_ids = list(self._abandoned.keys())
+        except Exception:  # noqa: BLE001 - diagnostics never break ticks
+            return 0
+        for job_id in job_ids:
+            for entry in self.abandoned_workers(job_id):
+                worker = entry.get("thread")
+                if worker is None:
+                    continue
+                try:
+                    if self._interrupt_worker_db(worker):
+                        prodded += 1
+                except Exception:  # noqa: BLE001 - prod is best-effort
+                    _log.debug("scheduler: ghost prod failed",
+                               exc_info=True)
+        if prodded:
+            _log.debug("scheduler: re-interrupted %d abandoned worker(s)",
+                       prodded)
+        return prodded
 
     #: Run states that mean the firing never executed (AA-67).
     _NON_RUN_STATUSES = ("skipped", "missed", "suppressed", "throttled")

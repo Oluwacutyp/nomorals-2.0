@@ -37,12 +37,34 @@ def ensure_news_jobs(scheduler: Any) -> list[dict[str, Any]]:
     Idempotent by name. Returns one status dict per job.
     """
     out: list[dict[str, Any]] = []
-    have = {j.get("name") for j in scheduler.list_jobs()}
+    have = {j.get("name"): j for j in scheduler.list_jobs()}
     for name, spec, payload in _JOBS:
         if name in have:
-            out.append({"name": name, "already_scheduled": True})
+            # Reconcile the persisted row with the policy the code now
+            # declares: add() only sets overlap_policy on a FRESH row,
+            # so a poll registered months ago keeps the policy it was
+            # born with (concurrent) forever — and on the owner's box
+            # that is exactly the row that stacked the second ghost.
+            # The update takes effect on the next tick, no restart.
+            row = have[name]
+            if (row.get("overlap_policy") or "concurrent") != "skip":
+                scheduler.set_overlap_policy(row["id"], "skip")
+                out.append({"name": name, "already_scheduled": True,
+                            "overlap_policy": "skip"})
+            else:
+                out.append({"name": name, "already_scheduled": True})
             continue
-        job = scheduler.add(name, spec, "tool", payload, routine=True)
+        job = scheduler.add(name, spec, "tool", payload, routine=True,
+                            # A wedged poll must never stack a second worker
+                            # behind the first: the poll's own overlap gate
+                            # only ever saw _active runs, so an abandoned
+                            # worker looked like a free slot and the count
+                            # grew (2026-11-19: 1 → 2 abandoned workers).
+                            # skip + the abandoned-worker gate means a
+                            # firing while a ghost lives is skipped, the
+                            # schedule advances, and the ghost is prodded
+                            # on every tick until it unwinds.
+                            overlap_policy="skip")
         out.append({"name": name, "scheduled": True,
                     "job_id": job.get("id")})
     return out

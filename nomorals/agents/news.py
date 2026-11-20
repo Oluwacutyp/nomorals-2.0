@@ -885,6 +885,31 @@ class NewsAgent:
         return known
 
     # ── retention prune ────────────────────────────────────────────────
+    #: Rows deleted per statement inside prune_news_items (2026-11-19
+    #: stall): the old single DELETE dropped the whole 60-day backlog in
+    #: one statement — 25.8s at 500k rows, holding the writer actor for
+    #: its whole duration while every other routed write in the process
+    #: queued behind it.  A batch this size applies in well under a
+    #: second, so no single statement ever wedges the writer.
+    #: Cap per prune call: a huge backlog drains over successive hourly
+    #: polls instead of one giant statement, and no poll ever spends
+    #: more than _PRUNE_MAX_SECONDS_S pruning.
+    _PRUNE_BATCH_ROWS = 2000
+    _PRUNE_MAX_ROWS_PER_CALL = 20000
+    _PRUNE_MAX_SECONDS_S = 60.0
+
+    def _prune_sql_batch(self, cutoff: float) -> int:
+        """One bounded prune step on the native-SQL path: delete at most
+        _PRUNE_BATCH_ROWS settled rows older than ``cutoff``.  Returns
+        the rows deleted (0 when nothing is left)."""
+        cur = self.db.execute(
+            "DELETE FROM news_items WHERE id IN ("
+            "SELECT id FROM news_items WHERE created_at < ? "
+            "AND COALESCE(delivery_state, '') != ? LIMIT ?)",
+            (cutoff, STATE_UNDELIVERED, self._PRUNE_BATCH_ROWS),
+        )
+        return int(cur.rowcount or 0)
+
     def prune_news_items(
         self, older_than_days: float = NEWS_RETENTION_DAYS,
     ) -> int:
@@ -906,18 +931,47 @@ class NewsAgent:
         try:
             items = self._items()
             if items is not None:
+                # Rowstore path, batched the same way: the old find()
+                # materialized EVERY row older than the cutoff and then
+                # deleted them one by one — an unbounded fetchall on a
+                # table that grows forever.  Each batch re-finds (the
+                # deleted rows are gone, so the next batch is the next
+                # oldest slice); the per-call budgets bound the whole
+                # prune however large the backlog is.
                 dropped = 0
-                for row in items.find({"created_at": {"$lt": cutoff}}) or []:
-                    if ((row.get("delivery_state") or "") != STATE_UNDELIVERED
-                            and items.delete(row.get("id"))):
-                        dropped += 1
+                started = time.monotonic()
+                while dropped < self._PRUNE_MAX_ROWS_PER_CALL:
+                    if (time.monotonic() - started
+                            > self._PRUNE_MAX_SECONDS_S):
+                        break
+                    batch = items.find(
+                        {"created_at": {"$lt": cutoff}},
+                        limit=self._PRUNE_BATCH_ROWS) or []
+                    if not batch:
+                        break
+                    n = 0
+                    for row in batch:
+                        if ((row.get("delivery_state") or "")
+                                != STATE_UNDELIVERED
+                                and items.delete(row.get("id"))):
+                            n += 1
+                    dropped += n
+                    if n < len(batch):
+                        # Nothing more deletable in this slice (the rest
+                        # is live undelivered work): stop, don't spin.
+                        break
                 return dropped
-            cur = self.db.execute(
-                "DELETE FROM news_items WHERE created_at < ? "
-                "AND COALESCE(delivery_state, '') != ?",
-                (cutoff, STATE_UNDELIVERED),
-            )
-            return int(cur.rowcount or 0)
+            dropped = 0
+            started = time.monotonic()
+            while dropped < self._PRUNE_MAX_ROWS_PER_CALL:
+                if (time.monotonic() - started
+                        > self._PRUNE_MAX_SECONDS_S):
+                    break
+                n = self._prune_sql_batch(cutoff)
+                if n <= 0:
+                    break
+                dropped += n
+            return dropped
         except Exception as exc:  # noqa: BLE001 - pruning is hygiene
             record_failure("news.prune", exc)
             return 0
