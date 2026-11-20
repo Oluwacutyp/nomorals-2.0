@@ -76,6 +76,40 @@ def _cmd_show(args: argparse.Namespace, context: Any) -> int:
             if getattr(args, "take", ""):
                 show.load_take(args.take)
             return _out(args, show.status())
+        if action == "serve":
+            # Serving needs no show — it serves an exported
+            # directory, not a live run.
+            if not args.out:
+                print("show serve needs --out <dir>",
+                      file=sys.stderr)
+                return 2
+            from ...media.show.web import serve_demo, stop_demo
+            try:
+                status = serve_demo(
+                    args.out, host=args.host, port=args.port)
+            except ShowError as exc:
+                print(f"show: {exc}", file=sys.stderr)
+                return 1
+            print(f"serving {status['dir']} at {status['url']} "
+                  f"(Ctrl-C to stop)")
+            if status.get("network"):
+                print("listening on all interfaces (host 0.0.0.0) — "
+                      "the demo is reachable on the network",
+                      file=sys.stderr)
+            import threading
+            try:
+                threading.Event().wait()
+            except KeyboardInterrupt:
+                print("stopping the demo server", file=sys.stderr)
+            stop_demo(args.out)
+            return 0
+        if action == "unserve":
+            if not args.out:
+                print("show unserve needs --out <dir>",
+                      file=sys.stderr)
+                return 2
+            from ...media.show.web import stop_demo
+            return _out(args, stop_demo(args.out))
         show = get_show(name)
         if action == "status":
             return _out(args, show.status())
@@ -112,6 +146,21 @@ def _cmd_show(args: argparse.Namespace, context: Any) -> int:
                       file=sys.stderr)
                 return 2
             return _out(args, dict(show.export(args.out), show=name))
+        if action == "web":
+            if not args.out:
+                print("show web needs --out <dir>",
+                      file=sys.stderr)
+                return 2
+            from ...media.show.web import export_web
+            attached = ensure_defaults(show)
+            result = export_web(
+                show, args.out, ticks=args.ticks,
+                max_frames=args.max_frames,
+                width=(args.width or None),
+                height=(args.height or None),
+                title=(args.title or None),
+                overwrite=args.overwrite)
+            return _out(args, dict(result, auto_attached=attached))
         if action == "attach-rig":
             from ...media.rig import get_session as get_rig_session
             return _out(args, show.attach_rig(

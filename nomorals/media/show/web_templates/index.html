@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{TITLE}} — Devon show</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<main>
+<h1 id="title">{{TITLE}}</h1>
+<p id="meta">A Devon show, played in your browser. No server needed — open this file anywhere.</p>
+<canvas id="stage" width="640" height="360"></canvas>
+<div id="caption" aria-live="polite"></div>
+<div id="progress"><div id="bar"></div></div>
+<p id="status">Loading frames…</p>
+<p>
+<button id="start" type="button" disabled>Start the show</button>
+<button id="pause" type="button" disabled>Pause</button>
+<button id="replay" type="button" disabled>Replay</button>
+</p>
+<p id="note">Frames are the show's own rendered poses; the lines and camera cuts come from the act's beats.</p>
+</main>
+<script src="main.js"></script>
+</body>
+</html>

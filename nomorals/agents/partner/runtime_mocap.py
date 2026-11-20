@@ -900,6 +900,7 @@ class RuntimeMocapMixin:
         /live run [name] [ticks]           run bounded ticks (max 150)
         /live events [name]                the show's journal
         /live export [name]                driven poses as BVH
+        /live web [name] <dir> [ticks]      export the show as a hosted demo (static site)
         /live load-take [name] <path>      load a BVH/JSON take
         /live attach-rig [show] <rig>      attach a rig session
         /live attach-cloudcam [show] <cam> attach a cloudcam session
@@ -922,7 +923,8 @@ class RuntimeMocapMixin:
         rest = parts[1:]
         name = "default"
         if verb in ("create", "start", "pause", "resume", "stop",
-                    "tick", "status", "events", "export", "load-take",
+                    "tick", "status", "events", "export", "web",
+                    "load-take",
                     "drop", "attach-rig", "attach-cloudcam") and rest:
             name = rest[0]
             rest = rest[1:]
@@ -963,7 +965,7 @@ class RuntimeMocapMixin:
                         f"{status['state']} (tick {status['tick']}, "
                         f"{status['posed']} poses){extra}")
             if verb not in ("status", "start", "pause", "resume",
-                            "stop", "tick", "events", "export",
+                            "stop", "tick", "events", "export", "web",
                             "load-take", "attach-rig", "attach-cloudcam",
                             "drop"):
                 return self._control_live_help()
@@ -1005,6 +1007,21 @@ class RuntimeMocapMixin:
                 result = show.export(f"show-{name}.bvh")
                 return (f"exported {result['frames']} frames to "
                         f"{result['path']}")
+            if verb == "web":
+                if not rest:
+                    return "/live web [name] <dir> [ticks]"
+                from ...media.show.web import export_web
+                ticks = 30
+                if len(rest) > 1 and rest[1].isdigit():
+                    ticks = int(rest[1])
+                attached = ensure_defaults(show)
+                result = export_web(show, rest[0], ticks=ticks)
+                extra = (f" (auto-attached {', '.join(attached)})"
+                         if attached else "")
+                return (f"show {name} as a hosted demo: "
+                        f"{result['frames']} frames, "
+                        f"{result['duration_s']}s, {result['index']}"
+                        f"{extra}")
             if verb == "load-take":
                 if not rest:
                     return "/live load-take [name] <path.bvh|path.json>"
@@ -1047,7 +1064,8 @@ class RuntimeMocapMixin:
             "/live create [name] | list | status [name] | start [name] "
             "| pause [name] | resume [name] | stop [name] | tick [name] "
             "| run [name] [ticks] | events [name] | export [name] | "
-            "load-take [name] <path> | attach-rig [show] <rig> | "
+            "web [name] <dir> [ticks] | load-take [name] <path> | "
+            "attach-rig [show] <rig> | "
             "attach-cloudcam [show] <cam> | drop [name]")
 
     # ── scene project: /project ────────────────────────────────────

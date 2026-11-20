@@ -31,7 +31,8 @@ from ..media.show.show import Show
 __all__ = ["ensure_defaults", "register"]
 
 _ACTIONS = ("create", "list", "status", "start", "pause", "resume",
-            "stop", "tick", "run", "events", "export", "attach_rig",
+            "stop", "tick", "run", "events", "export", "web", "serve",
+            "unserve", "attach_rig",
             "attach_cloudcam", "load_take", "drop")
 
 
@@ -131,14 +132,22 @@ def register(registry: Any) -> None:
             "params=<{ticks, interval_s}>>; events=<the show's "
             "journal, node=<name>, params=<{limit}>>; export=<"
             "write the driven poses as BVH, node=<name>, output="
-            "<path.bvh>>; attach_rig=<attach a rig session, node="
-            "<show>, value=<rig session>>; attach_cloudcam=<"
+            "<path.bvh>>; web=<export the show as a hosted demo — "
+            "a static site (Start button + canvas) that plays the "
+            "show's rendered frames in a browser, node=<name>, "
+            "output=<dir>, params=<{ticks, max_frames, width, "
+            "height, title, overwrite}>>; serve=<serve an exported "
+            "demo directory on loopback, output=<dir>, params=<{"
+            "host, port}>>; unserve=<stop serving a demo, output="
+            "<dir>>; attach_rig=<attach a rig session, node=<show>, value=<"
+            "rig session>>; attach_cloudcam=<"
             "attach a cloudcam session, node=<show>, value=<"
             "cloudcam session>>; load_take=<load a BVH/JSON take, "
             "node=<show>, sources=[path.bvh|path.json]>; drop=<"
             "stop and drop a show, node=<name>>. action=<create|"
             "list|status|start|pause|resume|stop|tick|run|events|"
-            "export|attach_rig|attach_cloudcam|load_take|drop>; "
+            "export|web|serve|unserve|attach_rig|attach_cloudcam|"
+            "load_take|drop>; "
             "sources=<list of paths>; output=<path to write>."
         ),
         capability=Capability.FS_WRITE,
@@ -165,6 +174,21 @@ def register(registry: Any) -> None:
             return {"shows": list_shows()}
         if action == "create":
             return _create(name, args).status()
+        if action == "serve":
+            # Serving needs no show — it serves an exported
+            # directory, not a live run.
+            if not output:
+                raise ValueError("serve needs output=<dir>")
+            from ..media.show.web import serve_demo
+            return serve_demo(
+                output,
+                host=str(args.get("host") or "127.0.0.1"),
+                port=int(args.get("port") or 0))
+        if action == "unserve":
+            if not output:
+                raise ValueError("unserve needs output=<dir>")
+            from ..media.show.web import stop_demo
+            return stop_demo(output)
         show = get_show(name)
         if action == "status":
             return show.status()
@@ -197,6 +221,23 @@ def register(registry: Any) -> None:
             if not output:
                 raise ValueError("export needs output=<path.bvh>")
             return dict(show.export(output), show=name)
+        if action == "web":
+            if not output:
+                raise ValueError("web needs output=<dir>")
+            from ..media.show.web import export_web
+            attached = ensure_defaults(show)
+            result = export_web(
+                show, output,
+                ticks=int(args.get("ticks") or 30),
+                max_frames=int(args.get("max_frames") or 450),
+                width=(int(args["width"])
+                       if args.get("width") is not None else None),
+                height=(int(args["height"])
+                        if args.get("height") is not None else None),
+                title=(str(args["title"])
+                       if args.get("title") else None),
+                overwrite=bool(args.get("overwrite")))
+            return dict(result, auto_attached=attached)
         if action == "attach_rig":
             session_name = str(value or "").strip()
             if not session_name:

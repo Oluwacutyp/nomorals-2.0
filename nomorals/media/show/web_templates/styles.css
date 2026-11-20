@@ -1,0 +1,75 @@
+body {
+  background: #0a0a0e;
+  color: #e8e8ec;
+  font-family: system-ui, sans-serif;
+  margin: 0;
+  padding: 24px;
+}
+
+main {
+  max-width: 720px;
+  margin: 0 auto;
+  text-align: center;
+}
+
+h1 {
+  font-size: 1.4em;
+  margin: 0 0 4px;
+}
+
+#meta, #note {
+  color: #a0a0aa;
+  font-size: 0.9em;
+}
+
+#stage {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: #0a0a0e;
+  border: 1px solid #33333c;
+  border-radius: 8px;
+}
+
+#caption {
+  min-height: 1.6em;
+  font-size: 1.15em;
+  margin: 10px 0 4px;
+}
+
+#progress {
+  height: 6px;
+  background: #22222a;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+#bar {
+  height: 100%;
+  width: 0;
+  background: #78b4ff;
+}
+
+#status {
+  color: #a0a0aa;
+  font-size: 0.9em;
+}
+
+button {
+  background: #1c1c24;
+  color: #e8e8ec;
+  border: 1px solid #44444e;
+  border-radius: 6px;
+  padding: 8px 18px;
+  font-size: 1em;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+button:hover:not(:disabled) {
+  border-color: #78b4ff;
+}

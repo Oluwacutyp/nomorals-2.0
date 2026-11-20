@@ -18,6 +18,9 @@ that plugins (:mod:`plugins`) register systems into, over
 named resources, with a bounded event journal. A take player
 (:mod:`player`) steps a BVH take into the store one frame per
 tick. One show is one run, direct — no hub, no shared queue.
+A show also exports as a hosted demo (:mod:`web`): a static
+site — Start button + canvas — that plays the show's rendered
+frames in a browser, with the act's lines and camera cuts.
 """
 
 from __future__ import annotations
@@ -40,12 +43,20 @@ from .registry import (
 )
 from .show import MAX_EVENTS, MAX_POSED, PHASES, Show
 from .states import TRANSITIONS, ShowState, legal
+from .web import (
+    DemoServer,
+    export_web,
+    list_demos,
+    serve_demo,
+    stop_demo,
+)
 
 __all__ = [
     "MAX_EVENTS",
     "MAX_POSED",
     "PHASES",
     "CloudCamPlugin",
+    "DemoServer",
     "FaceMocapPlugin",
     "MocapPlugin",
     "RigPlugin",
@@ -56,9 +67,13 @@ __all__ = [
     "TakePlayer",
     "TRANSITIONS",
     "drop_show",
+    "export_web",
     "get_show",
     "legal",
+    "list_demos",
     "list_shows",
     "load_show",
     "reset_shows",
+    "serve_demo",
+    "stop_demo",
 ]

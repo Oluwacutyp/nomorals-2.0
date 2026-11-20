@@ -3506,6 +3506,11 @@ def _parser() -> argparse.ArgumentParser:
                      "[--interval SECONDS] [--export PATH.bvh]\\n"
                      "nm show events [--session NAME] [--limit N]\\n"
                      "nm show export [--session NAME] --out PATH.bvh\\n"
+                     "nm show web [--session NAME] --out DIR [--ticks N] "
+                     "[--max-frames N] [--width W] [--height H] "
+                     "[--title TITLE] [--overwrite]\\n"
+                     "nm show serve --out DIR [--port N] [--host HOST]\\n"
+                     "nm show unserve --out DIR\\n"
                      "nm show attach-rig [--session NAME] <rig session>\\n"
                      "nm show attach-cloudcam [--session NAME] "
                      "<cloudcam session>\\n"
@@ -3537,6 +3542,40 @@ def _parser() -> argparse.ArgumentParser:
         "export", help="write the driven poses as BVH")
     show_export.add_argument("--out", default="",
                              help="BVH output path")
+    show_web = show_sub.add_parser(
+        "web", help="export the show as a hosted demo (static site)")
+    show_web.add_argument("--out", default="",
+                          help="demo directory to write")
+    show_web.add_argument("--ticks", type=int, default=30,
+                          help="ticks to run when the show has no "
+                               "poses yet (1..3600, default 30)")
+    show_web.add_argument("--max-frames", type=int, default=450,
+                          help="frames to export at most (1..900, "
+                               "default 450)")
+    show_web.add_argument("--width", type=int, default=0,
+                          help="frame width in pixels (default: the "
+                               "rig session's)")
+    show_web.add_argument("--height", type=int, default=0,
+                          help="frame height in pixels (default: the "
+                               "rig session's)")
+    show_web.add_argument("--title", default="",
+                          help="page title (default: the show name)")
+    show_web.add_argument("--overwrite", action="store_true",
+                          help="allow a non-empty output directory")
+    show_serve = show_sub.add_parser(
+        "serve", help="serve an exported demo on loopback "
+                      "(foreground, Ctrl-C stops it)")
+    show_serve.add_argument("--out", default="",
+                            help="demo directory to serve")
+    show_serve.add_argument("--port", type=int, default=0,
+                            help="port to bind (default: ephemeral)")
+    show_serve.add_argument("--host", default="127.0.0.1",
+                            help="host to bind (default 127.0.0.1; "
+                                 "0.0.0.0 exposes it on the network)")
+    show_unserve = show_sub.add_parser(
+        "unserve", help="stop serving a demo started in this process")
+    show_unserve.add_argument("--out", default="",
+                              help="demo directory to stop serving")
     show_attach_rig = show_sub.add_parser(
         "attach-rig", help="attach a rig session")
     show_attach_rig.add_argument("value", help="rig session name")
@@ -3574,7 +3613,7 @@ def _parser() -> argparse.ArgumentParser:
                  show_sub.choices["resume"],
                  show_sub.choices["stop"],
                  show_sub.choices["tick"], show_run, show_events,
-                 show_export, show_attach_rig, show_attach_cc,
+                 show_export, show_web, show_attach_rig, show_attach_cc,
                  show_load_take, show_create,
                  show_sub.choices["drop"]):
         _sub.add_argument("--session", default="default",
