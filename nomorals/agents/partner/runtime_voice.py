@@ -261,6 +261,46 @@ class RuntimeVoiceMixin:
         return ("/g2p <word> [word ...] | status | tiers | "
                 "load <path> | override <path>")
 
+    def _control_sentence(self, tail: str, chat_key: str,
+                          message: Any = None) -> str:
+        """Split text into sentences, or show its token stream.
+
+        /sentence <text>          sentences, numbered, with the
+                                  ambiguous flag where the split
+                                  was a judgement call
+        /sentence tokens <text>   the token stream the segmenter
+                                  decided on
+        """
+        from ...media.sentence import segment, tokenize
+
+        parts = (tail or "").split(None, 1)
+        if not parts:
+            return self._control_sentence_help()
+        try:
+            if parts[0].lower() == "tokens":
+                if len(parts) < 2:
+                    return "usage: /sentence tokens <text>"
+                tokens = tokenize(parts[1])
+                if not tokens:
+                    return "sentence tokens: (no tokens)"
+                return "\n".join(
+                    f"{t.kind}: {t.text!r}" for t in tokens)
+            sentences = segment(tail)
+            if not sentences:
+                return "sentence: (no sentences)"
+            lines = []
+            for n, s in enumerate(sentences, 1):
+                lines.append(f"{n}. {s.text}"
+                             + ("  (ambiguous)" if s.ambiguous else ""))
+            return "\n".join(lines)
+        except Exception as exc:  # noqa: BLE001 - chat never dies
+            record_failure(
+                "runtime_voice.RuntimeVoiceMixin._control_sentence", exc)
+            return f"sentence failed: {exc}"
+
+    def _control_sentence_help(self) -> str:
+        return "/sentence <text> | tokens <text>"
+
     def _control_stt(self, tail: str) -> str:
         """Transcribe an audio file with the best available STT backend."""
         path = (tail or "").strip()

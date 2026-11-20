@@ -162,7 +162,6 @@ _EMOTION_RE = re.compile(
 )
 _TAG_RE = re.compile(r"\[[^\]]+\]|<strong>.*?</strong>", re.DOTALL)
 
-_SENT_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+")
 _WORD_RE = re.compile(r"\S+")
 _LAUGH_WORD_RE = re.compile(r"\b(haha+h?|hehe+h?|lol|lmao+|rofl)\b",
                             re.IGNORECASE)
@@ -579,7 +578,14 @@ class PerformanceTuner:
         return normalize_for_speech(text)
 
     def segment(self, text: str) -> list[str]:
-        return [s for s in _SENT_SPLIT_RE.split(text.strip()) if s.strip()]
+        # One engine for the whole voice stack: the sentence organ
+        # (media/sentence.py) knows abbreviations, acronyms and
+        # decimals; the old regex split "Dr. Smith" into two
+        # sentences. Lazy import: media/__init__ is heavy and this
+        # module loads on many paths.
+        from ..media.sentence import segment_text
+
+        return segment_text(text)
 
     def detect(self, sentence: str) -> Intent:
         return detect_intent(sentence)

@@ -12619,6 +12619,9 @@ class PartnerRuntime(
         if kind == "g2p":
             return self._control_g2p(command.tail, chat_key,
                                      message=message)
+        if kind == "sentence":
+            return self._control_sentence(command.tail, chat_key,
+                                         message=message)
         if kind == "smarthome":
             return self._control_smarthome(command.tail, chat_key,
                                            message=message)

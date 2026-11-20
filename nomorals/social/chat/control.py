@@ -923,6 +923,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "facemcap": (0, None),   # /facemcap … — ARKit LiveLink CSV facial capture, as face takes
     "facemesh": (0, None),   # /facemesh … — MediaPipe Face Mesh capture, as face takes
     "g2p": (0, None),        # /g2p … — pronounce English words in Arpabet (owner-only)
+    "sentence": (0, None),   # /sentence … — sentence tokenization + segmentation for TTS input (owner-only)
     "vtuber": (0, None),     # /vtuber … — a scripted character performance on a stage
     "smarthome": (0, None),  # /smarthome … — WeMo + Z-Wave home devices: discover, read, control (gated), subscribe
     "camwall": (0, None),    # /camwall … — IP cameras wall: load, start, status, export, serve (owner-only)
@@ -4609,6 +4610,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/g2p <word> [word ...] | status | tiers | load <cmudict file> | override <cmudict file>",
               "example": "/g2p blorp",
               "related": "/tts /sing /voice"},
+    "sentence": {"what": "Sentence tokenization + segmentation for TTS input (echelon/sentence.rs pattern, §3C.11): the text is lexed into semantic tokens (words, numbers, currency, dates, times, URLs, hashtags, emoji) and split into sentences — abbreviations (Dr., e.g., U.S.A.), decimals and ordinals never end one, and a single-letter initial (J. Smith) is flagged ambiguous instead of silently guessed. The same engine the voice director, sentence-chunked TTS and the live-call publisher share, so what you see here is what Devon speaks. (The `nm sentence` CLI drives the same engine.) Owner only.",
+              "usage": "/sentence <text> | tokens <text>",
+              "example": "/sentence Dr. Smith went home. He left.",
+              "related": "/g2p /tts /sing /voice"},
     "vtuber": {"what": "A VTuber show — a scripted character performance on a stage (AnimationTest UE5 VTuber show pattern, pattern only): a character (named expressions over the rig's 52 blendshapes + named gestures over its 60 bones) performs an act (timed beats: say a line, make an expression, strike a gesture, cut camera, load a take, load a face take) through a show's own phases, with audience cues landing at the next tick and a live MVN receiver attachable as the show's capture source (the recorded take holds while live is attached). (The `vtuber` brain tool and `nm vtuber` CLI drive the same performances.) Owner only.",
               "usage": "/vtuber character <path.json> [name] | act <path.vtact.json> [name] | perform <show> <act> <character> | cue <show> <kind> <value> [seconds] | live <show> <receiver> | live-detach <show> | status [show] | tick [show] | stop [show] | list | drop [show]",
               "example": "/vtuber perform demo opener devon",
@@ -5110,7 +5115,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
       "pvp", "raid", "laser"]),
     ("voice & vision", ["tts", "speak", "stt", "voice", "look", "image", "lens",
                         "vision", "voices", "clonevoice", "sing",
-                        "translate", "tl"]),
+                        "translate", "tl", "sentence"]),
     ("decoding & crypto", ["decode", "cookies", "cookielab", "structure", "cipher",
                            "monitor", "investigate", "breach"]),
     ("media system", ["music", "distribute", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
@@ -5446,7 +5451,8 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "pvp", "raid", "laser"]),
     ("voice & vision",
      ["tts", "speak", "stt", "voice", "look", "image", "lens",
-      "vision", "voices", "clonevoice", "sing", "translate", "tl"]),
+      "vision", "voices", "clonevoice", "sing", "translate", "tl",
+      "sentence"]),
     ("tools & automation",
      ["schedule", "db", "artifact", "api", "proxy", "tor", "onion", "combo", "enum", "recon", "subbrute", "chain", "disclose", "seed", "bin", "toolhub", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
@@ -5850,6 +5856,7 @@ LIST_ONELINERS: dict[str, str] = {
     "facemcap": "ARKit LiveLink CSV facial capture, as face takes — /facemcap load | list | status | drive | frame | export | render | attach",
     "facemesh": "MediaPipe Face Mesh capture, as face takes — /facemesh capture | landmarks | status",
     "g2p": "pronounce English words in Arpabet — /g2p <word> | status | tiers | load | override",
+    "sentence": "sentence tokenization + segmentation for TTS input — /sentence <text> | tokens <text>",
     "vtuber": "a scripted character performance on a stage — /vtuber character | act | perform | cue | live | status | tick | stop",
     "smarthome": "smart home devices — WeMo + Z-Wave — /smarthome discover | status | on | off | toggle | subscribe | health",
     "camwall": "IP cameras wall — constantly refreshing cameras — /camwall load | status | start | export | serve",

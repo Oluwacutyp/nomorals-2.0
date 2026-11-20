@@ -1228,8 +1228,16 @@ class LiveKitCallSession:
         interruption audio is kept as the next turn's prefix, and the
         outcome is 'barged'.
         """
-        sentences = [s.strip() for s in
-                     re.split(r"(?<=[.!?…])\s+", plan.spoken) if s.strip()]
+        try:
+            from ..media.sentence import segment_text
+
+            sentences = segment_text(plan.spoken)
+        except Exception:
+            # A live call never dies on a utility import: the old
+            # regex split is the fallback, not the engine.
+            sentences = [s.strip() for s in
+                         re.split(r"(?<=[.!?…])\s+", plan.spoken)
+                         if s.strip()]
         if not sentences:
             return "done", []
         # Audio that arrived BEFORE this reply is the next turn's input,

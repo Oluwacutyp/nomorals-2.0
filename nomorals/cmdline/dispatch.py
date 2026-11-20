@@ -159,6 +159,7 @@ from .commands.cloudcam import _cmd_cloudcam
 from .commands.facemcap import _cmd_facemcap
 from .commands.facemesh import _cmd_facemesh
 from .commands.g2p import _cmd_g2p
+from .commands.sentence import _cmd_sentence
 from .commands.show import _cmd_show
 from .commands.smarthome import _cmd_smarthome
 from .commands.camwall import _cmd_camwall
@@ -558,6 +559,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "facemcap": _CommandSpec(_cmd_facemcap),
     "facemesh": _CommandSpec(_cmd_facemesh),
     "g2p": _CommandSpec(_cmd_g2p),
+    "sentence": _CommandSpec(_cmd_sentence),
     "show": _CommandSpec(_cmd_show),
     "smarthome": _CommandSpec(_cmd_smarthome),
     "camwall": _CommandSpec(_cmd_camwall),

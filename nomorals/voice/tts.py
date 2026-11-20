@@ -907,18 +907,21 @@ def select_backends(purpose: str = "file",
     return sorted(avail, key=_key)
 
 
-#: sentence splitter for sentence-chunked streaming (backends without a
-#: native chunked API). Splits on sentence-ending punctuation and hard
-#: line breaks — the live-voice production pattern (sentence TTS +
-#: ordered playback), not a model call.
-_SENTENCE_SPLIT = re.compile(r"(?<=[.!?…])\s+|\n+")
-
-
+#: Sentence splitter for sentence-chunked streaming (backends
+#: without a native chunked API) — the live-voice production
+#: pattern (sentence TTS + ordered playback), not a model call.
+#: The engine lives in media/sentence.py; this function keeps the
+#: never-raises contract and the hard-line-break split.
 def _split_sentences(text: str) -> list[str]:
     """Split text into speakable sentences. Never raises."""
     try:
-        parts = [p.strip() for p in _SENTENCE_SPLIT.split(text or "")
-                 if p.strip()]
+        from ..media.sentence import segment_text
+
+        # Hard line breaks still split (the old behaviour): segment
+        # each line-break chunk, then flatten.
+        parts: list[str] = []
+        for chunk in re.split(r"\n+", text or ""):
+            parts.extend(segment_text(chunk))
         if parts:
             return parts
         stripped = (text or "").strip()

@@ -95,6 +95,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "facemcap": ["fc"],
     "facemesh": ["fm"],
     "g2p": ["gp"],
+    "sentence": [],  # "sent" is already a command — no alias
     "code": ["c"],
     "graph": [],
     "commands": ["cmd"],
@@ -4006,6 +4007,24 @@ def _parser() -> argparse.ArgumentParser:
         "overrides tier (the owner's corrections, highest precedence)")
     g2p_override.add_argument("path",
                               help="CMUdict-format file to load")
+    sentence = sub.add_parser("sentence", aliases=CLI_ALIASES["sentence"],
+        help="Sentence tokenization + segmentation for TTS input",
+        description=("nm sentence split <text...> [--json]\n"
+                     "nm sentence tokens <text...> [--json]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sentence.add_argument("--json", action="store_true",
+                          help="Output as JSON")
+    sentence_sub = sentence.add_subparsers(dest="sentence_action",
+                                           required=True)
+    s_split = sentence_sub.add_parser(
+        "split", help="split text into sentences (abbreviation-"
+        "aware: Dr./e.g./U.S.A. do not end one)")
+    s_split.add_argument("text", nargs="+", help="text to split")
+    s_tokens = sentence_sub.add_parser(
+        "tokens", help="show the token stream the segmenter "
+        "decides on")
+    s_tokens.add_argument("text", nargs="+", help="text to tokenize")
     smarthome = sub.add_parser("smarthome", aliases=CLI_ALIASES["smarthome"],
         help="Smart home devices — WeMo + Z-Wave: discover, read, "
              "control (gated), subscribe",
