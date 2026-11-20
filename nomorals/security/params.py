@@ -149,8 +149,10 @@ def confirm(url: str, names: Iterable[str], *, governor: Governor,
 
 
 def register(registry: Any) -> None:
+    from .case import case_dir, governor_for, home_of, resolve_scope
+
     context = registry.context
-    home = Path(getattr(context, "home", ".") or ".")
+    home = Path(home_of(context))
 
     @registry.register(
         "param_mine",
@@ -159,7 +161,7 @@ def register(registry: Any) -> None:
         parameters={"case": "str", "extra": "str (optional) — comma list"},
     )
     def param_mine(case: str, *, extra: str = "") -> dict[str, Any]:
-        found = mine(home / "data" / "evidence" / case,
+        found = mine(case_dir(home, case),
                      extra=[e.strip() for e in extra.split(",") if e.strip()])
         return {"hosts": len(found),
                 "candidates": {h: len(n) for h, n in found.items()}}
@@ -167,14 +169,18 @@ def register(registry: Any) -> None:
     @registry.register(
         "param_confirm",
         description="Confirm parameter names against a URL by control value; "
-                    "returns only names the server reacts to.",
+                    "returns only names the server reacts to. `scope` is a "
+                    "scope file; pass `case` instead to run under that "
+                    "case's scope.txt. Refuses without a scope.",
         capability=Capability.NET_OUT,
         parameters={"url": "str", "names": "str — comma list",
-                    "scope": "str — scope file"},
+                    "scope": "str — scope file (optional)",
+                    "case": "str — case name (optional)"},
     )
-    def param_confirm(url: str, names: str, scope: str) -> dict[str, Any]:
-        from .scope import load_scope
-        gov = Governor(load_scope(scope), max_total=len(names.split(",")) + 10)
-        found = confirm(url, [n.strip() for n in names.split(",") if n.strip()],
-                        governor=gov)
+    def param_confirm(url: str, names: str, scope: str = "",
+                      case: str = "") -> dict[str, Any]:
+        names_list = [n.strip() for n in names.split(",") if n.strip()]
+        gov = governor_for(resolve_scope(home, scope, case),
+                           max_total=len(names_list) + 10)
+        found = confirm(url, names_list, governor=gov)
         return {"url": url, "confirmed": [p.as_dict() for p in found]}

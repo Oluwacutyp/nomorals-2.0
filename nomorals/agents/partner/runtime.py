@@ -12252,6 +12252,8 @@ class PartnerRuntime(
             return self._control_seed(command.tail or arg)
         if kind == "bin":
             return self._control_bin(command.tail or arg)
+        if kind == "sec":
+            return self._control_sec(command.tail or arg)
         if kind == "toolhub":
             return self._control_toolhub(command.tail or arg, chat_key)
         if kind == "workspace":

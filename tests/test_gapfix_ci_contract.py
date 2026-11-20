@@ -300,14 +300,14 @@ class RealRepoTests(unittest.TestCase):
         missing = old_runs - new_runs
         self.assertEqual(missing, set())
 
-    def test_tool_count_still_749(self):
+    def test_tool_count_still_774(self):
         from types import SimpleNamespace
 
         from nomorals.tools.registry import ToolRegistry
 
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 749)
+        self.assertEqual(len(registry._tools), 774)
 
 
 class CliTests(unittest.TestCase):

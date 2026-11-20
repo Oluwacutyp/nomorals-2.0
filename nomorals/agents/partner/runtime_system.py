@@ -1091,6 +1091,360 @@ class RuntimeSystemMixin:
             lines.append("  failed: " + "; ".join(v["sources_failed"]))
         return "\n".join(lines)
 
+    def _control_sec(self, tail: str, chat_key: str = "") -> str:
+        # /sec — the security probe batch (owner's probe organs): scope,
+        # params, inject, jwt, graphql, race, cors, planner, leaks,
+        # dossier, bans, capture, amplify, replay, chain, attack. The
+        # same brain tools the CLI calls, reached the way /combo and
+        # /seed reach theirs: self.context.tools.call(...). Every probe
+        # runs under a scope file (--case <name> or --scope <file>); no
+        # scope, no probe — the tool refuses and the refusal is the
+        # reply. Owner-only (not in PUBLIC_COMMANDS).
+        def _flags(parts: list[str]) -> tuple[list[str], str, str,
+                                              dict[str, str]]:
+            rest: list[str] = []
+            case = scope = ""
+            markers: dict[str, str] = {}
+            i = 0
+            while i < len(parts):
+                if parts[i] == "--case" and i + 1 < len(parts):
+                    case = parts[i + 1]
+                    i += 2
+                elif parts[i] == "--scope" and i + 1 < len(parts):
+                    scope = parts[i + 1]
+                    i += 2
+                elif parts[i] in ("--success", "--dupe", "--id-field") \
+                        and i + 1 < len(parts):
+                    markers[parts[i][2:].replace("-", "_")] = parts[i + 1]
+                    i += 2
+                else:
+                    rest.append(parts[i])
+                    i += 1
+            return rest, case, scope, markers
+
+        def _call(tool: str, **kw: object) -> tuple[bool, object]:
+            outcome = self.context.tools.call(tool, **kw)
+            if not outcome.ok:
+                return False, (f"{tool} failed: "
+                               f"{getattr(outcome.error, 'message', outcome.error)}")
+            return True, (outcome.value or {})
+
+        def _fail(msg: object) -> str:
+            return str(msg)
+
+        parts = (tail or "").split()
+        if not parts:
+            return ("usage: /sec case init <name> | scope check <url> | "
+                    "params confirm <url> <names> | inject <url> <param> | "
+                    "jwt <token> | graphql probe <url> | race <url> | "
+                    "cors <url> | plan next <case> | leaks <addr> | "
+                    "dossier <subject> | ban state <subject> | "
+                    "chain <case> <usernames> | attack <host> <usernames> "
+                    "[--case C | --scope F]")
+        verb = parts[0].lower()
+        rest, case, scope, markers = _flags(parts[1:])
+        if verb == "case":
+            if rest and rest[0] == "init" and len(rest) >= 2:
+                from ...security.case import home_of, init_case
+                made = init_case(home_of(self.context), rest[1])
+                return (f"case {made['case']} ready at {made['dir']}\n"
+                        f"scope template: {made['scope']} — list the "
+                        f"hosts under test in it before any probe runs")
+            if rest and rest[0] == "list":
+                from pathlib import Path as _P
+
+                from ...security.case import home_of
+                root = _P(home_of(self.context)) / "data" / "evidence"
+                names = sorted(p.name for p in root.iterdir()
+                               if p.is_dir()) if root.is_dir() else []
+                return "cases: " + (", ".join(names) if names else "none yet")
+            return "usage: /sec case init <name> | list"
+        if verb == "scope":
+            if rest and rest[0] == "load":
+                ok, v = _call("scope_load", path="", case=case)
+                if not ok:
+                    return _fail(v)
+                return f"scope: {v}"
+            if rest and rest[0] == "check" and len(rest) >= 2:
+                ok, v = _call("scope_check", path="", url=rest[1], case=case)
+                if not ok:
+                    return _fail(v)
+                return (f"{rest[1]}: "
+                        f"{'in scope' if v.get('in_scope') else 'OUT OF SCOPE'}")
+            return "usage: /sec scope load | check <url> [--case C | --scope F]"
+        if verb == "params":
+            if rest and rest[0] == "mine" and len(rest) >= 2:
+                ok, v = _call("param_mine", case=rest[1])
+                if not ok:
+                    return _fail(v)
+                cands = v.get("candidates") or {}
+                return (f"{len(cands)} host(s): " + ", ".join(
+                    f"{h} ({n})" for h, n in sorted(cands.items())))
+            if rest and rest[0] == "confirm" and len(rest) >= 3:
+                ok, v = _call("param_confirm", url=rest[1], names=rest[2],
+                              scope=scope, case=case)
+                if not ok:
+                    return _fail(v)
+                found = v.get("confirmed") or []
+                return ("confirmed: " + ", ".join(
+                    f"{p.get('name')} ({p.get('where')})" for p in found)
+                    if found else "nothing confirmed")
+            return ("usage: /sec params mine <case> | confirm <url> "
+                    "<names> [--case C | --scope F]")
+        if verb == "inject":
+            if len(rest) < 2:
+                return ("usage: /sec inject <url> <param> "
+                        "[--case C | --scope F]")
+            ok, v = _call("inject_probe", url=rest[0], param=rest[1],
+                          scope=scope, case=case)
+            if not ok:
+                return _fail(v)
+            found = v.get("findings") or []
+            lines = [f"{v.get('url')}: {len(found)} finding(s)"]
+            for f in found:
+                lines.append(f"  {f.get('class')}: {f.get('evidence', '')[:80]}")
+            return "\n".join(lines)
+        if verb == "jwt":
+            if not rest:
+                return "usage: /sec jwt <token>"
+            ok, v = _call("jwt_attack", token=rest[0])
+            if not ok:
+                return _fail(v)
+            confirmed = v.get("confirmed") or []
+            lines = [f"{len(confirmed)} confirmed attack(s)"]
+            for r in confirmed:
+                lines.append(f"  {r.get('test')}: {str(r.get('detail', ''))[:80]}")
+            return "\n".join(lines)
+        if verb == "graphql":
+            if len(rest) < 2:
+                return ("usage: /sec graphql probe <url> | amplify <url> "
+                        "[count] [--case C | --scope F]")
+            if rest[0] == "probe":
+                ok, v = _call("graphql_probe", url=rest[1],
+                              scope=scope, case=case)
+                if not ok:
+                    return _fail(v)
+                return (f"{rest[1]}: introspection "
+                        f"{'on' if v.get('introspection') else 'off'}, "
+                        f"{v.get('types')} type(s), "
+                        f"{len(v.get('mutations') or [])} mutation(s), "
+                        f"sensitive: {', '.join(v.get('sensitive') or []) or 'none'}")
+            if rest[0] == "amplify":
+                count = rest[2] if len(rest) >= 3 and rest[2].isdigit() else "50"
+                ok, v = _call("graphql_amplify", url=rest[1], count=count,
+                              scope=scope, case=case)
+                if not ok:
+                    return _fail(v)
+                return (f"amplified: {v.get('answered')} of "
+                        f"{v.get('requested')} answered "
+                        f"({'ok' if v.get('ok') else 'rejected'})")
+            return "usage: /sec graphql probe <url> | amplify <url> [count]"
+        if verb == "race":
+            if not rest:
+                return "usage: /sec race <url> [count] [--case C | --scope F]"
+            count = rest[1] if len(rest) >= 2 and rest[1].isdigit() else "20"
+            ok, v = _call("race_wave", url=rest[0], count=count,
+                          scope=scope, case=case)
+            if not ok:
+                return _fail(v)
+            return (f"race: {v.get('sent')} sent, {v.get('answered')} "
+                    f"answered, verdict {v.get('verdict')}")
+        if verb == "cors":
+            if not rest:
+                return "usage: /sec cors <url> [--case C | --scope F]"
+            ok, v = _call("cors_probe", url=rest[0], scope=scope, case=case)
+            if not ok:
+                return _fail(v)
+            hits = v.get("findings") or []
+            lines = [f"{rest[0]}: {v.get('verdict')} "
+                     f"({len(hits)} origin(s) with headers)"]
+            for h in hits:
+                lines.append(f"  {h.get('origin')}: "
+                             f"{h.get('severity', h.get('error', ''))}")
+            return "\n".join(lines)
+        if verb == "csrf":
+            if not rest:
+                return "usage: /sec csrf <action-url> [k=v ...]"
+            fields: dict[str, str] = {}
+            for token in rest[1:]:
+                if "=" in token:
+                    key, _, value = token.partition("=")
+                    fields[key.strip()] = value.strip()
+            ok, v = _call("csrf_poc", action=rest[0], fields=fields)
+            if not ok:
+                return _fail(v)
+            return f"csrf PoC: {v.get('bytes', 0)} bytes" + (
+                f" saved to {v.get('file')}" if v.get("file") else "")
+        if verb == "plan":
+            if len(rest) < 2:
+                return ("usage: /sec plan next <case> | add <case> <class> "
+                        "<target> | resolve <case> <id> <true|false>")
+            if rest[0] == "next":
+                ok, v = _call("plan_next", case=rest[1])
+                if not ok:
+                    return _fail(v)
+                nxt = v.get("next") or []
+                lines = [f"next ({len(nxt)}):"]
+                for h in nxt:
+                    lines.append(f"  {h.get('id')}: {h.get('class')} "
+                                 f"{h.get('target')} "
+                                 f"[{h.get('confidence')}]")
+                return "\n".join(lines)
+            if rest[0] == "add" and len(rest) >= 4:
+                ok, v = _call("plan_add", case=rest[1], cls=rest[2],
+                              target=rest[3],
+                              param=" ".join(rest[4:]) if len(rest) > 4 else "")
+                if not ok:
+                    return _fail(v)
+                return f"added {v.get('id')}: {v.get('class')} {v.get('target')}"
+            if rest[0] == "resolve" and len(rest) >= 4:
+                ok, v = _call("plan_resolve", case=rest[1], id=rest[2],
+                              confirmed=rest[3])
+                if not ok:
+                    return _fail(v)
+                return f"{v.get('id')}: {v.get('state')}"
+            return ("usage: /sec plan next <case> | add <case> <class> "
+                    "<target> | resolve <case> <id> <true|false>")
+        if verb == "leaks":
+            if not rest:
+                return "usage: /sec leaks <email|username|domain>"
+            target = rest[0]
+            kw: dict[str, str] = {}
+            if "@" in target:
+                kw["email"] = target
+            elif "." in target:
+                kw["domain"] = target
+            else:
+                kw["username"] = target
+            ok, v = _call("leaks_harvest", **kw)
+            if not ok:
+                return _fail(v)
+            skipped = v.get("sources_skipped_no_key") or []
+            lines = [f"{target}: "
+                     f"{'EXPOSED' if v.get('exposed') else 'not seen'} "
+                     f"({len(v.get('passwords') or [])} password(s), "
+                     f"{len(v.get('sessions') or [])} session(s))"]
+            if skipped:
+                lines.append("keyed sources skipped (no key): "
+                             + ", ".join(skipped))
+            return "\n".join(lines)
+        if verb == "dossier":
+            if not rest:
+                return "usage: /sec dossier <username|email>"
+            kind = "email" if "@" in rest[0] else "username"
+            ok, v = _call("dossier_build", subject=rest[0], kind=kind)
+            if not ok:
+                return _fail(v)
+            return (f"{v.get('subject')}: tier {v.get('tier')} "
+                    f"({v.get('score')}/100)")
+        if verb == "ban":
+            if len(rest) < 2:
+                return ("usage: /sec ban report <platform> <target> "
+                        "<session> | state <subject> | appeal <handle>")
+            if rest[0] == "state":
+                ok, v = _call("ban_state", subject=rest[1])
+                if not ok:
+                    return _fail(v)
+                states = v.get("states") or {}
+                return (f"{rest[1]}: " + ", ".join(
+                    f"{p}={s}" for p, s in sorted(states.items()))
+                    if states else f"{rest[1]}: no ban state recorded")
+            if rest[0] == "appeal":
+                ok, v = _call("ban_appeal", handle=rest[1])
+                if not ok:
+                    return _fail(v)
+                return (f"appeal drafts: {len(v.get('files') or [])} file(s) "
+                        f"on {', '.join(v.get('platforms') or [])}")
+            if rest[0] == "report" and len(rest) >= 4:
+                ok, v = _call("ban_report", platform=rest[1], target=rest[2],
+                              session_account=rest[3])
+                if not ok:
+                    return _fail(v)
+                return (f"report {v.get('platform')}: "
+                        f"{'sent' if v.get('ok') else 'failed'} "
+                        f"(HTTP {v.get('status', '?')})")
+            return ("usage: /sec ban report <platform> <target> <session> | "
+                    "state <subject> | appeal <handle>")
+        if verb == "capture":
+            if not rest:
+                return "usage: /sec capture <platform> — a headed browser opens; file one report by hand"
+            ok, v = _call("report_capture", platform=rest[0])
+            if not ok:
+                return _fail(v)
+            return f"captured: {v.get('saved')}"
+        if verb == "amplify":
+            if not rest:
+                return "usage: /sec amplify <template-file> [count] [--case C | --scope F]"
+            count = rest[1] if len(rest) >= 2 and rest[1].isdigit() else "20"
+            ok, v = _call("report_amplify", template=rest[0], count=count,
+                          scope=scope, case=case)
+            if not ok:
+                return _fail(v)
+            return (f"amplified: {v.get('attempted')} attempt(s), "
+                    f"{v.get('counted')} counted, {v.get('dupes')} dupes, "
+                    f"{v.get('blocked')} blocked")
+        if verb in ("replay", "diagnose"):
+            if len(rest) < 1:
+                return f"usage: /sec {verb} <url> [{{json body}}] [--case C | --scope F]"
+            import json as _json
+            body: dict[str, object] = {}
+            if len(rest) >= 2 and rest[1].startswith("{"):
+                try:
+                    body = _json.loads(" ".join(rest[1:]))
+                except ValueError:
+                    return "--body must be a JSON object"
+            tool = "replay_run" if verb == "replay" else "replay_diagnose"
+            ok, v = _call(tool, url=rest[0], body=body, kinds={},
+                          success=markers.get("success", ""),
+                          dupe=markers.get("dupe", ""),
+                          id_field=markers.get("id_field", ""),
+                          scope=scope, case=case)
+            if not ok:
+                return _fail(v)
+            if verb == "replay":
+                return (f"replayed: {v.get('attempted')} attempt(s), "
+                        f"{v.get('counted')} counted, {v.get('dupes')} dupes, "
+                        f"{v.get('blocked')} blocked")
+            suspects = v.get("suspects") or []
+            return ("suspects: " + ", ".join(suspects)
+                    if suspects else "no single field explains the refusal")
+        if verb == "chain":
+            if len(rest) < 2:
+                return "usage: /sec chain <case> <usernames> [passwords]"
+            ok, v = _call("sec_chain", case=rest[0], usernames=rest[1],
+                          passwords=rest[2] if len(rest) >= 3 else "")
+            if not ok:
+                return _fail(v)
+            runs = v.get("runs") or []
+            lines = [f"chain {rest[0]}: {len(runs)} run(s)"]
+            for r in runs:
+                if r.get("skipped"):
+                    lines.append(f"  {r.get('hypothesis')}: skipped — "
+                                 f"{r.get('note', '')}")
+                    continue
+                lines.append(f"  {r.get('hypothesis')}: "
+                             f"{len(r.get('found') or [])} found, "
+                             f"{r.get('attempts')} attempt(s)")
+            return "\n".join(lines)
+        if verb == "attack":
+            if len(rest) < 2:
+                return ("usage: /sec attack <host> <usernames> [passwords] "
+                        "[--case C | --scope F]")
+            ok, v = _call("attacker", host=rest[0], usernames=rest[1],
+                          passwords=rest[2] if len(rest) >= 3 else "",
+                          scope=scope, case=case)
+            if not ok:
+                return _fail(v)
+            found = v.get("found") or []
+            lines = [f"attack {rest[0]}: {v.get('attempts')} attempt(s), "
+                     f"{len(found)} found"]
+            for f in found:
+                lines.append(f"  + {f.get('login')}")
+            return "\n".join(lines)
+        return ("unknown /sec verb — try: case, scope, params, inject, jwt, "
+                "graphql, race, cors, csrf, plan, leaks, dossier, ban, "
+                "capture, amplify, replay, diagnose, chain, attack")
+
     def _control_bin(self, tail: str, chat_key: str = "") -> str:
         # /bin <digits> | gen <prefix> [count] [length] |
         # check <number> [mm yyyy] [cvv] | spam <prefix> [count] —

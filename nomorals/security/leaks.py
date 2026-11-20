@@ -18,11 +18,11 @@ import os
 import re
 import urllib.parse
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 from ..core.http import HttpClient
-from ..core.policy import Capability
 from ..core.logging_setup import get_logger
+from ..core.policy import Capability
 
 _log = get_logger(__name__)
 __all__ = ["KEYS", "Exposure", "harvest_exposure", "register"]
@@ -183,11 +183,22 @@ def _dehashed(term: str, key: str, timeout: float = 30.0) -> Exposure:
     return out
 
 
+def _merge_into(merged: Exposure, part: Exposure) -> None:
+    """Fold one source's exposure into the merged result."""
+    merged.identities |= part.identities
+    merged.passwords |= part.passwords
+    merged.sessions += part.sessions
+    merged.platforms |= part.platforms
+    merged.malwares |= part.malwares
+    merged.sources |= part.sources
+
+
 def harvest_exposure(*, email: str = "", username: str = "", domain: str = "",
                      timeout: float = 30.0) -> dict[str, Any]:
     subject = email or username or domain
     merged = Exposure(subject=subject)
-    skipped: list[str] = []
+    skipped_no_key: list[str] = []
+    skipped_other: list[str] = []
     ran: list[str] = []
 
     if email:
@@ -195,11 +206,77 @@ def harvest_exposure(*, email: str = "", username: str = "", domain: str = "",
             try:
                 part = fn(email, timeout=timeout)
                 ran.append(name)
-                merged.identities |= part.identities
-                merged.passwords |= part.passwords
-                merged.sessions += part.sessions
-                merged.platforms |= part.platforms
-                merged.malwares |= part.malwares
-                merged.sources |= part.sources
+                _merge_into(merged, part)
             except Exception as exc:  # noqa: BLE001
-                _log.info("%s failed: %s", name,
+                _log.info("%s failed: %s", name, exc)
+
+    if username:
+        try:
+            part = _cavalier(username=username, timeout=timeout)
+            ran.append("cavalier")
+            _merge_into(merged, part)
+        except Exception as exc:  # noqa: BLE001
+            _log.info("cavalier failed: %s", exc)
+
+    if domain:
+        try:
+            part = _cavalier(domain=domain, timeout=timeout)
+            ran.append("cavalier")
+            _merge_into(merged, part)
+        except Exception as exc:  # noqa: BLE001
+            _log.info("cavalier failed: %s", exc)
+
+    # Keyed sources: a missing key is reported in
+    # `sources_skipped_no_key`, never faked. Only HIBP and DeHashed
+    # have adapters in this module; the other KEYS entries are
+    # reported as skipped (no adapter yet) when their key is set.
+    for env, provider in KEYS.items():
+        key = os.environ.get(env, "").strip()
+        if not key:
+            skipped_no_key.append(provider)
+            continue
+        if provider == "hibp" and email:
+            try:
+                _merge_into(merged, _hibp(email, key, timeout=timeout))
+                ran.append("hibp")
+            except Exception as exc:  # noqa: BLE001
+                _log.info("hibp failed: %s", exc)
+        elif provider == "dehashed" and subject:
+            try:
+                _merge_into(merged,
+                            _dehashed(subject, key, timeout=timeout))
+                ran.append("dehashed")
+            except Exception as exc:  # noqa: BLE001
+                _log.info("dehashed failed: %s", exc)
+        else:
+            skipped_other.append(provider)
+
+    out = merged.as_dict()
+    out["ran"] = ran
+    out["sources_skipped_no_key"] = skipped_no_key
+    if skipped_other:
+        out["sources_skipped"] = skipped_other
+    return out
+
+
+def register(registry: Any) -> None:
+    @registry.register(
+        "leaks_harvest",
+        description="Leak and credential-exposure harvest for an email, "
+                    "username or domain: keyless stealer-log (Cavalier) "
+                    "and combolist (ProxyNova) sources, plus HIBP / "
+                    "DeHashed when their keys are set (NM_HIBP_KEY, "
+                    "NM_DEHASHED_KEY). A missing key is reported in "
+                    "sources_skipped_no_key, never faked; the keyless "
+                    "sources run without one. Keys are read from the "
+                    "environment and never appear in the result.",
+        capability=Capability.NET_OUT,
+        parameters={"email": "str (optional)", "username": "str (optional)",
+                    "domain": "str (optional)"},
+    )
+    def leaks_harvest(email: str = "", username: str = "",
+                      domain: str = "") -> dict[str, Any]:
+        if not (email or username or domain):
+            return {"error": "give an email, username or domain"}
+        return harvest_exposure(email=email, username=username,
+                                domain=domain)

@@ -234,11 +234,11 @@ def test_health_shape(tmp_path):
 
 # ── tool wiring: no new tool, preview rides craftfonts ───────────
 
-def test_tool_count_stays_749(tmp_path):
+def test_tool_count_stays_774(tmp_path):
     # No new brain tool: the preview rides the existing craftfonts
     # tool (its render action already reached the typography
     # organ), so the registry count does not move.
-    assert len(_registry()._tools) == 749
+    assert len(_registry()._tools) == 774
 
 
 def test_tool_preview_action_renders_png(tmp_path):

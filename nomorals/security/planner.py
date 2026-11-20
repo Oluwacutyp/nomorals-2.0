@@ -140,15 +140,17 @@ class Ledger:
 
 
 def register(registry: Any) -> None:
+    from .case import case_dir, home_of
+
     context = registry.context
-    root = Path(getattr(context, "home", ".") or ".") / "data" / "evidence"
+    home = home_of(context)
 
     @registry.register("plan_next",
                        description="Ranked next hypotheses to test.",
                        capability=Capability.DB_READ,
                        parameters={"case": "str", "limit": "int (optional, 5)"})
     def plan_next(case: str, *, limit: str = "5") -> dict[str, Any]:
-        ledger = Ledger(root / case / "hypotheses.jsonl")
+        ledger = Ledger(case_dir(home, case) / "hypotheses.jsonl")
         return {"next": [h.as_dict() for h in ledger.next(int(limit or 5))],
                 "stats": ledger.stats()}
 
@@ -160,7 +162,7 @@ def register(registry: Any) -> None:
                                    "confidence": "float (optional, 0.5)"})
     def plan_add(case: str, cls: str, target: str, *, param: str = "",
                  confidence: str = "0.5") -> dict[str, Any]:
-        ledger = Ledger(root / case / "hypotheses.jsonl")
+        ledger = Ledger(case_dir(home, case) / "hypotheses.jsonl")
         item = ledger.add(cls, target, param=param,
                           confidence=float(confidence or 0.5))
         return item.as_dict()
@@ -173,7 +175,7 @@ def register(registry: Any) -> None:
                                    "confirmed": "bool", "note": "str (optional)"})
     def plan_resolve(case: str, id: str, confirmed: str = "false",
                      *, note: str = "") -> dict[str, Any]:
-        ledger = Ledger(root / case / "hypotheses.jsonl")
+        ledger = Ledger(case_dir(home, case) / "hypotheses.jsonl")
         item = ledger.resolve(id, confirmed=(confirmed or "").lower()
                               in {"1", "true", "yes"}, note=note)
         return item.as_dict() if item else {"error": "unknown id"}

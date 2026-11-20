@@ -459,15 +459,15 @@ class ParityTest(unittest.TestCase):
 
 
 class ToolCountTest(unittest.TestCase):
-    def test_tool_count_is_749_after_inddutils(self):
+    def test_tool_count_is_774_after_inddutils(self):
         # A new tool is added by this lane: the inddutils tool over
         # documents/indd. 734 at base 414ee6bb; lane 116 (Craft-I18n)
         # ships in parallel and adds no tool; 748 after the bughunter
-        # port (lane 121) added 8 bughunter tools. 749 after the mocap port (lane 125) added the mocap tool.
+        # port (lane 121) added 8 bughunter tools. 749 after the mocap port (lane 125) added the mocap tool. 774 after the secprobe wire-up added 25 tools (scope_load, scope_check, param_mine, param_confirm, inject_probe, jwt_attack, graphql_probe, graphql_amplify, race_wave, cors_probe, csrf_poc, plan_next, plan_add, plan_resolve, leaks_harvest, dossier_build, ban_report, ban_state, ban_set_state, ban_appeal, report_capture, report_amplify, replay_run, replay_diagnose, sec_chain).
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
         self.assertIn("inddutils", registry._tools)
-        self.assertEqual(len(registry._tools), 749)
+        self.assertEqual(len(registry._tools), 774)
 
 
 if __name__ == "__main__":

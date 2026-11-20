@@ -23,7 +23,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 
-__all__ = ["Fingerprint", "Delta", "fingerprint", "compare", "similarity"]
+__all__ = ["Fingerprint", "Delta", "fingerprint", "compare", "similarity",
+           "login_delta"]
 
 _TOKEN = re.compile(r"[A-Za-z0-9_\-]{4,}")
 _SQL_ERROR = re.compile(
@@ -40,6 +41,8 @@ class Fingerprint:
     length: int = 0
     words: int = 0
     headers: frozenset[str] = frozenset()
+    location: str = ""
+    cookies: frozenset[str] = frozenset()
     elapsed_ms: float = 0.0
     digest: str = ""
     body: str = field(default="", repr=False)
@@ -52,18 +55,38 @@ class Fingerprint:
                 "words": self.words, "elapsed_ms": round(self.elapsed_ms),
                 "digest": self.digest, "reflected": self.reflected[:8],
                 "sql_error": self.sql_error, "stack": self.stack,
-                "headers": sorted(self.headers)[:20]}
+                "headers": sorted(self.headers)[:20],
+                "location": self.location,
+                "cookies": sorted(self.cookies)[:20]}
 
 
 def fingerprint(status: int, body: str, headers: Any = None,
                 elapsed_ms: float = 0.0,
-                markers: Iterable[str] = ()) -> Fingerprint:
+                markers: Iterable[str] = (),
+                location: str = "", cookies: Iterable[str] = (),
+                case_insensitive_markers: bool = False,
+                length: int | None = None) -> Fingerprint:
+    """Measure a response. `markers` are searched for reflection
+    offsets (`reflected` holds the first offset of each marker found);
+    pass `case_insensitive_markers` when the marker is a fail string
+    the server may echo in any case (the login verdict needs that).
+    `location` / `cookies` are the redirect target and the cookie
+    names — the login verdict's axes. `length` overrides the measured
+    length (the attacker counts raw bytes, not decoded characters)."""
     text = body or ""
-    found = [text.find(m) for m in markers if m and m in text]
+    if case_insensitive_markers:
+        lowered = text.lower()
+        found = [lowered.find(m.lower()) for m in markers
+                 if m and m.lower() in lowered]
+    else:
+        found = [text.find(m) for m in markers if m and m in text]
     return Fingerprint(
-        status=status, length=len(text), words=len(_TOKEN.findall(text)),
+        status=status, length=len(text) if length is None else length,
+        words=len(_TOKEN.findall(text)),
         headers=frozenset(k.lower() for k in
                           (headers.keys() if hasattr(headers, "keys") else [])),
+        location=location,
+        cookies=frozenset(m.lower() for m in cookies),
         elapsed_ms=elapsed_ms,
         digest=hashlib.sha256(text.encode("utf-8", "replace")).hexdigest(),
         body=text, reflected=found,
@@ -125,3 +148,32 @@ def compare(base: Fingerprint, probe: Fingerprint,
     verdict = ("strong" if score >= 6 else "interesting" if score >= 3
                else "same")
     return Delta(score=score, axes=axes, verdict=verdict)
+
+
+def login_delta(base: Fingerprint, probe: Fingerprint) -> int:
+    """The login verdict on the unified Fingerprint: how far an
+    attempt's response departs from the known-failure shape. Two axes
+    (score >= 2) make the attempt a candidate. This is the attacker's
+    baseline-differential rule, moved here so there is ONE fingerprint
+    primitive and ONE verdict for the same question.
+
+    The axes are the login question, not the probe question, so the
+    calibration differs from compare() on purpose: the length band is
+    48 bytes / 15% (a login page's failure body is short and stable),
+    and the fail-string axis reads `reflected` — the attempt's
+    fingerprint is built with markers=[fail_string], so `reflected`
+    is non-empty exactly when the fail string is present. A changed
+    redirect target or a new cookie is one axis each.
+    """
+    score = 0
+    if probe.status != base.status:
+        score += 1
+    if abs(probe.length - base.length) > max(48, base.length * 0.15):
+        score += 1
+    if probe.location != base.location:
+        score += 1
+    if probe.cookies - base.cookies:
+        score += 1
+    if base.reflected and not probe.reflected:
+        score += 1
+    return score

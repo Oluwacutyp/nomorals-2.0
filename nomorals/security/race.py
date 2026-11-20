@@ -93,21 +93,28 @@ def wave(url: str, *, governor: Governor, method: str = "POST",
 
 
 def register(registry: Any) -> None:
-    context = registry.context
+    from .case import governor_for, home_of, resolve_scope
+
+    home = home_of(registry.context)
 
     @registry.register("race_wave",
                        description="Fire N concurrent requests to test a "
-                                   "check-then-write window.",
+                                   "check-then-write window. `scope` is a "
+                                   "scope file; pass `case` instead to run "
+                                   "under that case's scope.txt. Refuses "
+                                   "without a scope.",
                        capability=Capability.NET_OUT,
-                       parameters={"url": "str", "scope": "str",
+                       parameters={"url": "str",
+                                   "scope": "str — scope file (optional)",
                                    "count": "int (optional, 20)",
                                    "body": "str (optional) — {n}/{u} templated",
-                                   "method": "str (optional, POST)"})
-    def race_wave(url: str, scope: str, *, count: str = "20",
-                  body: str = "", method: str = "POST") -> dict[str, Any]:
-        from .scope import load_scope
+                                   "method": "str (optional, POST)",
+                                   "case": "str — case name (optional)"})
+    def race_wave(url: str, scope: str = "", *, count: str = "20",
+                  body: str = "", method: str = "POST",
+                  case: str = "") -> dict[str, Any]:
         n = int(count or 20)
-        gov = Governor(load_scope(scope), max_total=n * 2,
-                       max_per_host=50.0)
+        gov = governor_for(resolve_scope(home, scope, case),
+                           max_total=n * 2, max_per_host=50.0)
         return wave(url, governor=gov, count=n, body_template=body,
                     method=method).as_dict()

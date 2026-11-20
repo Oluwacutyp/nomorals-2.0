@@ -18,7 +18,7 @@ from typing import Any, Optional
 from ..core.http import HttpClient
 from ..core.policy import Capability
 from ..core.logging_setup import get_logger
-from .scope import Governor
+from .scope import Governor, OutOfScope
 
 _log = get_logger(__name__)
 __all__ = ["ORIGINS", "CorsResult", "cors_probe", "csrf_poc", "register"]
@@ -43,6 +43,11 @@ def cors_probe(url: str, *, governor: Governor,
                timeout: float = 20.0) -> CorsResult:
     client = client or HttpClient(timeout=timeout)
     out = CorsResult(url=url)
+    # The scope gate sits OUTSIDE the per-origin try below: an
+    # out-of-scope URL is a refusal, never a "clean" verdict with the
+    # scope error buried as a per-origin error finding.
+    if not governor.scope.allows(url):
+        raise OutOfScope(f"{url} is not in scope")
     for origin in ORIGINS:
         try:
             governor.spend(url)
@@ -93,17 +98,24 @@ def csrf_poc(action: str, fields: dict[str, str],
 
 
 def register(registry: Any) -> None:
-    context = registry.context
+    from .case import governor_for, home_of, resolve_scope
+
+    home = home_of(registry.context)
 
     @registry.register("cors_probe",
                        description="Origin sweep for CORS reflection with "
-                                   "credentials.",
+                                   "credentials. `scope` is a scope file; "
+                                   "pass `case` instead to run under that "
+                                   "case's scope.txt. Refuses without a "
+                                   "scope.",
                        capability=Capability.NET_OUT,
-                       parameters={"url": "str", "scope": "str"})
-    def cors_probe_tool(url: str, scope: str) -> dict[str, Any]:
-        from .scope import load_scope
-        return cors_probe(url, governor=Governor(load_scope(scope),
-                                                 max_total=10)).as_dict()
+                       parameters={"url": "str",
+                                   "scope": "str — scope file (optional)",
+                                   "case": "str — case name (optional)"})
+    def cors_probe_tool(url: str, scope: str = "",
+                        case: str = "") -> dict[str, Any]:
+        gov = governor_for(resolve_scope(home, scope, case), max_total=10)
+        return cors_probe(url, governor=gov).as_dict()
 
     @registry.register("csrf_poc",
                        description="Generate a self-submitting CSRF PoC form.",

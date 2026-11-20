@@ -21,7 +21,7 @@ from ..core.logging_setup import get_logger
 from . import leaks, seed_sources, social_enum
 
 _log = get_logger(__name__)
-__all__ = ["Dossier", "build_dossier", "render", "register"]
+__all__ = ["Dossier", "build_dossier", "render", "save_dossier", "register"]
 
 _EXPOSURE_POINTS = {
     "stealer-log": 30, "breach": 18, "proxynova": 12, "dehashed": 18,
@@ -46,6 +46,28 @@ class Dossier:
                 "profile": self.profile, "score": self.score,
                 "tier": self.tier, "notes": self.notes}
 
+    def record_credentials(self, host: str,
+                           found: list[dict[str, Any]]) -> None:
+        """Land found credentials in the dossier — the account-exposure
+        score counts them, so a cracked login is visible in the score,
+        not only in the attacker's own out_file. Only the usernames
+        are recorded; passwords are NOT kept in the dossier, only
+        counted (the out_file holds the found pairs)."""
+        if not found:
+            return
+        exposed = self.exposure.setdefault("found_credentials", [])
+        seen = {(c.get("host"), c.get("username")) for c in exposed}
+        for pair in found:
+            key = (host, pair.get("username") or pair.get("login", ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            exposed.append({"host": host,
+                            "username": pair.get("username")
+                            or pair.get("login", ""),
+                            "protocol": pair.get("protocol", "")})
+        _score(self)
+
 
 def _score(d: Dossier) -> None:
     score = 0
@@ -55,6 +77,11 @@ def _score(d: Dossier) -> None:
         score += _EXPOSURE_POINTS.get(source, 0)
     if d.exposure.get("passwords"):
         score += min(25, len(d.exposure["passwords"]) * 3)
+    if d.exposure.get("found_credentials"):
+        # Credentials found by the attacker land here (see
+        # Dossier.record_credentials): each one is a confirmed live
+        # login, worth more than a leaked password.
+        score += min(25, len(d.exposure["found_credentials"]) * 5)
     if d.exposure.get("sessions"):
         score += min(15, len(d.exposure["sessions"]) * 4)
     if d.profile.get("accounts"):
@@ -112,6 +139,11 @@ def render(d: Dossier) -> str:
     if d.exposure.get("passwords"):
         lines += ["## Passwords seen", ""]
         lines += [f"- `{p}`" for p in d.exposure["passwords"][:20]] + [""]
+    if d.exposure.get("found_credentials"):
+        lines += ["## Credentials found by attack", ""]
+        lines += [f"- {c.get('username', '')} @ {c.get('host', '')} "
+                  f"({c.get('protocol', '')})"
+                  for c in d.exposure["found_credentials"][:20]] + [""]
     if d.exposure.get("platforms"):
         lines += ["## Breached services", "",
                   ", ".join(d.exposure["platforms"][:30]), ""]
@@ -121,9 +153,25 @@ def render(d: Dossier) -> str:
     return "\n".join(lines)
 
 
+def save_dossier(d: Dossier, root: str | Path) -> dict[str, str]:
+    """Write a dossier's markdown + JSON under ``root``. One shared
+    writer for the tool and the attack chain, so both land the same
+    files in the same shape."""
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    slug = re.sub(r"[^a-z0-9._\-]+", "-", d.subject.lower()).strip("-") or "dossier"
+    md = root / f"{slug}.md"
+    js = root / f"{slug}.json"
+    md.write_text(render(d), encoding="utf-8")
+    js.write_text(json.dumps(d.as_dict(), indent=1), encoding="utf-8")
+    return {"md": str(md), "json": str(js)}
+
+
 def register(registry: Any) -> None:
+    from .case import home_of
+
     context = registry.context
-    root = Path(getattr(context, "home", ".") or ".") / "data" / "dossiers"
+    root = Path(home_of(context)) / "data" / "dossiers"
 
     @registry.register(
         "dossier_build",
@@ -138,10 +186,5 @@ def register(registry: Any) -> None:
         d = build_dossier(subject, kind=kind or "username")
         payload = d.as_dict()
         if (save or "").lower() in {"1", "true", "yes"}:
-            root.mkdir(parents=True, exist_ok=True)
-            slug = re.sub(r"[^a-z0-9._\-]+", "-", subject.lower())
-            (root / f"{slug}.md").write_text(render(d), encoding="utf-8")
-            (root / f"{slug}.json").write_text(json.dumps(payload, indent=1),
-                                               encoding="utf-8")
-            payload["saved"] = str(root / f"{slug}.md")
+            payload["saved"] = save_dossier(d, root)["md"]
         return payload

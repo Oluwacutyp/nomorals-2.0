@@ -573,16 +573,17 @@ def test_resize_without_ffmpeg_is_an_honest_refusal(
 # ---------------------------------------------------------------------------
 
 
-def test_tool_registered_and_counts_749() -> None:
+def test_tool_registered_and_counts_774() -> None:
     registry = _registry()
     spec = registry.get("craftlauncher")
     assert spec is not None
     assert "shots" in spec.description
     assert "fetch" in spec.description
-    # 749 after the mocap port (lane 125) added the mocap tool; this
+    # 749 after the mocap port (lane 125) added the mocap tool, and
+    # 774 after the secprobe wire-up added 25 tools; this
     # lane adds no tool — the new actions ride the existing
     # action-dispatched craftlauncher tool.
-    assert len(registry._tools) == 749
+    assert len(registry._tools) == 774
 
 
 def test_tool_shots_lists_the_catalog() -> None:

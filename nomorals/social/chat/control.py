@@ -898,6 +898,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "disclose": (1, 4),      # /disclose score <kind> ... | contacts <domain> | draft <case> <domain> [contact] — disclosure desk (owner-only)
     "seed": (1, 2),          # /seed <domain> [only,...] | email <addr> | ip <ip> | words <url>... — keyless seed sources (owner-only)
     "bin": (1, 5),           # /bin <digits> | gen <prefix> [count] [length] | check <number> [mm yyyy] [cvv] | spam <prefix> [count] — card tooling (owner-only)
+    "sec": (1, None),        # /sec <verb> ... — security probes: scope, params, inject, jwt, graphql, race, cors, planner, leaks, dossier, bans, replay (owner-only)
     "toolhub": (0, 2),       # /toolhub | /toolhub proxy [run] | /toolhub bin [digits] | /toolhub help — button tool hub (owner-only; NOT /hub, which is the media hub)
     "workspace": (0, 4),     # /workspace [status|scale <n>|up|down|pause|resume|add|remove]
     "gen": (2, None),        # /gen <kind> <name> [json config]
@@ -4362,6 +4363,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/bin <digits> | gen <prefix> [count] [length] | check <number> [mm yyyy] [cvv] | spam <prefix> [count]",
             "example": "/bin 424242",
             "related": "/toolhub /chain"},
+    "sec": {"what": "Security probes, all under a scope file (a case's scope.txt via --case, or --scope <file>): scope load/check, param mining + confirmation, injection probing, JWT attacks, GraphQL probe + amplify, race waves, CORS probe, CSRF PoC, hypothesis planner, leak harvest, dossiers, ban reports, report capture + amplify, request replay + diagnose, the planner→attacker chain, and the credential brute. No scope, no probe — a bare URL refuses. Owner-only.",
+            "usage": "/sec case init <name> | scope check <url> | params confirm <url> <names> | inject <url> <param> | jwt <token> | graphql probe <url> | race <url> | cors <url> | plan next <case> | leaks <addr> | dossier <subject> | ban state <subject> | chain <case> <usernames> | attack <host> <usernames> [--case C | --scope F]",
+            "example": "/sec scope check https://example.com/login --case shop",
+            "related": "/combo /enum /seed /chain"},
     "toolhub": {"what": "button tool hub — fresh tested proxies as a file, BIN lookup; per-screen inline buttons with Back navigation (owner-only).",
             "usage": "/toolhub | /toolhub proxy [run] | /toolhub bin <digits> | /toolhub help",
             "example": "/toolhub proxy",
@@ -5382,7 +5387,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["schedule", "db", "artifact", "api", "proxy", "tor", "onion", "combo", "enum", "recon", "subbrute", "chain", "disclose", "seed", "bin", "toolhub", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
       "monitor", "investigate", "breach", "bet", "desk", "markets", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
-      "connectors", "provision", "models", "mcp", "a2a", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion", "gcal", "trello", "exness", "stripe",
+      "connectors", "provision", "models", "mcp", "a2a", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion", "gcal", "trello", "exness", "stripe", "sec",
       "guardrails", "content", "drafts", "day", "calendar", "repurpose", "engage", "cases", "runs", "craft", "worldmodel", "glossary", "read",
       "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
     ("platform control — updates & restarts",
@@ -5868,6 +5873,7 @@ LIST_ONELINERS: dict[str, str] = {
     "tor": "Tor status: SOCKS/control ports, circuit rotation (owner only)",
     "onion": "fetch a URL through Tor, validate v3 .onion addresses (owner only)",
     "combo": "check an email:password combo against service adapters (owner only)",
+    "sec": "security probes — scope, params, inject, jwt, graphql, race, cors, planner, leaks, dossier, bans, replay (owner only)",
     "enum": "username availability / email registration across social platforms (owner only)",
     "recon": "passive surface discovery for a domain: CT, DNS, AXFR, takeover leads (owner only)",
     "subbrute": "DNS subdomain brute with wildcard suppression + permutation rounds (owner only)",

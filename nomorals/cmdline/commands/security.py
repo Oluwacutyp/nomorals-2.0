@@ -476,3 +476,287 @@ def _cmd_watch(args, context):
         return 0
     print(f"unknown action: {action}")
     return 2
+
+
+def _sec_call(args, context, tool: str, text: str, **kw: object) -> int:
+    """One brain-tool call from `nm sec`: error → rc 1, else emit."""
+    outcome = context.tools.call(tool, **kw)
+    if not outcome.ok:
+        print(f"{tool} failed: "
+              f"{getattr(outcome.error, 'message', outcome.error)}")
+        return 1
+    value = outcome.value or {}
+    _emit(args, value, text.format(value=value))
+    return 0
+
+
+def _sec_scope_kw(args) -> dict[str, str]:
+    return {"scope": getattr(args, "scope", "") or "",
+            "case": getattr(args, "case", "") or ""}
+
+
+def _cmd_sec(args, context):
+    """Security probes — scope, params, inject, jwt, graphql, race,
+    cors, planner, leaks, dossier, bans, capture, amplify, replay,
+    chain, attack. Every probe runs under a scope file (a case's
+    scope.txt or --scope); no scope, no probe."""
+    import json as _json
+
+    sub = getattr(args, "seccommand", "") or ""
+    if sub == "case":
+        action = getattr(args, "case_action", "") or ""
+        from ...security.case import home_of, init_case
+        home = home_of(context)
+        if action == "init":
+            name = getattr(args, "name", "") or ""
+            if not name:
+                print("usage: nm sec case init <name>")
+                return 0
+            made = init_case(home, name)
+            _emit(args, made,
+                  f"case {made['case']} ready at {made['dir']}\n"
+                  f"scope template: {made['scope']} — list the hosts "
+                  f"under test in it before any probe runs")
+            return 0
+        if action == "list":
+            from pathlib import Path as _P
+            root = _P(home) / "data" / "evidence"
+            names = sorted(p.name for p in root.iterdir()
+                           if p.is_dir()) if root.is_dir() else []
+            _emit(args, {"cases": names},
+                  "cases: " + (", ".join(names) if names else "none yet"))
+            return 0
+        print("usage: nm sec case init <name> | list")
+        return 0
+    if sub == "scope":
+        action = getattr(args, "scope_action", "") or ""
+        if action == "load":
+            return _sec_call(args, context, "scope_load",
+                             "scope: {value}", path=getattr(args, "path", "") or "",
+                             case=getattr(args, "case", "") or "")
+        if action == "check":
+            url = getattr(args, "url", "") or ""
+            if not url:
+                print("usage: nm sec scope check <url> [--case C | --scope F]")
+                return 0
+            return _sec_call(args, context, "scope_check",
+                             "{value}", url=url,
+                             path=getattr(args, "path", "") or "",
+                             case=getattr(args, "case", "") or "")
+        print("usage: nm sec scope load [--case C | --scope F] | "
+              "check <url> [--case C | --scope F]")
+        return 0
+    if sub == "params":
+        action = getattr(args, "params_action", "") or ""
+        if action == "mine":
+            return _sec_call(args, context, "param_mine",
+                             "{value}", case=getattr(args, "case", "") or "",
+                             extra=getattr(args, "extra", "") or "")
+        if action == "confirm":
+            return _sec_call(args, context, "param_confirm",
+                             "{value}", url=getattr(args, "url", "") or "",
+                             names=getattr(args, "names", "") or "",
+                             **_sec_scope_kw(args))
+        print("usage: nm sec params mine <case> [--extra a,b] | "
+              "confirm <url> <names> [--case C | --scope F]")
+        return 0
+    if sub == "inject":
+        return _sec_call(args, context, "inject_probe", "{value}",
+                         url=getattr(args, "url", "") or "",
+                         param=getattr(args, "param", "") or "",
+                         classes=getattr(args, "classes", "") or "",
+                         **_sec_scope_kw(args))
+    if sub == "jwt":
+        return _sec_call(args, context, "jwt_attack", "{value}",
+                         token=getattr(args, "token", "") or "",
+                         jku=getattr(args, "jku", "") or "")
+    if sub == "graphql":
+        action = getattr(args, "graphql_action", "") or ""
+        if action == "probe":
+            return _sec_call(args, context, "graphql_probe", "{value}",
+                             url=getattr(args, "url", "") or "",
+                             **_sec_scope_kw(args))
+        if action == "amplify":
+            return _sec_call(args, context, "graphql_amplify", "{value}",
+                             url=getattr(args, "url", "") or "",
+                             count=str(getattr(args, "count", 50) or 50),
+                             **_sec_scope_kw(args))
+        print("usage: nm sec graphql probe <url> | amplify <url> "
+              "[--count N] [--case C | --scope F]")
+        return 0
+    if sub == "race":
+        return _sec_call(args, context, "race_wave", "{value}",
+                         url=getattr(args, "url", "") or "",
+                         count=str(getattr(args, "count", 20) or 20),
+                         body=getattr(args, "body", "") or "",
+                         method=getattr(args, "method", "POST") or "POST",
+                         **_sec_scope_kw(args))
+    if sub == "cors":
+        return _sec_call(args, context, "cors_probe", "{value}",
+                         url=getattr(args, "url", "") or "",
+                         **_sec_scope_kw(args))
+    if sub == "csrf":
+        fields: dict[str, str] = {}
+        for token in (getattr(args, "fields", "") or "").split(","):
+            if "=" in token:
+                key, _, value = token.partition("=")
+                fields[key.strip()] = value.strip()
+        return _sec_call(args, context, "csrf_poc", "{value}",
+                         action=getattr(args, "action", "") or "",
+                         fields=fields,
+                         method=getattr(args, "method", "POST") or "POST",
+                         out=getattr(args, "out", "") or "")
+    if sub == "plan":
+        action = getattr(args, "plan_action", "") or ""
+        case = getattr(args, "case", "") or ""
+        if action == "next":
+            return _sec_call(args, context, "plan_next", "{value}",
+                             case=case,
+                             limit=str(getattr(args, "limit", 5) or 5))
+        if action == "add":
+            return _sec_call(args, context, "plan_add", "{value}",
+                             case=case, cls=getattr(args, "class", "") or "",
+                             target=getattr(args, "target", "") or "",
+                             param=getattr(args, "param", "") or "",
+                             confidence=str(getattr(args, "confidence", 0.5)
+                                            or 0.5))
+        if action == "resolve":
+            return _sec_call(args, context, "plan_resolve", "{value}",
+                             case=case, id=getattr(args, "id", "") or "",
+                             confirmed=getattr(args, "confirmed", "false")
+                             or "false",
+                             note=getattr(args, "note", "") or "")
+        print("usage: nm sec plan next <case> | add <case> <class> "
+              "<target> | resolve <case> <id> <true|false>")
+        return 0
+    if sub == "leaks":
+        return _sec_call(args, context, "leaks_harvest", "{value}",
+                         email=getattr(args, "email", "") or "",
+                         username=getattr(args, "username", "") or "",
+                         domain=getattr(args, "domain", "") or "")
+    if sub == "dossier":
+        return _sec_call(args, context, "dossier_build", "{value}",
+                         subject=getattr(args, "subject", "") or "",
+                         kind=getattr(args, "kind", "username") or "username",
+                         save="true" if getattr(args, "save", False) else "false")
+    if sub == "ban":
+        action = getattr(args, "ban_action", "") or ""
+        if action == "report":
+            return _sec_call(args, context, "ban_report", "{value}",
+                             platform=getattr(args, "platform", "") or "",
+                             target=getattr(args, "target", "") or "",
+                             session_account=getattr(args, "session_account", "")
+                             or "",
+                             reason=getattr(args, "reason", "") or "")
+        if action == "state":
+            return _sec_call(args, context, "ban_state", "{value}",
+                             subject=getattr(args, "subject", "") or "")
+        if action == "set-state":
+            return _sec_call(args, context, "ban_set_state", "{value}",
+                             subject=getattr(args, "subject", "") or "",
+                             platform=getattr(args, "platform", "") or "",
+                             state=getattr(args, "state", "") or "",
+                             note=getattr(args, "note", "") or "")
+        if action == "appeal":
+            return _sec_call(args, context, "ban_appeal", "{value}",
+                             handle=getattr(args, "handle", "") or "",
+                             platforms=getattr(args, "platforms", "") or "")
+        print("usage: nm sec ban report <platform> <target> <session> | "
+              "state <subject> | set-state <subject> <platform> <state> | "
+              "appeal <handle>")
+        return 0
+    if sub == "capture":
+        from ...tools.security import ensure_secprobe_seams
+        ensure_secprobe_seams()
+        return _sec_call(args, context, "report_capture", "{value}",
+                         platform=getattr(args, "platform", "") or "",
+                         url_hint=getattr(args, "url_hint", "") or "")
+    if sub == "amplify":
+        return _sec_call(args, context, "report_amplify", "{value}",
+                         template=getattr(args, "template", "") or "",
+                         count=str(getattr(args, "count", 20) or 20),
+                         stop_after_dupes=str(getattr(args, "stop_after_dupes", 5)
+                                              or 5),
+                         **_sec_scope_kw(args))
+    if sub in ("replay", "diagnose"):
+        try:
+            body = _json.loads(getattr(args, "body", "") or "{}")
+        except ValueError:
+            print("--body must be a JSON object")
+            return 1
+        kinds: dict[str, str] = {}
+        for token in (getattr(args, "kinds", "") or "").split(","):
+            if "=" in token:
+                key, _, value = token.partition("=")
+                kinds[key.strip()] = value.strip()
+        if sub == "replay":
+            from ...tools.security import ensure_secprobe_seams
+            ensure_secprobe_seams()
+            return _sec_call(args, context, "replay_run", "{value}",
+                             url=getattr(args, "url", "") or "", body=body,
+                             count=str(getattr(args, "count", 20) or 20),
+                             kinds=kinds,
+                             signer=getattr(args, "signer", "none") or "none",
+                             signer_url=getattr(args, "signer_url", "") or "",
+                             success=getattr(args, "success", "") or "",
+                             dupe=getattr(args, "dupe", "") or "",
+                             id_field=getattr(args, "id_field", "") or "",
+                             **_sec_scope_kw(args))
+        return _sec_call(args, context, "replay_diagnose", "{value}",
+                         url=getattr(args, "url", "") or "", body=body,
+                         kinds=kinds,
+                         signer=getattr(args, "signer", "none") or "none",
+                         signer_url=getattr(args, "signer_url", "") or "",
+                         success=getattr(args, "success", "") or "",
+                         dupe=getattr(args, "dupe", "") or "",
+                         id_field=getattr(args, "id_field", "") or "",
+                         **_sec_scope_kw(args))
+    if sub == "chain":
+        return _sec_call(args, context, "sec_chain", "{value}",
+                         case=getattr(args, "case", "") or "",
+                         usernames=getattr(args, "usernames", "") or "",
+                         passwords=getattr(args, "passwords", "") or "",
+                         wordlist=getattr(args, "wordlist", "") or "",
+                         fail_string=getattr(args, "fail_string", "") or "",
+                         limit=str(getattr(args, "limit", 1) or 1),
+                         max_attempts=str(getattr(args, "max_attempts", 20000)
+                                          or 20000))
+    if sub == "attack":
+        from ...security.case import attacker_paths, home_of
+        case = getattr(args, "case", "") or ""
+        kw: dict[str, object] = {"host": getattr(args, "host", "") or "",
+                                 "protocol": getattr(args, "protocol",
+                                                     "http_form")
+                                 or "http_form",
+                                 "usernames": getattr(args, "usernames", "")
+                                 or "",
+                                 "passwords": getattr(args, "passwords", "")
+                                 or "",
+                                 "wordlist": getattr(args, "wordlist", "")
+                                 or "",
+                                 "path": getattr(args, "path", "/") or "/",
+                                 "method": getattr(args, "method", "POST")
+                                 or "POST",
+                                 "form_user": getattr(args, "form_user",
+                                                      "username")
+                                 or "username",
+                                 "form_pass": getattr(args, "form_pass",
+                                                      "password")
+                                 or "password",
+                                 "fail_string": getattr(args, "fail_string", "")
+                                 or "",
+                                 "max_attempts": str(getattr(args, "max_attempts",
+                                                             20000) or 20000),
+                                 **_sec_scope_kw(args)}
+        if getattr(args, "port", 0):
+            kw["port"] = str(args.port)
+        if case:
+            paths = attacker_paths(home_of(context), case,
+                                   str(kw["host"]))
+            kw.setdefault("out_file", paths["out_file"])
+            kw.setdefault("resume_file", paths["resume_file"])
+        return _sec_call(args, context, "attacker", "{value}", **kw)
+    print("usage: nm sec case|scope|params|inject|jwt|graphql|race|cors|"
+          "csrf|plan|leaks|dossier|ban|capture|amplify|replay|diagnose|"
+          "chain|attack …")
+    return 0

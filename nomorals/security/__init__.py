@@ -40,6 +40,49 @@
   intel, email reputation (owner's batch).
 - :mod:`nomorals.security.cards` — BIN intel, Luhn generation,
   structural and gateway card checks (owner's batch).
+- :mod:`nomorals.security.scope` — scope files (include/exclude/
+  allow_all) + the Governor: global budget, per-host spend,
+  snapshot; default-deny, no probe fires without a scope
+  (owner's probe batch, 2026-11-19).
+- :mod:`nomorals.security.diff` — response fingerprinting +
+  differential comparison: the ONE fingerprint primitive for the
+  probe organs, including the login verdict (owner's probe batch).
+- :mod:`nomorals.security.params` — parameter mining from a case
+  corpus, then confirmation over HttpClient (owner's probe batch).
+- :mod:`nomorals.security.inject` — injection probing over
+  confirmed params, with a differential-oracle judge (owner's
+  probe batch).
+- :mod:`nomorals.security.jwt` — JWT attacks: alg-none, weak HMAC,
+  kid traversal, jku redirect (owner's probe batch).
+- :mod:`nomorals.security.graphql` — GraphQL introspection, then
+  alias amplification (owner's probe batch).
+- :mod:`nomorals.security.race` — N identical requests in one wave
+  (owner's probe batch).
+- :mod:`nomorals.security.cors_csrf` — CORS probe + CSRF PoC
+  generation (owner's probe batch).
+- :mod:`nomorals.security.planner` — hypothesis ledger (JSONL on
+  disk) + next-action selection (owner's probe batch).
+- :mod:`nomorals.security.leaks` — leak / credential-exposure
+  sources: keyless Cavalier + ProxyNova, keyed HIBP / DeHashed
+  (owner's probe batch).
+- :mod:`nomorals.security.dossier` — one subject, every surface,
+  one score (owner's probe batch).
+- :mod:`nomorals.security.bans` — report / state tracking / appeal
+  drafts for banned handles (owner's probe batch).
+- :mod:`nomorals.security.report_amp` — capture one real report
+  request in a browser, then replay-amplify it (owner's probe
+  batch). One replay path: amplify() delegates to replay.
+- :mod:`nomorals.security.replay` — request mutation and replay:
+  coherent device minting, declarative mutation, drift bisection
+  (owner's probe batch, 2026-11-20). The shared replay engine.
+- :mod:`nomorals.security.case` — one case home: scope file,
+  planner ledger, findings and the attacker checkpoint in one
+  folder under Devon's home; the single Governor construction
+  point; the L4 proxy-pool seam.
+- :mod:`nomorals.security.attack_chain` — planner drives the
+  attack: a confirmed login-form hypothesis becomes an attacker
+  run, its outcome resolves the hypothesis, found credentials land
+  in the case dossier.
 """
 
 from . import dnsleak as _dnsleak_mod
@@ -343,4 +386,217 @@ __all__ += [
     "bin_check",
     "harvest",
     "wordlist",
+]
+
+# The owner's security probe batch (2026-11-19/20): scope + Governor,
+# fingerprinting, param mining + confirmation, injection probing, JWT,
+# GraphQL, race waves, CORS/CSRF, hypothesis planner, leak harvest,
+# dossiers, ban reports, report capture + amplification, request
+# mutation + replay, one case home, and the planner→attacker→dossier
+# chain. See security/scope.py, diff.py, params.py, inject.py,
+# jwt.py, graphql.py, race.py, cors_csrf.py, planner.py, leaks.py,
+# dossier.py, bans.py, report_amp.py, replay.py, case.py,
+# attack_chain.py. Aliases where a bare name would collide: `amplify`
+# exists in both graphql and report_amp; inject's Finding would
+# shadow evidence.Finding; replay's `replay` function shares its
+# module's name.
+from . import replay as _replay_mod  # noqa: E402 - section import, this file's convention
+from .bans import (  # noqa: E402
+    PLATFORMS,
+    STATES,
+    appeal_text,
+    mass_appeal,
+    report_all,
+    report_one,
+    set_state,
+)
+from .case import (  # noqa: E402
+    DEFAULT_SCOPE_NAME,
+    attacker_paths,
+    case_dir,
+    default_scope_path,
+    governor_for,
+    home_of,
+    init_case,
+    pool_from_factory,
+    resolve_scope,
+    scope_path,
+    set_pool_factory,
+    slugify_case,
+)
+from .cors_csrf import (  # noqa: E402
+    ORIGINS,
+    CorsResult,
+    cors_probe,
+    csrf_poc,
+)
+from .diff import (  # noqa: E402
+    Delta,
+    Fingerprint,
+    compare,
+    fingerprint,
+    login_delta,
+    similarity,
+)
+from .dossier import (  # noqa: E402
+    Dossier,
+    build_dossier,
+    render,
+    save_dossier,
+)
+from .graphql import (  # noqa: E402
+    INTROSPECTION,
+    graphql_probe,
+)
+from .graphql import amplify as graphql_amplify  # noqa: E402
+from .inject import (  # noqa: E402
+    PAYLOADS,
+    probe_param,
+)
+from .inject import Finding as InjectFinding  # noqa: E402
+from .jwt import (  # noqa: E402
+    WEAK_SECRETS,
+    alg_none,
+    attack,
+    decode,
+    encode,
+    jku_redirect,
+    kid_traversal,
+    weak_hmac,
+)
+from .leaks import (  # noqa: E402
+    KEYS,
+    Exposure,
+    harvest_exposure,
+)
+from .params import (  # noqa: E402
+    PARAM_SEEDS,
+    Param,
+    confirm,
+    mine,
+)
+from .planner import (  # noqa: E402
+    CLASS_COST,
+    CLASS_WEIGHT,
+    Hypothesis,
+    Ledger,
+)
+from .race import (  # noqa: E402
+    RaceResult,
+    wave,
+)
+from .replay import (  # noqa: E402
+    FIELD_KINDS,
+    Device,
+    Mutation,
+    diagnose,
+    mint_device,
+    mutate,
+    set_signer_factory,
+)
+from .report_amp import (  # noqa: E402
+    TEMPLATES,
+    Template,
+    capture,
+    load_template,
+    set_capture_driver,
+)
+from .report_amp import amplify as report_amplify  # noqa: E402
+from .scope import (  # noqa: E402
+    BudgetExhausted,
+    Governor,
+    OutOfScope,
+    Scope,
+    load_scope,
+)
+
+replay_request = _replay_mod.replay
+
+from .attack_chain import (  # noqa: E402
+    chain_for_case,
+    run_chain,
+)
+
+__all__ += [
+    "Scope",
+    "Governor",
+    "BudgetExhausted",
+    "OutOfScope",
+    "load_scope",
+    "Fingerprint",
+    "Delta",
+    "fingerprint",
+    "compare",
+    "similarity",
+    "login_delta",
+    "PARAM_SEEDS",
+    "Param",
+    "mine",
+    "confirm",
+    "PAYLOADS",
+    "InjectFinding",
+    "probe_param",
+    "WEAK_SECRETS",
+    "decode",
+    "encode",
+    "alg_none",
+    "weak_hmac",
+    "kid_traversal",
+    "jku_redirect",
+    "attack",
+    "INTROSPECTION",
+    "graphql_probe",
+    "graphql_amplify",
+    "RaceResult",
+    "wave",
+    "ORIGINS",
+    "CorsResult",
+    "cors_probe",
+    "csrf_poc",
+    "Hypothesis",
+    "Ledger",
+    "CLASS_COST",
+    "CLASS_WEIGHT",
+    "KEYS",
+    "Exposure",
+    "harvest_exposure",
+    "Dossier",
+    "build_dossier",
+    "render",
+    "save_dossier",
+    "PLATFORMS",
+    "STATES",
+    "report_one",
+    "report_all",
+    "set_state",
+    "appeal_text",
+    "mass_appeal",
+    "TEMPLATES",
+    "Template",
+    "capture",
+    "report_amplify",
+    "load_template",
+    "set_capture_driver",
+    "FIELD_KINDS",
+    "Mutation",
+    "Device",
+    "mint_device",
+    "mutate",
+    "replay_request",
+    "diagnose",
+    "set_signer_factory",
+    "DEFAULT_SCOPE_NAME",
+    "case_dir",
+    "slugify_case",
+    "scope_path",
+    "default_scope_path",
+    "resolve_scope",
+    "governor_for",
+    "attacker_paths",
+    "init_case",
+    "home_of",
+    "set_pool_factory",
+    "pool_from_factory",
+    "run_chain",
+    "chain_for_case",
 ]

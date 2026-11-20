@@ -3,7 +3,7 @@
 Covers: the upstream self-tests (scope / skill map / closure /
 state / memory / agent / recon, all offline), the machine-checked
 parity TOML, the SHA-256 attribution record, the 8-tool surface
-(registry count 749), the 7-Question Gate, the closure ledger, and
+(registry count 774), the 7-Question Gate, the closure ledger, and
 the engine end to end on a scoped fixture HTTP server — with scope
 enforcement demonstrated (an out-of-scope URL is refused in code
 and never tested).
@@ -207,14 +207,14 @@ class AttributionTest(unittest.TestCase):
 
 
 class ToolCountTest(unittest.TestCase):
-    def test_tool_count_is_749_after_bughunter(self):
+    def test_tool_count_is_774_after_bughunter(self):
         # 735 at base 62ae286d; the bughunter port (lane 121) adds
         # 8 tools (scope_check, classify, recon, surface, triage,
         # report, engage, hackerone) — the security organ's 27
         # existing tools are separate registry entries and there is
-        # no single action-dispatched "security" tool to extend. 749 after the mocap port (lane 125) added the mocap tool.
+        # no single action-dispatched "security" tool to extend. 749 after the mocap port (lane 125) added the mocap tool. 774 after the secprobe wire-up added 25 tools (scope_load, scope_check, param_mine, param_confirm, inject_probe, jwt_attack, graphql_probe, graphql_amplify, race_wave, cors_probe, csrf_poc, plan_next, plan_add, plan_resolve, leaks_harvest, dossier_build, ban_report, ban_state, ban_set_state, ban_appeal, report_capture, report_amplify, replay_run, replay_diagnose, sec_chain).
         registry = _registry()
-        self.assertEqual(len(registry._tools), 749)
+        self.assertEqual(len(registry._tools), 774)
         for name in ("bughunter_scope_check", "bughunter_classify",
                      "bughunter_recon", "bughunter_surface",
                      "bughunter_triage", "bughunter_report",

@@ -144,8 +144,6 @@ def attack(token: str, *, jku_url: str = "") -> list[dict[str, Any]]:
 
 
 def register(registry: Any) -> None:
-    context = registry.context
-
     @registry.register("jwt_attack",
                        description="JWT forgery tests: alg none, weak HMAC "
                                    "dictionary, kid traversal, jku redirect.",

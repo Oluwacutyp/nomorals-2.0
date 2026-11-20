@@ -133,6 +133,99 @@ def _sandbox_detonate(data: bytes, filename: str) -> dict[str, Any]:
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+def _playwright_capture_driver(platform: str, url_hint: str = "",
+                               timeout: float = 240.0) -> dict[str, Any]:
+    """Drive a real headed browser and capture one report request.
+
+    The sync_playwright block the owner's capture() carried, moved
+    here to the L4 layer so it can self-provision through the real
+    browser rung (browser/provision.ensure_playwright) instead of
+    failing on a bare ImportError."""
+    import time
+    import urllib.parse
+
+    from ..browser.provision import ensure_playwright
+    from ..core.errors import ToolError
+    from ..security import report_amp
+
+    if not ensure_playwright():
+        raise ToolError(
+            "capture needs Playwright + Chromium: the browser rung "
+            "could not provision them on this machine")
+    from playwright.sync_api import sync_playwright
+    spec = report_amp.TEMPLATES.get(platform)
+    if spec is None:
+        raise ToolError(f"unknown platform {platform!r}")
+    needle = url_hint or urllib.parse.urlsplit(spec["url"]).path
+    hits: list[dict[str, Any]] = []
+
+    def on_request(req: Any) -> None:
+        if needle not in req.url:
+            return
+        hits.append({"url": req.url, "method": req.method,
+                     "headers": dict(req.headers),
+                     "body": req.post_data or ""})
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=False)
+        ctx = browser.new_context()
+        ctx.on("request", on_request)
+        page = ctx.new_page()
+        page.goto(spec["url"], wait_until="domcontentloaded", timeout=45_000)
+        print(f"  file one report on {platform} by hand — capturing "
+              f"{needle}")
+        deadline = time.time() + timeout
+        while not hits and time.time() < deadline:
+            page.wait_for_timeout(500)
+        browser.close()
+    if not hits:
+        raise ToolError("no matching request captured")
+    return hits[-1]
+
+
+def _playwright_signer_factory(url: str) -> Any:
+    """Build a browser signer for a page URL, provisioning the
+    browser rung first."""
+    from ..browser.provision import ensure_playwright
+    from ..core.errors import ToolError
+    from ..security import replay as _replay
+
+    if not ensure_playwright():
+        raise ToolError(
+            "browser signing needs Playwright + Chromium: the browser "
+            "rung could not provision them on this machine")
+    return _replay._Signer(url)
+
+
+def _proxy_pool_factory(context: Any) -> Any:
+    """Build the rotation pool from the registry context.
+
+    The owner's report_amp/replay imported `tools.proxy_rotate` — a
+    module that does not exist (the pool lives in
+    `tools.proxy_rotation`); the ImportError was swallowed by a bare
+    except, so the rotated egress never engaged and every replay ran
+    direct. This is the real pool, by its real name."""
+    from .proxy_rotation import pool_from_context
+
+    return pool_from_context(context)
+
+
+def ensure_secprobe_seams() -> dict[str, bool]:
+    """Plug the L4 seams into the security organs (idempotent). The
+    wave calls this at registration; the CLI calls it before
+    `nm sec capture` / `nm sec replay` so those verbs work outside
+    the brain too."""
+    from ..security import case as _case
+    from ..security import replay as _replay
+    from ..security import report_amp as _report_amp
+
+    _report_amp.set_capture_driver(_playwright_capture_driver)
+    _replay.set_signer_factory(_playwright_signer_factory)
+    _case.set_pool_factory(_proxy_pool_factory)
+    return {"capture_driver": True, "signer_factory": True,
+            "pool_factory": True}
+
+
 def register(registry: Any) -> None:
     from ..core.policy import Capability
 
@@ -334,3 +427,52 @@ def register(registry: Any) -> None:
 
     _session_forge.register(registry)
     _payloads.register(registry)
+
+    # The owner's security probe batch, third wave (2026-11-19/20):
+    # scope + Governor, param mining + confirmation, injection
+    # probing, JWT attacks, GraphQL probe + amplify, race waves,
+    # CORS/CSRF, hypothesis planner, leak harvest, dossiers, ban
+    # reports, report capture + amplification, request mutation +
+    # replay, and the planner→attacker→dossier chain. Each organ
+    # lives in security/ and registers its own tools here, like the
+    # earlier waves. The L4 seams (browser driver, browser signer,
+    # proxy pool) are plugged in below — security/ is L3 and cannot
+    # import them itself.
+    from ..security import attack_chain as _attack_chain
+    from ..security import bans as _bans
+    from ..security import cors_csrf as _cors_csrf
+    from ..security import dossier as _dossier
+    from ..security import graphql as _graphql
+    from ..security import inject as _inject
+    from ..security import jwt as _jwt
+    from ..security import leaks as _leaks
+    from ..security import params as _params
+    from ..security import planner as _planner
+    from ..security import race as _race
+    from ..security import replay as _replay
+    from ..security import report_amp as _report_amp
+    from ..security import scope as _scope
+
+    # The attacker runner is L4 (tools/attacker.py) and the chain is
+    # L3 (security/): the runner is injected here, never imported
+    # from inside security/ — the layering scan flags even a lazy
+    # import. (tools/attacker.py imports security.diff/scope, the
+    # other direction, so no cycle.)
+    from .attacker import run_attack
+
+    _scope.register(registry)
+    _params.register(registry)
+    _inject.register(registry)
+    _jwt.register(registry)
+    _graphql.register(registry)
+    _race.register(registry)
+    _cors_csrf.register(registry)
+    _planner.register(registry)
+    _leaks.register(registry)
+    _dossier.register(registry)
+    _bans.register(registry)
+    _report_amp.register(registry)
+    _replay.register(registry)
+    _attack_chain.register(registry, run_attack)
+
+    ensure_secprobe_seams()

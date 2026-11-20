@@ -238,12 +238,19 @@ class AttackerBaselineTests(unittest.TestCase):
         cls.server.server_close()
 
     def test_baseline_differential_finds_only_the_real_pair(self):
+        # The secprobe wire-up made a scope mandatory: an attacker run
+        # needs a Governor built from a scope file — no unscoped brute.
+        # The loopback scope below allows only this test's own server.
+        from nomorals.security.scope import Governor, Scope
+        governor = Governor(Scope(include=["127.0.0.1"]),
+                            max_total=100, max_per_host=1000.0)
         res = run_attack(
             "127.0.0.1", port=self.port, protocol="http_form",
             usernames="alice", passwords="wrong1,s3cret",
             fail_string="Invalid credentials", path="/login",
             workers=1, rate=100.0, delay=0.0, jitter=0.0,
-            quiet=True, baseline_tries=2, confirm_tries=1, timeout=5.0)
+            quiet=True, baseline_tries=2, confirm_tries=1, timeout=5.0,
+            governor=governor)
         self.assertEqual(res["attempts"], 2)
         self.assertEqual([f["login"] for f in res["found"]], ["alice"])
         self.assertEqual([f["password"] for f in res["found"]], ["s3cret"])

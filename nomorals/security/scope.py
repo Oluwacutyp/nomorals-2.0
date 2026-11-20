@@ -169,24 +169,36 @@ class Governor:
 
 
 def register(registry: Any) -> None:
-    context = registry.context
-    home = Path(getattr(context, "home", ".") or ".")
-
     @registry.register(
         "scope_load",
-        description="Parse and validate a scope file (include/exclude/allow_all).",
+        description="Parse and validate a scope file (include/exclude/allow_all). "
+                    "`path` is a scope file; pass `case` instead to load "
+                    "that case's scope.txt, or neither for the default "
+                    "scope file.",
         capability=Capability.DB_READ,
-        parameters={"path": "str — scope file"},
+        parameters={"path": "str — scope file (optional)",
+                    "case": "str — case name (optional)"},
     )
-    def scope_load(path: str) -> dict[str, Any]:
-        return load_scope(path).as_dict()
+    def scope_load(path: str = "", case: str = "") -> dict[str, Any]:
+        if (path or "").strip():
+            return load_scope(path).as_dict()
+        from .case import home_of, resolve_scope
+        return resolve_scope(home_of(registry.context), case=case).as_dict()
 
     @registry.register(
         "scope_check",
-        description="Is this URL in scope?",
+        description="Is this URL in scope? `path` is a scope file; pass "
+                    "`case` instead to check against that case's "
+                    "scope.txt, or neither for the default scope file.",
         capability=Capability.DB_READ,
-        parameters={"path": "str — scope file", "url": "str"},
+        parameters={"path": "str — scope file (optional)", "url": "str",
+                    "case": "str — case name (optional)"},
     )
-    def scope_check(path: str, url: str) -> dict[str, Any]:
-        scope = load_scope(path)
+    def scope_check(path: str = "", url: str = "",
+                    case: str = "") -> dict[str, Any]:
+        if (path or "").strip():
+            scope = load_scope(path)
+        else:
+            from .case import home_of, resolve_scope
+            scope = resolve_scope(home_of(registry.context), case=case)
         return {"url": url, "in_scope": scope.allows(url)}

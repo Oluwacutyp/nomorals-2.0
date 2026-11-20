@@ -17,7 +17,7 @@ from typing import Any, Optional
 from ..core.http import HttpClient
 from ..core.policy import Capability
 from ..core.logging_setup import get_logger
-from .scope import Governor
+from .scope import Governor, OutOfScope
 
 _log = get_logger(__name__)
 __all__ = ["INTROSPECTION", "graphql_probe", "amplify", "register"]
@@ -57,6 +57,10 @@ def graphql_probe(url: str, *, governor: Governor,
                   timeout: float = 20.0) -> GqlResult:
     client = client or HttpClient(timeout=timeout)
     result = GqlResult(url=url)
+    # The scope gate sits OUTSIDE the transport try below: an
+    # out-of-scope URL is a refusal, never a "reachable: False" note.
+    if not governor.scope.allows(url):
+        raise OutOfScope(f"{url} is not in scope")
     try:
         governor.spend(url)
         resp = client.post(url, data=json.dumps({"query": INTROSPECTION}),
@@ -117,26 +121,38 @@ def amplify(url: str, query_type: str = "query", field_name: str = "__typename",
 
 
 def register(registry: Any) -> None:
-    context = registry.context
+    from .case import governor_for, home_of, resolve_scope
+
+    home = home_of(registry.context)
 
     @registry.register("graphql_probe",
                        description="Introspect a GraphQL endpoint and list "
-                                   "sensitive fields and mutations.",
+                                   "sensitive fields and mutations. `scope` "
+                                   "is a scope file; pass `case` instead to "
+                                   "run under that case's scope.txt. "
+                                   "Refuses without a scope.",
                        capability=Capability.NET_OUT,
-                       parameters={"url": "str", "scope": "str"})
-    def graphql_probe_tool(url: str, scope: str) -> dict[str, Any]:
-        from .scope import load_scope
-        gov = Governor(load_scope(scope), max_total=10)
+                       parameters={"url": "str",
+                                   "scope": "str — scope file (optional)",
+                                   "case": "str — case name (optional)"})
+    def graphql_probe_tool(url: str, scope: str = "",
+                           case: str = "") -> dict[str, Any]:
+        gov = governor_for(resolve_scope(home, scope, case), max_total=10)
         return graphql_probe(url, governor=gov).as_dict()
 
     @registry.register("graphql_amplify",
                        description="Alias-amplification test against a GraphQL "
-                                   "endpoint.",
+                                   "endpoint. `scope` is a scope file; pass "
+                                   "`case` instead to run under that case's "
+                                   "scope.txt. Refuses without a scope.",
                        capability=Capability.NET_OUT,
-                       parameters={"url": "str", "scope": "str",
-                                   "count": "int (optional, 50)"})
-    def graphql_amplify_tool(url: str, scope: str,
-                             *, count: str = "50") -> dict[str, Any]:
-        from .scope import load_scope
-        gov = Governor(load_scope(scope), max_total=10_000)
+                       parameters={"url": "str",
+                                   "scope": "str — scope file (optional)",
+                                   "count": "int (optional, 50)",
+                                   "case": "str — case name (optional)"})
+    def graphql_amplify_tool(url: str, scope: str = "",
+                             *, count: str = "50",
+                             case: str = "") -> dict[str, Any]:
+        gov = governor_for(resolve_scope(home, scope, case),
+                           max_total=10_000)
         return amplify(url, count=int(count or 50), governor=gov)

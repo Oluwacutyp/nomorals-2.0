@@ -203,8 +203,10 @@ def mass_appeal(home: str | Path, handle: str, *,
 
 
 def register(registry: Any) -> None:
+    from .case import home_of
+
     context = registry.context
-    home = Path(getattr(context, "home", ".") or ".")
+    home = Path(home_of(context))
 
     @registry.register("ban_report",
                        description="File a report against a handle on one "

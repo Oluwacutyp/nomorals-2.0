@@ -38,7 +38,22 @@ from .scope import Governor
 
 _log = get_logger(__name__)
 __all__ = ["FIELD_KINDS", "Mutation", "Device", "mint_device", "mutate",
-           "replay", "diagnose", "register"]
+           "replay", "diagnose", "register", "set_signer_factory"]
+
+#: The browser-signer factory, plugged in by the L4 layer
+#: (tools/security.py). This module is L3: it cannot import the browser
+#: rung (L4, ensure_playwright) itself. Without a signer factory,
+#: signer="browser" refuses honestly instead of faking a signature. A
+#: signer factory takes a page URL and returns a signer with
+#: __enter__/__exit__ and .sign(field, body) — see _Signer. The
+#: proxy-pool factory lives in .case (shared with report_amp).
+_SIGNER_FACTORY: Callable[[str], Any] | None = None
+
+
+def set_signer_factory(factory: Callable[[str], Any] | None) -> None:
+    """Plug in (or clear) the browser-signer factory used by replay()."""
+    global _SIGNER_FACTORY
+    _SIGNER_FACTORY = factory
 
 FIELD_KINDS = ("identity", "signature", "nonce", "sequence", "timestamp",
                "static")
@@ -162,7 +177,12 @@ class _Signer:
         self.page = None
 
     def __enter__(self) -> "_Signer":
-        from playwright.sync_api import sync_playwright
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise ToolError(
+                "browser signing needs Playwright: it is not installed "
+                "on this machine") from exc
         self._pw = sync_playwright().start()
         self._browser = self._pw.chromium.launch(headless=self.headless)
         ctx = self._browser.new_context()
@@ -218,6 +238,11 @@ def _classify(status: int, text: str, *, success: str, dupe: str,
             return "dupe", f"id {rid}"
     if success and success.lower() in body:
         return "counted", rid or "success marker"
+    if rid:
+        # A fresh id the target minted for this attempt: the report
+        # landed. (Without this branch a fresh id fell through to the
+        # "error" return below — every id_field replay read as an error.)
+        return "counted", f"id {rid}"
     if status in (200, 201) and not rid:
         return "counted", "http 200"
     return "error", f"http {status}"
@@ -228,23 +253,35 @@ def replay(url: str, body: dict[str, Any], spec: Mutation, *, count: int,
            id_field: str = "", pool: Optional[Any] = None,
            method: str = "POST", stop_after_dupes: int = 5,
            delay: float = 1.4, timeout: float = 25.0,
-           signer_url: str = "", progress: bool = True) -> dict[str, Any]:
+           signer_url: str = "", progress: bool = True,
+           extra_headers: dict[str, str] | None = None,
+           signer_factory: Callable[[str], Any] | None = None
+           ) -> dict[str, Any]:
     """Replay with per-attempt device + mutation. Same stop rule as the
-    report engine: consecutive dupes end it."""
+    report engine: consecutive dupes end it. `extra_headers` are sent
+    under the minted device headers (the device wins for UA/viewport/
+    locale); `signer_factory` builds the browser signer for
+    signer="browser" — without one that signer refuses honestly."""
     seen: set[str] = set()
     rows: list[dict[str, Any]] = []
     dupes = 0
-    signer: Optional[_Signer] = None
+    signer: Optional[Any] = None
     if spec.signer == "browser":
         if not signer_url:
             raise ToolError("signer='browser' needs signer_url")
-        signer = _Signer(signer_url)
+        factory = signer_factory or _SIGNER_FACTORY
+        if factory is None:
+            raise ToolError(
+                "signer='browser' needs a Playwright browser driver — "
+                "none is wired; run it from `nm sec replay`, which wires "
+                "the real browser rung, or pass a signer factory")
+        signer = factory(signer_url)
         signer.__enter__()
     try:
         for n in range(1, count + 1):
             device = mint_device()
             payload_body = mutate(body, spec, device=device, seq=n)
-            headers = {**device.headers(),
+            headers = {**(extra_headers or {}), **device.headers(),
                        "Content-Type": "application/json"}
             if signer is not None:
                 for name, kind in spec.kinds.items():
@@ -264,7 +301,17 @@ def replay(url: str, body: dict[str, Any], spec: Mutation, *, count: int,
                                          success=success, dupe=dupe,
                                          id_field=id_field, seen=seen)
             except Exception as exc:  # noqa: BLE001
-                verdict, why = "error", type(exc).__name__
+                # HttpClient raises for 403/429 instead of returning
+                # them, so the classifier never sees those statuses —
+                # map them to "blocked" here, the verdict _classify
+                # assigns them. Anything else stays an error.
+                details = getattr(exc, "details", None) or {}
+                status = details.get("http_status") \
+                    if isinstance(details, dict) else None
+                if status in (403, 429):
+                    verdict, why = "blocked", f"http {status}"
+                else:
+                    verdict, why = "error", type(exc).__name__
             if verdict == "counted" and why.startswith("id "):
                 seen.add(why[3:])
             elif verdict == "counted" and id_field and why not in (
@@ -272,7 +319,8 @@ def replay(url: str, body: dict[str, Any], spec: Mutation, *, count: int,
                 seen.add(why)
             dupes = dupes + 1 if verdict == "dupe" else 0
             rows.append({"n": n, "verdict": verdict, "why": why,
-                         "device": device.as_dict()})
+                         "device": device.as_dict(),
+                         "proxy": bool(proxy)})
             if progress:
                 print(f"  {n:>3} {verdict:<8} {why[:44]}")
             if dupes >= stop_after_dupes:
@@ -313,50 +361,69 @@ def diagnose(url: str, body: dict[str, Any], spec: Mutation, *,
 
 
 def register(registry: Any) -> None:
+    from .case import governor_for, home_of, pool_from_factory, resolve_scope
+
     context = registry.context
+    home = home_of(context)
 
     @registry.register(
         "replay_run",
         description="Replay a captured request N times with coherent device "
-                    "rotation and declarative field mutation.",
+                    "rotation and declarative field mutation. `kinds` maps "
+                    "each body field to identity|signature|nonce|sequence|"
+                    "timestamp|static. `scope` is a scope file; pass `case` "
+                    "instead to run under that case's scope.txt. Refuses "
+                    "without a scope. signer='browser' re-signs through a "
+                    "live page and refuses when no browser driver is wired.",
         capability=Capability.NET_OUT,
         parameters={"url": "str", "body": "dict", "count": "int",
                     "kinds": "dict — field -> kind",
                     "signer": "str (optional) — none|browser",
-                    "signer_url": "str (optional)"})
+                    "signer_url": "str (optional)",
+                    "scope": "str — scope file (optional)",
+                    "case": "str — case name (optional)"})
     def replay_run(url: str, body: dict[str, Any], *, count: str = "20",
                    kinds: Optional[dict[str, str]] = None,
                    signer: str = "none", signer_url: str = "",
                    success: str = "", dupe: str = "",
-                   id_field: str = "") -> dict[str, Any]:
-        from .scope import Scope
+                   id_field: str = "", scope: str = "",
+                   case: str = "") -> dict[str, Any]:
         spec = Mutation(kinds=kinds or {}, signer=signer)
-        gov = Governor(Scope(allow_all=True), max_total=int(count or 20) + 5,
-                       max_per_host=3.0)
-        pool = None
-        try:
-            from ..tools.proxy_rotate import pool_from_context
-            pool = pool_from_context(context)
-            pool.probe_all()
-        except Exception:  # noqa: BLE001
-            pool = None
-        return replay(url, body, spec, count=int(count or 20), governor=gov,
+        n = int(count or 20)
+        gov = governor_for(resolve_scope(home, scope, case),
+                           max_total=n + 5, max_per_host=3.0)
+        return replay(url, body, spec, count=n, governor=gov,
                       success=success, dupe=dupe, id_field=id_field,
-                      pool=pool, signer_url=signer_url)
+                      pool=pool_from_factory(context),
+                      signer_url=signer_url)
 
     @registry.register(
         "replay_diagnose",
-        description="Bisect which mutated field a target started rejecting.",
+        description="Bisect which mutated field a target started rejecting: "
+                    "each field is held static in turn while the rest "
+                    "rotate; the field whose restoration brings acceptance "
+                    "back is named. `success` / `dupe` / `id_field` are the "
+                    "same verdict markers replay_run takes — without one of "
+                    "them a 200 is just counted and the bisect is blind. "
+                    "`scope` is a scope file; pass `case` instead to run "
+                    "under that case's scope.txt. Refuses without a scope.",
         capability=Capability.NET_OUT,
         parameters={"url": "str", "body": "dict",
                     "kinds": "dict", "signer": "str (optional)",
-                    "signer_url": "str (optional)"})
+                    "signer_url": "str (optional)",
+                    "success": "str (optional)",
+                    "dupe": "str (optional)",
+                    "id_field": "str (optional)",
+                    "scope": "str — scope file (optional)",
+                    "case": "str — case name (optional)"})
     def replay_diagnose(url: str, body: dict[str, Any],
                         kinds: dict[str, str], *, signer: str = "none",
-                        signer_url: str = "") -> dict[str, Any]:
-        from .scope import Scope
+                        signer_url: str = "", success: str = "",
+                        dupe: str = "", id_field: str = "", scope: str = "",
+                        case: str = "") -> dict[str, Any]:
         spec = Mutation(kinds=kinds, signer=signer)
-        gov = Governor(Scope(allow_all=True), max_total=200,
-                       max_per_host=3.0)
+        gov = governor_for(resolve_scope(home, scope, case),
+                           max_total=200, max_per_host=3.0)
         return diagnose(url, body, spec, governor=gov,
-                        signer_url=signer_url)
+                        signer_url=signer_url, success=success, dupe=dupe,
+                        id_field=id_field)

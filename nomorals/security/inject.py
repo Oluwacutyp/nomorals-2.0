@@ -204,22 +204,28 @@ def probe_param(param: Param, *, governor: Governor,
 
 
 def register(registry: Any) -> None:
+    from .case import governor_for, home_of, resolve_scope
+
     context = registry.context
-    home = __import__("pathlib").Path(getattr(context, "home", ".") or ".")
+    home = home_of(context)
 
     @registry.register(
         "inject_probe",
         description="Probe a confirmed parameter for injection classes. "
-                    "Differential oracle with re-send confirmation.",
+                    "Differential oracle with re-send confirmation. "
+                    "`scope` is a scope file; pass `case` instead to run "
+                    "under that case's scope.txt. Refuses without a scope.",
         capability=Capability.NET_OUT,
-        parameters={"url": "str", "param": "str", "scope": "str",
-                    "classes": "str (optional) — comma list"},
+        parameters={"url": "str", "param": "str",
+                    "scope": "str — scope file (optional)",
+                    "classes": "str (optional) — comma list",
+                    "case": "str — case name (optional)"},
     )
-    def inject_probe(url: str, param: str, scope: str,
-                     *, classes: str = "") -> dict[str, Any]:
+    def inject_probe(url: str, param: str, scope: str = "",
+                     *, classes: str = "", case: str = "") -> dict[str, Any]:
         from .params import Param
-        from .scope import load_scope
-        gov = Governor(load_scope(scope), max_total=400)
+        gov = governor_for(resolve_scope(home, scope, case),
+                           max_total=400)
         found = probe_param(Param(url=url, name=param, where="query"),
                             governor=gov,
                             classes=[c.strip() for c in classes.split(",")

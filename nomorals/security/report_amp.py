@@ -19,28 +19,22 @@ stops the run.
 """
 from __future__ import annotations
 
-import base64
 import json
-import random
 import re
-import secrets
-import string
 import time
 import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from ..core.http import HttpClient
 from ..core.policy import Capability
 from ..core.errors import ToolError
 from ..core.logging_setup import get_logger
 from .scope import Governor
 
 _log = get_logger(__name__)
-__all__ = ["TEMPLATES", "Template", "capture", "amplify", "register"]
-
-_B36 = string.ascii_lowercase + string.digits
+__all__ = ["TEMPLATES", "Template", "capture", "amplify", "register",
+           "set_capture_driver"]
 
 
 @dataclass
@@ -101,71 +95,47 @@ TEMPLATES: dict[str, dict[str, Any]] = {
 }
 
 
-# ── fingerprint minting ────────────────────────────────────────────────────
-def _verify_fp() -> str:
-    return "verify_" + "".join(random.choices(_B36, k=36))
-
-
-def _ms_token() -> str:
-    raw = secrets.token_bytes(80)
-    return base64.urlsafe_b64encode(raw).decode().rstrip("=")[:107]
-
-
-def _uuid() -> str:
-    h = secrets.token_hex(16)
-    return f"{h[:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:]}"
-
-
-def _mint(name: str) -> str:
-    return {
-        "verifyFp": _verify_fp, "msToken": _ms_token,
-        "csrftoken": lambda: secrets.token_hex(16),
-        "uuid": _uuid, "ts": lambda: str(int(time.time() * 1000)),
-    }.get(name, lambda: "")() 
-
-
 # ── capture ────────────────────────────────────────────────────────────────
+#: The browser driver, plugged in by the L4 layer (tools/security.py):
+#: a callable ``driver(platform, url_hint, timeout) -> hit dict`` that
+#: drives a real headed browser, waits for the owner to file one report
+#: by hand, and returns the captured request (``url`` / ``method`` /
+#: ``headers`` / ``body``). This module is L3 and cannot import the
+#: browser rung (L4) itself — without a driver, capture() refuses
+#: honestly instead of faking a capture.
+_CAPTURE_DRIVER: Callable[..., dict[str, Any]] | None = None
+
+
+def set_capture_driver(
+        driver: Callable[..., dict[str, Any]] | None) -> None:
+    """Plug in (or clear) the browser driver used by capture()."""
+    global _CAPTURE_DRIVER
+    _CAPTURE_DRIVER = driver
+
+
 def capture(platform: str, *, url_hint: str = "", timeout: float = 240.0,
-            out_dir: str | Path = "") -> dict[str, Any]:
+            out_dir: str | Path = "",
+            driver: Callable[..., dict[str, Any]] | None = None
+            ) -> dict[str, Any]:
     """Record one real report request in a browser, then persist it.
 
     You file the report by hand once; this stores the exact request so
-    every later replay is authentic.
+    every later replay is authentic. `driver` is the browser rung
+    (see set_capture_driver); without one this refuses, naming the
+    missing piece — it never fakes a capture.
     """
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        raise ToolError("playwright required for capture") from None
     spec = TEMPLATES.get(platform)
     if spec is None:
         raise ToolError(f"unknown platform {platform!r}")
-    needle = url_hint or urllib.parse.urlsplit(spec["url"]).path
-    hits: list[dict[str, Any]] = []
-
-    def on_request(req):
-        if needle not in req.url:
-            return
-        hits.append({"url": req.url, "method": req.method,
-                     "headers": dict(req.headers),
-                     "body": req.post_data or ""})
-
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=False)
-        ctx = browser.new_context()
-        ctx.on("request", on_request)
-        page = ctx.new_page()
-        page.goto(spec["url"], wait_until="domcontentloaded", timeout=45_000)
-        print(f"  file one report on {platform} by hand — capturing "
-              f"{needle}")
-        deadline = time.time() + timeout
-        while not hits and time.time() < deadline:
-            page.wait_for_timeout(500)
-        browser.close()
-    if not hits:
-        raise ToolError("no matching request captured")
-    hit = hits[-1]
+    drv = driver or _CAPTURE_DRIVER
+    if drv is None:
+        raise ToolError(
+            "capture needs a Playwright browser driver — none is wired; "
+            "run it from `nm sec capture`, which wires the real browser "
+            "rung, or pass a driver")
+    hit = drv(platform, url_hint, timeout)
     body: dict[str, str] = {}
-    raw = hit["body"]
+    raw = hit.get("body") or ""
     if raw:
         try:
             body = json.loads(raw)
@@ -202,119 +172,94 @@ def load_template(path: str | Path) -> Template:
 
 
 # ── amplify ────────────────────────────────────────────────────────────────
-def _classify(status: int, text: str, tpl: Template,
-              previous: set[str]) -> tuple[str, str]:
-    body = (text or "").lower()
-    if status in (403, 429) or "captcha" in body:
-        return "blocked", f"http {status}"
-    if tpl.dupe_marker and tpl.dupe_marker.lower() in body:
-        return "dupe", "platform says already reported"
-    rid = ""
-    if tpl.report_id_field:
-        try:
-            rid = str(json.loads(text or "{}").get(tpl.report_id_field) or "")
-        except ValueError:
-            rid = ""
-        if rid and rid in previous:
-            return "dupe", f"same report id {rid}"
-    if tpl.success_marker and tpl.success_marker.lower() in body:
-        return "counted", rid or "success marker"
-    if status in (200, 201) and not rid:
-        return "counted", "http 200"
-    return "error", f"http {status}"
-
-
 def amplify(template: Template, count: int = 20, *, governor: Governor,
             pool: Optional[Any] = None, stop_after_dupes: int = 5,
             delay: float = 1.2, timeout: float = 25.0,
             progress: bool = True) -> dict[str, Any]:
-    """Replay `count` times with rotated egress and minted volatility."""
-    ids: set[str] = set()
-    results: list[dict[str, Any]] = []
-    dupes = 0
+    """Replay `count` times with rotated egress and minted volatility.
+
+    One replay path: this delegates to security.replay.replay(), the
+    shared engine — the classification, the minting and the stop rule
+    live there now, not here. The template's volatile fields become a
+    Mutation spec (identity, except `ts` which is a timestamp; a field
+    the identity minter does not know keeps its captured value, and
+    X-Bogus is never minted — the old minter returned "" for it and
+    the write was skipped, so it keeps the captured value too). The
+    captured headers ride along under the minted device headers, so
+    each replay is one coherent device. A template whose signer is
+    "browser" keeps its old behaviour: the signature field is sent as
+    captured (this engine never signed; a live-page signature needs a
+    page URL the template does not carry — use replay() with
+    signer_url for that).
+    """
+    from .replay import Mutation, replay as _replay
+
+    kinds: dict[str, str] = {}
+    for name in template.volatile:
+        low = name.lower()
+        if name == "X-Bogus":
+            continue
+        if name == "ts":
+            kinds[name] = "timestamp"
+        elif ("verifyfp" in low or "mstoken" in low or "uuid" in low
+              or "device" in low or "install" in low
+              or "csrftoken" in low or "csrf" in low):
+            kinds[name] = "identity"
+    spec = Mutation(kinds=kinds, signer="none")
     started = time.time()
-
-    for n in range(1, count + 1):
-        body = dict(template.body)
-        for name in template.volatile:
-            if name in body or name != "X-Bogus":
-                minted = _mint(name)
-                if minted:
-                    body[name] = minted
-        proxy = pool.acquire() if pool is not None else None
-        client = HttpClient(timeout=timeout, proxy_url=proxy or "")
-        governor.spend(template.url)
-        payload = json.dumps(body) if template.method.upper() != "GET" else None
-        headers = dict(template.headers)
-        if payload:
-            headers.setdefault("Content-Type", "application/json")
-        try:
-            if template.method.upper() == "GET":
-                resp = client.get(template.url + (
-                    "?" + urllib.parse.urlencode(body) if body else ""),
-                    headers=headers)
-            else:
-                resp = client.post(template.url, data=payload, headers=headers)
-            verdict, why = _classify(resp.status, resp.text or "", template, ids)
-        except Exception as exc:  # noqa: BLE001
-            verdict, why = "error", f"{type(exc).__name__}"
-        if verdict == "counted" and why and why not in ("http 200",
-                                                        "success marker"):
-            ids.add(why)
-        dupes = dupes + 1 if verdict == "dupe" else 0
-        results.append({"n": n, "verdict": verdict, "why": why,
-                        "proxy": bool(proxy)})
-        if progress:
-            print(f"  {n:>3} {verdict:<8} {why[:50]}")
-        if dupes >= stop_after_dupes:
-            if progress:
-                print(f"  stopped: {dupes} consecutive dupes")
-            break
-        time.sleep(delay + random.random() * 0.6)
-
-    counted = sum(1 for r in results if r["verdict"] == "counted")
-    return {"platform": template.platform, "attempted": len(results),
-            "counted": counted,
-            "dupes": sum(1 for r in results if r["verdict"] == "dupe"),
-            "blocked": sum(1 for r in results if r["verdict"] == "blocked"),
-            "seconds": round(time.time() - started, 1),
-            "results": results}
+    result = _replay(template.url, dict(template.body), spec, count=count,
+                     governor=governor, success=template.success_marker,
+                     dupe=template.dupe_marker,
+                     id_field=template.report_id_field, pool=pool,
+                     method=template.method,
+                     stop_after_dupes=stop_after_dupes, delay=delay,
+                     timeout=timeout, progress=progress,
+                     extra_headers=dict(template.headers))
+    result["platform"] = template.platform
+    result["seconds"] = round(time.time() - started, 1)
+    return result
 
 
 def register(registry: Any) -> None:
+    from .case import governor_for, home_of, pool_from_factory, resolve_scope
+
     context = registry.context
-    home = Path(getattr(context, "home", ".") or ".")
-    from .scope import load_scope, Scope
+    home = home_of(context)
 
     @registry.register(
         "report_capture",
         description="Capture one real report request in a browser for later "
-                    "replay amplification.",
+                    "replay amplification. A headed browser opens and you "
+                    "file one report by hand; the exact request is stored. "
+                    "Refuses when no browser driver is wired (see "
+                    "`nm sec capture`).",
         capability=Capability.NET_OUT,
         parameters={"platform": "str", "url_hint": "str (optional)"})
     def report_capture(platform: str, *, url_hint: str = "") -> dict[str, Any]:
         return capture(platform, url_hint=url_hint,
-                       out_dir=home / "data" / "templates")
+                       out_dir=Path(home) / "data" / "templates")
 
     @registry.register(
         "report_amplify",
-        description="Replay a captured report N times with rotated egress and "
-                    "minted fingerprints.",
+        description="Replay a captured report N times with rotated egress "
+                    "and minted fingerprints. `template` is the captured "
+                    "template file; `scope` is a scope file, or pass "
+                    "`case` to run under that case's scope.txt. Refuses "
+                    "without a scope. (The tools layer upgrades this tool "
+                    "with the real proxy pool when one is configured; "
+                    "without it the replay runs direct.)",
         capability=Capability.NET_OUT,
         parameters={"template": "str — path", "count": "int (optional, 20)",
-                    "stop_after_dupes": "int (optional, 5)"})
+                    "stop_after_dupes": "int (optional, 5)",
+                    "scope": "str — scope file (optional)",
+                    "case": "str — case name (optional)"})
     def report_amplify(template: str, *, count: str = "20",
-                       stop_after_dupes: str = "5") -> dict[str, Any]:
+                       stop_after_dupes: str = "5", scope: str = "",
+                       case: str = "") -> dict[str, Any]:
         tpl = load_template(template)
-        scope = Scope(allow_all=True)
-        gov = Governor(scope, max_total=int(count or 20) + 5,
-                       max_per_host=3.0)
-        pool = None
-        try:
-            from ..tools.proxy_rotate import pool_from_context
-            pool = pool_from_context(context)
-            pool.probe_all()
-        except Exception:  # noqa: BLE001 - direct is valid
-            pool = None
-        return amplify(tpl, int(count or 20), governor=gov, pool=pool,
+        n = int(count or 20)
+        gov = governor_for(resolve_scope(home, scope, case),
+                           max_total=n + 5, max_per_host=3.0)
+        return amplify(tpl, n, governor=gov,
+                       pool=pool_from_factory(context),
                        stop_after_dupes=int(stop_after_dupes or 5))

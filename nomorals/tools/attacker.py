@@ -32,6 +32,8 @@ from typing import Any, Callable, Optional
 from ..core.errors import ToolError
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability
+from ..security.diff import Fingerprint, fingerprint, login_delta
+from ..security.scope import BudgetExhausted, Governor, OutOfScope
 
 _log = get_logger(__name__)
 __all__ = ["Attacker", "AttackResult", "CredentialResult", "run_attack", "register"]
@@ -113,28 +115,12 @@ class AttackResult:
         }
 
 
-@dataclass
-class Fingerprint:
-    """The FAILURE response shape, measured once up front."""
-    status: int = 0
-    length: int = 0
-    location: str = ""
-    cookies: frozenset[str] = frozenset()
-    body_hit: bool = False
-
-    def delta(self, other: "Fingerprint") -> int:
-        score = 0
-        if other.status != self.status:
-            score += 1
-        if abs(other.length - self.length) > max(48, self.length * 0.15):
-            score += 1
-        if other.location != self.location:
-            score += 1
-        if other.cookies - self.cookies:
-            score += 1
-        if self.body_hit and not other.body_hit:
-            score += 1
-        return score
+# The response fingerprint is security.diff.Fingerprint (one primitive
+# for the whole security organ) and the login verdict is
+# security.diff.login_delta — this module's own Fingerprint class with
+# its delta() is gone. An attempt's fingerprint is built with
+# markers=[fail_string], so `reflected` is non-empty exactly when the
+# fail string is present (the old body_hit).
 
 
 class _PaceGate:
@@ -234,6 +220,7 @@ class Attacker:
         proxy_report: Optional[Callable[[str, bool, float], None]] = None,
         baseline_tries: int = 3,
         confirm_tries: int = 2,
+        governor: Governor | None = None,
     ) -> None:
         host = (host or "").strip()
         if not host:
@@ -263,6 +250,26 @@ class Attacker:
         self.form_user = form_user or "username"
         self.form_pass = form_pass or "password"
         self.fail_string = fail_string or ""
+        # Scope + budget are mandatory: no unscoped brute, ever. The
+        # Governor is built from a case scope file by the caller (the
+        # brain tool, the chain, the CLI); the target URL is checked
+        # here, before any thread starts, so a refusal is fast and
+        # names the target. Pacing stays with _PaceGate — the caller
+        # builds the Governor with a high max_per_host so its interval
+        # does not fight the attacker's own rate.
+        if governor is None:
+            raise ToolError(
+                "attacker needs a scope: pass a Governor built from a "
+                "case scope file — no unscoped brute")
+        self.governor = governor
+        scheme = {"http_form": "http", "http_basic": "http",
+                  "ssh": "ssh", "ftp": "ftp"}[self.protocol]
+        path_part = (self.path if self.protocol in
+                     ("http_form", "http_basic") else "/")
+        self._target_url = f"{scheme}://{self.host}:{self.port}{path_part}"
+        if not governor.scope.allows(self._target_url):
+            raise OutOfScope(f"{self._target_url} is not in scope")
+        self._budget_exhausted = False
         self.workers = max(1, min(int(workers), 64))
         self.rate = max(0.1, float(rate))
         self.delay, self.jitter = float(delay), float(jitter)
@@ -392,13 +399,14 @@ class Attacker:
         resp = conn.getresponse()
         raw = resp.read(60_000)
         text = raw.decode("utf-8", "replace")
-        fp = Fingerprint(
-            status=resp.status, length=len(raw),
+        fp = fingerprint(
+            resp.status, text, headers=resp.msg,
+            elapsed_ms=(time.monotonic() - started) * 1000,
+            markers=[self.fail_string] if self.fail_string else [],
+            case_insensitive_markers=True,
             location=(resp.getheader("Location") or ""),
-            cookies=frozenset(m.lower() for m in
-                              _COOKIE_RE.findall(str(resp.msg))),
-            body_hit=bool(self.fail_string
-                          and self.fail_string.lower() in text.lower()))
+            cookies=_COOKIE_RE.findall(str(resp.msg)),
+            length=len(raw))
         if self._proxy_report and proxy:
             self._proxy_report(proxy, True, (time.monotonic() - started) * 1000)
         return fp, self._harvest_csrf(text), conn
@@ -464,11 +472,13 @@ class Attacker:
             ok = fp.status not in (401, 403)
             return ok, f"http {fp.status}"
         if self.fail_string:
-            if fp.body_hit:
+            # markers=[fail_string]: reflected is non-empty exactly
+            # when the fail string is present.
+            if fp.reflected:
                 return False, f"http {fp.status} (fail string)"
             if fp.status < 400:
                 return True, f"http {fp.status} (no fail string)"
-        score = base.delta(fp)
+        score = login_delta(base, fp)
         if fp.status in (301, 302, 303) and fp.location != base.location:
             score += 1
         if _SUCCESS_HINTS.search(fp.location):
@@ -482,7 +492,7 @@ class Attacker:
             except (ConnectionError, OSError):
                 conn = None
                 continue
-            if base.delta(again) < 2:
+            if login_delta(base, again) < 2:
                 return False, f"http {fp.status} unconfirmed"
         return True, f"http {fp.status} delta {score} confirmed"
 
@@ -501,6 +511,17 @@ class Attacker:
                 if item is None or self._attempts > self.max_attempts:
                     return
             login, password = item
+            try:
+                # One spend per attempt against the Governor budget; the
+                # baseline tries + confirm re-tries ride on the
+                # attempt's spend. Exhaustion stops the run with the
+                # reason named, not as a transport error.
+                self.governor.spend(self._target_url)
+            except BudgetExhausted:
+                self._stop.set()
+                with self._lock:
+                    self._budget_exhausted = True
+                return
             proxy = self._proxy_factory() if self._proxy_factory else None
             self._gate.take_slot()
             try:
@@ -600,7 +621,10 @@ class Attacker:
                            backoffs=self._backoffs,
                            seconds=time.monotonic() - started,
                            found=list(self._found), out_file=self.out_file)
-        if self._attempts == 0:
+        if self._budget_exhausted:
+            res.note = (f"budget exhausted after {self._attempts} attempts — "
+                        f"{self.governor.snapshot()}")
+        elif self._attempts == 0:
             res.note = "nothing to do (empty space or fully resumed)"
         elif not self._found:
             res.note = ("no valid credentials in the given space"
@@ -649,8 +673,10 @@ def run_attack(
     proxy_report: Callable[[str, bool, float], None] | None = None,
     baseline_tries: int = 3,
     confirm_tries: int = 2,
+    governor: Governor | None = None,
 ) -> dict[str, Any]:
-    """Functional entry point (CLI + registry share this)."""
+    """Functional entry point (CLI + registry share this). `governor`
+    is mandatory — a run without a scope refuses."""
     users = [u.strip() for u in usernames.replace(";", ",").split(",")]
     pws = [p.strip() for p in passwords.replace(";", ",").split(",")
            if p.strip()]
@@ -664,6 +690,7 @@ def run_attack(
         stop_on_lockout=stop_on_lockout, resume_file=resume_file,
         proxy_factory=proxy_factory, proxy_report=proxy_report,
         baseline_tries=baseline_tries, confirm_tries=confirm_tries,
+        governor=governor,
     )
     return attacker.run().as_dict()
 
@@ -710,6 +737,11 @@ def register(registry: Any) -> None:
             "resume_file": "str (optional) — JSONL checkpoint to resume from",
             "baseline_tries": "int (optional, 3) — bad-pair fingerprint tries",
             "confirm_tries": "int (optional, 2) — re-tries before a hit counts",
+            "scope": "str (optional) — scope file; pass `case` instead to "
+                     "run under that case's scope.txt. A run without a "
+                     "scope refuses — no unscoped brute.",
+            "case": "str (optional) — case name; the run's scope file, "
+                    "ledger and checkpoint live in the case dir",
         },
     )
     def attacker(
@@ -738,6 +770,8 @@ def register(registry: Any) -> None:
         resume_file: str = "",
         baseline_tries: str = "",
         confirm_tries: str = "",
+        scope: str = "",
+        case: str = "",
     ) -> dict[str, Any]:
         def f(key: str, default: float) -> float:
             try:
@@ -769,6 +803,11 @@ def register(registry: Any) -> None:
                 proxy_report = _report
         except Exception as exc:  # noqa: BLE001 - no pool, go direct
             _log.debug("attacker: no rotation pool: %s", exc)
+        from ..security.case import governor_for, home_of, resolve_scope
+        home = home_of(context) if context is not None else "."
+        gov = governor_for(
+            resolve_scope(home, scope, case),
+            max_total=int(f(max_attempts, 20000)), max_per_host=1000.0)
         return run_attack(
             host, port=int(f(port, 0)), protocol=protocol,
             usernames=usernames, passwords=passwords, wordlist=wl,
@@ -783,4 +822,5 @@ def register(registry: Any) -> None:
             proxy_report=proxy_report,
             baseline_tries=int(f(baseline_tries, 3)),
             confirm_tries=int(f(confirm_tries, 2)),
+            governor=gov,
         )

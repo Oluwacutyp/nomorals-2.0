@@ -125,6 +125,7 @@ from .commands.security import (
     _cmd_decode,
     _cmd_monitor,
     _cmd_osint,
+    _cmd_sec,
     _cmd_watch,
 )
 from .commands.search import _cmd_search
@@ -480,6 +481,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "hub": _CommandSpec(_cmd_hub),
     "cipher": _CommandSpec(_cmd_cipher),
     "osint": _CommandSpec(_cmd_osint),
+    "sec": _CommandSpec(_cmd_sec),
     "structure": _CommandSpec(_cmd_structure),
     "money": _CommandSpec(_cmd_money),
     "arena": _CommandSpec(_cmd_arena),
