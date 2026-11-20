@@ -137,6 +137,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "video": ["vid"],
     "voice": ["vc"],
     "mocap": [],
+    "scene": ["sc"],
     "audio": ["au"],
     "weather": ["wx"],
     "workspace": ["ws"],
@@ -2587,6 +2588,113 @@ def _parser() -> argparse.ArgumentParser:
     w_tz.add_argument("from_zone", nargs="?", default=None)
     w_tz.add_argument("to_zone", nargs="?", default=None)
 
+    scene = sub.add_parser("scene", aliases=CLI_ALIASES["scene"],
+        help="Spawn actors into a Scene3D document",
+        description=("nm scene spawn --scene FILE --kind "
+                     "prop|character|sound|light [--name N] "
+                     "[--at x,y,z | --offset-from NODE --offset x,y,z | "
+                     "--in-front-of NODE [--distance D] | "
+                     "--random-around [NODE] [--random-bounds "
+                     "x0,x1,y0,y1,z0,z1] [--seed N]] [--lifetime S] "
+                     "[--primitive cube|...] [--params JSON] "
+                     "[--material M] [--bvh FILE] [--sound-clip F] "
+                     "[--destroy-after-play] [--duration S]\n"
+                     "nm scene despawn --scene FILE --name N\n"
+                     "nm scene list --scene FILE [--json]\n"
+                     "nm scene status --scene FILE --name N [--json]\n"
+                     "nm scene tick --scene FILE [--json]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    scene_sub = scene.add_subparsers(dest="scene_action", required=True)
+    s_spawn = scene_sub.add_parser("spawn", help="spawn one actor")
+    s_spawn.add_argument("--scene", required=True,
+                         help="scene3d document path")
+    s_spawn.add_argument("--kind", default="prop",
+                         choices=("prop", "character", "sound", "light"),
+                         help="actor kind (default prop)")
+    s_spawn.add_argument("--name", default="",
+                         help="actor name (auto-named if omitted)")
+    s_spawn.add_argument("--at", default=None,
+                         help="explicit position x,y,z")
+    s_spawn.add_argument("--offset-from", default=None,
+                         help="anchor node (or 'camera') to offset from")
+    s_spawn.add_argument("--offset", default=None,
+                         help="offset x,y,z from --offset-from")
+    s_spawn.add_argument("--in-front-of", default=None,
+                         help="anchor node on the camera -> anchor arc")
+    s_spawn.add_argument("--distance", type=float, default=2.0,
+                         help="arc distance for --in-front-of (default 2)")
+    s_spawn.add_argument("--random-around", default=None, nargs="?",
+                         const="camera",
+                         help="scatter around an anchor node (default "
+                              "the camera); the clone's random placement, "
+                              "opt-in with stated bounds")
+    s_spawn.add_argument("--random-bounds", default=None,
+                         help="scatter bounds x0,x1,y0,y1,z0,z1")
+    s_spawn.add_argument("--seed", type=int, default=None,
+                         help="seed for --random-around (deterministic)")
+    s_spawn.add_argument("--lifetime", type=float, default=None,
+                         help="destroy timer in seconds (default: lives "
+                              "until despawned)")
+    s_spawn.add_argument("--parent", default="",
+                         help="scene node to parent under")
+    s_spawn.add_argument("--rotation", default=None,
+                         help="euler rotation degrees x,y,z")
+    s_spawn.add_argument("--look-at", default=None,
+                         help="aim -Z at point x,y,z")
+    s_spawn.add_argument("--scale", default=None,
+                         help="scale x,y,z (default 1,1,1)")
+    s_spawn.add_argument("--primitive", default="cube",
+                         choices=("cube", "sphere", "plane", "cylinder",
+                                  "cone"),
+                         help="prop primitive (default cube)")
+    s_spawn.add_argument("--params", default="",
+                         help="primitive params as JSON")
+    s_spawn.add_argument("--material", default="",
+                         help="scene material name for a prop")
+    s_spawn.add_argument("--bvh", default="",
+                         help="BVH file for a character spawn")
+    s_spawn.add_argument("--sound-clip", default="",
+                         help="audio clip for a sound spawn")
+    s_spawn.add_argument("--volume", type=float, default=1.0,
+                         help="sound volume 0..1 (default 1)")
+    s_spawn.add_argument("--destroy-after-play", action="store_true",
+                         help="despawn a sound actor when its clip ends")
+    s_spawn.add_argument("--duration", type=float, default=None,
+                         help="sound clip duration in seconds")
+    s_spawn.add_argument("--light-kind", default="point",
+                         choices=("ambient", "directional", "point",
+                                  "spot"),
+                         help="light kind (default point)")
+    s_spawn.add_argument("--color", default=None,
+                         help="light color r,g,b (default 1,1,1)")
+    s_spawn.add_argument("--intensity", type=float, default=1.0,
+                         help="light intensity (default 1)")
+    s_spawn.add_argument("--json", action="store_true",
+                         help="print the actor state as JSON")
+    s_despawn = scene_sub.add_parser("despawn", help="remove one actor")
+    s_despawn.add_argument("--scene", required=True,
+                           help="scene3d document path")
+    s_despawn.add_argument("--name", required=True, help="actor name")
+    s_despawn.add_argument("--json", action="store_true",
+                           help="print the actor state as JSON")
+    s_list = scene_sub.add_parser("list", help="list spawned actors")
+    s_list.add_argument("--scene", required=True,
+                        help="scene3d document path")
+    s_list.add_argument("--json", action="store_true",
+                        help="print actors as JSON")
+    s_status = scene_sub.add_parser("status", help="one actor's state")
+    s_status.add_argument("--scene", required=True,
+                          help="scene3d document path")
+    s_status.add_argument("--name", required=True, help="actor name")
+    s_status.add_argument("--json", action="store_true",
+                          help="print the actor state as JSON")
+    s_tick = scene_sub.add_parser(
+        "tick", help="activate new actors and cull expired ones")
+    s_tick.add_argument("--scene", required=True,
+                        help="scene3d document path")
+    s_tick.add_argument("--json", action="store_true",
+                        help="print the tick result as JSON")
     voice = sub.add_parser("voice", aliases=CLI_ALIASES["voice"],
         help="Live voice loop: talk to Devon through your mic and speakers",
         description=("nm voice call [--turns N] [--profile P] [--device ID]\n"

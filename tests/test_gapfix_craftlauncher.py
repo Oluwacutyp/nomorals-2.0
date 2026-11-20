@@ -574,8 +574,8 @@ def test_tool_registered_and_counts_733() -> None:
     # craft-libs port (lane 113) added the craftlibs tool, 734 after
     # the craft-fonts port (lane 114) added the craftfonts tool.
     # 735 after the indd-utils port (lane 117) added the inddutils tool.
-    # 748 after the auth-plugin wiring added 5 tools (session_forge, session_verify, payload_png_bomb, payload_svg_bomb, payload_keylogger) on top of the bughunter port (lane 121). 749 after the mocap port (lane 125) added the mocap tool. 774 after the secprobe wire-up added 25 tools (scope_load, scope_check, param_mine, param_confirm, inject_probe, jwt_attack, graphql_probe, graphql_amplify, race_wave, cors_probe, csrf_poc, plan_next, plan_add, plan_resolve, leaks_harvest, dossier_build, ban_report, ban_state, ban_set_state, ban_appeal, report_capture, report_amplify, replay_run, replay_diagnose, sec_chain).
-    assert len(registry._tools) == 774
+    # 748 after the auth-plugin wiring added 5 tools (session_forge, session_verify, payload_png_bomb, payload_svg_bomb, payload_keylogger) on top of the bughunter port (lane 121). 749 after the mocap port (lane 125) added the mocap tool. 774 after the secprobe wire-up added 25 tools (scope_load, scope_check, param_mine, param_confirm, inject_probe, jwt_attack, graphql_probe, graphql_amplify, race_wave, cors_probe, csrf_poc, plan_next, plan_add, plan_resolve, leaks_harvest, dossier_build, ban_report, ban_state, ban_set_state, ban_appeal, report_capture, report_amplify, replay_run, replay_diagnose, sec_chain). 775 after this lane (B.19) added scene_spawn.
+    assert len(registry._tools) == 775
 
 
 def _call(registry, **kwargs):

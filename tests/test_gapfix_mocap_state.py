@@ -12,7 +12,7 @@ Proves: the store (write/read, ownership, staleness, deltas +
 missed, subscribers, late-joiner snapshot, save/load), the router
 (configured/unconfigured/unknown), the BVH round trip, the Kinect
 fixture bridge, the BVH export loop, and the mocap brain tool — with
-the tool count pinned at 774 (748 at the lane's base 0733f79a, +1
+the tool count pinned at 774 (748 at the lane's base 0733f79a, +1 775 after this lane (B.19) added scene_spawn.
 mocap tool, +25 secprobe tools: no existing tool reaches the
 cross-engine
 state store — Kinect has no tool, anicraft is 2D vector animation,
@@ -452,14 +452,14 @@ class BridgeTest(unittest.TestCase):
 
 
 class ToolTest(unittest.TestCase):
-    def test_tool_count_is_774_after_mocap(self):
+    def test_tool_count_is_775_after_mocap(self):
         # 774 after the secprobe wire-up (749 after the mocap tool): no existing tool reaches the
         # cross-engine state store (Kinect has no tool, anicraft is
         # 2D vector animation, media is downloads), so the store
         # needs its own action-dispatched entry.
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 774)
+        self.assertEqual(len(registry._tools), 775)
         self.assertIn("mocap", registry._tools)
 
     def _call(self, **kwargs):

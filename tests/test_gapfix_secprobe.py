@@ -11,7 +11,7 @@ Every tool's happy path + refusals, all offline:
 
 The registry is built with a throwaway home (SimpleNamespace(home=tmp))
 so case dirs, ledgers and dossiers land in the test tmp dir, never in
-the repo. The tool count pin is 774 (749 + 25 secprobe tools).
+the repo. The tool count pin is 774 (749 + 25 secprobe tools). 775 after this lane (B.19) added scene_spawn.
 """
 from __future__ import annotations
 
@@ -900,9 +900,9 @@ class ChainTests(_SecBase):
 
 # ── tool count ────────────────────────────────────────────────────────
 class ToolCountTests(_SecBase):
-    def test_tool_count_is_774_after_secprobe(self):
+    def test_tool_count_is_775_after_secprobe(self):
         # 749 after the mocap port (lane 125) + 25 secprobe tools.
-        self.assertEqual(len(self.registry._tools), 774)
+        self.assertEqual(len(self.registry._tools), 775)
         for name in ("scope_load", "scope_check", "param_mine",
                      "param_confirm", "inject_probe", "jwt_attack",
                      "graphql_probe", "graphql_amplify", "race_wave",

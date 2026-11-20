@@ -17,7 +17,7 @@ The mined rules under test, each with its evidence in the store:
   supersedes it.
 * An accepted RFC writes a decision-journal entry.
 
-The tool count stays 774 — the secprobe wire-up added 25 tools;
+The tool count stays 774 — the secprobe wire-up added 25 tools; 775 after this lane (B.19) added scene_spawn.
 the RFC verbs ride the
 existing ``nm decisions`` / ``/decisions`` surface.
 """
@@ -511,14 +511,14 @@ class DispatcherTests(unittest.TestCase):
                       handle_rfc(self.store, ["module", "voice"],
                                  actor="owner"))
 
-    def test_tool_count_stays_774(self):
+    def test_tool_count_stays_775(self):
         from nomorals.tools.registry import ToolRegistry
 
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
         # Lane 128 adds no tool: the RFC verbs ride the existing
         # ``nm decisions`` / ``/decisions`` surface.
-        self.assertEqual(len(registry._tools), 774)
+        self.assertEqual(len(registry._tools), 775)
 
 
 if __name__ == "__main__":

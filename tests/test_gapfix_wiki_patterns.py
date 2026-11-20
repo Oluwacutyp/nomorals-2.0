@@ -5,7 +5,7 @@ canonical five, and the sitemap.
 
 craft-wiki carries NO licence, so this is original Devon code
 implementing mined patterns, never a copy of its text or files. The
-tool count stays 774 — the secprobe wire-up added 25 tools; the new
+tool count stays 774 — the secprobe wire-up added 25 tools; the new 775 after this lane (B.19) added scene_spawn.
 actions ride the existing action-dispatched ``wiki`` tool (774 =
 749 + 25 secprobe tools; 749 = 748 at the lane's base + 1 mocap
 tool, lane 125).
@@ -416,7 +416,7 @@ class TestToolAndVerb(unittest.TestCase):
     def _call(self, reg, **kw):
         return reg._tools["wiki"].fn(**kw)
 
-    def test_tool_count_stays_774(self) -> None:
+    def test_tool_count_stays_775(self) -> None:
         from nomorals.tools.registry import ToolRegistry
 
         registry = ToolRegistry(SimpleNamespace())
@@ -426,7 +426,7 @@ class TestToolAndVerb(unittest.TestCase):
         # tools; 749 = 748 at the lane's base + 1 mocap tool
         # (lane 125), which landed between the lane's base and
         # the rebase.
-        self.assertEqual(len(registry._tools), 774)
+        self.assertEqual(len(registry._tools), 775)
         self.assertIn("wiki", registry._tools)
 
     def test_tool_nav_sitemap_canonical(self) -> None:

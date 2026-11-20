@@ -88,6 +88,7 @@ from .commands.shorts import cmd_shorts
 from .commands.video import cmd_video
 from .commands.board import cmd_board
 from .commands.director import cmd_director
+from .commands.scene import cmd_scene
 from .commands.improve import _cmd_improve
 from .commands.inbox import _cmd_inbox
 from .commands.learn import _cmd_learn
@@ -569,6 +570,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "video": _CommandSpec(cmd_video),
     "board": _CommandSpec(cmd_board),
     "director": _CommandSpec(cmd_director),
+    "scene": _CommandSpec(cmd_scene),
     "inbox": _CommandSpec(_cmd_inbox),
     "learn": _CommandSpec(_cmd_learn),
     "legal": _CommandSpec(_cmd_legal),
