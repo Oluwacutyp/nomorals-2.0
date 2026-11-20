@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from ...core.logging_setup import get_logger
@@ -536,3 +537,199 @@ class RuntimeMocapMixin:
             "| run [name] [ticks] | events [name] | export [name] | "
             "load-take [name] <path> | attach-rig [show] <rig> | "
             "attach-cloudcam [show] <cam> | drop [name]")
+
+    # ── scene project: /project ────────────────────────────────────
+    def _control_project(self, tail: str, chat_key: str,
+                         message: Any = None) -> str:
+        """Scene projects — one directory tying scenes, takes, rigs
+        and assets together.
+
+        /project create <name> [root]        scaffold a project
+        /project list                        loaded projects
+        /project status [name]               one project's state
+        /project open <path>                 open a .dvproject/dir
+        /project import-uproject <path> [root] import a UE .uproject
+        /project validate [name]             every problem on disk
+        /project add-scene <name> <path>     validate + add a scene
+        /project add-take <name> <path>      validate + add a take
+        /project add-rig <name> <path>       validate + add a rig
+        /project add-asset <name> <path>     record a file as asset
+        /project remove <kind> <entry> [name] drop an entry
+        /project set-default <scene> [name]  name the default scene
+        /project open-scene <scene> [name]   load a scene entry
+        /project take-path <take> [name]     a take entry's path
+        /project export <out> [name]         sealed bundle copy
+        /project bind-show [name] [show] [take] show over the take
+        /project drop [name]                 forget a loaded project
+        """
+        from ...media.project import (
+            Project,
+            drop_project,
+            get_project,
+            list_projects,
+            load_project,
+        )
+        from ...media.project.errors import ProjectError
+        from ...tools.mocap import _STORE
+
+        parts = (tail or "").split()
+        if not parts:
+            return self._control_project_help()
+        verb = parts[0]
+        rest = parts[1:]
+        name = "default"
+        if verb in ("status", "validate", "add-scene", "add-take",
+                    "add-rig", "add-asset", "set-default",
+                    "open-scene", "take-path", "export", "bind-show",
+                    "drop") and rest:
+            name = rest[0]
+            rest = rest[1:]
+        try:
+            if verb == "list":
+                projects = list_projects()
+                lines = ["projects:"]
+                for entry in projects:
+                    lines.append(
+                        f"  {entry['name']}: "
+                        f"{len(entry['scenes'])} scenes, "
+                        f"{len(entry['takes'])} takes, "
+                        f"{len(entry['rigs'])} rigs, "
+                        f"default {entry['default_scene'] or 'none'}")
+                return "\n".join(lines)
+            if verb == "create":
+                if not rest:
+                    return "/project create <name> [root]"
+                project = Project.create(
+                    rest[0], rest[1] if len(rest) > 1 else ".")
+                load_project(project.manifest_path)
+                return (f"project {rest[0]} created at "
+                        f"{project.root}")
+            if verb == "open":
+                if not rest:
+                    return "/project open <path>"
+                project = load_project(rest[0])
+                return (f"project {project.name} opened "
+                        f"({len(project.entries['scenes'])} scenes, "
+                        f"{len(project.entries['takes'])} takes)")
+            if verb == "import-uproject":
+                if not rest:
+                    return ("/project import-uproject "
+                            "<path.uproject> [root]")
+                project, receipt = Project.from_uproject(
+                    rest[0], rest[1] if len(rest) > 1 else ".")
+                load_project(project.manifest_path)
+                unmapped = receipt["unmapped_plugins"]
+                return (f"project {project.name} imported from UE "
+                        f"{receipt['source_engine']} "
+                        f"(modules: "
+                        f"{', '.join(receipt['modules'])}; "
+                        f"plugins: "
+                        f"{', '.join(receipt['plugins']) or 'none'}"
+                        + (f"; unmapped, disabled: "
+                           f"{', '.join(unmapped)}" if unmapped
+                           else "") + ")")
+            if verb == "remove":
+                if len(rest) < 2:
+                    return ("/project remove <kind> <entry> [name]")
+                name = rest[2] if len(rest) > 2 else "default"
+                project = get_project(name)
+                receipt = project.remove(rest[0], rest[1])
+                project.save()
+                return (f"project {name}: removed "
+                        f"{receipt['kind']} {receipt['removed']}")
+            if verb not in ("status", "validate", "add-scene",
+                            "add-take", "add-rig", "add-asset",
+                            "set-default", "open-scene", "take-path",
+                            "export", "bind-show", "drop"):
+                return self._control_project_help()
+            project = get_project(name)
+            if verb == "status":
+                return json.dumps(project.status(), indent=2)
+            if verb == "validate":
+                problems = project.validate()
+                if not problems:
+                    return f"project {name} is whole"
+                return (f"project {name} has {len(problems)} "
+                        f"problem(s):\n"
+                        + "\n".join(f"  - {p}" for p in problems))
+            if verb in ("add-scene", "add-take", "add-rig",
+                        "add-asset"):
+                if not rest:
+                    return (f"/project {verb} <name> <path>")
+                path = rest[0]
+                entry = None
+                if verb == "add-scene":
+                    receipt = project.add_scene(
+                        Path(path).stem, path)
+                elif verb == "add-take":
+                    receipt = project.add_take(
+                        Path(path).stem, path)
+                elif verb == "add-rig":
+                    receipt = project.add_rig(
+                        Path(path).stem, path)
+                else:
+                    receipt = project.add_asset(
+                        Path(path).stem, path)
+                project.save()
+                return (f"project {name}: added "
+                        f"{receipt['kind']} {receipt['entry']} "
+                        f"({receipt['stored']})")
+            if verb == "set-default":
+                if not rest:
+                    return "/project set-default <scene> [name]"
+                project.set_default_scene(rest[0])
+                project.save()
+                return (f"project {name}: default scene "
+                        f"{rest[0]}")
+            if verb == "open-scene":
+                if not rest:
+                    return "/project open-scene <scene> [name]"
+                scene = project.open_scene(rest[0])
+                return (f"project {name} scene {rest[0]}: "
+                        f"{scene.title!r} — {len(scene.nodes)} "
+                        f"nodes, {len(scene.tracks)} tracks")
+            if verb == "take-path":
+                if not rest:
+                    return "/project take-path <take> [name]"
+                return (f"project {name} take {rest[0]}: "
+                        f"{project.take_path(rest[0])}")
+            if verb == "export":
+                if not rest:
+                    return "/project export <out> [name]"
+                receipt = project.export_bundle(rest[0])
+                return (f"project {name} exported to "
+                        f"{receipt['out']} "
+                        f"({receipt['files']} files)")
+            if verb == "bind-show":
+                show = rest[0] if rest else name
+                take = rest[1] if len(rest) > 1 else ""
+                status = project.bind_show(show, _STORE, take=take)
+                return (f"project {name}: show {show} bound to "
+                        f"take {status['project_take']} — "
+                        f"default scene "
+                        f"{status['project_default_scene'] or 'none'}")
+            if verb == "drop":
+                drop_project(name)
+                return f"project {name} dropped"
+        except ProjectError as exc:
+            record_failure(
+                "runtime_mocap.RuntimeMocapMixin._control_project",
+                exc)
+            return f"project: {exc}"
+        except Exception as exc:  # noqa: BLE001 - chat never dies
+            record_failure(
+                "runtime_mocap.RuntimeMocapMixin._control_project",
+                exc)
+            return f"project failed: {exc}"
+        return self._control_project_help()
+
+    def _control_project_help(self) -> str:
+        return (
+            "/project create <name> [root] | list | status [name] | "
+            "open <path> | import-uproject <path.uproject> [root] | "
+            "validate [name] | add-scene <name> <path> | add-take "
+            "<name> <path> | add-rig <name> <path> | add-asset "
+            "<name> <path> | remove <kind> <entry> [name] | "
+            "set-default <scene> [name] | open-scene <scene> [name] "
+            "| take-path <take> [name] | export <out> [name] | "
+            "bind-show [name] [show] [take] | drop [name]")

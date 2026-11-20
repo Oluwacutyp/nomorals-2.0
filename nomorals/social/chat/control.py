@@ -916,6 +916,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "mocap": (0, None),      # /mocap … — mocap store + VTuber rig
     "cloudcam": (0, None),   # /cloudcam … — streamed point clouds
     "live": (0, None),       # /live … — one live run of mocap + rig + cloudcam, through named states
+    "project": (0, None),    # /project … — scene projects: one directory tying scenes, takes, rigs and assets together (owner-only)
     "clonevoice": (1, 1),  # /clonevoice <name> — attach a voice note, clone it
     "voices": (0, 0),      # /voices — list every voice, cloned vs built-in
     "bet": (0, None),        # /bet analyze <home> vs <away> [odds…] | bankroll | backtest
@@ -4581,6 +4582,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/live create [name] | list | status [name] | start [name] | pause [name] | resume [name] | stop [name] | tick [name] | run [name] [ticks] | events [name] | export [name] | load-take [name] <path> | attach-rig [show] <rig> | attach-cloudcam [show] <cam> | drop [name]",
               "example": "/live start",
               "related": "/mocap /cloudcam /blender"},
+    "project": {"what": "Scene projects — one directory tying scenes, takes, rigs and assets together (StreamTwo UE project shape, pattern only): a sealed manifest (<name>.dvproject: modules, plugins, targets, the content index) plus Config/DefaultProject.ini plus Content/Scenes|Takes|Rigs|Assets. Scenes are validated by loading them, takes by parsing them, rigs by building their definitions — nothing is recorded on trust. A project can bind a show to its default take. (The `scene_project` brain tool and `nm sceneproject` CLI drive the same projects.) Owner only.",
+              "usage": "/project create <name> [root] | list | status [name] | open <path> | import-uproject <path.uproject> [root] | validate [name] | add-scene <name> <path> | add-take <name> <path> | add-rig <name> <path> | add-asset <name> <path> | remove <kind> <entry> [name] | set-default <scene> [name] | open-scene <scene> [name] | take-path <take> [name] | export <out> [name] | bind-show [show] [name] | drop [name]",
+              "example": "/project create zelda-stream",
+              "related": "/mocap /live /blender"},
     "shorts": {"what": "Devon's short-form content empire: niche → script → voiceover → AI visuals → beat-synced edit → captions → publish.",
               "usage": "/shorts make <niche> \"<topic>\" [--now] | /shorts niches | /shorts status | /shorts calendar | /shorts ledger",
               "example": "/shorts make motivation \"discipline beats motivation\" --now",
@@ -5066,7 +5071,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("decoding & crypto", ["decode", "cookies", "cookielab", "structure", "cipher",
                            "monitor", "investigate", "breach"]),
     ("media system", ["music", "distribute", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
-                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "sham", "musicnote",
+                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "sham", "musicnote",
                       "steal", "sticker", "convert", "gif", "emoji", "customemoji", "emojiart", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "models", "mcp", "a2a", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion",
@@ -5333,7 +5338,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("media system — music · playback · video · podcast",
      ["music", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
       "distribute", "dj", "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "produce", "like", "dislike",
-      "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "sham", "musicnote",
+      "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "sham", "musicnote",
       "steal", "sticker", "convert", "gif", "emoji", "customemoji",
       "emojiart", "react", "create",
       "awoo", "baka", "bite", "blush", "bonk", "bored",
@@ -5797,6 +5802,7 @@ LIST_ONELINERS: dict[str, str] = {
     "mocap": "motion-capture state + the VTuber rig — /mocap status | rig list | rig load | rig pose | rig render | rig drive <bvh>",
     "cloudcam": "streamed point clouds — /cloudcam start | status | tick | export | render",
     "live": "one live run of mocap + rig + cloudcam, through named states — /live create | start | tick | run | stop | export",
+    "project": "scene projects — one directory tying scenes, takes, rigs and assets together — /project create | open | validate | add-scene | bind-show",
     "image": "look up an image (format, dims, seen-before) — or generate one from a prompt",
     "lens": "reverse image search",
     "schedule": "cron-style in-process jobs",

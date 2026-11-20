@@ -26,8 +26,8 @@ drives it), pause holds the pose, stop exports BVH + releases
 the skeleton claim + stops the show-owned cloudcam poller, the
 bounded event journal (drops counted, never silent), the show
 brain tool, the `nm show` CLI, and the /live chat verb — with
-the tool count pinned at 777 (776 after B.20 added cloudcam;
-777 after this lane (B.22) added show).
+the tool count pinned at 778 (776 after B.20 added cloudcam;
+777 after this lane (B.22) added show. 778 after this lane (B.26) added scene_project).
 """
 
 from __future__ import annotations
@@ -153,10 +153,10 @@ def _registry(tmp_path):
     return registry
 
 
-def test_tool_count_is_777_after_show():
+def test_tool_count_is_778_after_show():
     registry = ToolRegistry(SimpleNamespace())
     registry.register_builtins()
-    assert len(registry._tools) == 777
+    assert len(registry._tools) == 778
     assert "show" in registry._tools
 
 

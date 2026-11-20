@@ -12375,6 +12375,9 @@ class PartnerRuntime(
         if kind == "live":
             return self._control_live(command.tail, chat_key,
                                       message=message)
+        if kind == "project":
+            return self._control_project(command.tail, chat_key,
+                                         message=message)
         if kind == "voices":
             return self._control_voices(command.tail or arg,
                                         chat_key=chat_key)

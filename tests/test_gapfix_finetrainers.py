@@ -657,17 +657,17 @@ def test_attribution():
     assert result["verified"] == 39
 
 
-def test_tool_count_still_777():
+def test_tool_count_still_778():
     from types import SimpleNamespace
 
     from nomorals.tools.registry import ToolRegistry
 
     registry = ToolRegistry(SimpleNamespace())
     registry.register_builtins()
-    assert len(registry._tools) == 777, (
+    assert len(registry._tools) == 778, (
         "lane 119 adds no tool (774 after the secprobe wire-up added "
         "25 tools; 775 after B.19 added scene_spawn; 776 after B.20 "
-        "added cloudcam; 777 after this lane (B.22) added show) — if "
+        "added cloudcam; 777 after this lane (B.22) added show. 778 after this lane (B.26) added scene_project) — if "
         "this changed, a tool was added and "
         "every pin test needs updating with the reason named"
     )

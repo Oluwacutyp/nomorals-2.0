@@ -139,6 +139,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "voice": ["vc"],
     "mocap": [],
     "scene": ["sc"],
+    "sceneproject": ["sproj"],
     "show": [],
     "audio": ["au"],
     "weather": ["wx"],
@@ -3506,6 +3507,109 @@ def _parser() -> argparse.ArgumentParser:
                  show_sub.choices["drop"]):
         _sub.add_argument("--session", default="default",
                           help="show name (default 'default')")
+
+    sceneproject = sub.add_parser(
+        "sceneproject", aliases=CLI_ALIASES["sceneproject"],
+        help="one directory tying scenes, takes, rigs and assets together",
+        description=("nm sceneproject create <name> [--root DIR] "
+                     "[--description TEXT] [--category TEXT]\n"
+                     "nm sceneproject list\n"
+                     "nm sceneproject status [--name NAME]\n"
+                     "nm sceneproject open <path>\n"
+                     "nm sceneproject import-uproject <path.uproject> "
+                     "[--root DIR]\n"
+                     "nm sceneproject validate [--name NAME]\n"
+                     "nm sceneproject add-scene <path> [--name NAME] "
+                     "[--entry NAME] [--link]\n"
+                     "nm sceneproject add-take <path> [--name NAME] "
+                     "[--entry NAME] [--link]\n"
+                     "nm sceneproject add-rig <path> [--name NAME] "
+                     "[--entry NAME] [--link]\n"
+                     "nm sceneproject add-asset <path> [--name NAME] "
+                     "[--entry NAME] [--kind KIND] [--link]\n"
+                     "nm sceneproject remove <kind> <entry> [--name NAME] "
+                     "[--delete-file]\n"
+                     "nm sceneproject set-default <scene> [--name NAME]\n"
+                     "nm sceneproject open-scene <scene> [--name NAME]\n"
+                     "nm sceneproject take-path <take> [--name NAME]\n"
+                     "nm sceneproject export --out DIR [--name NAME]\n"
+                     "nm sceneproject bind-show [--name NAME] "
+                     "[--show NAME] [--take NAME]\n"
+                     "nm sceneproject drop [--name NAME]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sceneproject.add_argument("--json", action="store_true",
+                              help="Output as JSON")
+    sceneproject_sub = sceneproject.add_subparsers(
+        dest="sceneproject_action", required=True)
+    sceneproject_sub.add_parser("list", help="loaded projects")
+    sceneproject_sub.add_parser("status", help="one project's state")
+    sceneproject_sub.add_parser("validate",
+                                help="every problem with the project")
+    sceneproject_create = sceneproject_sub.add_parser(
+        "create", help="scaffold a project")
+    sceneproject_create.add_argument("project_name",
+                                     help="project name")
+    sceneproject_create.add_argument("--root", default=".",
+                                     help="parent directory (default '.')")
+    sceneproject_create.add_argument("--description", default="",
+                                     help="project description")
+    sceneproject_create.add_argument("--category", default="",
+                                     help="project category")
+    sceneproject_open = sceneproject_sub.add_parser(
+        "open", help="open a .dvproject file or directory")
+    sceneproject_open.add_argument("path", help=".dvproject or dir")
+    sceneproject_import = sceneproject_sub.add_parser(
+        "import-uproject", help="import a real UE .uproject")
+    sceneproject_import.add_argument("path", help=".uproject file")
+    sceneproject_import.add_argument("--root", default=".",
+                                     help="parent directory (default '.')")
+    for _verb, _help in (
+            ("add-scene", "validate and add a Scene3D file"),
+            ("add-take", "validate and add a BVH/JSON take"),
+            ("add-rig", "validate and add a rig definition"),
+            ("add-asset", "record a file as an asset")):
+        _sp = sceneproject_sub.add_parser(_verb, help=_help)
+        _sp.add_argument("path", help="file to add")
+        _sp.add_argument("--entry", default="",
+                         help="entry name (default: file stem)")
+        _sp.add_argument("--link", action="store_true",
+                         help="link the outside file instead of copying it")
+        if _verb == "add-asset":
+            _sp.add_argument("--kind", default="",
+                             help="asset kind (default: from suffix)")
+    sceneproject_remove = sceneproject_sub.add_parser(
+        "remove", help="drop an entry")
+    sceneproject_remove.add_argument(
+        "kind", help="scenes|takes|rigs|assets")
+    sceneproject_remove.add_argument("entry", help="entry name")
+    sceneproject_remove.add_argument(
+        "--delete-file", action="store_true",
+        help="also delete a copied file (never a link target)")
+    sceneproject_default = sceneproject_sub.add_parser(
+        "set-default", help="name the default scene")
+    sceneproject_default.add_argument("scene", help="scene entry name")
+    sceneproject_open_scene = sceneproject_sub.add_parser(
+        "open-scene", help="load a scene entry as a Scene3D")
+    sceneproject_open_scene.add_argument("scene",
+                                         help="scene entry name")
+    sceneproject_take = sceneproject_sub.add_parser(
+        "take-path", help="a take entry's path")
+    sceneproject_take.add_argument("take", help="take entry name")
+    sceneproject_export = sceneproject_sub.add_parser(
+        "export", help="copy the project as a sealed bundle")
+    sceneproject_export.add_argument("--out", required=True,
+                                     help="bundle directory")
+    sceneproject_bind = sceneproject_sub.add_parser(
+        "bind-show", help="load a show over the project's take")
+    sceneproject_bind.add_argument("--show", default="",
+                                   help="show name (default: project name)")
+    sceneproject_bind.add_argument("--take", default="",
+                                   help="take entry (default: first take)")
+    sceneproject_sub.add_parser("drop", help="forget a loaded project")
+    for _sub in sceneproject_sub.choices.values():
+        _sub.add_argument("--name", default="default",
+                          help="project name (default 'default')")
 
     inbox = sub.add_parser("inbox", aliases=CLI_ALIASES["inbox"],
         help="Drop-in inbox: drop a file, link, or note — Devon acts",
