@@ -917,6 +917,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "cloudcam": (0, None),   # /cloudcam … — streamed point clouds
     "live": (0, None),       # /live … — one live run of mocap + rig + cloudcam, through named states
     "project": (0, None),    # /project … — scene projects: one directory tying scenes, takes, rigs and assets together (owner-only)
+    "facemcap": (0, None),   # /facemcap … — ARKit LiveLink CSV facial capture, as face takes
     "clonevoice": (1, 1),  # /clonevoice <name> — attach a voice note, clone it
     "voices": (0, 0),      # /voices — list every voice, cloned vs built-in
     "bet": (0, None),        # /bet analyze <home> vs <away> [odds…] | bankroll | backtest
@@ -4586,6 +4587,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/project create <name> [root] | list | status [name] | open <path> | import-uproject <path.uproject> [root] | validate [name] | add-scene <name> <path> | add-take <name> <path> | add-rig <name> <path> | add-asset <name> <path> | remove <kind> <entry> [name] | set-default <scene> [name] | open-scene <scene> [name] | take-path <take> [name] | export <out> [name] | bind-show [show] [name] | drop [name]",
               "example": "/project create zelda-stream",
               "related": "/mocap /live /blender"},
+    "facemcap": {"what": "ARKit LiveLink CSV facial capture — a recording becomes a face take: per-frame rig blendshape weights and bone rotations, drivable through a rig session, attachable to a show, exportable as a face-take JSON or a driven BVH. A LiveLink CSV (SMPTE timecode, blendshape count, one float column per ARKit morph) plus a mapping (morph rename, bone rotations with axis/offset/scale) loads from a .morph_anim.json manifest, a face-take .json or a .csv. (The `facemcap` brain tool and `nm facemcap` CLI drive the same takes.) Owner only.",
+              "usage": "/facemcap load <path> [name] | list | status [name] | drive <name> [rig] | frame <name> [n] | export <name> | render <name> [n] | attach <name> <show> | drop [name]",
+              "example": "/facemcap load takes/smile.morph_anim.json",
+              "related": "/mocap /live /cloudcam"},
     "shorts": {"what": "Devon's short-form content empire: niche → script → voiceover → AI visuals → beat-synced edit → captions → publish.",
               "usage": "/shorts make <niche> \"<topic>\" [--now] | /shorts niches | /shorts status | /shorts calendar | /shorts ledger",
               "example": "/shorts make motivation \"discipline beats motivation\" --now",
@@ -5071,7 +5076,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("decoding & crypto", ["decode", "cookies", "cookielab", "structure", "cipher",
                            "monitor", "investigate", "breach"]),
     ("media system", ["music", "distribute", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
-                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "sham", "musicnote",
+                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "sham", "musicnote",
                       "steal", "sticker", "convert", "gif", "emoji", "customemoji", "emojiart", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "models", "mcp", "a2a", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion",
@@ -5338,7 +5343,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("media system — music · playback · video · podcast",
      ["music", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
       "distribute", "dj", "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "produce", "like", "dislike",
-      "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "sham", "musicnote",
+      "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "sham", "musicnote",
       "steal", "sticker", "convert", "gif", "emoji", "customemoji",
       "emojiart", "react", "create",
       "awoo", "baka", "bite", "blush", "bonk", "bored",
@@ -5803,6 +5808,7 @@ LIST_ONELINERS: dict[str, str] = {
     "cloudcam": "streamed point clouds — /cloudcam start | status | tick | export | render",
     "live": "one live run of mocap + rig + cloudcam, through named states — /live create | start | tick | run | stop | export",
     "project": "scene projects — one directory tying scenes, takes, rigs and assets together — /project create | open | validate | add-scene | bind-show",
+    "facemcap": "ARKit LiveLink CSV facial capture, as face takes — /facemcap load | list | status | drive | frame | export | render | attach",
     "image": "look up an image (format, dims, seen-before) — or generate one from a prompt",
     "lens": "reverse image search",
     "schedule": "cron-style in-process jobs",

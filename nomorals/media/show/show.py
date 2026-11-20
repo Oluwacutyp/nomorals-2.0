@@ -6,10 +6,11 @@ no upstream code):
 
 * An **App** plugins extend: :meth:`Show.add_plugin` runs a
   plugin's ``build(show)``, which registers systems and resources.
-  The three built-in plugins are the organs themselves —
+  The four built-in plugins are the organs themselves —
   :class:`MocapPlugin` (the take player), :class:`RigPlugin`
   (drive + render), :class:`CloudCamPlugin` (stage the point
-  cloud).
+  cloud), :class:`FaceMocapPlugin` (the face take, into the
+  store's ``face`` channel).
 * **States** with ``OnEnter``/``OnExit`` hooks: a show moves
   ``idle → arming → live → paused → live → stopping → done``
   (or ``failed``), and a transition is requested
@@ -42,12 +43,19 @@ from pathlib import Path
 from typing import Any
 
 from ..cloudcam.errors import CloudCamError
+from ..facemcap import FaceTakePlayer
+from ..facemcap.registry import load_take as _load_face_take
 from ..mocap.errors import MocapError
 from ..mocap.kinect_bridge import _ensure_engine
 from ..rig.errors import RigError
 from .errors import ShowError
 from .player import TakePlayer
-from .plugins import CloudCamPlugin, MocapPlugin, RigPlugin
+from .plugins import (
+    CloudCamPlugin,
+    FaceMocapPlugin,
+    MocapPlugin,
+    RigPlugin,
+)
 from .states import TRANSITIONS, ShowState, legal
 
 __all__ = [
@@ -132,10 +140,14 @@ class Show:
         self._owns_cloudcam = False
         self._last_error: str | None = None
         self._last_receipt: dict[str, Any] | None = None
+        self._last_face: dict[str, Any] = {"attached": False}
+        self._face_finished_noted = False
+        self._face_bones_unknown_noted = False
         # The built-in plugins: the organs themselves.
         self.add_plugin(MocapPlugin())
         self.add_plugin(RigPlugin())
         self.add_plugin(CloudCamPlugin())
+        self.add_plugin(FaceMocapPlugin())
         self.on_enter(ShowState.ARMING, self._arm)
         self.on_enter(ShowState.LIVE, self._go_live)
         self.on_enter(ShowState.STOPPING, self._tear_down)
@@ -268,6 +280,31 @@ class Show:
         self._take_finished_noted = False
         return self._take.to_dict()
 
+    def load_face_take(self, path: str | Path) -> dict[str, Any]:
+        """Load a face take from a manifest
+        (``.morph_anim.json``) or a CSV file — the face
+        recording the show steps in capture. The take is
+        registered under ``face:<show>`` so a show's face take
+        never collides with a tool-loaded take of the same
+        file."""
+        take = _load_face_take(f"face:{self.name}", path)
+        player = FaceTakePlayer(take)
+        self.set_resource("face_take", player)
+        self._face_finished_noted = False
+        self._face_bones_unknown_noted = False
+        return player.to_dict()
+
+    def attach_face_take(self, player: Any) -> dict[str, Any]:
+        """Attach a face player (replacing any attached one)."""
+        if player is None:
+            raise ShowError("attach_face_take needs a face player",
+                            kind="bad_face_take")
+        self.set_resource("face_take", player)
+        self._face_finished_noted = False
+        self._face_bones_unknown_noted = False
+        return {"ok": True, "show": self.name,
+                "face_take": player.name}
+
     def attach_rig(self, session: Any) -> dict[str, Any]:
         """Attach a rig session (replacing any attached one)."""
         if session is None:
@@ -355,6 +392,7 @@ class Show:
         receipt["held"] = self._held
         receipt["rendered_bytes"] = self._rendered_bytes
         receipt["cloudcam"] = dict(self._last_cloudcam)
+        receipt["face"] = dict(self._last_face)
         self._last_receipt = receipt
         return receipt
 
@@ -467,18 +505,29 @@ class Show:
     # -- hooks ------------------------------------------------------
 
     def _arm(self, _show: Show) -> None:
-        """Entering ARMING: register the show's engine, reset the
-        take, claim the skeleton channel when a take is loaded,
-        and start the attached cloudcam when it is not running."""
+        """Entering ARMING: register the show's engine, reset
+        the takes, claim the skeleton channel when a take is
+        loaded and the face channel when a face take is loaded,
+        and start the attached cloudcam when it is not
+        running."""
+        produces: list[str] = []
+        if self._take is not None:
+            produces.append("skeleton")
+        if "face_take" in self._resources:
+            produces.append("face")
         _ensure_engine(
             self.store, self.engine,
-            produces=("skeleton",) if self._take is not None else (),
+            produces=tuple(produces),
             note=f"live show {self.name!r} — take player and "
                  f"drive")
         if self._take is not None:
             self._take.reset()
             self._take_finished_noted = False
             self.store.claim("skeleton", self.engine)
+        if "face_take" in self._resources:
+            self._resources["face_take"].reset()
+            self._face_finished_noted = False
+            self.store.claim("face", self.engine)
         cam = self._resources.get("cloudcam")
         if cam is not None and not cam.running:
             cam.start()
@@ -514,6 +563,12 @@ class Show:
         try:
             if self.store.owner("skeleton") == self.engine:
                 self.store.release("skeleton", self.engine)
+        except Exception as exc:  # noqa: BLE001 - best effort
+            self._record("release_failed", {"error": str(exc)})
+        try:
+            if ("face" in self.store.channels()
+                    and self.store.owner("face") == self.engine):
+                self.store.release("face", self.engine)
         except Exception as exc:  # noqa: BLE001 - best effort
             self._record("release_failed", {"error": str(exc)})
         cam = self._resources.get("cloudcam")
@@ -556,6 +611,7 @@ class Show:
         """Everything a status line needs, honest numbers only."""
         rig = self._resources.get("rig")
         cam = self._resources.get("cloudcam")
+        face_take = self._resources.get("face_take")
         return {
             "name": self.name,
             "state": self.state.value,
@@ -564,6 +620,9 @@ class Show:
             "resources": sorted(self._resources),
             "take": (self._take.to_dict()
                      if self._take is not None else None),
+            "face_take": (face_take.to_dict()
+                          if face_take is not None else None),
+            "face": dict(self._last_face),
             "rig": (rig.rig.name if rig is not None else None),
             "cloudcam": (cam.status() if cam is not None else None),
             "posed": len(self._posed),

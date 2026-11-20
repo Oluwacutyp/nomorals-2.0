@@ -12448,6 +12448,9 @@ class PartnerRuntime(
         if kind == "cloudcam":
             return self._control_cloudcam(command.tail, chat_key,
                                           message=message)
+        if kind == "facemcap":
+            return self._control_facemcap(command.tail, chat_key,
+                                          message=message)
         if kind == "live":
             return self._control_live(command.tail, chat_key,
                                       message=message)

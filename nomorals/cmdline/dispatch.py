@@ -156,6 +156,7 @@ from .commands.vision import _cmd_vision
 from .commands.voice import _cmd_voice
 from .commands.mocap import _cmd_mocap
 from .commands.cloudcam import _cmd_cloudcam
+from .commands.facemcap import _cmd_facemcap
 from .commands.show import _cmd_show
 from .commands.sceneproject import _cmd_sceneproject
 from .commands.weather import _cmd_weather
@@ -546,6 +547,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "voice": _CommandSpec(_cmd_voice),
     "mocap": _CommandSpec(_cmd_mocap),
     "cloudcam": _CommandSpec(_cmd_cloudcam),
+    "facemcap": _CommandSpec(_cmd_facemcap),
     "show": _CommandSpec(_cmd_show),
     "sceneproject": _CommandSpec(_cmd_sceneproject),
     "captcha": _CommandSpec(_cmd_captcha),

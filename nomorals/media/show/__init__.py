@@ -26,6 +26,7 @@ from .errors import ShowError
 from .player import TakePlayer
 from .plugins import (
     CloudCamPlugin,
+    FaceMocapPlugin,
     MocapPlugin,
     RigPlugin,
     ShowPlugin,
@@ -45,6 +46,7 @@ __all__ = [
     "MAX_POSED",
     "PHASES",
     "CloudCamPlugin",
+    "FaceMocapPlugin",
     "MocapPlugin",
     "RigPlugin",
     "Show",

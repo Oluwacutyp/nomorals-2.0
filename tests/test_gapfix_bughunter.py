@@ -3,7 +3,7 @@
 Covers: the upstream self-tests (scope / skill map / closure /
 state / memory / agent / recon, all offline), the machine-checked
 parity TOML, the SHA-256 attribution record, the 8-tool surface
-(registry count 774; 775 after this lane (B.19) added scene_spawn; 776 after this lane (B.20) added cloudcam), the 7-Question Gate, the closure ledger, and 777 after this lane (B.22) added show. 778 after this lane (B.26) added scene_project.
+(registry count 774; 775 after this lane (B.19) added scene_spawn; 776 after this lane (B.20) added cloudcam), the 7-Question Gate, the closure ledger, and 777 after this lane (B.22) added show. 778 after this lane (B.26) added scene_project. 779 after this lane (B.23) added facemcap.
 the engine end to end on a scoped fixture HTTP server — with scope
 enforcement demonstrated (an out-of-scope URL is refused in code
 and never tested).
@@ -207,14 +207,14 @@ class AttributionTest(unittest.TestCase):
 
 
 class ToolCountTest(unittest.TestCase):
-    def test_tool_count_is_778_after_bughunter(self):
+    def test_tool_count_is_779_after_bughunter(self):
         # 735 at base 62ae286d; the bughunter port (lane 121) adds
         # 8 tools (scope_check, classify, recon, surface, triage,
         # report, engage, hackerone) — the security organ's 27
         # existing tools are separate registry entries and there is
-        # no single action-dispatched "security" tool to extend. 749 after the mocap port (lane 125) added the mocap tool. 774 after the secprobe wire-up added 25 tools (scope_load, scope_check, param_mine, param_confirm, inject_probe, jwt_attack, graphql_probe, graphql_amplify, race_wave, cors_probe, csrf_poc, plan_next, plan_add, plan_resolve, leaks_harvest, dossier_build, ban_report, ban_state, ban_set_state, ban_appeal, report_capture, report_amplify, replay_run, replay_diagnose, sec_chain).
+        # no single action-dispatched "security" tool to extend. 749 after the mocap port (lane 125) added the mocap tool. 774 after the secprobe wire-up added 25 tools (scope_load, scope_check, param_mine, param_confirm, inject_probe, jwt_attack, graphql_probe, graphql_amplify, race_wave, cors_probe, csrf_poc, plan_next, plan_add, plan_resolve, leaks_harvest, dossier_build, ban_report, ban_state, ban_set_state, ban_appeal, report_capture, report_amplify, replay_run, replay_diagnose, sec_chain). 775 after B.19 added scene_spawn; 776 after B.20 added cloudcam; 777 after B.22 added show; 779 after this lane (B.23) added facemcap.
         registry = _registry()
-        self.assertEqual(len(registry._tools), 778)
+        self.assertEqual(len(registry._tools), 779)
         for name in ("bughunter_scope_check", "bughunter_classify",
                      "bughunter_recon", "bughunter_surface",
                      "bughunter_triage", "bughunter_report",

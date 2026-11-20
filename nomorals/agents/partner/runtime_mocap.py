@@ -371,6 +371,147 @@ class RuntimeMocapMixin:
             "stop [name] | status [name] | list | tick [name] | "
             "export [name] | render [name]")
 
+    # ── facemcap: /facemcap ───────────────────────────────────────
+    def _control_facemcap(self, tail: str, chat_key: str,
+                          message: Any = None) -> str:
+        """ARKit LiveLink CSV facial capture, as face takes.
+
+        /facemcap load <path> [name]   load a take (manifest,
+                                        face-take JSON or CSV)
+        /facemcap list                  loaded takes
+        /facemcap status [name]         one take's state
+        /facemcap drive <name> [rig]    drive the whole take
+                                        through a rig session
+        /facemcap frame <name> [n]      one frame as data
+        /facemcap export <name>         the take as a face-take
+                                        JSON file
+        /facemcap render <name> [n]     one frame as a PNG
+        /facemcap attach <name> <show>  attach the take to a show
+        /facemcap drop [name]           drop a take
+        """
+        from ...media.facemcap import (
+            drive_take,
+            drop_take,
+            get_take,
+            list_takes,
+            load_take,
+            render_frame,
+        )
+        from ...media.facemcap.errors import FaceMocapError
+
+        parts = (tail or "").split()
+        if not parts:
+            return self._control_facemcap_help()
+        verb = parts[0]
+        rest = parts[1:]
+        name = "default"
+        if verb in ("status", "drive", "frame", "export", "render",
+                    "attach", "drop") and rest:
+            name = rest[0]
+            rest = rest[1:]
+        try:
+            if verb == "list":
+                takes = list_takes()
+                lines = ["facemcap takes:"]
+                for entry in takes:
+                    lines.append(
+                        f"  {entry['name']}: {entry['frames']} "
+                        f"frames, {entry['fps']}fps, "
+                        f"{entry['duration_s']}s, root "
+                        f"{entry['root'] or '(none)'}, "
+                        f"{len(entry['morphs'])} morphs"
+                        + (f", {len(entry['unmapped'])} unmapped"
+                           if entry['unmapped'] else ""))
+                return "\n".join(lines)
+            if verb == "load":
+                if not rest:
+                    return self._control_facemcap_help()
+                path = rest[0]
+                if len(rest) > 1:
+                    name = rest[1]
+                take = load_take(name, path)
+                return (f"facemcap {take.name} loaded: "
+                        f"{take.total} frames, {take.fps}fps, "
+                        f"{take.duration_s:.2f}s, root "
+                        f"{take.root_name or '(none)'}, "
+                        f"{len(take.morph_names)} morphs"
+                        + (f", {len(take.unmapped)} unmapped: "
+                           f"{', '.join(take.unmapped)}"
+                           if take.unmapped else ""))
+            if verb == "status":
+                take = get_take(name)
+                return json.dumps(take.to_dict(), indent=2)
+            if verb == "drive":
+                take = get_take(name)
+                from ...media.rig import get_session as get_rig
+                rig_name = rest[0] if rest else "default"
+                session = get_rig(rig_name)
+                posed = drive_take(session, take)
+                return (f"facemcap {take.name} driven through rig "
+                        f"{session.rig.name}: {len(posed)} frames, "
+                        f"{take.fps}fps")
+            if verb == "frame":
+                take = get_take(name)
+                index = int(rest[0]) if rest else 0
+                if index < 0 or index >= take.total:
+                    return (f"facemcap {take.name} has frames "
+                            f"0..{take.total - 1}, got {index}")
+                return json.dumps(
+                    dict(take.frames[index].to_dict(),
+                         take=take.name, index=index,
+                         total=take.total), indent=2)
+            if verb == "export":
+                take = get_take(name)
+                target = f"facemcap-{name}.json"
+                Path(target).write_text(
+                    json.dumps(take.to_json(), indent=1),
+                    encoding="utf-8")
+                return (f"facemcap {take.name} exported: "
+                        f"{take.total} frames to "
+                        f"{Path(target).resolve()}")
+            if verb == "render":
+                take = get_take(name)
+                from ...media.rig import get_session as get_rig
+                index = int(rest[0]) if rest else 0
+                rig_name = rest[1] if len(rest) > 1 else "default"
+                session = get_rig(rig_name)
+                result = render_frame(
+                    session, take, index,
+                    f"facemcap-{name}-{index}.png")
+                return (f"facemcap {take.name} frame {index} "
+                        f"rendered to {result['path']}")
+            if verb == "attach":
+                if not rest:
+                    return self._control_facemcap_help()
+                take = get_take(name)
+                from ...media.show import get_show
+                show = get_show(rest[0])
+                result = show.attach_face_take(take.player())
+                return (f"facemcap {take.name} attached to show "
+                        f"{show.name}: {result['face_take']}")
+            if verb == "drop":
+                result = drop_take(name)
+                return (f"facemcap {name} dropped"
+                        + (f" ({result['frames']} frames)"
+                           if result['frames'] else ""))
+        except FaceMocapError as exc:
+            record_failure(
+                "runtime_mocap.RuntimeMocapMixin._control_facemcap",
+                exc)
+            return f"facemcap: {exc}"
+        except Exception as exc:  # noqa: BLE001 - chat never dies
+            record_failure(
+                "runtime_mocap.RuntimeMocapMixin._control_facemcap",
+                exc)
+            return f"facemcap failed: {exc}"
+        return self._control_facemcap_help()
+
+    def _control_facemcap_help(self) -> str:
+        return (
+            "/facemcap load <path> [name] | list | status [name] | "
+            "drive <name> [rig] | frame <name> [n] | export <name> | "
+            "render <name> [n] | attach <name> <show> | drop [name]")
+
     # ── show: /live ───────────────────────────────────────────────
     def _control_live(self, tail: str, chat_key: str,
                       message: Any = None) -> str:

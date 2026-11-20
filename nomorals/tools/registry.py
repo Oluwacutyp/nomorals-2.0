@@ -622,7 +622,7 @@ class ToolRegistry:
             "a2a_client", "archive", "attacker", "audio", "browser",
             "braineval",
             "accounts",
-            "backup", "build_app", "captcha", "cipher", "cloudcam", "code_executor", "compress",
+            "backup", "build_app", "captcha", "cipher", "cloudcam", "facemcap", "code_executor", "compress",
             "connectors", "code_indexer", "code_graph", "codecard",
             "computer",
             "database", "deals", "decoder", "decoder_agent", "deliver_report",

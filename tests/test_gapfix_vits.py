@@ -403,7 +403,8 @@ class RegistryTests(unittest.TestCase):
         from nomorals.tools.registry import ToolRegistry
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 778)
+        # 779 after this lane (B.23) added facemcap.
+        self.assertEqual(len(registry._tools), 779)
 
     def test_vits_backend_registered_but_unavailable_here(self):
         from nomorals.voice.tts import (

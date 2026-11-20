@@ -8,8 +8,8 @@ JSON/PLY, mocap state store, ZMQ refusal when pyzmq is missing), the
 texture-upload staging (hidden sentinel, placeholder, bounds), the
 PLY/PNG renderers, the session worker lifecycle, the session registry,
 the cloudcam brain tool, the `nm cloudcam` CLI, and the /cloudcam chat
-verb — with the tool count pinned at 778 (775 after B.19 added
-scene_spawn; 776 after this lane (B.20) added cloudcam). 777 after this lane (B.22) added show. 778 after this lane (B.26) added scene_project.
+verb — with the tool count pinned at 779 (775 after B.19 added
+scene_spawn; 776 after this lane (B.20) added cloudcam). 777 after this lane (B.22) added show. 778 after this lane (B.26) added scene_project. 779 after this lane (B.23) added facemcap.
 """
 
 from __future__ import annotations
@@ -97,10 +97,11 @@ def _registry(tmp_path):
     return registry
 
 
-def test_tool_count_is_778_after_cloudcam():
+def test_tool_count_is_779_after_cloudcam():
+    # 779 after this lane (B.23) added facemcap.
     registry = ToolRegistry(SimpleNamespace())
     registry.register_builtins()
-    assert len(registry._tools) == 778
+    assert len(registry._tools) == 779
     assert "cloudcam" in registry._tools
 
 

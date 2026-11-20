@@ -92,6 +92,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "cards": ["cd"],
     "cipher": ["cip"],
     "cloudcam": ["cc"],
+    "facemcap": ["fc"],
     "code": ["c"],
     "graph": [],
     "commands": ["cmd"],
@@ -3610,6 +3611,77 @@ def _parser() -> argparse.ArgumentParser:
     for _sub in sceneproject_sub.choices.values():
         _sub.add_argument("--name", default="default",
                           help="project name (default 'default')")
+    facemcap = sub.add_parser("facemcap", aliases=CLI_ALIASES["facemcap"],
+        help="ARKit LiveLink CSV facial capture, as face takes",
+        description=("nm facemcap load [--session NAME] --path "
+                     "PATH.morph_anim.json|PATH.json|PATH.csv "
+                     "[--mapping PATH|'arkit'] [--root NAME] "
+                     "[--fps N]\\n"
+                     "nm facemcap list\\n"
+                     "nm facemcap status [--session NAME]\\n"
+                     "nm facemcap drive [--session NAME] [--rig NAME] "
+                     "[--render-dir DIR] [--export PATH.bvh]\\n"
+                     "nm facemcap frame [--session NAME] "
+                     "[--index N]\\n"
+                     "nm facemcap export [--session NAME] "
+                     "--out PATH.json\\n"
+                     "nm facemcap render [--session NAME] [--rig NAME] "
+                     "[--index N] --out PATH.png\\n"
+                     "nm facemcap drop [--session NAME]\\n"
+                     "nm facemcap attach [--session NAME] <show>"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    facemcap.add_argument("--json", action="store_true",
+                          help="Output as JSON")
+    facemcap_sub = facemcap.add_subparsers(dest="facemcap_action",
+                                           required=True)
+    facemcap_sub.add_parser("list", help="loaded face takes")
+    facemcap_sub.add_parser("status", help="one take's state")
+    fc_load = facemcap_sub.add_parser(
+        "load", help="load a take from a manifest, JSON or CSV")
+    fc_load.add_argument("--path", default="",
+                         help="manifest (.morph_anim.json), "
+                         "face-take (.json) or CSV path")
+    fc_load.add_argument("--mapping", default="",
+                         help="mapping path, or 'arkit' for the "
+                         "bundled 52-name rename table")
+    fc_load.add_argument("--root", default="",
+                         help="animation root name (CSV loads)")
+    fc_load.add_argument("--fps", type=float, default=None,
+                         help="fps override (CSV loads)")
+    fc_drive = facemcap_sub.add_parser(
+        "drive", help="drive the take through a rig session")
+    fc_drive.add_argument("--rig", default="default",
+                          help="rig session name (default 'default')")
+    fc_drive.add_argument("--render-dir", default="",
+                          help="PNG per frame, written here")
+    fc_drive.add_argument("--export", default="",
+                          help="BVH path for the driven take")
+    fc_frame = facemcap_sub.add_parser(
+        "frame", help="one frame as data")
+    fc_frame.add_argument("--index", type=int, default=0,
+                          help="frame number (default 0)")
+    fc_export = facemcap_sub.add_parser(
+        "export", help="write the take as a face-take JSON")
+    fc_export.add_argument("--out", default="",
+                           help="JSON output path")
+    fc_render = facemcap_sub.add_parser(
+        "render", help="render one frame as a PNG")
+    fc_render.add_argument("--rig", default="default",
+                           help="rig session name (default 'default')")
+    fc_render.add_argument("--index", type=int, default=0,
+                           help="frame number (default 0)")
+    fc_render.add_argument("--out", default="",
+                           help="PNG output path")
+    facemcap_sub.add_parser("drop", help="drop a take")
+    fc_attach = facemcap_sub.add_parser(
+        "attach", help="attach the take to a show")
+    fc_attach.add_argument("show", help="show name")
+    for _sub in (facemcap_sub.choices["status"], fc_load,
+                 fc_drive, fc_frame, fc_export, fc_render,
+                 facemcap_sub.choices["drop"], fc_attach):
+        _sub.add_argument("--session", default="default",
+                          help="face take name (default 'default')")
 
     inbox = sub.add_parser("inbox", aliases=CLI_ALIASES["inbox"],
         help="Drop-in inbox: drop a file, link, or note — Devon acts",
