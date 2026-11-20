@@ -373,6 +373,8 @@ class RuntimeVoiceMixin:
         /voice morph <name> <a> <b> [ratio]      blend two voices
         /voice talk on|off                       voice conversation mode
         /voice verify enroll                     enroll your voice (biometric)
+        /voice convert <path>                    convert a voice note / file
+        /voice convert status                    conversion rung readiness
         /voice rm <name>                         drop a catalogue voice
         /voice service list | health <slug> | status
                                                  model services (TorchScript)
@@ -658,12 +660,27 @@ class RuntimeVoiceMixin:
             return (f"🔐 {res['verdict']} "
                     f"(confidence {res.get('confidence', 0):.0%})")
 
+        if verb == "convert":
+            from ...voice import realtime as _rt
+            try:
+                data_dir = str(
+                    self.context.settings.audio.voice_data_dir
+                    or "voice_data")
+            except Exception:  # noqa: BLE001 — settings shape varies in tests
+                data_dir = ""
+            result = _rt.control_convert(rest, message=message,
+                                         data_dir=data_dir)
+            if not result.get("ok") or not result.get("path"):
+                return result.get("text", "conversion failed")
+            return self._deliver_voice_note(
+                chat_key, result["path"], result["text"], "realtime")
+
         return (f"usage: /voice list | use <name> | say [voice] text | "
                 f"clone <name> [path] | match <path> | "
                 f"transcript <name> text | "
                 f"describe <name> text | backend <name> <backend> | "
                 f"design <name> <description> | morph <name> <a> <b> [ratio] | "
-                f"talk on|off | verify enroll | rm <name>")
+                f"talk on|off | verify enroll | convert <path> | rm <name>")
 
     # ── /clonevoice <name> — zero-shot voice cloning, top-level ──────────
     def _control_clonevoice(self, tail: str, chat_key: str,

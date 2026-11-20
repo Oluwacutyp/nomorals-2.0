@@ -544,6 +544,7 @@ class MicCapture:
         self._queue: queue.Queue[bytes | None] = queue.Queue(maxsize=maxsize)
         self._stop = threading.Event()
         self._ended = False
+        self._terminal_seen = False
         self._thread: threading.Thread | None = None
         self.dropped = 0
 
@@ -575,8 +576,24 @@ class MicCapture:
         None immediately instead of blocking on a dead thread's queue.
         """
         if self._ended and self._queue.empty():
+            self._terminal_seen = True
             return None
-        return self._queue.get()
+        chunk = self._queue.get()
+        if chunk is None:
+            self._terminal_seen = True
+        return chunk
+
+    @property
+    def ended(self) -> bool:
+        """True once the mic stream has ended and its end was observed.
+
+        Polling loops (the realtime conversion loop) need this: ``poll``
+        returns None both on timeout and on stream end, so only this
+        property tells the two apart. Chunks are FIFO and the terminal
+        None is enqueued last, so observing it means every real chunk
+        was already handed out.
+        """
+        return self._terminal_seen
 
     def poll(self, timeout: float = 0.05) -> bytes | None:
         """Short-timeout read for the barge-in check. None = nothing yet.
@@ -589,6 +606,7 @@ class MicCapture:
         except queue.Empty:
             return None
         if chunk is None:
+            self._terminal_seen = True
             self._queue.put(chunk)
         return chunk
 

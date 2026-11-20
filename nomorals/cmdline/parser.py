@@ -2593,6 +2593,9 @@ def _parser() -> argparse.ArgumentParser:
                      "nm voice clone <name> <audio> [--transcript T]\n"
                      "nm voice match <audio> | nm voice probe <audio>\n"
                      "nm voice list | nm voice use <name> | nm voice current\n"
+                     "nm voice convert <file> [--model PATH | --service REF]\n"
+                     "nm voice convert --live [--seconds N] | --serve "
+                     "[--port N] | --status | --export-probe\n"
                      "nm voice listen [--secs N] [--out PATH]\n"
                      "nm voice transcribe <file>\n"
                      "nm voice stats [--json]\n"
@@ -2742,6 +2745,54 @@ def _parser() -> argparse.ArgumentParser:
     v_probe = voice_sub.add_parser(
         "probe", help="acoustic voice-print of a clip (clone quality)")
     v_probe.add_argument("audio", help="audio file path")
+    # -- realtime voice conversion: mic -> model -> speaker ---------------
+    v_convert = voice_sub.add_parser(
+        "convert", help="realtime voice conversion (mic -> model -> "
+                        "speaker, or one wav file)")
+    v_convert.add_argument("file", nargs="?", default="",
+                           help="wav file to convert (omit with --live, "
+                                "--serve, --status, --export-probe)")
+    v_convert.add_argument("--out", default="",
+                           help="converted wav output path (file mode)")
+    v_convert.add_argument("--model", default="",
+                           help="TorchScript conversion model path "
+                                "(default: the probe model, if exported)")
+    v_convert.add_argument("--service", default="",
+                           help="registered conversion service "
+                                "(slug@version)")
+    v_convert.add_argument("--direction", default="A2B",
+                           choices=("A2B", "B2A"),
+                           help="conversion direction (default A2B)")
+    v_convert.add_argument("--skip-vocode", action="store_true",
+                           help="pass audio through unconverted (exercises "
+                                "the transport + resampling path only)")
+    v_convert.add_argument("--discard-vocoded", action="store_true",
+                           help="return the model-rate input instead of "
+                                "the converted audio")
+    v_convert.add_argument("--buffer-size", type=int, default=70000,
+                           help="samples buffered before a batch converts "
+                                "(default 70000)")
+    v_convert.add_argument("--pitch-shift", type=float, default=0.0,
+                           help="pitch shift in semitones (default 0)")
+    v_convert.add_argument("--transport", default="inproc",
+                           choices=("inproc", "tcp", "zeromq"),
+                           help="sidecar transport (default inproc)")
+    v_convert.add_argument("--host", default="127.0.0.1",
+                           help="sidecar host for tcp/zeromq")
+    v_convert.add_argument("--port", type=int, default=5555,
+                           help="sidecar port for tcp/zeromq (default 5555)")
+    v_convert.add_argument("--live", action="store_true",
+                           help="run the live mic -> model -> speaker loop")
+    v_convert.add_argument("--serve", action="store_true",
+                           help="run the conversion sidecar server")
+    v_convert.add_argument("--status", action="store_true",
+                           help="show conversion rung readiness")
+    v_convert.add_argument("--export-probe", action="store_true",
+                           help="export the probe conversion model")
+    v_convert.add_argument("--seconds", type=float, default=0.0,
+                           help="live loop duration (0 = until Ctrl-C)")
+    v_convert.add_argument("--device", default="default", help="device id")
+    v_convert.add_argument("--json", action="store_true", help="Output as JSON")
     # -- live calls: Devon as a LiveKit room participant ---------------
     v_live = voice_sub.add_parser(
         "live", help="live voice + video in a LiveKit room (WebRTC)")

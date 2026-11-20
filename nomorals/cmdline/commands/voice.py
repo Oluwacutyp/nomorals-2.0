@@ -114,6 +114,8 @@ def _cmd_voice(args: argparse.Namespace, context: Any) -> int:
         return _cmd_voice_match(args, context)
     if action == "probe":
         return _cmd_voice_probe(args, context)
+    if action == "convert":
+        return _cmd_voice_convert(args, context)
     if action == "live":
         return _cmd_voice_live(args, context)
     if action == "service":
@@ -862,6 +864,185 @@ def _cmd_voice_probe(args: argparse.Namespace,  # noqa: ARG001
     print(f"  verdict: {vp.get('verdict', info.get('verdict', ''))}")
     for w in info.get("warnings", [])[:4]:
         print(f"  ⚠️ {w}")
+    return 0
+
+
+def _cmd_voice_convert(args: argparse.Namespace, context: Any) -> int:
+    """Route `nm voice convert` — file, live loop, server, status, probe."""
+    from ...voice import realtime as _rt
+
+    if args.export_probe:
+        try:
+            result = _rt.export_probe_model(args.out or "")
+        except Exception as exc:  # noqa: BLE001 — honest failure, named
+            print(f"probe export failed: {exc}", file=sys.stderr)
+            return 1
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print(f"probe model → {result['path']}")
+            print(f"receipt → {result['receipt']}")
+            print("convert with it: "
+                  "nm voice convert <file> --model "
+                  f"{result['path']}")
+        return 0
+    if args.status:
+        status = _rt.conversion_status()
+        if args.json:
+            print(json.dumps(status, indent=2))
+            return 0
+        print(_rt.status_text(status))
+        return 0
+    params = _rt.ConversionParams(
+        direction=args.direction,
+        buffer_size_minimum=args.buffer_size,
+        pitch_shift_semitones=args.pitch_shift,
+        skip_vocode=args.skip_vocode,
+        discard_vocoded_audio=args.discard_vocoded,
+    )
+    if args.serve:
+        if args.transport == "inproc":
+            print("serve needs a network transport: "
+                  "--transport tcp|zeromq", file=sys.stderr)
+            return 2
+        try:
+            # skip-vocode needs no model: the converter returns the
+            # resampled input without ever calling an executor.
+            executor = (None if args.skip_vocode
+                        else _rt.resolve_executor(
+                            model_path=args.model,
+                            service_ref=args.service))
+        except _rt.ConversionUnavailable as exc:
+            print(f"cannot serve: {exc}", file=sys.stderr)
+            return 1
+        server = _rt.ConversionServer(_rt.Converter(executor, params))
+        transport = args.transport
+        print(f"conversion sidecar serving ({transport}) — "
+              "Ctrl-C to stop.\n")
+        try:
+            if transport == "zeromq":
+                _rt.serve_zeromq(
+                    server, f"tcp://*:{args.port}")
+            else:
+                _rt.serve_tcp(server, args.host, args.port)
+        except _rt.ConversionUnavailable as exc:
+            print(f"cannot serve: {exc}", file=sys.stderr)
+            return 1
+        except KeyboardInterrupt:
+            print("\nsidecar stopped.")
+        return 0
+    if args.live:
+        return _cmd_voice_convert_live(args, context, params)
+    if not args.file:
+        print("usage: nm voice convert <file> [--out PATH] "
+              "[--model PATH | --service REF] | --live | --serve | "
+              "--status | --export-probe", file=sys.stderr)
+        return 2
+    try:
+        executor = (None if args.skip_vocode
+                    else _rt.resolve_executor(
+                        model_path=args.model,
+                        service_ref=args.service))
+    except _rt.ConversionUnavailable as exc:
+        print(f"cannot convert: {exc}", file=sys.stderr)
+        return 1
+    out = args.out or ""
+    if not out:
+        stem = Path(args.file).stem
+        out = str(Path(args.file).with_name(f"{stem}-converted.wav"))
+    try:
+        receipt = _rt.convert_file(args.file, out, executor=executor,
+                                   params=params)
+    except _rt.ConversionUnavailable as exc:
+        print(f"cannot convert: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 — honest failure, named
+        print(f"conversion failed: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(receipt, indent=2))
+    else:
+        print(f"converted → {receipt['output']} "
+              f"({receipt['input_samples']} samples "
+              f"@{receipt['input_rate']} Hz -> "
+              f"{receipt['output_samples']} samples "
+              f"@{receipt['output_rate']} Hz, "
+              f"{receipt['executor']}, {args.direction})")
+    return 0
+
+
+def _cmd_voice_convert_live(args: argparse.Namespace, context: Any,
+                            params: Any) -> int:
+    """The live mic -> model -> speaker loop (consent-gated)."""
+    from ...voice import realtime as _rt
+    from ...voice.session import (
+        ConsentStore,
+        default_mic,
+        default_speaker,
+    )
+
+    settings = context.settings
+    data_dir = _voice_data_dir(args, settings)
+    consent = ConsentStore(data_dir)
+    if not consent.consented(args.device):
+        try:
+            ans = input("Allow microphone recording on this device? [y/N] ")
+        except EOFError:
+            ans = ""
+        if ans.strip().lower() not in ("y", "yes"):
+            print("no consent — not recording.")
+            return 1
+        consent.grant(args.device)
+    mic = default_mic()
+    if mic is None:
+        print("no microphone available on this device.", file=sys.stderr)
+        return 1
+    speaker = default_speaker()
+    if speaker is None:
+        print("no speaker available on this device.", file=sys.stderr)
+        return 1
+    try:
+        executor = (None if params.skip_vocode
+                    else _rt.resolve_executor(
+                        model_path=args.model,
+                        service_ref=args.service))
+    except _rt.ConversionUnavailable as exc:
+        print(f"cannot convert: {exc}", file=sys.stderr)
+        return 1
+    if args.transport == "inproc":
+        server = _rt.ConversionServer(_rt.Converter(executor, params))
+        client = _rt.InProcessClient(server)
+    else:
+        try:
+            client = _rt.make_client(
+                args.transport, host=args.host, port=args.port)
+        except (_rt.ConversionUnavailable, ValueError,
+                OSError) as exc:
+            print(f"cannot reach the sidecar: {exc}", file=sys.stderr)
+            return 1
+    loop = _rt.RealtimeConverter(
+        mic=mic, speaker=speaker, client=client, params=params,
+        data_dir=data_dir)
+    print("Realtime conversion live — speak, and hear it back converted "
+          "(Ctrl-C to stop).\n")
+    try:
+        report = loop.run(seconds=args.seconds)
+    except _rt.ConversionUnavailable as exc:
+        print(f"cannot convert: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\nconversion stopped.")
+        return 0
+    finally:
+        client.close()
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(f"live conversion ended ({report['end_reason']}): "
+              f"{report['batches_sent']} batches sent, "
+              f"{report['batches_received']} converted back, "
+              f"{report['activations']} activations, "
+              f"{report['transport_errors']} transport errors.")
     return 0
 
 
