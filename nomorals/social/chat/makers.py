@@ -2041,15 +2041,26 @@ class MakerService:
         :mod:`.mock_formats`) instead of a card skin — an
         additional rung, not a replacement; a screen that
         can't render falls back to the card with the failure
-        named in ``screen_error``."""
+        named in ``screen_error``.  A further ``record``
+        word (``/qcard screen record …``) records that chat
+        as a video instead: an encode that can't land falls
+        back to the still screen, then to the card, each
+        failure named.  The backdrop image lands as the
+        photo message inside the chat, never a placeholder
+        scene."""
         first, _, rest = str(tail or "").strip().partition(" ")
         if (kind in ("qcard", "fakemsg", "meme2")
                 and first.strip().lower() in ("screen", "chat")):
+            record = False
+            head, _, tail_rest = rest.strip().partition(" ")
+            if head.strip().lower() == "record":
+                record = True
+                rest = tail_rest
             return self._card_screen(
                 kind, rest, reply_name=reply_name,
                 reply_text=reply_text, sender_name=sender_name,
                 avatars=avatars, backdrop=backdrop,
-                audience=audience, send=send)
+                audience=audience, send=send, record=record)
         try:
             style, entries = parse_card_request(
                 kind, tail, reply_name=reply_name,
@@ -2090,16 +2101,25 @@ class MakerService:
                      avatars: dict[int, Any] | None = None,
                      backdrop: Any = None,
                      audience: str = "",
-                     send) -> dict[str, Any]:
+                     send,
+                     record: bool = False) -> dict[str, Any]:
         """The mock-screen rung of the card surface: parse
         the entries with the card grammar, stage them as a
         chat exchange, and deliver through the mock organ's
         service (its MediaRef carries ``audience`` exactly
         as the card's does, so the send seam's brand mark
-        behaves the same).  Any failure falls back to the
-        plain card — the stripped tail no longer leads with
-        the format word, so the fallback cannot loop — with
-        the screen's failure named in ``screen_error``."""
+        behaves the same).  The backdrop image — the
+        caller's, else one resolved here from the entries'
+        words — lands as the photo message inside the chat
+        (handed over under the screen's image id), so the
+        exchange carries a real picture, never a placeholder
+        scene.  ``record`` records the chat as a video
+        instead of a still: an encode that can't land falls
+        back to the still screen, and only a still that
+        can't render either falls back to the plain card —
+        the stripped tail no longer leads with the format
+        word, so the fallback cannot loop — with each
+        failure named in ``screen_error``."""
         try:
             _style, entries = parse_card_request(
                 kind, tail, reply_name=reply_name,
@@ -2107,35 +2127,65 @@ class MakerService:
         except MakerError as exc:
             return {"sent": False, "reason": str(exc)}
         names = [str(e.get("name") or "") for e in entries]
+        record_error = ""
+        if backdrop is None:
+            try:
+                seed = " ".join(
+                    str(e.get("text") or "") for e in entries)
+                backdrop = card_backdrop(
+                    seed=seed, fetcher=self.bytes_fetcher)
+            except Exception:  # noqa: BLE001 - no photo bubble
+                backdrop = None
         try:
-            from .mock_formats import entries_screen, meme_screen
+            from .mock_formats import IMAGE_MESSAGE_ID, entries_screen, meme_screen
             from .mock_screens import MockScreenService
 
             if kind == "meme2":
-                screen = meme_screen(entries)
+                screen = meme_screen(entries, image=backdrop)
                 caption = "🖼 meme — as a chat"
             else:
-                screen = entries_screen(entries, reaction="❤️")
+                screen = entries_screen(entries, reaction="❤️",
+                                        image=backdrop)
                 caption = (f"💬 quote screen — "
                            f"{names[0] if names else ''}")
-            out = MockScreenService(
-                media_dir=self.media_dir or "").render(
-                    screen, audience=audience,
-                    caption=_trim_caption(caption), send=send)
+            media = ({IMAGE_MESSAGE_ID: backdrop}
+                     if backdrop is not None else None)
+            service = MockScreenService(
+                media_dir=self.media_dir or "")
+            if record:
+                out = service.record_chat(
+                    screen, media=media, audience=audience,
+                    caption="🎬 " + _trim_caption(caption),
+                    send=send)
+                if out.get("sent"):
+                    return {"sent": True, "style": "record",
+                            "format": "record",
+                            "drawn": out.get("drawn") or {},
+                            "duration_s": out.get("duration_s")}
+                record_error = str(
+                    out.get("reason") or "the recording failed")
+            out = service.render(
+                screen, media=media, audience=audience,
+                caption=_trim_caption(caption), send=send)
         except Exception as exc:  # noqa: BLE001 - named, then fallback
             out = {"sent": False, "reason": str(exc)[:160]}
         if out.get("sent"):
-            return {"sent": True, "style": "screen",
-                    "format": "screen",
-                    "drawn": out.get("drawn") or {}}
+            result = {"sent": True, "style": "screen",
+                      "format": "screen",
+                      "drawn": out.get("drawn") or {}}
+            if record:
+                result["record_error"] = record_error
+            return result
         fallback = self.card(
             kind, tail, reply_name=reply_name,
             reply_text=reply_text, sender_name=sender_name,
             avatars=avatars, backdrop=backdrop,
             audience=audience, send=send)
         fallback["format"] = "card"
-        fallback["screen_error"] = str(
-            out.get("reason") or "the screen render failed")
+        reason = str(out.get("reason") or "the screen render failed")
+        if record:
+            reason = record_error + "; still failed: " + reason
+        fallback["screen_error"] = reason
         return fallback
 
     # -- removebg -----------------------------------------------

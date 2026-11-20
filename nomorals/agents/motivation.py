@@ -37,18 +37,22 @@ The notifier text remains the record + fallback channel; when
 the card renderer itself is unavailable, the published words
 carry a line naming that the card couldn't be rendered.
 
-Formats (2026-11-11): the presented image has two formats —
-the makers ``card`` and a mock ``chat`` screen (the piece
+Formats (2026-11-11, default changed 2026-11-19 on the
+owner's order — the creative form was shipped as an opt-in
+and his mornings never changed, so the class now rotates
+by default): the presented image has two formats — the
+makers ``card`` and a mock ``chat`` screen (the piece
 staged as a conversation with Devon through the mock-screens
 organ, via ``social.chat.mock_formats``).  Selection:
 an explicit per-run format wins, then the
-``settings.motivation.format`` pref — ``card`` (default),
-``chat``, or ``rotate`` (the two alternate by Lagos day and
-window).  The chat format falls back to the card when it
-can't render; the card keeps its original contract (a dead
-renderer is the named text degradation).  The run's result,
-marker and ledger entries all name the format that actually
-delivered.
+``settings.motivation.format`` pref — ``card`` for the card
+always, ``chat`` for the chat always, or ``rotate`` — and
+with no pref set at all the class rotates (the two
+alternate by Lagos day and window).  The chat format
+falls back to the card when it can't render; the card
+keeps its original contract (a dead renderer is the named
+text degradation).  The run's result, marker and ledger
+entries all name the format that actually delivered.
 """
 
 from __future__ import annotations
@@ -447,19 +451,43 @@ def _piece_body(item: dict[str, Any], window: str,
     return _card(item, window)
 
 
+#: Sentinel for "resolve the backdrop fresh" — distinct
+#: from an explicitly resolved None (both rungs missed).
+_UNSET = object()
+
+
+def _safe_backdrop(piece: str):
+    """The run's backdrop image (a real photograph from the
+    picsum pool, else Devon's own studio art, else None) —
+    best-effort, never raises.  Resolved ONCE per run and
+    shared by the card and the chat screen, so the two
+    formats never fetch twice and the screen's photo is
+    the card's backdrop, not a second draw."""
+    try:
+        from ..social.chat.makers import card_backdrop
+
+        return card_backdrop(seed=piece)
+    except Exception:  # noqa: BLE001 - no backdrop, no photo bubble
+        _log.debug("motivation: backdrop unavailable",
+                   exc_info=True)
+        return None
+
+
 def _render_piece_card(context: Any, item: dict[str, Any],
                        window: str, piece: str,
-                       title: str) -> Path:
+                       title: str, backdrop=_UNSET) -> Path:
     """Render the piece as its PNG card (the makers
     ``motivation`` design over a backdrop).  Raises on any
     failure — the caller names the degradation and posts the
     words.  The card file lives under the workspace so the
-    gateway's file send can carry it."""
-    from ..social.chat.makers import card_backdrop, render_card_png
+    gateway's file send can carry it.  ``backdrop`` is the
+    run's shared backdrop (resolved fresh when unset)."""
+    from ..social.chat.makers import render_card_png
 
     src = item.get("source") or {}
     label = str(src.get("label") or "").strip()
-    backdrop = card_backdrop(seed=piece)
+    if backdrop is _UNSET:
+        backdrop = _safe_backdrop(piece)
     data, _drawn = render_card_png(
         "motivation",
         [{"name": label or "Her library", "text": piece,
@@ -486,10 +514,13 @@ def _resolve_format(prefs: dict[str, Any], window: str,
     """Which image format this run presents in: an explicit
     per-run pick (the tool's ``format``) wins, then the
     ``settings.motivation.format`` pref — ``chat``/``screen``
-    for the mock conversation, ``rotate``/``alternate`` to
-    alternate the two by Lagos day + window (so morning and
-    evening differ, and days alternate), anything else the
-    card default."""
+    for the mock conversation, ``card`` for the card always,
+    ``rotate``/``alternate`` to alternate the two by Lagos
+    day + window (so morning and evening differ, and days
+    alternate).  With no pref set at all the class rotates
+    too (the owner's 2026-11-19 order — the creative form
+    was shipped as an opt-in and his mornings never
+    changed, so rotate is the default, not the card)."""
     want = str(explicit or "").strip().lower()
     if want in ("chat", "screen"):
         return "chat"
@@ -498,21 +529,31 @@ def _resolve_format(prefs: dict[str, Any], window: str,
     pref = str(prefs.get("format") or "").strip().lower()
     if pref in ("chat", "screen"):
         return "chat"
-    if pref in ("rotate", "alternate", "both"):
-        slot = int(day_ordinal) + (0 if window == "morning" else 1)
-        return "chat" if slot % 2 else "card"
-    return "card"
+    if pref == "card":
+        return "card"
+    slot = int(day_ordinal) + (0 if window == "morning" else 1)
+    return "chat" if slot % 2 else "card"
 
 
 def _render_piece_screen(context: Any, window: str, piece: str,
-                         theme: str) -> Path:
+                         theme: str, backdrop=None,
+                         voice_audio: str = "") -> Path:
     """Render the piece as a mock chat screen (the piece
     staged as a conversation with Devon) through the
     mock-screens organ.  Raises on any failure — the caller
     falls back to the card format, then to the named text
     degradation.  The PNG lives beside the card files so
-    the gateway's file send can carry it."""
+    the gateway's file send can carry it.  ``backdrop`` is
+    the run's shared backdrop image: when present it lands
+    as the photo message inside the chat (the real pixels,
+    handed over under the screen's image id) — never a
+    placeholder scene.  ``voice_audio`` is a real voice-note
+    file (the run's synthesized ogg when the voice pref is
+    on): it lands as the voice message, its true duration
+    measured from the samples at render.  A bubble exists
+    only when its media does."""
     from ..social.chat.mock_formats import (
+        IMAGE_MESSAGE_ID,
         motivation_screen,
         render_screen_image,
     )
@@ -523,8 +564,14 @@ def _render_piece_screen(context: Any, window: str, piece: str,
         raise RuntimeError("no workspace directory for the screen")
     folder = Path(ws) / "motivation_cards"
     folder.mkdir(parents=True, exist_ok=True)
-    screen = motivation_screen(piece, theme=theme, window=window)
-    out = render_screen_image(screen, media_dir=folder)
+    screen = motivation_screen(
+        piece, theme=theme, window=window,
+        image=backdrop, voice=voice_audio or None)
+    media = {}
+    if backdrop is not None:
+        media[IMAGE_MESSAGE_ID] = backdrop
+    out = render_screen_image(screen, media_dir=folder,
+                              media=media or None)
     if not out.get("ok"):
         raise RuntimeError(str(out.get("reason")
                                or "the screen render failed"))
@@ -584,28 +631,49 @@ def _deliver_card(context: Any, path: Path, caption: str) -> bool:
         return False
 
 
-def _send_voice(context: Any, text: str) -> bool:
+def _make_voice_ogg(context: Any, text: str) -> str:
+    """Synthesize the piece to a voice-note ogg file and
+    return its path ("" when synthesis is unavailable).
+    Never raises.  The run synthesizes ONCE: the same ogg
+    lands as the voice message inside the chat screen AND
+    goes out as the real voice note."""
+    try:
+        from ..voice.tts import UniversalTTS
+        from .morning_pulse import _to_voice_ogg
+
+        engine = UniversalTTS(backend="system", audience="private")
+        out = engine.speak(text[:1200])
+        wav = (out or {}).get("path") or ""
+        if not wav:
+            return ""
+        ogg, _mime = _to_voice_ogg(wav)
+        return str(ogg or "")
+    except Exception:  # noqa: BLE001
+        _log.debug("motivation: voice synthesis failed",
+                   exc_info=True)
+        return ""
+
+
+def _send_voice(context: Any, text: str, ogg: str = "") -> bool:
     """Best-effort voice note of the piece (prefs-gated, off default).
 
     Reuses the pulse's machinery: UniversalTTS → ogg → send_voice_note
-    on the owner's first reachable chat.  Never raises.
+    on the owner's first reachable chat.  ``ogg`` is a voice file
+    already synthesized for this run (the chat screen's voice
+    message) — passed in, it is sent, not synthesized twice.
+    Never raises.
     """
     try:
         from ..social.chat.gateway import resolve_owner_targets
         from ..social.chat.voice_transport import send_voice_note
-        from ..voice.tts import UniversalTTS
-        from .morning_pulse import _to_voice_ogg
         from .notifier import resolve_gateway
 
         gateway = resolve_gateway(context)
         if gateway is None:
             return False
-        engine = UniversalTTS(backend="system", audience="private")
-        out = engine.speak(text[:1200])
-        wav = (out or {}).get("path") or ""
-        if not wav:
+        ogg = ogg or _make_voice_ogg(context, text)
+        if not ogg:
             return False
-        ogg, _mime = _to_voice_ogg(wav)
         targets = resolve_owner_targets(context) or []
         for plat, ref in targets:
             adapter = gateway._adapter_for(plat)
@@ -710,6 +778,15 @@ def run_motivation(context: Any, window: str = "morning", *,
         fmt = _resolve_format(
             prefs, window, format,
             day_ordinal=lagos_now.date().toordinal())
+        # The run's media, resolved ONCE: one backdrop for
+        # both formats, and (voice pref on + the chat format
+        # in play) one synthesized voice note that lands
+        # inside the chat screen as its voice message AND
+        # goes out as the real voice note — never twice.
+        backdrop = _safe_backdrop(piece)
+        voice_ogg = ""
+        if prefs.get("voice") and fmt == "chat":
+            voice_ogg = _make_voice_ogg(context, body)
         card_path: Path | None = None
         card_error = ""
         format_error = ""
@@ -719,10 +796,12 @@ def run_motivation(context: Any, window: str = "morning", *,
             try:
                 if attempt == "chat":
                     card_path = _render_piece_screen(
-                        context, window, piece, theme)
+                        context, window, piece, theme,
+                        backdrop=backdrop, voice_audio=voice_ogg)
                 else:
                     card_path = _render_piece_card(
-                        context, item, window, piece, title)
+                        context, item, window, piece, title,
+                        backdrop=backdrop)
                 used_format = attempt
                 break
             except Exception as exc:  # noqa: BLE001 - next format rung
@@ -756,6 +835,10 @@ def run_motivation(context: Any, window: str = "morning", *,
         result["source_type"] = (item.get("source") or {}).get("type")
         result["card_rendered"] = card_path is not None
         result["format"] = used_format
+        if used_format == "chat":
+            result["screen_media"] = {
+                "image": backdrop is not None,
+                "voice": bool(voice_ogg)}
         if format_error and used_format != fmt:
             result["format_error"] = format_error
         if card_path is None and card_error:
@@ -782,7 +865,8 @@ def run_motivation(context: Any, window: str = "morning", *,
                           "degraded_card": synthesized is None,
                           "format": used_format})
         if prefs.get("voice") and delivered:
-            result["voice_sent"] = _send_voice(context, body)
+            result["voice_sent"] = _send_voice(context, body,
+                                                ogg=voice_ogg)
         return result
     finally:
         # The chain must survive this firing, whatever happened above
@@ -950,15 +1034,16 @@ def register(registry: Any) -> None:
             "piece immediately) | history (recent pieces) | run "
             "(scheduler entry) | backstop (re-arm + catch-up). "
             "window=morning|evening (default: current Lagos day-part). "
-            "format=card|chat names the presented image's format for "
+            "format=card|chat|rotate names the presented image's format for "
             "a run — the makers card, or the piece staged as a mock "
-            "chat screen (default: the class pref, card unless set)."
+            "chat screen (default: the class pref, rotating card/chat "
+            "by Lagos day and window unless set)."
         ),
         capability=Capability.DB_READ,
         parameters={
             "action": "str — status|now|history|run|backstop|ensure",
             "window": "str — morning|evening (optional)",
-            "format": "str — card|chat (optional)",
+            "format": "str — card|chat|rotate (optional)",
         },
     )
     def motivation(*, action: str = "", window: str = "",

@@ -125,7 +125,11 @@ class RuntimeFunMixin:
         as a photo.  A leading format word names the mock-
         screen rung instead: ``/quote chat …`` stages the
         quote as a chat exchange (``card`` names the default
-        explicitly); a screen that can't render falls back
+        explicitly); ``/quote chat record …`` records that
+        chat as a video instead (a recording that can't
+        encode falls back to the still screen, then the
+        card, each failure named in the result).  A screen
+        that can't render falls back
         to the card inside the service.  Text is the NAMED
         degradation only: when the renderer itself is
         unavailable the words post with a line saying the
@@ -140,6 +144,10 @@ class RuntimeFunMixin:
             fmt = ("screen" if words[0].lower() in ("chat", "screen")
                    else "card")
             tail = words[1] if len(words) > 1 else ""
+            rest = tail.split(None, 1)
+            if fmt == "screen" and rest and rest[0].lower() == "record":
+                fmt = "record"
+                tail = rest[1] if len(rest) > 1 else ""
         if message is None:
             out = service.text("quote", tail)
             if out.get("ok"):

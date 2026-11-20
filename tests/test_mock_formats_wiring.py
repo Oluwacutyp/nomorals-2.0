@@ -313,18 +313,32 @@ class MotivationFormatTests(_MotivationHarness):
     def test_resolve_format_pref_and_rotation(self):
         from nomorals.agents import motivation as mot
 
+        # The default is ROTATE (owner order 2026-11-19 — the
+        # creative form shipped as an opt-in and his mornings
+        # never changed): no pref at all alternates by Lagos
+        # day + window, exactly like an explicit rotate pref.
         assert mot._resolve_format({}, "morning", "",
                                    day_ordinal=100) == "card"
-        assert mot._resolve_format({"format": "chat"}, "morning",
-                                   "", day_ordinal=100) == "chat"
-        assert mot._resolve_format({"format": "chat"}, "morning",
-                                   "card", day_ordinal=100) == "card"
+        assert mot._resolve_format({}, "morning", "",
+                                   day_ordinal=101) == "chat"
+        assert mot._resolve_format({}, "evening", "",
+                                   day_ordinal=100) == "chat"
+        assert mot._resolve_format({}, "evening", "",
+                                   day_ordinal=101) == "card"
         assert mot._resolve_format({"format": "rotate"}, "morning",
                                    "", day_ordinal=100) == "card"
         assert mot._resolve_format({"format": "rotate"}, "evening",
                                    "", day_ordinal=100) == "chat"
         assert mot._resolve_format({"format": "rotate"}, "morning",
                                    "", day_ordinal=101) == "chat"
+        # An explicit card pref still means the card always —
+        # the default change must never override a choice.
+        assert mot._resolve_format({"format": "card"}, "morning",
+                                   "", day_ordinal=101) == "card"
+        assert mot._resolve_format({"format": "chat"}, "morning",
+                                   "", day_ordinal=100) == "chat"
+        assert mot._resolve_format({"format": "chat"}, "morning",
+                                   "card", day_ordinal=100) == "card"
 
     def test_run_with_chat_format_renders_the_screen(self):
         ctx = self._ctx()

@@ -1225,7 +1225,13 @@ class FunService:
         ``bigquote`` design over a backdrop).  ``format`` =
         "screen"/"chat" picks the mock-screen rung instead:
         the quote staged as a chat exchange through the
-        mock-screens organ (see :mod:`.mock_formats`).  A
+        mock-screens organ (see :mod:`.mock_formats`) — the
+        backdrop image lands as the photo message inside
+        the chat, never a placeholder scene.  ``format`` =
+        "record" records that same chat as a video (the
+        screen recording, delivered as an mp4) — a recording
+        that can't encode falls back to the still screen,
+        then to the card, with each failure named.  A
         screen that can't render falls back to the card with
         the failure named in ``screen_error`` — never a dead
         end.  Text remains only as the named degradation —
@@ -1252,10 +1258,14 @@ class FunService:
                     "every /quote source answered empty — "
                     "try again in a bit")}
             screen_error = ""
-            if str(format or "").strip().lower() in ("screen", "chat"):
+            if str(format or "").strip().lower() in (
+                    "screen", "chat", "record"):
                 out = self._quote_screen(
                     quote_text, author, text=text, source=source,
-                    send=send)
+                    send=send,
+                    record=str(format or "").strip().lower()
+                    == "record",
+                    backdrop_fn=backdrop_fn)
                 if out.get("sent"):
                     return out
                 screen_error = str(
@@ -1319,31 +1329,77 @@ class FunService:
 
     def _quote_screen(self, quote_text: str, author: str, *,
                       text: str, source: str,
-                      send: Callable[[Any, str], Any]
+                      send: Callable[[Any, str], Any],
+                      record: bool = False,
+                      backdrop_fn: Callable[..., Any] | None = None,
                       ) -> dict[str, Any]:
         """The quote as a mock chat screen, delivered through
         the caller's send seam by the organ's own service
-        (its MediaRef/audience handling rides along).  Never
-        raises — a failure comes back as ``reason`` and the
-        caller falls back to the card."""
+        (its MediaRef/audience handling rides along).  The
+        card backdrop — the same real photograph / studio
+        art the card path draws — lands as the photo message
+        inside the chat (handed over under the screen's
+        image id), so the exchange carries a real picture,
+        never a placeholder scene.  ``record`` records the
+        chat as a video instead of a still: an encode that
+        can't land falls back to the still screen inside
+        this call, and only a still that can't render either
+        comes back as ``reason`` for the caller's card
+        fallback.  Never raises — a failure comes back as
+        ``reason`` and the caller falls back to the card."""
         try:
-            from .mock_formats import quote_screen
+            from .mock_formats import IMAGE_MESSAGE_ID, quote_screen
             from .mock_screens import MockScreenService
 
-            screen = quote_screen(quote_text, author or "Unknown")
+            backdrop = None
+            try:
+                resolve = backdrop_fn
+                if resolve is None:
+                    from .makers import card_backdrop
+
+                    def _resolve_backdrop(seed: str = ""):
+                        return card_backdrop(
+                            seed=seed,
+                            fetcher=self.bytes_fetcher)
+
+                    resolve = _resolve_backdrop
+                backdrop = resolve(seed=quote_text)
+            except Exception:  # noqa: BLE001 - no photo bubble
+                backdrop = None
+            screen = quote_screen(quote_text, author or "Unknown",
+                                  image=backdrop)
             caption = _trim_caption(
                 f"💬 “{quote_text}”"
                 + (f"\n— {author}" if author else ""))
-            out = MockScreenService(
-                media_dir=self.media_dir or "").render(
-                    screen, caption=caption, send=send)
+            media = ({IMAGE_MESSAGE_ID: backdrop}
+                     if backdrop is not None else None)
+            service = MockScreenService(
+                media_dir=self.media_dir or "")
+            if record:
+                out = service.record_chat(
+                    screen, media=media,
+                    caption="🎬 " + caption, send=send)
+                if out.get("sent"):
+                    return {"sent": True, "format": "record",
+                            "source": source, "author": author,
+                            "drawn": out.get("drawn") or {},
+                            "duration_s": out.get("duration_s")}
+                record_error = str(
+                    out.get("reason") or "the recording failed")
+            out = service.render(
+                screen, media=media, caption=caption, send=send)
             if out.get("sent"):
-                return {"sent": True, "format": "screen",
-                        "source": source, "author": author,
-                        "drawn": out.get("drawn") or {}}
-            return {"sent": False,
-                    "reason": str(out.get("reason")
-                                  or "the screen render failed"),
+                result = {"sent": True, "format": "screen",
+                          "source": source, "author": author,
+                          "drawn": out.get("drawn") or {}}
+                if record:
+                    result["record_error"] = record_error
+                return result
+            reason = str(out.get("reason")
+                         or "the screen render failed")
+            if record:
+                reason = record_error + "; still failed: " + reason
+            return {"sent": False, "reason": reason,
                     "text": text, "source": source,
                     "author": author}
         except Exception as exc:  # noqa: BLE001 - named, then fallback

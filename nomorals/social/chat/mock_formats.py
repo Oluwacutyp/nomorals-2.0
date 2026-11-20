@@ -19,6 +19,7 @@ wiring — the builders below speak only the schema.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any
 
 from .mock_screens import designs as _designs
@@ -30,6 +31,8 @@ from .mock_screens.schema import (
 )
 
 __all__ = [
+    "IMAGE_MESSAGE_ID",
+    "VOICE_MESSAGE_ID",
     "chat_platforms",
     "require_platform",
     "split_bubbles",
@@ -39,6 +42,42 @@ __all__ = [
     "motivation_screen",
     "render_screen_image",
 ]
+
+
+#: Message ids of the media-carrying bubbles the builders append
+#: when a real image / voice note rides the screen.  A source that
+#: is not a file path (bytes, a PIL image, a MediaRef without a
+#: path) rides the render's ``media`` hand-off under these keys —
+#: the builder cannot store bytes in ``Message.media`` (a path
+#: string), so the caller hands them to :func:`render_screen_image`
+#: (or the organ's service) under the same ids.
+IMAGE_MESSAGE_ID = "img"
+VOICE_MESSAGE_ID = "voice"
+
+
+def _media_path(source) -> str:
+    """The on-disk path of a hand-off source, or "" when the
+    source is bytes / pixels rather than a file (those ride
+    the render hand-off instead)."""
+    if isinstance(source, (str, Path)):
+        return str(source)
+    path = getattr(source, "path", "")
+    if path:
+        return str(path)
+    return ""
+
+
+def _media_message(message_id: str, sender: str, kind: str,
+                   source, *, time: str, caption: str = ""
+                   ) -> Message:
+    """One media-carrying bubble: the message exists ONLY
+    when a real source was handed over — a screen never
+    carries a photo/voice bubble with no media behind it
+    (that is what the placeholder scene is for, and the
+    content classes never stage one)."""
+    return Message(message_id, sender, kind=kind, time=time,
+                   caption=caption,
+                   media=_media_path(source))
 
 
 def chat_platforms() -> tuple[str, ...]:
@@ -132,13 +171,22 @@ def entries_screen(entries: list[dict], *,
                    device: str = "android",
                    dark: bool = False,
                    reaction: str = "",
-                   me_reply: str = "") -> Screen:
+                   me_reply: str = "",
+                   image=None,
+                   voice=None) -> Screen:
     """Stage card entries (``{name, text}`` — the makers
     entry shape) as a chat exchange: each distinct name is a
     participant, the first name carries the header, every
     entry is that person's bubble(s), split chat-sized.
     ``reaction`` lands on the first person's last bubble;
-    ``me_reply`` is the phone owner's closing bubble."""
+    ``me_reply`` is the phone owner's closing bubble.
+    ``image`` / ``voice`` are real media hand-offs (a file
+    path, bytes, a PIL image, a MediaRef): when given, a
+    photo / voice-note bubble from the first person lands
+    after the exchange — the image is the photo itself and
+    the voice note carries its true duration, measured at
+    render.  When neither is given, no media bubble exists
+    at all — the screen never stages a placeholder photo."""
     platform = require_platform(platform)
     people: dict[str, Participant] = {"me": Participant("me", "You")}
     order: list[str] = []
@@ -170,6 +218,16 @@ def entries_screen(entries: list[dict], *,
         for msg in messages:
             if msg.id == first_last_mid:
                 msg.reactions = [reaction]
+    if image is not None:
+        messages.append(_media_message(
+            IMAGE_MESSAGE_ID, first_pid, "image", image,
+            time=_clock(tick)))
+        tick += 1
+    if voice is not None:
+        messages.append(_media_message(
+            VOICE_MESSAGE_ID, first_pid, "voice", voice,
+            time=_clock(tick)))
+        tick += 1
     if me_reply:
         messages.append(Message(
             "me-last", "me", text=me_reply, time=_clock(tick),
@@ -184,37 +242,54 @@ def entries_screen(entries: list[dict], *,
 def quote_screen(quote_text: str, author: str, *,
                  platform: str = "whatsapp",
                  device: str = "android",
-                 dark: bool = False) -> Screen:
+                 dark: bool = False,
+                 image=None,
+                 voice=None) -> Screen:
     """A quote as a chat exchange: the author sends the line
     as their message; the owner reacts and answers — the
-    quote carried by a conversation, not a card."""
+    quote carried by a conversation, not a card.  ``image``
+    / ``voice`` stage a real photo / voice note from the
+    author into the exchange (see :func:`entries_screen`)."""
     return entries_screen(
         [{"name": author or "Unknown",
           "text": str(quote_text or "")}],
         platform=platform, device=device, dark=dark,
-        reaction="❤️", me_reply="needed that.")
+        reaction="❤️", me_reply="needed that.",
+        image=image, voice=voice)
 
 
 def meme_screen(entries: list[dict], *,
                 platform: str = "whatsapp",
                 device: str = "android",
-                dark: bool = False) -> Screen:
+                dark: bool = False,
+                image=None,
+                voice=None) -> Screen:
     """A meme whose joke is the exchange itself: the named
     voice drops the line(s), the owner dies laughing — the
-    chat IS the meme's delivery shape."""
+    chat IS the meme's delivery shape.  ``image`` / ``voice``
+    stage a real photo / voice note into the exchange (see
+    :func:`entries_screen`)."""
     return entries_screen(
         entries, platform=platform, device=device, dark=dark,
-        reaction="😂", me_reply="😂😂😂")
+        reaction="😂", me_reply="😂😂😂",
+        image=image, voice=voice)
 
 
 def motivation_screen(piece: str, *, theme: str = "",
                       window: str = "morning",
                       platform: str = "whatsapp",
-                      device: str = "android") -> Screen:
+                      device: str = "android",
+                      image=None,
+                      voice=None) -> Screen:
     """A motivation piece staged as a conversation with
     Devon: the owner asks (the theme, or the day-part's
     ask), Devon answers in chat-sized bubbles, the owner
-    receives it — a two-voice exchange carrying the lesson."""
+    receives it — a two-voice exchange carrying the lesson.
+    ``image`` / ``voice`` stage a real photo / voice note
+    from Devon into the exchange after her answer — her
+    image generation lands as the photo, her voice note
+    as the voice message with its true duration, measured
+    at render.  Neither is staged when not given."""
     platform = require_platform(platform)
     theme = str(theme or "").strip()
     if theme:
@@ -236,8 +311,19 @@ def motivation_screen(piece: str, *, theme: str = "",
         if j == len(bubbles) - 1:
             msg.reactions = ["🙏"]
         messages.append(msg)
+    tick = 1 + len(bubbles)
+    if image is not None:
+        messages.append(_media_message(
+            IMAGE_MESSAGE_ID, "devon", "image", image,
+            time=_clock(tick)))
+        tick += 1
+    if voice is not None:
+        messages.append(_media_message(
+            VOICE_MESSAGE_ID, "devon", "voice", voice,
+            time=_clock(tick)))
+        tick += 1
     messages.append(Message(
-        "close", "me", text=close, time=_clock(1 + len(bubbles)),
+        "close", "me", text=close, time=_clock(tick),
         ticks="read"))
     return Screen(
         platform=platform, title="Devon", subtitle="online",
@@ -246,16 +332,24 @@ def motivation_screen(piece: str, *, theme: str = "",
         messages=messages, chrome=DeviceChrome(style=device))
 
 
-def render_screen_image(screen: Screen, *, media_dir: Any = ""
+def render_screen_image(screen: Screen, *, media_dir: Any = "",
+                        media: dict | None = None
                         ) -> dict[str, Any]:
     """Render a staged screen to PNG bytes through the
     organ's service (no send — the caller delivers through
     its own seam).  Never raises: ``ok`` False carries the
-    organ's own reason."""
+    organ's own reason.  ``media`` is the real-media
+    hand-off (message id → bytes / path / PIL image /
+    MediaRef) for the screen's photo / voice bubbles — it
+    wins over a message's own ``media`` reference, so a
+    generated image or voice note that is not a file lands
+    here under :data:`IMAGE_MESSAGE_ID` /
+    :data:`VOICE_MESSAGE_ID`."""
     from .mock_screens import MockScreenService
 
     try:
-        out = MockScreenService(media_dir=media_dir or "").render(screen)
+        out = MockScreenService(media_dir=media_dir or "").render(
+            screen, media=media)
     except Exception as exc:  # noqa: BLE001 - a format rung, never a wall
         return {"ok": False, "reason": str(exc)[:160]}
     if out.get("data"):
