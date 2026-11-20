@@ -61,6 +61,7 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import socket
 import struct
 import sys
@@ -768,26 +769,24 @@ class TorchScriptExecutor:
     ``execute({"magnitude": mag})`` runs the module's ``forward`` on
     the named tensors (numpy float32, batch first) and returns the
     outputs by the same names. The module is loaded once, on first
-    use, and must return exactly one output per input.
+    use — through the shared model-load cache
+    (:mod:`nomorals.voice.cache`), so a repeat conversion with the
+    same model file never re-runs ``torch.jit.load`` — and must
+    return exactly one output per input.
     """
 
     def __init__(self, path: str, *, entry: str = "forward") -> None:
         self.path = path
         self.entry = entry
-        self._module: Any = None
 
     def _load(self) -> Any:
-        if self._module is None:
-            from .vits._torch import require_torch
-            torch = require_torch(
-                "loading a TorchScript conversion model")
-            if not os.path.isfile(self.path):
-                raise ConversionUnavailable(
-                    f"conversion model not found: {self.path} — "
-                    "nm voice convert --export-probe writes one")
-            self._module = torch.jit.load(self.path, map_location="cpu")
-            self._module.eval()
-        return self._module
+        if not os.path.isfile(self.path):
+            raise ConversionUnavailable(
+                f"conversion model not found: {self.path} — "
+                "nm voice convert --export-probe writes one")
+        from .cache import shared_model_cache
+        return shared_model_cache().load_torchscript(
+            self.path, entry=self.entry)
 
     def execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
         from .vits._torch import require_torch
@@ -830,16 +829,15 @@ class RegistryExecutor:
     def _server_or_raise(self) -> Any:
         if self._server is None:
             try:
-                from .services import ModelServer, ServiceRegistry
+                from .cache import shared_model_cache
+                self._server = shared_model_cache().server(
+                    self.services_dir)
             except ImportError as exc:
                 raise ConversionUnavailable(
                     "the voice service registry is not on this build "
                     "yet — model services ship with the storyteller-ml "
                     "rung; use --model <torchscript file> meanwhile"
                     ) from exc
-            registry = (ServiceRegistry(self.services_dir)
-                        if self.services_dir else ServiceRegistry())
-            self._server = ModelServer(registry)
         return self._server
 
     def execute(self, inputs: dict[str, Any]) -> dict[str, Any]:
@@ -1052,12 +1050,20 @@ def _floats_to_int16_bytes(frames: Any) -> bytes:
 
 def convert_file(input_path: str, output_path: str, *,
                  executor: Any = None,
-                 params: ConversionParams | None = None) -> dict[str, Any]:
+                 params: ConversionParams | None = None,
+                 cache: Any = None) -> dict[str, Any]:
     """Convert one wav file end to end (stdlib wav I/O).
 
     Returns the conversion receipt: input/output paths, rates, sample
     counts, and the executor used. The file is mono-mixed by the
     reader (the sidecar was mono too).
+
+    With ``cache`` (a :class:`~nomorals.voice.cache.ConversionCache`)
+    the conversion is keyed by model + input bytes + settings: a
+    repeat conversion copies the cached wav out instead of re-running
+    the pipeline, and the receipt says ``cached: True``. A corrupt
+    cached entry is refused by name, dropped, and the conversion
+    re-runs — the receipt names it under ``cache_corrupt``.
     """
     from .session import read_wav_bytes, write_wav_bytes
     if not os.path.isfile(input_path):
@@ -1065,6 +1071,35 @@ def convert_file(input_path: str, output_path: str, *,
     pcm, rate = read_wav_bytes(input_path)
     frames = _int16_bytes_to_floats(pcm)
     use = params or ConversionParams()
+    cache_key = ""
+    cache_corrupt = ""
+    if cache is not None:
+        from .cache import CorruptCacheEntry, executor_identity
+        with open(input_path, "rb") as fh:
+            input_sha = hashlib.sha256(fh.read()).hexdigest()
+        cache_key = cache.key_for(
+            model_identity=executor_identity(executor),
+            input_sha256=input_sha, input_rate=rate, params=use)
+        try:
+            hit = cache.lookup(cache_key)
+        except CorruptCacheEntry as exc:
+            # Refused by name and already dropped: re-run the
+            # conversion and replace the entry below.
+            hit = None
+            cache_corrupt = cache_key
+            _log.warning("convert_file: %s", exc)
+        if hit is not None:
+            shutil.copyfile(hit["path"], output_path)
+            return {"ok": True, "input": input_path,
+                    "output": output_path,
+                    "input_rate": rate,
+                    "output_rate": int(hit["output_rate"]),
+                    "input_samples": len(frames),
+                    "output_samples": int(hit["output_samples"]),
+                    "executor": type(executor).__name__
+                    if executor else "none",
+                    "skip_vocode": bool(use.skip_vocode),
+                    "cached": True, "cache_key": cache_key}
     converter = Converter(executor, use)
     out_frames = converter.convert(frames, rate)
     out_rate = use.output_rate or rate
@@ -1072,12 +1107,30 @@ def convert_file(input_path: str, output_path: str, *,
         out_rate = use.model_rate
     write_wav_bytes(output_path, _floats_to_int16_bytes(out_frames),
                     sample_rate=out_rate)
-    return {"ok": True, "input": input_path, "output": output_path,
-            "input_rate": rate, "output_rate": out_rate,
-            "input_samples": len(frames),
-            "output_samples": len(out_frames),
-            "executor": type(executor).__name__ if executor else "none",
-            "skip_vocode": bool(use.skip_vocode)}
+    receipt = {"ok": True, "input": input_path, "output": output_path,
+               "input_rate": rate, "output_rate": out_rate,
+               "input_samples": len(frames),
+               "output_samples": len(out_frames),
+               "executor": type(executor).__name__ if executor else "none",
+               "skip_vocode": bool(use.skip_vocode),
+               "cached": False, "cache_key": cache_key}
+    if cache_corrupt:
+        receipt["cache_corrupt"] = cache_corrupt
+    if cache is not None:
+        from .cache import executor_identity
+        try:
+            cache.store(
+                cache_key, output_path,
+                model_identity=executor_identity(executor),
+                input_sha256=input_sha, input_rate=rate, params=use,
+                input_samples=len(frames),
+                output_samples=len(out_frames), output_rate=out_rate)
+        except OSError as exc:
+            # A cache that cannot write never fails a conversion
+            # that otherwise succeeded — the failure is named on
+            # the receipt instead.
+            receipt["cache_store_error"] = str(exc)
+    return receipt
 
 
 # -- the sidecar server (ZeroMQ REP loop, transport-free) -------------------
@@ -1503,6 +1556,12 @@ def conversion_status(*, services_dir: str = "") -> dict[str, Any]:
                     if d.task == "voice-conversion"]
     except ImportError:
         services = None
+    cache_status: dict[str, Any] | None = None
+    try:
+        from .cache import default_conversion_cache
+        cache_status = default_conversion_cache().status()
+    except OSError:
+        cache_status = None
     return {
         "torch": torch_available(),
         "librosa": _librosa_available(),
@@ -1511,6 +1570,7 @@ def conversion_status(*, services_dir: str = "") -> dict[str, Any]:
         "probe_model": os.path.isfile(default_probe_path()),
         "probe_path": default_probe_path(),
         "services": services,
+        "cache": cache_status,
     }
 
 
@@ -1530,6 +1590,15 @@ def status_text(status: dict[str, Any] | None = None) -> str:
         lines.append("  services: none registered for voice-conversion")
     else:
         lines.append("  services: " + ", ".join(status["services"]))
+    cache = status.get("cache")
+    if cache is None:
+        lines.append("  cache: unavailable")
+    else:
+        lines.append(
+            f"  cache: {cache['entries']} entries, "
+            f"{cache['bytes']} bytes, {cache['hits']} hits / "
+            f"{cache['misses']} misses, {cache['evictions']} evicted "
+            f"({cache['dir']})")
     if not status["torch"] or not status["librosa"]:
         lines.append("  full conversion needs torch + librosa; "
                      "--skip-vocode converts nothing but exercises the "
@@ -1552,6 +1621,7 @@ def control_convert(tail: str, *, message: Any = None,
     service_ref = ""
     model_path = ""
     direction = "A2B"
+    no_cache = False
     index = 0
     while index < len(parts):
         token = parts[index]
@@ -1564,6 +1634,9 @@ def control_convert(tail: str, *, message: Any = None,
         elif token == "--direction" and index + 1 < len(parts):
             direction = parts[index + 1].upper()
             index += 2
+        elif token == "--no-cache":
+            no_cache = True
+            index += 1
         elif token in ("status", "health") and not path:
             return {"ok": True, "text": status_text(), "path": ""}
         elif token.startswith("--"):
@@ -1582,8 +1655,8 @@ def control_convert(tail: str, *, message: Any = None,
         return {"ok": False,
                 "text": ("usage: /voice convert <audio path> "
                          "[--service <slug@version> | --model <path>] "
-                         "[--direction A2B|B2A] — attach a voice note "
-                         "to the message or pass a file path\n"
+                         "[--direction A2B|B2A] [--no-cache] — attach a "
+                         "voice note to the message or pass a file path\n"
                          + status_text()),
                 "path": ""}
     if not os.path.isfile(path):
@@ -1602,10 +1675,14 @@ def control_convert(tail: str, *, message: Any = None,
     os.makedirs(dest_dir, exist_ok=True)
     out_path = os.path.join(
         dest_dir, f"converted-{int(time.time() * 1000)}.wav")
+    cache = None
+    if not no_cache:
+        from .cache import default_conversion_cache
+        cache = default_conversion_cache()
     try:
         receipt = convert_file(
             path, out_path, executor=executor,
-            params=ConversionParams(direction=direction))
+            params=ConversionParams(direction=direction), cache=cache)
     except (ConversionUnavailable, ValueError, OSError) as exc:
         return {"ok": False, "text": f"conversion failed: {exc}",
                 "path": ""}
@@ -1614,5 +1691,7 @@ def control_convert(tail: str, *, message: Any = None,
                      f"@{receipt['input_rate']} Hz -> "
                      f"{receipt['output_samples']} samples "
                      f"@{receipt['output_rate']} Hz "
-                     f"({receipt['executor']}, {direction})"),
+                     f"({receipt['executor']}, {direction})"
+                     + (" — from cache" if receipt.get("cached")
+                        else "")),
             "path": out_path}

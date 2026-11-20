@@ -2770,6 +2770,10 @@ def _parser() -> argparse.ArgumentParser:
     v_convert.add_argument("--skip-vocode", action="store_true",
                            help="pass audio through unconverted (exercises "
                                 "the transport + resampling path only)")
+    v_convert.add_argument("--no-cache", action="store_true",
+                           help="skip the conversion cache (re-convert "
+                                "even when the same input was converted "
+                                "before)")
     v_convert.add_argument("--discard-vocoded", action="store_true",
                            help="return the model-rate input instead of "
                                 "the converted audio")
@@ -2797,6 +2801,25 @@ def _parser() -> argparse.ArgumentParser:
                            help="live loop duration (0 = until Ctrl-C)")
     v_convert.add_argument("--device", default="default", help="device id")
     v_convert.add_argument("--json", action="store_true", help="Output as JSON")
+    # -- voice cache: converted audio + loaded models, with accounting --
+    v_cache = voice_sub.add_parser(
+        "cache",
+        help="voice cache: converted-audio + loaded-model accounting",
+        description=("nm voice cache stats [--json]\n"
+                     "nm voice cache clear [--json]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    cache_sub = v_cache.add_subparsers(dest="voice_cache_action",
+                                       required=True)
+    v_cache_stats = cache_sub.add_parser(
+        "stats", help="cached conversions + loaded models, with "
+                      "hit/miss accounting")
+    v_cache_stats.add_argument("--json", action="store_true",
+                               help="Output as JSON")
+    v_cache_clear = cache_sub.add_parser(
+        "clear", help="drop every cached conversion (loaded models "
+                      "stay loaded until evicted)")
+    v_cache_clear.add_argument("--json", action="store_true",
+                               help="Output as JSON")
     # -- live calls: Devon as a LiveKit room participant ---------------
     v_live = voice_sub.add_parser(
         "live", help="live voice + video in a LiveKit room (WebRTC)")

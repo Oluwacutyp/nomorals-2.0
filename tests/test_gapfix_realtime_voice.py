@@ -723,9 +723,12 @@ def _fake_context(tmp_path):
             audio=SimpleNamespace(voice_data_dir=str(tmp_path))))
 
 
-def test_cli_convert_file_mode(tmp_path):
+def test_cli_convert_file_mode(tmp_path, monkeypatch):
     from nomorals.cmdline.commands.voice import _cmd_voice_convert
     from nomorals.cmdline.parser import _parser
+    # §3B.14: the convert path now caches to the default voice cache
+    # dir — point it at scratch so the test never writes the real one.
+    monkeypatch.setenv("NM_VOICE_CACHE_DIR", str(tmp_path / "cache"))
     src = _write_wav(tmp_path / "in.wav", _sine_frames(seconds=0.5))
     out = str(tmp_path / "out.wav")
     args = _parser().parse_args(
@@ -736,9 +739,11 @@ def test_cli_convert_file_mode(tmp_path):
     assert len(frames) == 8000
 
 
-def test_cli_convert_file_mode_json(tmp_path, capsys):
+def test_cli_convert_file_mode_json(tmp_path, monkeypatch, capsys):
     from nomorals.cmdline.commands.voice import _cmd_voice_convert
     from nomorals.cmdline.parser import _parser
+    # §3B.14: see test_cli_convert_file_mode — cache at scratch.
+    monkeypatch.setenv("NM_VOICE_CACHE_DIR", str(tmp_path / "cache"))
     src = _write_wav(tmp_path / "in.wav", _sine_frames(seconds=0.5))
     args = _parser().parse_args(
         ["voice", "convert", str(src), "--skip-vocode", "--json"])
@@ -862,5 +867,8 @@ def test_live_loop_silence_sends_nothing(tmp_path):
 def test_conversion_status_shape():
     status = rt.conversion_status()
     assert set(status) == {"torch", "librosa", "scipy", "pyzmq",
-                           "probe_model", "probe_path", "services"}
+                           "probe_model", "probe_path", "services",
+                           # §3B.14: the cache is part of the status now —
+                           # conversion_status() reports it by design.
+                           "cache"}
     assert isinstance(status["torch"], bool)

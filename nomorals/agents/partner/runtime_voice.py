@@ -375,6 +375,9 @@ class RuntimeVoiceMixin:
         /voice verify enroll                     enroll your voice (biometric)
         /voice convert <path>                    convert a voice note / file
         /voice convert status                    conversion rung readiness
+        /voice cache stats | clear               cached conversions +
+                                                 loaded models, with
+                                                 hit/miss accounting
         /voice rm <name>                         drop a catalogue voice
         /voice service list | health <slug> | status
                                                  model services (TorchScript)
@@ -669,6 +672,26 @@ class RuntimeVoiceMixin:
             return (f"🔐 {res['verdict']} "
                     f"(confidence {res.get('confidence', 0):.0%})")
 
+        if verb == "cache":
+            from ...voice.cache import (
+                ConversionCache,
+                cache_status_text,
+                shared_model_cache,
+            )
+            cparts = rest.strip().split()
+            action = (cparts[0] if cparts else "stats").lower()
+            cache = ConversionCache()
+            if action == "clear":
+                count = cache.clear()
+                return (f"voice cache cleared — {count} cached "
+                        "conversion(s) dropped (loaded models stay "
+                        "loaded until evicted)")
+            if action == "stats":
+                return cache_status_text(
+                    cache.status(), shared_model_cache().status())
+            return ("usage: /voice cache stats | clear — "
+                    "cached conversions + loaded models")
+
         if verb == "convert":
             from ...voice import realtime as _rt
             try:
@@ -689,7 +712,7 @@ class RuntimeVoiceMixin:
                 f"transcript <name> text | "
                 f"describe <name> text | backend <name> <backend> | "
                 f"design <name> <description> | morph <name> <a> <b> [ratio] | "
-                f"talk on|off | verify enroll | convert <path> | rm <name>")
+                f"talk on|off | verify enroll | convert <path> | cache stats|clear | rm <name>")
 
     # ── /clonevoice <name> — zero-shot voice cloning, top-level ──────────
     def _control_clonevoice(self, tail: str, chat_key: str,

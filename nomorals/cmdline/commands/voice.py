@@ -116,6 +116,8 @@ def _cmd_voice(args: argparse.Namespace, context: Any) -> int:
         return _cmd_voice_probe(args, context)
     if action == "convert":
         return _cmd_voice_convert(args, context)
+    if action == "cache":
+        return _cmd_voice_cache(args, context)
     if action == "live":
         return _cmd_voice_live(args, context)
     if action == "service":
@@ -1110,9 +1112,13 @@ def _cmd_voice_convert(args: argparse.Namespace, context: Any) -> int:
     if not out:
         stem = Path(args.file).stem
         out = str(Path(args.file).with_name(f"{stem}-converted.wav"))
+    cache = None
+    if not getattr(args, "no_cache", False):
+        from ...voice.cache import default_conversion_cache
+        cache = default_conversion_cache()
     try:
         receipt = _rt.convert_file(args.file, out, executor=executor,
-                                   params=params)
+                                   params=params, cache=cache)
     except _rt.ConversionUnavailable as exc:
         print(f"cannot convert: {exc}", file=sys.stderr)
         return 1
@@ -1127,8 +1133,40 @@ def _cmd_voice_convert(args: argparse.Namespace, context: Any) -> int:
               f"@{receipt['input_rate']} Hz -> "
               f"{receipt['output_samples']} samples "
               f"@{receipt['output_rate']} Hz, "
-              f"{receipt['executor']}, {args.direction})")
+              f"{receipt['executor']}, {args.direction})"
+              + (" — from cache" if receipt.get("cached") else ""))
     return 0
+
+
+def _cmd_voice_cache(args: argparse.Namespace, context: Any) -> int:
+    """Route `nm voice cache` — stats / clear (discord-vocodes §3B.14)."""
+    from ...voice.cache import (
+        ConversionCache,
+        cache_status_text,
+        shared_model_cache,
+    )
+
+    action = args.voice_cache_action
+    cache = ConversionCache()
+    if action == "stats":
+        result = cache.status()
+        models = shared_model_cache().status()
+        if getattr(args, "json", False):
+            print(json.dumps({"cache": result, "models": models},
+                             indent=2, default=str))
+        else:
+            print(cache_status_text(result, models))
+        return 0
+    if action == "clear":
+        count = cache.clear()
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": True, "cleared": count}, indent=2))
+        else:
+            print(f"voice cache cleared — {count} cached conversion(s) "
+                  "dropped (loaded models stay loaded until evicted)")
+        return 0
+    print(f"unknown voice cache action: {action}", file=sys.stderr)
+    return 2
 
 
 def _cmd_voice_convert_live(args: argparse.Namespace, context: Any,
