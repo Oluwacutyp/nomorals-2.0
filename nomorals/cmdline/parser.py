@@ -2833,7 +2833,8 @@ def _parser() -> argparse.ArgumentParser:
                      "[--name N] [--version V] [--entry E]\n"
                      "nm voice service serve <slug[@version]> --inputs JSON\n"
                      "nm voice service health <slug[@version]>\n"
-                     "nm voice service export-vits-probe [--owner O]\n"
+                     "nm voice service export-vits-probe [--owner O] "
+                     "[--method trace|script] [--device auto|cpu|cuda]\n"
                      "nm voice service evict <slug[@version]>\n"
                      "nm voice service status [--json]"),
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -2885,6 +2886,15 @@ def _parser() -> argparse.ArgumentParser:
              "(real VITS architecture, random weights)")
     v_svc_probe.add_argument("--owner", default="",
                              help="container registry owner for ghcr.io refs")
+    v_svc_probe.add_argument("--method", default="trace",
+                             choices=("trace", "script"),
+                             help="export path: trace (default — the "
+                                  "probe was built traced) or script "
+                                  "(shape-polymorphic)")
+    v_svc_probe.add_argument("--device", default="auto",
+                             choices=("auto", "cpu", "cuda"),
+                             help="export device (default auto; the "
+                                  "artifact is always CPU-runnable)")
     v_svc_probe.add_argument("--json", action="store_true",
                              help="Output as JSON")
     v_svc_status = svc_sub.add_parser(

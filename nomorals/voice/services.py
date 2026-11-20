@@ -464,7 +464,8 @@ def export_torchscript_service(module: Any, example_inputs: dict,
                                out_path: str, *, method: str = "script",
                                entry: str = "forward", task: str = "",
                                name: str = "", version: str = "0.1.0",
-                               source: str = "") -> ModelArtifact:
+                               source: str = "",
+                               device: str = "auto") -> ModelArtifact:
     """Export a torch module to a TorchScript artifact + record.
 
     ``example_inputs`` is an ordered dict of name -> tensor. ``method``
@@ -472,53 +473,37 @@ def export_torchscript_service(module: Any, example_inputs: dict,
     caller names it; traced artifacts are shape-specialised and the
     artifact records the exact shapes). The exported module is run once
     on the example inputs so the output spec is measured, not guessed.
+    ``device`` is the export device (``auto`` / ``cpu`` / ``cuda``);
+    the artifact is always runnable on CPU.
+
+    The export itself is :func:`nomorals.training.export.export_module`
+    (census §3B.16) — the trace check runs first and the export is
+    verified against the source, with the numbers in the receipt
+    sidecar next to the artifact. ``allow_unchecked_trace`` stays on
+    here: the VITS probe's trace is the upstream's known case (the
+    check warns on its data-dependent branches), so the check is
+    attempted and recorded, and the unchecked retry is the documented
+    fallback — the same behaviour this function had when it passed
+    ``check_trace=False`` directly.
     """
+    # The voice organ's own torch gate first: this is voice code,
+    # and the gate is what the runtime + tests control here. The
+    # training exporter checks its own gate next.
     from .vits._torch import require_torch
-    torch = require_torch("exporting a model service to TorchScript")
-    if method not in ("script", "trace"):
-        raise ValueError(f"unknown export method {method!r} — "
-                         "'script' or 'trace'")
-    if not example_inputs:
-        raise ValueError("export needs example inputs (name -> tensor)")
-    if not name:
-        raise ValueError("export needs a service name")
-    if not _VERSION_RE.match(version):
-        raise ValueError(f"bad version {version!r}: semver core only")
-    if not (task or "").strip():
-        raise ValueError("export needs a task (e.g. 'tts-mel')")
+    require_torch("exporting a model service to TorchScript")
+    from ..training.export import export_module
 
-    if method == "script":
-        scripted = torch.jit.script(module)
-        entry_fn = getattr(scripted, entry, None)
-        if entry_fn is None or not callable(entry_fn):
-            raise ValueError(f"scripted module has no entry {entry!r}")
-    else:
-        traced = torch.jit.trace_module(
-            module, {entry: tuple(example_inputs.values())},
-            check_trace=False, strict=True)
-        scripted = traced
-    out_dir = os.path.dirname(os.path.abspath(out_path))
-    os.makedirs(out_dir, exist_ok=True)
-    torch.jit.save(scripted, out_path)
-
-    with torch.no_grad():
-        outs = getattr(scripted, entry)(*example_inputs.values())
-    if not isinstance(outs, (tuple, list)):
-        outs = (outs,)
-    inputs = [TensorSpec(name=n, dtype=_dtype_name(t.dtype),
-                         shape=([None] * len(t.shape)
-                                if method == "script"
-                                else [int(d) for d in t.shape]))
-              for n, t in example_inputs.items()]
-    outputs = [TensorSpec(name=f"output_{i}",
-                          dtype=_dtype_name(t.dtype),
-                          shape=[int(d) for d in t.shape])
-               for i, t in enumerate(outs)]
+    receipt = export_module(
+        module, example_inputs, out_path, method=method, entry=entry,
+        name=name, version=version, task=task, source=source or
+        "torch export", device=device, allow_unchecked_trace=True)
     return ModelArtifact(
-        name=name, version=version, task=task, format="torchscript",
-        path=os.path.abspath(out_path), sha256=_sha256_file(out_path),
-        inputs=inputs, outputs=outputs, entry=entry,
-        traced=(method == "trace"), source=source or "torch export",
+        name=receipt.name, version=receipt.version, task=receipt.task,
+        format="torchscript", path=receipt.path, sha256=receipt.sha256,
+        inputs=[TensorSpec.from_dict(t) for t in receipt.inputs],
+        outputs=[TensorSpec.from_dict(t) for t in receipt.outputs],
+        entry=receipt.entry, traced=receipt.traced,
+        source=receipt.source, created_at=receipt.created_at,
     )
 
 
@@ -748,7 +733,8 @@ def service_executor(registry: ServiceRegistry,
 # -- the one real end-to-end service -----------------------------------
 
 def export_vits_probe_service(services_dir: str = "", *, seed: int = 0,
-                              owner: str = "") -> ServiceDeclaration:
+                              owner: str = "", method: str = "trace",
+                              device: str = "auto") -> ServiceDeclaration:
     """Build, export, and register the VITS probe service.
 
     The REAL VITS architecture (``SynthesizerTrn`` from the bundled
@@ -761,6 +747,12 @@ def export_vits_probe_service(services_dir: str = "", *, seed: int = 0,
     not audio, and the survey says so.
     A real trained voice comes from ``export_torchscript(checkpoint,
     config)`` and registers into this same registry.
+
+    ``method`` is the export path (``trace`` by default — the probe
+    was built traced — or ``script``); ``device`` is the export
+    device (``auto`` / ``cpu`` / ``cuda``). The export is verified
+    against the source and the receipt sidecar next to the artifact
+    carries the method, the device, and the deviation.
     """
     from .vits._torch import require_torch
     torch = require_torch("exporting the VITS probe service")
@@ -789,7 +781,7 @@ def export_vits_probe_service(services_dir: str = "", *, seed: int = 0,
     }
     out_path = os.path.join(services_dir, "vits-probe-0.1.0.pt")
     artifact = export_torchscript_service(
-        net, example, out_path, method="trace",
+        net, example, out_path, method=method, device=device,
         entry="infer_ts_noistft", task="tts-spectral", name="vits-probe",
         version="0.1.0",
         source=f"SynthesizerTrn random weights, seed {seed} — probe, "

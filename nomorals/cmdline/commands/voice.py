@@ -240,14 +240,32 @@ def _cmd_voice_service(args: argparse.Namespace, context: Any) -> int:
               "(real architecture, random weights)…", file=sys.stderr)
         try:
             decl = export_vits_probe_service(
-                owner=getattr(args, "owner", "") or "")
+                owner=getattr(args, "owner", "") or "",
+                method=getattr(args, "method", "trace") or "trace",
+                device=getattr(args, "device", "auto") or "auto")
         except Exception as exc:  # noqa: BLE001 — CLI reports, never traces
             print(f"export failed: {type(exc).__name__}: {exc}",
                   file=sys.stderr)
             return 1
+        # The verification numbers live in the receipt sidecar next
+        # to the artifact — the export's proof, not a shrug.
+        receipt: dict[str, Any] = {}
+        try:
+            from ...training.export import receipt_path_for
+            with open(receipt_path_for(decl.artifact.path),
+                      encoding="utf-8") as fh:
+                receipt = json.load(fh)
+        except (OSError, ValueError):
+            receipt = {}
+        verification = receipt.get("verification", {})
         return _emit({"registered": decl.ref, "task": decl.task,
                       "artifact": decl.artifact.path,
                       "sha256": decl.artifact.sha256,
+                      "method": receipt.get("method"),
+                      "device": receipt.get("export_device"),
+                      "max_abs_deviation": verification.get(
+                          "max_abs_deviation"),
+                      "trace_checked": receipt.get("trace_checked"),
                       "note": "probe service — random weights, "
                               "not a trained voice"})
 
