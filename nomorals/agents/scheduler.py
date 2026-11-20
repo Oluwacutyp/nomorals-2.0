@@ -2160,7 +2160,8 @@ class Scheduler:
                         output_meta=alert_meta,
                     )
                 elif not ok:
-                    from .job_reports import (command_failure_doc,
+                    from .job_reports import (chat_failure_line,
+                                              command_failure_doc,
                                               failure_doc)
 
                     _fail_doc = failure_doc(job_name, summary)
@@ -2177,20 +2178,16 @@ class Scheduler:
                     # The alert names the ONE failure mode that
                     # actually happened (2026-11-11 scheduler
                     # incident: the policy line used to list three
-                    # possible modes without saying which): a timeout
-                    # names the stuck call + the outstanding
-                    # abandoned count; any other failure names its
-                    # own first line.
-                    if timed_out and self._last_guard_timeout:
-                        _detail = self._last_guard_timeout
-                        _reason = (
-                            f"timed out after "
-                            f"{float(_detail.get('timeout_s') or 0):g}s "
-                            f"in {_detail.get('stuck') or 'unknown'} — "
-                            f"{int(_detail.get('abandoned') or 0)} "
-                            "abandoned worker(s) outstanding")
-                    else:
-                        _reason = (summary.splitlines() or ["job failed"])[0][:500]
+                    # possible modes without saying which) — and it
+                    # names it SHORT.  The old reason was the stored
+                    # summary's first line, capped at 500 chars: for
+                    # a timeout that line is one giant sampled stack
+                    # chain, so the policy line arrived in the DM as
+                    # a second wall of Windows paths (2026-11-19
+                    # screenshots).  The short line carries the same
+                    # facts — the stuck call, the abandoned count —
+                    # and the full text stays in the run record.
+                    _reason = chat_failure_line(summary)
                     self.notifier.publish(
                         "schedule", title, "",
                         doc=_fail_doc,

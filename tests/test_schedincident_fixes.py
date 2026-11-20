@@ -205,8 +205,17 @@ def test_execute_alert_names_the_stuck_call_and_abandoned_count():
     hints = published["kwargs"]["alert_hints"]
     assert hints["failed"] is True
     assert hints["subject"] == "job1"
-    assert hints["reason"].startswith(
-        "timed out after 1s in x.py:1:fn"), hints["reason"]
+    # Lane 134 (2026-11-19): the policy reason is now the same
+    # chat-short line as the published Doc — one failure line, not
+    # two wordings — so it carries the stored summary's own
+    # "job failed: " prefix instead of starting at "timed out".
+    # What this test pins is unchanged: the reason names the stuck
+    # call and the outstanding abandoned count.
+    assert hints["reason"] == (
+        "job failed: timed out after 1s in x.py:1:fn "
+        "(worker abandoned; 2 abandoned worker(s) outstanding "
+        "for 'job1'; the stuck call may still be running)"), \
+        hints["reason"]
     assert "2 abandoned worker(s) outstanding" in hints["reason"]
 
 

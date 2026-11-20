@@ -50,6 +50,7 @@ scheduler additionally guards the call).
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Mapping
 
 from ..social.chat.present import (Doc, Field, KV, Section, from_dict,
@@ -59,7 +60,8 @@ _log = logging.getLogger(__name__)
 
 __all__ = ["job_report_doc", "failure_doc",
            "command_report_doc", "command_failure_doc",
-           "tool_result_doc", "summarize_last_result", "noop_reason"]
+           "tool_result_doc", "summarize_last_result", "noop_reason",
+           "chat_failure_line"]
 
 #: Lists longer than this render their head + an explicit tail count.
 _LIST_LIMIT = 10
@@ -722,14 +724,155 @@ def job_report_doc(tool: str, value: Any, *, job_name: str = "") -> Doc:
     return _stamped(doc)
 
 
+# ── chat-short failure lines (2026-11-19: the owner's screenshots) ──
+#
+# The stored failure text is the journal: it keeps the watchdog's
+# sampled stack chains, the "where the time went" histogram and the
+# db tail — and the 2026-11-19 screenshots show all of it landing
+# in the owner's DM as one wall (a 300s timeout arrived as Windows
+# paths joined by arrows, twice: once as the report, once as the
+# alert-policy line).  The chat form keeps only the failure itself.
+# The stored record is never touched: schedule_runs.result and
+# schedule_jobs.last_result keep the whole text, so the owner can
+# ask about the job by name and read the full detail there.
+
+#: A failure line bound for chat is one short line: the owner reads
+#: it on a phone.
+_CHAT_FAILURE_LINE_MAX = 200
+
+#: Markers where the stored failure text stops being the failure and
+#: starts being journal detail — a chat line never carries either.
+_CHAT_FAILURE_TAIL_MARKERS = (" — where the time went:", " — db:")
+
+#: One sampled stack frame: ``path:line:call`` — the path may be a
+#: Windows path (backslashes survive the sampler's "/" split) or a
+#: frozen-module name (which carries a space inside ``<…>``).
+_FRAME_RE = re.compile(r"(?:<[^>]+>|\S+):\d+:\S+")
+
+#: A run of ``→``-joined frames — the sampler's stack-chain shape.
+_CHAIN_RE = re.compile(
+    r"(?:(?:<[^>]+>|\S+):\d+:\S+)"
+    r"(?: → (?:(?:<[^>]+>|\S+):\d+:\S+))+")
+
+
+def _short_frame(frame: str) -> str:
+    """One sampled frame, path-stripped: ``corpus.py:578:CanonCorpus.
+    _chapter_text``.  The sampler already strips "/" paths; Windows
+    backslashes survive it, so both separators are stripped here."""
+    frame = (frame or "").strip()
+    frame = frame.replace("\\", "/").rsplit("/", 1)[-1]
+    return frame
+
+
+def _collapse_chains(text: str) -> str:
+    """Every ``→``-separated stack chain collapses to its stuck call
+    — the FIRST frame, path-stripped.  The sampler walks
+    innermost-first, so the first frame is where the thread is stuck
+    (``Path.open`` for a hung file read,
+    ``SSLContext.load_default_certs`` for a hung cert load); the
+    later frames are its callers.  The surrounding words (the
+    timeout, the abandoned-worker parenthetical) are kept verbatim."""
+    if " → " not in text:
+        return text
+
+    def _first_frame(match: re.Match[str]) -> str:
+        return _short_frame(match.group(0).split(" → ")[0])
+
+    return _CHAIN_RE.sub(_first_frame, text)
+
+
+def _traceback_tail(lines: list[str]) -> str:
+    """The exception line of a pasted traceback — its last line.
+    Frame headers and source lines are indented; the exception line
+    is flush-left, so it is the last unindented, non-empty line."""
+    for line in reversed(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("Traceback (most recent call last)"):
+            continue
+        if line[:1].isspace():
+            continue
+        if stripped.startswith("^"):
+            continue
+        return stripped
+    return ""
+
+
+def _first_content_line(text: str) -> str:
+    """The first line that states the failure — never a traceback
+    frame.  A pasted traceback's own first lines are its header and
+    its ``File "…", line …`` frames; the failure is its last line.
+    When the traceback rides inline after a prefix (a command
+    failure's ``exit=3:`` head), the prefix is kept and the frames
+    are dropped: ``"command failed: exit=3: ValueError: bad flag"``.
+    """
+    text = text or ""
+    tb_at = text.find("Traceback (most recent call last)")
+    if tb_at != -1:
+        prefix = text[:tb_at].strip()
+        prefix = prefix.splitlines()[0].strip() if prefix else ""
+        tail = _traceback_tail(text[tb_at:].splitlines())
+        if prefix and tail:
+            return prefix + " " + tail
+        return tail or prefix
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("^"):
+            continue
+        if line[:1].isspace():
+            continue  # a traceback source line, never the statement
+        if re.match(r'File ".+", line \d+', stripped):
+            continue
+        if stripped.startswith("Traceback"):
+            continue
+        return stripped
+    return ""
+
+
+def chat_failure_line(summary: str) -> str:
+    """One short human-readable line for a failure bound for chat.
+
+    What failed, in what, and what happens next — one line, no
+    frames, no paths, no histogram.  The journal tail is cut, a
+    pasted traceback reduces to its exception line, a stack chain
+    reduces to its stuck call, and the line caps at 200 chars on a
+    word boundary.  Already-short clean lines pass through
+    unchanged, so the F3 pins on the published form still hold.
+    Never raises: a formatting bug degrades to ``"job failed"``,
+    never to a wall or a crash.
+    """
+    try:
+        text = str(summary or "")
+        if not text.strip():
+            return "job failed"
+        for marker in _CHAT_FAILURE_TAIL_MARKERS:
+            cut = text.find(marker)
+            if cut != -1:
+                text = text[:cut]
+        line = _first_content_line(text)
+        if not line:
+            return "job failed"
+        line = _collapse_chains(line)
+        if len(line) > _CHAT_FAILURE_LINE_MAX:
+            cut = line[:_CHAT_FAILURE_LINE_MAX].rsplit(" ", 1)[0]
+            line = (cut or line[:_CHAT_FAILURE_LINE_MAX]).rstrip() + "…"
+        return line
+    except Exception:  # noqa: BLE001 - a chat line must never fail
+        return "job failed"
+
+
 def failure_doc(job_name: str, summary: str) -> Doc:
     """The published report for a failed run: tone error, and the
-    summary is the run's own failure text (``"job failed: …"``) —
-    the failure named plainly, exactly as the stored record states
-    it.  The ``last_result`` string itself is untouched by this Doc;
-    it exists only for the publish path."""
+    summary is the run's own failure text — shortened to the
+    chat-short line (see :func:`chat_failure_line`).  The failure
+    named plainly, exactly as the stored record states it, minus
+    the frames, paths and histogram that used to ride along: the
+    ``last_result`` string itself is untouched by this Doc; it
+    exists only for the publish path."""
     return _stamped(Doc(title=f"scheduled: {job_name}", icon="❌",
-                        tone="error", summary=str(summary or "")))
+                        tone="error",
+                        summary=chat_failure_line(summary)))
 
 
 # ── command payloads (Formatting F7 — the F3 residue) ───────────────
@@ -790,11 +933,12 @@ def command_report_doc(job_name: str, command: str,
 def command_failure_doc(job_name: str, command: str,
                         summary: str) -> Doc:
     """:func:`failure_doc` for a command payload: the failure text
-    is the summary (exactly as stored), and the command that failed
-    is named as a mono row — a failed run names what failed."""
+    is the summary, shortened to the chat-short line, and the
+    command that failed is named as a mono row — a failed run names
+    what failed."""
     return _stamped(Doc(
         title=f"scheduled: {job_name}", icon="❌", tone="error",
-        summary=str(summary or ""),
+        summary=chat_failure_line(summary),
         sections=(Section("Run", rows=(
             KV("Command", str(command or ""), mono=True),)),)))
 
@@ -864,6 +1008,12 @@ def summarize_last_result(job: Mapping[str, Any], *,
             # is the first fact the run actually reported
             if first.lower().startswith("ok:") and len(lines) > 2:
                 first = lines[2]
+        if failed:
+            # A failed run's first line can be the whole watchdog
+            # wall (a timeout is one giant line of sampled frames):
+            # the view shows the chat-short line, the stored record
+            # keeps the whole text.
+            first = chat_failure_line(raw)
         if not with_mark:
             return first
         mark = "❌" if failed else "✅"

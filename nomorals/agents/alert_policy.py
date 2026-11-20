@@ -157,6 +157,13 @@ TIER_DEDUPED = "deduped"
 DEFAULT_RECURRENCE_THRESHOLD = 3
 DEFAULT_RECURRENCE_WINDOW_S = 6 * 3600.0
 
+#: A policy line rides the delivered body — it is one short line,
+#: always.  A reason longer than this is cut at a word boundary;
+#: the decision journal keeps the whole reason, the delivered line
+#: never carries a wall (the scheduler's timeout reason used to
+#: arrive as a 500-char slice of a sampled stack chain).
+POLICY_LINE_REASON_MAX = 200
+
 #: the durable decision journal (kv_store, alongside the ops-alert
 #: cooldowns — same substrate, no second store).
 JOURNAL_KEY = "alert_policy:journal:v1"
@@ -272,8 +279,18 @@ class AlertDecision:
         return self.tier == TIER_SUPPRESS
 
     def body_line(self) -> str:
-        """The policy's own line, appended to paged alert bodies."""
-        return (f"alert policy: {self.tier} — {self.reason} "
+        """The policy's own line, appended to paged alert bodies.
+
+        One short line, always: the reason is flattened to one line
+        and cut at a word boundary past the cap.  The decision
+        journal keeps the whole reason — this only bounds what the
+        owner reads.
+        """
+        reason = " ".join(str(self.reason or "").split())
+        if len(reason) > POLICY_LINE_REASON_MAX:
+            cut = reason[:POLICY_LINE_REASON_MAX].rsplit(" ", 1)[0]
+            reason = (cut or reason[:POLICY_LINE_REASON_MAX]).rstrip() + "…"
+        return (f"alert policy: {self.tier} — {reason} "
                 f"(subject: {self.subject})")
 
 
