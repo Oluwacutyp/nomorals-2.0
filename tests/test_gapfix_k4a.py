@@ -474,8 +474,9 @@ def test_attribution_verifies_every_upstream_hash():
     result = verify_attribution()
     assert result["failed"] == []
     assert result["skipped"] == []
-    # 30 upstream files + 1 SDK fixture + 16 Devon files.
-    assert result["verified"] == 47
+    # 30 upstream files + 30 echelon files + 1 SDK fixture + 18
+    # Devon files (the k4arecord half added 30 echelon + 2 Devon).
+    assert result["verified"] == 79
 
 
 def test_attribution_toml_names_the_real_licence():
@@ -483,8 +484,9 @@ def test_attribution_toml_names_the_real_licence():
     assert data["meta"]["license"] == "MIT"
     assert data["meta"]["commit"].startswith("ffc3815")
     assert len(data["upstream"]) == 30
+    assert len(data["echelon"]) == 30
     assert len(data["sdk"]) == 1
-    assert len(data["devon"]) == 16
+    assert len(data["devon"]) == 18
 
 
 def test_parity_toml_is_versioned():

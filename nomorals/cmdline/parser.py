@@ -3236,7 +3236,18 @@ def _parser() -> argparse.ArgumentParser:
                      "nm mocap mvn stop [--session NAME]\\n"
                      "nm mocap mvn status [--session NAME]\\n"
                      "nm mocap mvn decode --pcap PATH\\n"
-                     "nm mocap mvn names"),
+                     "nm mocap mvn names\\n"
+                     "nm mocap kinect record OUT.mkv [--frames N] "
+                     "[--device N] [--timeout-ms MS] [--no-imu] "
+                     "[--tag KEY=VALUE ...] [--color-format FMT] "
+                     "[--color-resolution RES] [--depth-mode MODE] "
+                     "[--camera-fps FPS]\\n"
+                     "nm mocap kinect playback FILE.mkv [info|read|imu|"
+                     "tag|attachment|tracks|data] [--count N] "
+                     "[--direction next|previous] [--seek-usec N] "
+                     "[--origin begin|end|device-time] [--name NAME] "
+                     "[--track NAME]\\n"
+                     "nm mocap kinect status"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     mocap.add_argument("--json", action="store_true",
@@ -3368,6 +3379,71 @@ def _parser() -> argparse.ArgumentParser:
     m_mvn_sub.choices["status"].add_argument(
         "--session", default="",
         help="one MVN session (empty = all sessions)")
+    m_kinect = mocap_sub.add_parser(
+        "kinect", help="Kinect record/playback: .mkv sessions")
+    m_kinect_sub = m_kinect.add_subparsers(dest="mocap_kinect_verb",
+                                           required=True)
+    m_kinect_record = m_kinect_sub.add_parser(
+        "record", help="record a live Kinect into a .mkv file")
+    m_kinect_record.add_argument("out", help=".mkv output path")
+    m_kinect_record.add_argument(
+        "--frames", type=int, default=30,
+        help="frames to record (default 30)")
+    m_kinect_record.add_argument(
+        "--device", type=int, default=0,
+        help="device index (default 0)")
+    m_kinect_record.add_argument(
+        "--timeout-ms", type=int, default=1000,
+        help="ms to wait for each capture (default 1000)")
+    m_kinect_record.add_argument(
+        "--no-imu", action="store_true",
+        help="do not write the IMU track")
+    m_kinect_record.add_argument(
+        "--tag", dest="tags", action="append", default=[],
+        help="tag to write, KEY=VALUE (repeatable)")
+    m_kinect_record.add_argument(
+        "--color-format", default="MJPG",
+        help="color format: MJPG|NV12|YUY2|BGRA32 (default MJPG)")
+    m_kinect_record.add_argument(
+        "--color-resolution", default="720P",
+        help="color resolution: OFF|720P|1080P|1440P|1536P|2160P|"
+        "3072P (default 720P)")
+    m_kinect_record.add_argument(
+        "--depth-mode", default="WFOV_2X2BINNED",
+        help="depth mode: OFF|NFOV_2X2BINNED|NFOV_UNBINNED|"
+        "WFOV_2X2BINNED|WFOV_UNBINNED|PASSIVE_IR "
+        "(default WFOV_2X2BINNED)")
+    m_kinect_record.add_argument(
+        "--camera-fps", default="30",
+        help="camera fps: 5|15|30 (default 30)")
+    m_kinect_playback = m_kinect_sub.add_parser(
+        "playback", help="read a .mkv recording back")
+    m_kinect_playback.add_argument("file", help=".mkv recording path")
+    m_kinect_playback.add_argument(
+        "op", nargs="?", default="info",
+        choices=["info", "read", "imu", "tag", "attachment",
+                 "tracks", "data"],
+        help="what to read (default info)")
+    m_kinect_playback.add_argument(
+        "--count", type=int, default=5,
+        help="captures/samples/blocks to read (default 5)")
+    m_kinect_playback.add_argument(
+        "--direction", default="next", choices=["next", "previous"],
+        help="walk direction (default next)")
+    m_kinect_playback.add_argument(
+        "--seek-usec", type=int, default=None,
+        help="seek to this device timestamp before reading")
+    m_kinect_playback.add_argument(
+        "--origin", default="begin",
+        choices=["begin", "end", "device-time"],
+        help="seek origin (default begin)")
+    m_kinect_playback.add_argument(
+        "--name", default="",
+        help="tag/attachment name (op=tag|attachment)")
+    m_kinect_playback.add_argument(
+        "--track", default="",
+        help="track name (op=data)")
+    m_kinect_sub.add_parser("status", help="probe the Kinect SDKs")
 
     cloudcam = sub.add_parser("cloudcam", aliases=CLI_ALIASES["cloudcam"],
         help="streamed point clouds: worker thread + ring buffer",

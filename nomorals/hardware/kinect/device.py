@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ctypes
 import struct
+from contextlib import contextmanager
 from ctypes import byref, c_bool, c_char, c_int, c_int32, c_size_t, c_uint8
 from dataclasses import dataclass
 from types import TracebackType
@@ -56,6 +57,7 @@ __all__ = [
     "DeviceConfig",
     "KinectDevice",
     "Transformation",
+    "capture_from_handle",
 ]
 
 #: How long get_capture waits for a frame by default (ms).
@@ -116,6 +118,57 @@ def _check(result: int, what: str) -> None:
         raise DeviceError(f"{what} failed (k4a result {result})")
 
 
+def _read_image(lib: K4aLibrary, image: int | None) -> Frame | None:
+    """One k4a_image_t handle -> a decoded Frame (the image is released).
+
+    Module-level so playback can decode the captures it reads with
+    the same code the live device uses — one decode path, not two.
+    """
+    if not image:
+        return None
+    try:
+        fmt = ImageFormat(lib.k4a_image_get_format(image))
+        width = lib.k4a_image_get_width_pixels(image)
+        height = lib.k4a_image_get_height_pixels(image)
+        stride = lib.k4a_image_get_stride_bytes(image)
+        size = lib.k4a_image_get_size(image)
+        buf = lib.k4a_image_get_buffer(image)
+        data = ctypes.string_at(buf, size) if buf else b""
+        return Frame(
+            fmt=fmt, width=int(width), height=int(height),
+            stride=int(stride), data=data,
+            device_timestamp_usec=int(
+                lib.k4a_image_get_device_timestamp_usec(image)),
+            system_timestamp_nsec=int(
+                lib.k4a_image_get_system_timestamp_nsec(image)),
+            exposure_usec=int(
+                lib.k4a_image_get_exposure_usec(image)),
+            white_balance=int(
+                lib.k4a_image_get_white_balance(image)),
+            iso_speed=int(lib.k4a_image_get_iso_speed(image)),
+        )
+    finally:
+        lib.k4a_image_release(image)
+
+
+def capture_from_handle(lib: K4aLibrary, handle: int) -> Capture:
+    """A raw k4a_capture_t handle -> a decoded Capture.
+
+    The capture handle itself is NOT released here — the caller
+    owns it. The images inside are read and released.
+    """
+    return Capture(
+        color=_read_image(
+            lib, lib.k4a_capture_get_color_image(handle)),
+        depth=_read_image(
+            lib, lib.k4a_capture_get_depth_image(handle)),
+        ir=_read_image(
+            lib, lib.k4a_capture_get_ir_image(handle)),
+        temperature_c=float(
+            lib.k4a_capture_get_temperature_c(handle)),
+    )
+
+
 class KinectDevice:
     """One open Azure Kinect device."""
 
@@ -171,6 +224,16 @@ class KinectDevice:
     def is_open(self) -> bool:
         """True while the device handle is held."""
         return self._handle is not None
+
+    @property
+    def handle(self) -> int | None:
+        """The raw k4a_device_t handle (None when closed).
+
+        For calls that take the device itself — ``k4a_record_create``
+        stores the device's calibration and serial number in the
+        recording — rather than opening a second handle.
+        """
+        return self._handle
 
     def _require_open(self) -> int:
         if self._handle is None:
@@ -323,65 +386,40 @@ class KinectDevice:
             self._lib.k4a_device_stop_cameras(self._handle)
         self._cameras_started = False
 
-    def get_capture(self, timeout_ms: int = DEFAULT_TIMEOUT_MS
-                    ) -> Capture | None:
-        """Wait for one capture; None on timeout.
+    @contextmanager
+    def raw_capture(self, timeout_ms: int = DEFAULT_TIMEOUT_MS):
+        """Wait for one capture and yield its raw k4a_capture_t handle.
 
-        Raises :class:`CaptureError` when the SDK reports failure.
+        Yields None on timeout. The handle is released when the
+        context exits — for callers that need the capture itself
+        (recording it, handing it to another SDK call) instead of
+        the decoded frames :meth:`get_capture` returns.
         """
         handle = self._require_open()
         capture = ctypes.c_void_p()
         result = self._lib.k4a_device_get_capture(
             handle, byref(capture), int(timeout_ms))
         if result == 2:  # K4A_WAIT_RESULT_TIMEOUT
-            return None
+            yield None
+            return
         if result != 0 or not capture.value:
             raise CaptureError(
                 f"get capture failed (k4a wait result {result})")
         try:
-            return Capture(
-                color=self._read_image(
-                    self._lib.k4a_capture_get_color_image(
-                        capture.value)),
-                depth=self._read_image(
-                    self._lib.k4a_capture_get_depth_image(
-                        capture.value)),
-                ir=self._read_image(
-                    self._lib.k4a_capture_get_ir_image(capture.value)),
-                temperature_c=float(
-                    self._lib.k4a_capture_get_temperature_c(
-                        capture.value)),
-            )
+            yield capture.value
         finally:
             self._lib.k4a_capture_release(capture.value)
 
-    def _read_image(self, image: int | None) -> Frame | None:
-        if not image:
-            return None
-        try:
-            lib = self._lib
-            fmt = ImageFormat(lib.k4a_image_get_format(image))
-            width = lib.k4a_image_get_width_pixels(image)
-            height = lib.k4a_image_get_height_pixels(image)
-            stride = lib.k4a_image_get_stride_bytes(image)
-            size = lib.k4a_image_get_size(image)
-            buf = lib.k4a_image_get_buffer(image)
-            data = ctypes.string_at(buf, size) if buf else b""
-            return Frame(
-                fmt=fmt, width=int(width), height=int(height),
-                stride=int(stride), data=data,
-                device_timestamp_usec=int(
-                    lib.k4a_image_get_device_timestamp_usec(image)),
-                system_timestamp_nsec=int(
-                    lib.k4a_image_get_system_timestamp_nsec(image)),
-                exposure_usec=int(
-                    lib.k4a_image_get_exposure_usec(image)),
-                white_balance=int(
-                    lib.k4a_image_get_white_balance(image)),
-                iso_speed=int(lib.k4a_image_get_iso_speed(image)),
-            )
-        finally:
-            self._lib.k4a_image_release(image)
+    def get_capture(self, timeout_ms: int = DEFAULT_TIMEOUT_MS
+                    ) -> Capture | None:
+        """Wait for one capture; None on timeout.
+
+        Raises :class:`CaptureError` when the SDK reports failure.
+        """
+        with self.raw_capture(timeout_ms) as capture:
+            if capture is None:
+                return None
+            return capture_from_handle(self._lib, capture)
 
     # -- IMU ----------------------------------------------------------
 

@@ -8,6 +8,10 @@ a comment. Entries come in two kinds:
 * ``upstream`` — a file in the storytold/k4a-sys-temp clone this port
   derives from; ``sha256`` is pinned and verified. The clone is MIT
   (Copyright 2020 Amédée d'Aboville) at commit ffc3815.
+* ``echelon`` — a file in the upstream echelon/k4a-sys clone (the
+  same author's crate, 0.2.2); verified the same way against that
+  clone's root. The vendored SDK headers are byte-identical between
+  the two clones, so the same hashes appear in both sections.
 * ``sdk`` — a file derived from the Microsoft Azure Kinect Sensor
   SDK itself (MIT), pinned by the SHA-256 of the repo file it was
   extracted into, with the SDK source named.
@@ -24,12 +28,15 @@ from pathlib import Path
 from typing import Any
 
 __all__ = ["DEFAULT_ATTRIBUTION_PATH", "DEFAULT_CLONE_ROOT",
+           "DEFAULT_ECHELON_CLONE_ROOT",
            "load_attribution", "verify_attribution"]
 
 DEFAULT_ATTRIBUTION_PATH = Path(__file__).resolve().parent.parent \
     / "kinect-attribution.toml"
 DEFAULT_CLONE_ROOT = Path.home() / "workspace" / "echelon-mining" \
     / "repos" / "storytold" / "k4a-sys-temp"
+DEFAULT_ECHELON_CLONE_ROOT = Path.home() / "workspace" \
+    / "echelon-mining" / "repos" / "echelon" / "k4a-sys"
 
 
 def _sha256(path: Path) -> str:
@@ -53,10 +60,12 @@ def load_attribution(path: str | Path | None = None) -> dict[str, Any]:
 
 
 def verify_attribution(path: str | Path | None = None, *,
-                       clone_root: str | Path | None = None
+                       clone_root: str | Path | None = None,
+                       echelon_clone_root: str | Path | None = None
                        ) -> dict[str, Any]:
-    """Verify every [[upstream]], [[sdk]] and [[devon]] entry:
-    upstream entries are hash-checked against the clone, sdk
+    """Verify every [[upstream]], [[echelon]], [[sdk]] and [[devon]]
+    entry: upstream entries are hash-checked against the temp
+    clone, echelon entries against the upstream echelon clone, sdk
     entries are hash-checked against the repo file, devon entries
     are checked to exist. Returns {verified, failed, skipped}."""
     toml_path = Path(path) if path is not None else DEFAULT_ATTRIBUTION_PATH
@@ -68,26 +77,37 @@ def verify_attribution(path: str | Path | None = None, *,
     data = load_attribution(toml_path)
     clones = Path(clone_root) if clone_root is not None \
         else DEFAULT_CLONE_ROOT
+    echelon = Path(echelon_clone_root) \
+        if echelon_clone_root is not None \
+        else DEFAULT_ECHELON_CLONE_ROOT
     repo_root = Path(__file__).resolve().parents[3]
     verified = 0
     failed: list[dict[str, str]] = []
     skipped: list[dict[str, str]] = []
-    for asset in data.get("upstream", []):
-        asset_id = str(asset.get("id", "<unnamed>"))
-        upstream = str(asset.get("upstream", ""))
-        want = str(asset.get("sha256", ""))
-        source = clones / upstream
-        if not source.exists():
-            skipped.append({"id": asset_id,
-                            "reason": f"upstream clone lacks {upstream}"})
-            continue
-        got = _sha256(source)
-        if got != want:
-            failed.append({"id": asset_id,
-                           "reason": f"sha256 mismatch for {upstream}: "
-                                     f"got {got[:12]}, want {want[:12]}"})
-        else:
-            verified += 1
+
+    def _check_hashed(assets, root: Path, kind: str) -> None:
+        nonlocal verified
+        for asset in assets:
+            asset_id = str(asset.get("id", "<unnamed>"))
+            upstream = str(asset.get("upstream", ""))
+            want = str(asset.get("sha256", ""))
+            source = root / upstream
+            if not source.exists():
+                skipped.append(
+                    {"id": asset_id,
+                     "reason": f"{kind} clone lacks {upstream}"})
+                continue
+            got = _sha256(source)
+            if got != want:
+                failed.append(
+                    {"id": asset_id,
+                     "reason": f"sha256 mismatch for {upstream}: "
+                               f"got {got[:12]}, want {want[:12]}"})
+            else:
+                verified += 1
+
+    _check_hashed(data.get("upstream", []), clones, "upstream")
+    _check_hashed(data.get("echelon", []), echelon, "echelon")
     for asset in data.get("sdk", []):
         asset_id = str(asset.get("id", "<unnamed>"))
         rel = str(asset.get("path", ""))

@@ -36,6 +36,8 @@ def _cmd_mocap(args: argparse.Namespace, context: Any) -> int:
         return _cmd_mocap_ingest(args, context)
     if action == "mvn":
         return _cmd_mocap_mvn(args, context)
+    if action == "kinect":
+        return _cmd_mocap_kinect(args, context)
     if action == "status":
         from ...tools.mocap import _STORE
         return _out(args, {
@@ -284,6 +286,63 @@ def _cmd_mocap_mvn(args: argparse.Namespace, context: Any) -> int:
         print(f"mvn: {exc}", file=sys.stderr)
         return 1
     print(f"unknown mocap mvn verb: {verb}", file=sys.stderr)
+    return 2
+
+
+def _cmd_mocap_kinect(args: argparse.Namespace, context: Any) -> int:
+    """Route `nm mocap kinect` verbs — the same sessions the
+    ``mocap`` brain tool drives, from the terminal."""
+    from ...hardware.kinect.errors import KinectError
+    from ...tools.mocap import _kinect_action
+
+    verb = args.mocap_kinect_verb
+    try:
+        if verb == "record":
+            tags: dict[str, str] = {}
+            for raw in (args.tags or []):
+                if "=" not in raw:
+                    print("kinect record --tag needs KEY=VALUE, "
+                          f"got {raw!r}", file=sys.stderr)
+                    return 2
+                key, value = raw.split("=", 1)
+                tags[key.strip()] = value
+            params = {"frames": int(args.frames or 0),
+                      "device_index": int(args.device or 0),
+                      "timeout_ms": int(args.timeout_ms or 1000),
+                      "imu": not args.no_imu, "tags": tags,
+                      "color_format": args.color_format,
+                      "color_resolution": args.color_resolution,
+                      "depth_mode": args.depth_mode,
+                      "camera_fps": args.camera_fps}
+            return _out(args, _kinect_action(
+                "kinect_record", "", params, [], args.out))
+        if verb == "playback":
+            params = {"op": args.op,
+                      "count": int(args.count or 0),
+                      "direction": args.direction,
+                      "origin": args.origin,
+                      "name": args.name, "track": args.track}
+            if args.seek_usec is not None:
+                params["seek_usec"] = int(args.seek_usec)
+            return _out(args, _kinect_action(
+                "kinect_playback", "", params, [args.file], ""))
+        if verb == "status":
+            from ...hardware.kinect import probe
+            report = probe()
+            return _out(args, {
+                "sdk_present": report.sdk_present,
+                "record_sdk_present": report.record_sdk_present,
+                "record_sdk_path": report.record_sdk_path,
+                "device_count": report.device_count,
+                "summary": report.summary(),
+            })
+    except KinectError as exc:
+        print(f"kinect: {exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"kinect: {exc}", file=sys.stderr)
+        return 2
+    print(f"unknown mocap kinect verb: {verb}", file=sys.stderr)
     return 2
 
 

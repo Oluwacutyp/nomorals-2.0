@@ -15,6 +15,8 @@ __all__ = [
     "KinectError",
     "NoDeviceError",
     "NoSdkError",
+    "PlaybackError",
+    "RecordError",
     "SdkMismatchError",
 ]
 
@@ -67,3 +69,17 @@ class CalibrationError(KinectError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message, kind="calibration_failed")
+
+
+class RecordError(KinectError):
+    """A recording operation failed (create, tag, write, flush)."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, kind="record_failed")
+
+
+class PlaybackError(KinectError):
+    """A playback operation failed (open, seek, read)."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, kind="playback_failed")

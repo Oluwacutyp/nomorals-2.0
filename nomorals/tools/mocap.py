@@ -31,7 +31,8 @@ __all__ = ["register"]
 _ACTIONS = ("status", "engines", "route", "register", "publish", "read",
             "snapshot", "claim", "release", "subscribe", "poll",
             "unsubscribe", "bvh_write", "bvh_read", "kinect_fixture",
-            "kinect_status", "save", "load",
+            "kinect_status", "kinect_record", "kinect_playback",
+            "save", "load",
             "rig_list", "rig_load", "rig_pose", "rig_render",
             "rig_drive", "rig_export", "rig_status",
             "ingest_start", "ingest_stop", "ingest_status",
@@ -347,6 +348,231 @@ def _mvn_action(action: str, node: str, args: dict,
     raise ValueError(f"unhandled mocap action {action!r}")
 
 
+def _kinect_config(args: dict) -> Any:
+    """params -> DeviceConfig. Unknown values are refused by name."""
+    from ..hardware.kinect.device import DeviceConfig
+    from ..hardware.kinect.enums import (
+        ColorResolution,
+        DepthMode,
+        Fps,
+        ImageFormat,
+    )
+
+    formats = {"MJPG": ImageFormat.COLOR_MJPG,
+               "NV12": ImageFormat.COLOR_NV12,
+               "YUY2": ImageFormat.COLOR_YUY2,
+               "BGRA32": ImageFormat.COLOR_BGRA32}
+    resolutions = {"OFF": ColorResolution.OFF,
+                   "720P": ColorResolution.RES_720P,
+                   "1080P": ColorResolution.RES_1080P,
+                   "1440P": ColorResolution.RES_1440P,
+                   "1536P": ColorResolution.RES_1536P,
+                   "2160P": ColorResolution.RES_2160P,
+                   "3072P": ColorResolution.RES_3072P}
+    modes = {"OFF": DepthMode.OFF,
+             "NFOV_2X2BINNED": DepthMode.NFOV_2X2BINNED,
+             "NFOV_UNBINNED": DepthMode.NFOV_UNBINNED,
+             "WFOV_2X2BINNED": DepthMode.WFOV_2X2BINNED,
+             "WFOV_UNBINNED": DepthMode.WFOV_UNBINNED,
+             "PASSIVE_IR": DepthMode.PASSIVE_IR}
+    rates = {"5": Fps.FPS_5, "15": Fps.FPS_15, "30": Fps.FPS_30}
+    fmt = str(args.get("color_format") or "MJPG").upper()
+    res = str(args.get("color_resolution") or "720P").upper()
+    mode = str(args.get("depth_mode") or "WFOV_2X2BINNED").upper()
+    rate = str(args.get("camera_fps") or "30")
+    if fmt not in formats:
+        raise ValueError(f"unknown color_format {fmt!r}; use one of "
+                         f"{', '.join(sorted(formats))}")
+    if res not in resolutions:
+        raise ValueError(f"unknown color_resolution {res!r}; use one "
+                         f"of {', '.join(sorted(resolutions))}")
+    if mode not in modes:
+        raise ValueError(f"unknown depth_mode {mode!r}; use one of "
+                         f"{', '.join(sorted(modes))}")
+    if rate not in rates:
+        raise ValueError(f"unknown camera_fps {rate!r}; use one of "
+                         f"{', '.join(sorted(rates))}")
+    return DeviceConfig(color_format=formats[fmt],
+                        color_resolution=resolutions[res],
+                        depth_mode=modes[mode],
+                        camera_fps=rates[rate])
+
+
+def _frame_summary(frame: Any) -> dict[str, Any] | None:
+    """A Frame -> plain data (format, geometry, timestamps)."""
+    if frame is None:
+        return None
+    return {"format": frame.fmt.name, "width": frame.width,
+            "height": frame.height, "stride": frame.stride,
+            "bytes": len(frame.data),
+            "device_timestamp_usec": frame.device_timestamp_usec,
+            "system_timestamp_nsec": frame.system_timestamp_nsec}
+
+
+def _capture_summary(capture: Any) -> dict[str, Any]:
+    """A Capture -> plain data (one summary per image)."""
+    return {"color": _frame_summary(capture.color),
+            "depth": _frame_summary(capture.depth),
+            "ir": _frame_summary(capture.ir),
+            "temperature_c": capture.temperature_c}
+
+
+def _kinect_action(action: str, node: str, args: dict,
+                   sources: list[str], output: str) -> dict[str, Any]:
+    """Kinect record/playback verbs on the mocap tool — one code
+    path with the CLI and chat, over the k4arecord organ."""
+    import base64
+    import contextlib
+    import hashlib
+
+    from ..hardware.kinect import record as krec
+    from ..hardware.kinect.errors import PlaybackError
+
+    if action == "kinect_record":
+        if not output:
+            raise ValueError("kinect_record needs output=<path.mkv>")
+        tags = args.get("tags") or {}
+        if not isinstance(tags, dict):
+            raise ValueError(
+                "kinect_record params.tags must be an object")
+        return krec.record_live(
+            output, int(args.get("frames") or 30),
+            device_index=int(args.get("device_index") or 0),
+            config=_kinect_config(args),
+            tags={str(k): str(v) for k, v in tags.items()},
+            imu=bool(args.get("imu", True)),
+            timeout_ms=int(args.get("timeout_ms") or 1000))
+    if action == "kinect_playback":
+        if not sources:
+            raise ValueError("kinect_playback needs sources=[path.mkv]")
+        op = str(args.get("op") or "info")
+        count = max(0, int(args.get("count") or 5))
+        direction = str(args.get("direction") or "next")
+        if direction not in ("next", "previous"):
+            raise ValueError(
+                "kinect_playback direction must be next|previous, "
+                f"got {direction!r}")
+        origin_name = str(args.get("origin") or "begin").lower()
+        origins = {"begin": krec.PlaybackSeekOrigin.BEGIN,
+                   "end": krec.PlaybackSeekOrigin.END,
+                   "device-time": krec.PlaybackSeekOrigin.DEVICE_TIME}
+        if origin_name not in origins:
+            raise ValueError(
+                "kinect_playback origin must be begin|end|"
+                f"device-time, got {origin_name!r}")
+        with krec.Playback.open(sources[0]) as playback:
+            if op == "info":
+                return playback.info()
+            if op == "tracks":
+                tracks = []
+                for name in playback.track_names():
+                    entry: dict[str, Any] = {
+                        "name": name,
+                        "builtin": playback.track_is_builtin(name)}
+                    with contextlib.suppress(PlaybackError):
+                        entry["video_settings"] = (
+                            playback.track_video_settings(name))
+                    codec = playback.track_codec_id(name)
+                    if codec is not None:
+                        entry["codec_id"] = codec
+                    tracks.append(entry)
+                return {"path": playback.path,
+                        "track_count": len(tracks), "tracks": tracks}
+            if op in ("read", "imu", "data"):
+                seek_usec = args.get("seek_usec")
+                if seek_usec is not None:
+                    playback.seek(int(seek_usec),
+                                  origins[origin_name])
+            if op == "read":
+                read = (playback.previous_capture
+                        if direction == "previous"
+                        else playback.next_capture)
+                captures = []
+                eof = False
+                for _ in range(count):
+                    capture = read()
+                    if capture is None:
+                        eof = True
+                        break
+                    captures.append(_capture_summary(capture))
+                return {"path": playback.path,
+                        "captures_returned": len(captures),
+                        "eof": eof, "captures": captures}
+            if op == "imu":
+                read = (playback.previous_imu_sample
+                        if direction == "previous"
+                        else playback.next_imu_sample)
+                samples = []
+                eof = False
+                for _ in range(count):
+                    sample = read()
+                    if sample is None:
+                        eof = True
+                        break
+                    samples.append(sample)
+                return {"path": playback.path,
+                        "samples_returned": len(samples),
+                        "eof": eof, "samples": samples}
+            if op == "data":
+                track = str(args.get("track") or "")
+                if not track:
+                    raise ValueError(
+                        "kinect_playback op=data needs params.track")
+                read = (playback.previous_data_block
+                        if direction == "previous"
+                        else playback.next_data_block)
+                blocks = []
+                eof = False
+                for _ in range(count):
+                    block = read(track)
+                    if block is None:
+                        eof = True
+                        break
+                    entry = {
+                        "device_timestamp_usec":
+                            block.device_timestamp_usec,
+                        "size_bytes": len(block.data),
+                        "sha256": hashlib.sha256(
+                            block.data).hexdigest(),
+                    }
+                    if len(block.data) <= 1 << 20:
+                        entry["data_base64"] = base64.b64encode(
+                            block.data).decode("ascii")
+                    blocks.append(entry)
+                return {"path": playback.path, "track": track,
+                        "blocks_returned": len(blocks),
+                        "eof": eof, "blocks": blocks}
+            if op == "tag":
+                name = str(args.get("name") or "")
+                if not name:
+                    raise ValueError(
+                        "kinect_playback op=tag needs params.name")
+                return {"path": playback.path, "name": name,
+                        "value": playback.get_tag(name)}
+            if op == "attachment":
+                name = str(args.get("name") or "")
+                if not name:
+                    raise ValueError(
+                        "kinect_playback op=attachment needs "
+                        "params.name")
+                data = playback.get_attachment(name)
+                if data is None:
+                    return {"path": playback.path, "name": name,
+                            "value": None}
+                entry = {"path": playback.path, "name": name,
+                         "size_bytes": len(data),
+                         "sha256": hashlib.sha256(data).hexdigest()}
+                if len(data) <= 8 << 20:
+                    entry["data_base64"] = base64.b64encode(
+                        data).decode("ascii")
+                else:
+                    entry["note"] = ("attachment is larger than 8MB "
+                                     "— not inlined")
+                return entry
+        raise ValueError(f"unknown kinect_playback op {op!r}")
+    raise ValueError(f"unhandled mocap action {action!r}")
+
+
 def _rig_face(raw: Any) -> FaceInput | None:
     """params.face dict -> FaceInput. Unknown keys are refused by
     name, never ignored."""
@@ -420,7 +646,15 @@ def register(registry: Any) -> None:
             "JSON], output=<path.bvh>>; bvh_read=<parse a BVH file, "
             "sources=[path.bvh]>; kinect_fixture=<publish the "
             "vendored Kinect fixture as depth + pointcloud, sources="
-            "[fixtures dir]>; kinect_status=<probe the SDK/device>; "
+            "[fixtures dir]>; kinect_status=<probe the SDK/device, "
+            "including the record library>; kinect_record=<record N "
+            "frames from a live device into a .mkv, output=<path.mkv>, "
+            "params=<{frames, device_index, timeout_ms, tags, imu, "
+            "color_format, color_resolution, depth_mode, camera_fps}>>; "
+            "kinect_playback=<read a .mkv recording back, "
+            "sources=[path.mkv], params=<{op: info|read|imu|tag|"
+            "attachment|tracks|data, count, direction: next|previous, "
+            "seek_usec, origin: begin|end|device-time, name, track}>>; "
             "save=<persist the store, output=<path>>; load=<restore "
             "a saved store, sources=[path]>. Rig actions (VTuber "
             "rig, HyperJail pattern): rig_list=<loaded rig "
@@ -468,7 +702,8 @@ def register(registry: Any) -> None:
             "table>. action=<status|engines|"
             "route|register|publish|read|snapshot|claim|release|"
             "subscribe|poll|unsubscribe|bvh_write|bvh_read|"
-            "kinect_fixture|kinect_status|save|load|rig_list|"
+            "kinect_fixture|kinect_status|kinect_record|"
+            "kinect_playback|save|load|rig_list|"
             "rig_load|rig_pose|rig_render|rig_drive|rig_export|"
             "rig_status|ingest_start|ingest_stop|ingest_status|"
             "ingest_tick|ingest_publish|mvn_listen|mvn_send|mvn_replay|mvn_stop|mvn_status|mvn_decode|mvn_names>; sources=<list "
@@ -595,9 +830,13 @@ def register(registry: Any) -> None:
             report = probe()
             return {
                 "sdk_present": report.sdk_present,
+                "record_sdk_present": report.record_sdk_present,
+                "record_sdk_path": report.record_sdk_path,
                 "device_count": report.device_count,
-                "summary": report.summary,
+                "summary": report.summary(),
             }
+        if action in ("kinect_record", "kinect_playback"):
+            return _kinect_action(action, node, args, sources, output)
         if action == "save":
             if not output:
                 raise ValueError("save needs output=<path>")

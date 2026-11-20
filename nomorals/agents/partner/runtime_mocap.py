@@ -40,6 +40,11 @@ class RuntimeMocapMixin:
         /mocap mvn status [name]                  MVN sessions
         /mocap mvn decode <pcap>                  decode a capture, no UDP
         /mocap mvn names                          the MVN segment tables
+        /mocap kinect record <out.mkv> [frames N] [tag KEY=VALUE ...]
+                                                  record a live Kinect
+        /mocap kinect playback <file.mkv> [op] [count N]
+                                                  read a recording back
+        /mocap kinect status                      probe the Kinect SDKs
         """
         from ...media.mocap.bvh import SkeletonFrame
         from ...media.mocap.errors import MocapError
@@ -65,6 +70,8 @@ class RuntimeMocapMixin:
             return self._control_mocap_ingest(parts[1:])
         if parts[0] == "mvn":
             return self._control_mocap_mvn(parts[1:], chat_key)
+        if parts[0] == "kinect":
+            return self._control_mocap_kinect(parts[1:], chat_key)
         if parts[0] != "rig":
             return self._control_mocap_help()
         verb = parts[1] if len(parts) > 1 else ""
@@ -275,7 +282,7 @@ class RuntimeMocapMixin:
             "rig render [name] | rig drive <bvh> [text] | "
             "rig export <bvh> [text] | ingest start [live|fixture] "
             "[name] | ingest stop [name] | ingest status [name] | "
-            "ingest tick [name] [n] | ingest publish [live|fixture] | mvn listen [name] [host] [port] | mvn send [name] [host] [port] | mvn replay <pcap> [name] | mvn stop [name] | mvn status [name] | mvn decode <pcap> | mvn names")
+            "ingest tick [name] [n] | ingest publish [live|fixture] | mvn listen [name] [host] [port] | mvn send [name] [host] [port] | mvn replay <pcap> [name] | mvn stop [name] | mvn status [name] | mvn decode <pcap> | mvn names | kinect record <out.mkv> [frames N] [tag KEY=VALUE ...] | kinect playback <file.mkv> [op] [count N] | kinect status")
 
     def _control_mocap_mvn(self, parts: list[str],
                            chat_key: str) -> str:
@@ -366,6 +373,163 @@ class RuntimeMocapMixin:
         except Exception as exc:  # noqa: BLE001 - chat never dies
             record_failure(
                 "runtime_mocap.RuntimeMocapMixin._control_mocap_mvn",
+                exc)
+            return f"mocap failed: {exc}"
+        return self._control_mocap_help()
+
+    def _control_mocap_kinect(self, parts: list[str],
+                              chat_key: str) -> str:
+        """Kinect record/playback, live from any chat — the same
+        sessions the ``mocap`` brain tool and ``nm mocap kinect``
+        drive."""
+        from ...hardware.kinect.errors import KinectError
+        from ...tools.mocap import _kinect_action
+
+        if not parts:
+            return self._control_mocap_help()
+        verb = parts[0]
+        rest = parts[1:]
+
+        def _kv(tokens: list[str]) -> dict[str, str]:
+            values: dict[str, str] = {}
+            for token in tokens:
+                if "=" not in token:
+                    raise ValueError(
+                        f"expected KEY=VALUE, got {token!r}")
+                key, value = token.split("=", 1)
+                values[key.strip()] = value
+            return values
+
+        try:
+            if verb == "record":
+                if not rest:
+                    return "/mocap kinect record needs an .mkv path"
+                out = rest[0]
+                kv = _kv(rest[1:])
+                tags: dict[str, str] = {}
+                for token in rest[1:]:
+                    if token.startswith("tag="):
+                        key, value = token[4:].split("=", 1)
+                        tags[key.strip()] = value
+                params = {"frames": int(kv.get("frames") or 30),
+                          "device_index": int(kv.get("device") or 0),
+                          "timeout_ms": int(kv.get("timeout") or 1000),
+                          "imu": kv.get("imu", "on").lower() != "off",
+                          "tags": tags,
+                          "color_format": kv.get("color-format",
+                                                 "MJPG"),
+                          "color_resolution": kv.get(
+                              "color-resolution", "720P"),
+                          "depth_mode": kv.get(
+                              "depth-mode", "WFOV_2X2BINNED"),
+                          "camera_fps": kv.get("camera-fps", "30")}
+                summary = _kinect_action("kinect_record", "", params,
+                                         [], out)
+                return (f"recorded {summary['frames_written']} "
+                        f"frames ({summary['imu_samples']} IMU) to "
+                        f"{summary['path']}")
+            if verb == "playback":
+                if not rest:
+                    return "/mocap kinect playback needs an .mkv path"
+                path = rest[0]
+                tokens = rest[1:]
+                op = "info"
+                if tokens and "=" not in tokens[0]:
+                    op = tokens[0]
+                    tokens = tokens[1:]
+                kv = _kv(tokens)
+                params = {"op": op,
+                          "count": int(kv.get("count") or 5),
+                          "direction": kv.get("direction", "next"),
+                          "origin": kv.get("origin", "begin"),
+                          "name": kv.get("name", ""),
+                          "track": kv.get("track", "")}
+                if "seek" in kv:
+                    params["seek_usec"] = int(kv["seek"])
+                result = _kinect_action("kinect_playback", "", params,
+                                        [path], "")
+                if op == "info":
+                    return json.dumps(result, indent=2)
+                if op == "tracks":
+                    lines = [f"tracks in {path} "
+                             f"({result['track_count']}):"]
+                    for entry in result["tracks"]:
+                        line = f"  {entry['name']}"
+                        if entry.get("builtin"):
+                            line += " (builtin)"
+                        if entry.get("video_settings"):
+                            vs = entry["video_settings"]
+                            line += (f" {vs['width']}x{vs['height']} "
+                                     f"@{vs['framerate']}fps")
+                        lines.append(line)
+                    return "\n".join(lines)
+                if op == "read":
+                    lines = [f"read {result['captures_returned']} "
+                             f"captures from {path}"
+                             + (" (EOF)" if result["eof"] else "")]
+                    for capture in result["captures"]:
+                        depth = capture["depth"]
+                        color = capture["color"]
+                        stamp = (depth["device_timestamp_usec"]
+                                 if depth else None)
+                        bits = [f"@{stamp}us"]
+                        if color:
+                            bits.append(f"color {color['width']}x"
+                                        f"{color['height']}")
+                        if depth:
+                            bits.append(f"depth {depth['width']}x"
+                                        f"{depth['height']}")
+                        lines.append("  " + " ".join(bits))
+                    return "\n".join(lines)
+                if op == "imu":
+                    lines = [f"read {result['samples_returned']} "
+                             f"IMU samples from {path}"
+                             + (" (EOF)" if result["eof"] else "")]
+                    for sample in result["samples"]:
+                        lines.append(
+                            f"  @{sample['device_timestamp_usec']}us "
+                            f"acc={sample['acc']} "
+                            f"gyro={sample['gyro']}")
+                    return "\n".join(lines)
+                if op == "data":
+                    lines = [f"read {result['blocks_returned']} "
+                             f"blocks from {result['track']} in "
+                             f"{path}"
+                             + (" (EOF)" if result["eof"] else "")]
+                    for block in result["blocks"]:
+                        lines.append(
+                            f"  @{block['device_timestamp_usec']}us "
+                            f"{block['size_bytes']} bytes "
+                            f"sha256:{block['sha256'][:12]}")
+                    return "\n".join(lines)
+                if op == "tag":
+                    return (f"{result['name']}: "
+                            f"{result['value'] or '(not set)'}")
+                if op == "attachment":
+                    if result.get("value") is None:
+                        return (f"attachment {result['name']}: "
+                                "(not present)")
+                    return (f"attachment {result['name']}: "
+                            f"{result['size_bytes']} bytes, "
+                            f"sha256:{result['sha256'][:12]}")
+                return json.dumps(result, indent=2)
+            if verb == "status":
+                from ...hardware.kinect import probe
+                report = probe()
+                return report.summary()
+        except KinectError as exc:
+            record_failure(
+                "runtime_mocap.RuntimeMocapMixin._control_mocap_kinect",
+                exc)
+            return f"kinect: {exc}"
+        except (OSError, ValueError) as exc:
+            record_failure(
+                "runtime_mocap.RuntimeMocapMixin._control_mocap_kinect",
+                exc)
+            return f"kinect: {exc}"
+        except Exception as exc:  # noqa: BLE001 - chat never dies
+            record_failure(
+                "runtime_mocap.RuntimeMocapMixin._control_mocap_kinect",
                 exc)
             return f"mocap failed: {exc}"
         return self._control_mocap_help()

@@ -22,6 +22,7 @@ from .bindings import load_library
 from .device import DeviceConfig, KinectDevice
 from .enums import ColorResolution, DepthMode
 from .errors import KinectError
+from .record import load_record_library
 
 __all__ = ["ProbeReport", "probe"]
 
@@ -33,6 +34,9 @@ class ProbeReport:
     sdk_present: bool = False
     sdk_path: str | None = None
     sdk_error: str | None = None
+    record_sdk_present: bool = False
+    record_sdk_path: str | None = None
+    record_sdk_error: str | None = None
     device_count: int = 0
     devices: list[dict] = field(default_factory=list)
     frames_captured: int = 0
@@ -53,10 +57,24 @@ class ProbeReport:
         if not self.sdk_present:
             lines.append(
                 f"No Kinect SDK installed: {self.sdk_error}")
+            if not self.record_sdk_present:
+                lines.append(
+                    "No Kinect record library either: "
+                    f"{self.record_sdk_error}")
             return "\n".join(lines)
         lines.append(
             f"Kinect SDK found ({self.sdk_path}); "
             f"{self.device_count} device(s) connected.")
+        if self.record_sdk_present:
+            lines.append(
+                "Kinect record library found "
+                f"({self.record_sdk_path}) — recording and playback "
+                "available.")
+        else:
+            lines.append(
+                "No Kinect record library: "
+                f"{self.record_sdk_error} — recording and playback "
+                "unavailable.")
         if not self.devices:
             lines.append(
                 "No Azure Kinect device connected — plug one in "
@@ -87,6 +105,13 @@ def probe(frames: int = 0, timeout_ms: int = 1000,
     A missing SDK or device is reported, never raised.
     """
     report = ProbeReport()
+    try:
+        record_lib = load_record_library()
+    except KinectError as exc:
+        report.record_sdk_error = str(exc)
+    else:
+        report.record_sdk_present = True
+        report.record_sdk_path = record_lib.path
     try:
         lib = load_library()
     except KinectError as exc:

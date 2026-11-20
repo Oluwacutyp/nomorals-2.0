@@ -256,3 +256,171 @@ derives_from = []
 id = "kinect-test"
 path = "tests/test_gapfix_k4a.py"
 derives_from = []
+
+# Upstream: echelon/k4a-sys, version 0.2.2, MIT (Copyright
+# 2020 Amédée d'Aboville, LICENSE.md) — the crate this lane
+# ports the k4arecord half of. The vendored SDK headers are
+# byte-identical to the temp clone's, so their hashes match
+# the [[upstream]] section; the crate files (build.rs,
+# Cargo.toml, README, CHANGELOG, examples) are the ones that
+# differ, and are pinned here against the upstream clone.
+
+[[echelon]]
+id = "echelon-gitignore"
+upstream = ".gitignore"
+sha256 = "2b69b33a96e7d5e72a441debd6e3c36be2bde30a7b1944d3a7ecbb494b1291cc"
+
+[[echelon]]
+id = "echelon-changelog"
+upstream = "CHANGELOG.md"
+sha256 = "161db041c0dc51110afb42a9bcb519953cf7295e44d88c2ec2a1316f70902e17"
+
+[[echelon]]
+id = "echelon-cargo-toml"
+upstream = "Cargo.toml"
+sha256 = "c77a0825dad276bf393a59cd0e6ff2119778cba6ecd08980cd7ddd73f51cb9b7"
+
+[[echelon]]
+id = "echelon-license"
+upstream = "LICENSE.md"
+sha256 = "9dcc1c0e3bed4a89589106dbc7e1894f3208ef8cd392662ca90125ec04a5f1f4"
+
+[[echelon]]
+id = "echelon-readme"
+upstream = "README.md"
+sha256 = "e9e6619ab5b38883d34190a1e7d6cba0337b1adbf6544a7027ba4d0554fa37c8"
+
+[[echelon]]
+id = "echelon-build-rs"
+upstream = "build.rs"
+sha256 = "b9c5bd0896c60f3e9913584269d733b40ee2158191defd7885f084dfc5a5fe76"
+
+[[echelon]]
+id = "echelon-example-enumerate"
+upstream = "examples/enumerate.rs"
+sha256 = "d27101f4d2df4f1045b1cfcea96c45c1f0fc2ad5adc2f6528639211b8bfc2707"
+
+[[echelon]]
+id = "echelon-example-streaming"
+upstream = "examples/streaming.rs"
+sha256 = "66c23a6b774a0018b98e1d3868b44192c710cb306cefdeb320dbe4eb067cf04f"
+
+[[echelon]]
+id = "echelon-lib-rs"
+upstream = "src/lib.rs"
+sha256 = "8002c11922091615ec6534a47e5bf990564e354cc52fd88d15a8406a871bd1f5"
+
+[[echelon]]
+id = "echelon-wrapper-h"
+upstream = "wrapper.h"
+sha256 = "8f2d6c651fa476cbf53d3f02dca82dd935ff3cf6231ab7003f7ae305e2a36bae"
+
+[[echelon]]
+id = "echelon-linux-k4a-h"
+upstream = "vendor/include/linux/k4a/k4a.h"
+sha256 = "711aa1d0756dd8145e41ca48e47159e412c6c37c0dbee271fe73f4e94262714e"
+
+[[echelon]]
+id = "echelon-linux-k4a-hpp"
+upstream = "vendor/include/linux/k4a/k4a.hpp"
+sha256 = "6211190786dc4942e5059aab9f98ce5de6ffacd8a52a0393f407f79443608a53"
+
+[[echelon]]
+id = "echelon-linux-k4a-export-h"
+upstream = "vendor/include/linux/k4a/k4a_export.h"
+sha256 = "81466432d2ee341c815f7d7258bcc7b45989c2c0d59b11a66df46f7710a56434"
+
+[[echelon]]
+id = "echelon-linux-k4atypes-h"
+upstream = "vendor/include/linux/k4a/k4atypes.h"
+sha256 = "072193b88b8dee894ccedbccb16ac0dbb11098436ab5d1c51be2a1cd3a0745a8"
+
+[[echelon]]
+id = "echelon-linux-k4aversion-h"
+upstream = "vendor/include/linux/k4a/k4aversion.h"
+sha256 = "13bdf300b223d67bfa864674a631ca1575b791d023538265ce62c20bcfacdb10"
+
+[[echelon]]
+id = "echelon-linux-k4arecord-export-h"
+upstream = "vendor/include/linux/k4arecord/k4arecord_export.h"
+sha256 = "bb4cc0cd3e95c32824efa044e4f6ddfadd1edcf0c5342138221ed841015898dd"
+
+[[echelon]]
+id = "echelon-linux-playback-h"
+upstream = "vendor/include/linux/k4arecord/playback.h"
+sha256 = "387d84aeb9a070fd978128c6c6ff7221013e9e1357af0dd89611642989e4f98a"
+
+[[echelon]]
+id = "echelon-linux-playback-hpp"
+upstream = "vendor/include/linux/k4arecord/playback.hpp"
+sha256 = "9fbe658e5fead0fd8a58a07ccbd984d6956ac5a5c5b22fd35f479e11d8b333e9"
+
+[[echelon]]
+id = "echelon-linux-record-h"
+upstream = "vendor/include/linux/k4arecord/record.h"
+sha256 = "82a9460e95d76364c423c56ab860de3ad6cd56a81433976cbb922aafa015ee00"
+
+[[echelon]]
+id = "echelon-linux-record-types-h"
+upstream = "vendor/include/linux/k4arecord/types.h"
+sha256 = "a82df97161fdd209e58dc8cf2928c0fa9b6de1b80edb7472f31524f38f0c6a25"
+
+[[echelon]]
+id = "echelon-windows-k4a-h"
+upstream = "vendor/include/windows/k4a/k4a.h"
+sha256 = "71680919c81e60efe34f7fc05a126116640fd05b2785da3ecc30854518e56896"
+
+[[echelon]]
+id = "echelon-windows-k4a-hpp"
+upstream = "vendor/include/windows/k4a/k4a.hpp"
+sha256 = "6211190786dc4942e5059aab9f98ce5de6ffacd8a52a0393f407f79443608a53"
+
+[[echelon]]
+id = "echelon-windows-k4a-export-h"
+upstream = "vendor/include/windows/k4a/k4a_export.h"
+sha256 = "88313d9e37ebdcf61f2c0056597dc7215c1d0e27187ca5295ee564bbbb251f10"
+
+[[echelon]]
+id = "echelon-windows-k4atypes-h"
+upstream = "vendor/include/windows/k4a/k4atypes.h"
+sha256 = "072193b88b8dee894ccedbccb16ac0dbb11098436ab5d1c51be2a1cd3a0745a8"
+
+[[echelon]]
+id = "echelon-windows-k4aversion-h"
+upstream = "vendor/include/windows/k4a/k4aversion.h"
+sha256 = "2dc9c75c368d286323e84f10d3aa34b7eb6d4ffd7334e9201ea892bea8ccd514"
+
+[[echelon]]
+id = "echelon-windows-k4arecord-export-h"
+upstream = "vendor/include/windows/k4arecord/k4arecord_export.h"
+sha256 = "02c6b793ec325d6e6379446c5898014687b1b97c7f5236e639f7c47404d43764"
+
+[[echelon]]
+id = "echelon-windows-playback-h"
+upstream = "vendor/include/windows/k4arecord/playback.h"
+sha256 = "387d84aeb9a070fd978128c6c6ff7221013e9e1357af0dd89611642989e4f98a"
+
+[[echelon]]
+id = "echelon-windows-playback-hpp"
+upstream = "vendor/include/windows/k4arecord/playback.hpp"
+sha256 = "9fbe658e5fead0fd8a58a07ccbd984d6956ac5a5c5b22fd35f479e11d8b333e9"
+
+[[echelon]]
+id = "echelon-windows-record-h"
+upstream = "vendor/include/windows/k4arecord/record.h"
+sha256 = "82a9460e95d76364c423c56ab860de3ad6cd56a81433976cbb922aafa015ee00"
+
+[[echelon]]
+id = "echelon-windows-record-types-h"
+upstream = "vendor/include/windows/k4arecord/types.h"
+sha256 = "a82df97161fdd209e58dc8cf2928c0fa9b6de1b80edb7472f31524f38f0c6a25"
+
+[[devon]]
+id = "kinect-record"
+path = "nomorals/hardware/kinect/record.py"
+derives_from = ["echelon-linux-record-h", "echelon-linux-playback-h", "echelon-linux-record-types-h"]
+
+[[devon]]
+id = "kinect-record-test"
+path = "tests/test_gapfix_k4a_record.py"
+derives_from = []
