@@ -147,6 +147,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "vtuber": ["vt"],
     "smarthome": ["smh"],
     "camwall": ["cw"],
+    "env": [],
     "game": [],
     "audio": ["au"],
     "weather": ["wx"],
@@ -4155,6 +4156,46 @@ def _parser() -> argparse.ArgumentParser:
     cw_unserve.add_argument("--output", default="",
                             help="exported wall directory")
     camwall_sub.add_parser("served", help="wall servers running now")
+
+    env = sub.add_parser("env", aliases=CLI_ALIASES["env"],
+        help="Environment variables — get, list, check, status, dotenv",
+        description=("nm env get <NAME> [--show] | list [PREFIX] [--all] | "
+                     "check <NAME...> [--as string|bool|int|float|seconds|"
+                     "path] | status | dotenv [PATH]\n"
+                     "Read-only inspection: secret-named values are masked "
+                     "unless --show is passed on this terminal. There is no "
+                     "set subcommand — a fresh nm process cannot persist an "
+                     "environment change past its own exit."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    env.add_argument("--json", action="store_true",
+                     help="Output as JSON")
+    env_sub = env.add_subparsers(dest="env_action", required=True)
+    e_get = env_sub.add_parser("get",
+                               help="show one variable (masked if secret)")
+    e_get.add_argument("name", help="variable name")
+    e_get.add_argument("--show", action="store_true",
+                       help="reveal a secret value on this terminal")
+    e_list = env_sub.add_parser("list", help="list variables by prefix")
+    e_list.add_argument("prefix", nargs="?", default="",
+                        help="prefix filter (default NM_)")
+    e_list.add_argument("--all", action="store_true",
+                        help="list every variable, any prefix")
+    e_list.add_argument("--show", action="store_true",
+                        help="reveal secret values on this terminal")
+    e_check = env_sub.add_parser("check",
+                                 help="required-var check by name")
+    e_check.add_argument("names", nargs="+", help="variable names")
+    e_check.add_argument("--as", dest="as_kind", default="string",
+                         choices=["string", "bool", "int", "float",
+                                  "seconds", "path"],
+                         help="also parse the value as this type")
+    env_sub.add_parser("status",
+                       help="mapped / direct / ignored NM_* counts")
+    e_dotenv = env_sub.add_parser(
+        "dotenv", help="show what a .env file would load")
+    e_dotenv.add_argument("path", nargs="?", default="",
+                          help=".env file (default: first candidate)")
 
     inbox = sub.add_parser("inbox", aliases=CLI_ALIASES["inbox"],
         help="Drop-in inbox: drop a file, link, or note — Devon acts",

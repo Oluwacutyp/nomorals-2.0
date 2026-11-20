@@ -166,7 +166,7 @@ class RuntimeCamwallMixin:
                 return f"camwall: stopped serving {result.get('dir')}"
             return self._control_camwall_help()
         except Exception as exc:  # noqa: BLE001 - chat replies, never traces
-            record_failure(self, exc, context="camwall")
+            record_failure("runtime_camwall._control_camwall", exc)
             _log.exception("camwall command failed: %s", exc)
             return f"camwall: failed ({exc})"
 

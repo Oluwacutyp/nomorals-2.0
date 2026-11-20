@@ -926,6 +926,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "vtuber": (0, None),     # /vtuber … — a scripted character performance on a stage
     "smarthome": (0, None),  # /smarthome … — WeMo + Z-Wave home devices: discover, read, control (gated), subscribe
     "camwall": (0, None),    # /camwall … — IP cameras wall: load, start, status, export, serve (owner-only)
+    "env": (0, None),        # /env … — environment variables, read-only inspection (owner-only)
     "clonevoice": (1, 1),  # /clonevoice <name> — attach a voice note, clone it
     "voices": (0, 0),      # /voices — list every voice, cloned vs built-in
     "bet": (0, None),        # /bet analyze <home> vs <away> [odds…] | bankroll | backtest
@@ -4619,6 +4620,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/camwall load [config] [rows N] [server local|remote] | list | status [wall] | start [wall] | stop [wall] | tick [wall] | pause|resume|focus <camera> [wall] | wall [wall] | server local|remote [wall] | rows <1-6> [wall] | snapshot <camera> <path> [wall] | export <dir> [wall] | serve <dir> | unserve <dir> | served",
               "example": "/camwall load",
               "related": "/mocap /live /cloudcam"},
+    "env": {"what": "Environment variables — read-only inspection of what the process actually sees (easyenv.rs port, MIT): one variable, a prefix listing, a required-var check that fails by name, the mapped/direct/ignored NM_* counts, and what a .env file would load. Values for secret-named variables are always masked in chat — there is no reveal switch here; the terminal CLI (`nm env get --show`) is the only place a secret is ever shown. (The `nm env` CLI drives the same reads.) Owner only.",
+            "usage": "/env get <NAME> | list [PREFIX] | check <NAME...> [--as bool|int|float|seconds|path] | status | dotenv [PATH]",
+            "example": "/env status",
+            "related": "/doctor /deploy"},
     "shorts": {"what": "Devon's short-form content empire: niche → script → voiceover → AI visuals → beat-synced edit → captions → publish.",
               "usage": "/shorts make <niche> \"<topic>\" [--now] | /shorts niches | /shorts status | /shorts calendar | /shorts ledger",
               "example": "/shorts make motivation \"discipline beats motivation\" --now",
@@ -5112,7 +5117,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                             "macro", "file", "publish", "notify", "proactive", "mission",
                             "bet", "desk", "markets", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
                            "exness", "stripe", "content", "drafts", "day",
-                           "calendar", "repurpose", "engage", "cases", "runs", "craft", "glossary", "read",
+                           "calendar", "repurpose", "engage", "cases", "runs", "craft", "glossary", "read", "env",
                            "tempmail", "checkmail", "vnumber", "checksms",
                            "browser", "paper", "backup"]),
     ("platform control", ["start", "stop", "profile", "chatmode", "style",
@@ -5443,7 +5448,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "monitor", "investigate", "breach", "bet", "desk", "markets", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
       "connectors", "provision", "models", "mcp", "a2a", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion", "gcal", "trello", "exness", "stripe", "sec",
       "guardrails", "content", "drafts", "day", "calendar", "repurpose", "engage", "cases", "runs", "craft", "worldmodel", "glossary", "read",
-      "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
+      "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup", "env"]),
     ("platform control — updates & restarts",
      ["update", "pull", "deploy", "restart"]),
     ("groups & communities",
@@ -5843,6 +5848,7 @@ LIST_ONELINERS: dict[str, str] = {
     "vtuber": "a scripted character performance on a stage — /vtuber character | act | perform | cue | live | status | tick | stop",
     "smarthome": "smart home devices — WeMo + Z-Wave — /smarthome discover | status | on | off | toggle | subscribe | health",
     "camwall": "IP cameras wall — constantly refreshing cameras — /camwall load | status | start | export | serve",
+    "env": "environment variables, read-only — /env get | list | check | status | dotenv",
     "image": "look up an image (format, dims, seen-before) — or generate one from a prompt",
     "lens": "reverse image search",
     "schedule": "cron-style in-process jobs",

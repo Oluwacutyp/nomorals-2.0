@@ -41,6 +41,7 @@ from .runtime_voice import RuntimeVoiceMixin
 from .runtime_mocap import RuntimeMocapMixin
 from .runtime_smarthome import RuntimeSmarthomeMixin
 from .runtime_camwall import RuntimeCamwallMixin
+from .runtime_env import RuntimeEnvMixin
 from .runtime_memory import RuntimeMemoryMixin
 from .runtime_games import RuntimeGamesMixin
 from .runtime_provision import RuntimeProvisionMixin
@@ -412,6 +413,7 @@ class PartnerRuntime(
     RuntimeMocapMixin,
     RuntimeSmarthomeMixin,
     RuntimeCamwallMixin,
+    RuntimeEnvMixin,
     RuntimeMemoryMixin,
     RuntimeGamesMixin,
     RuntimeSystemMixin,
@@ -12621,6 +12623,9 @@ class PartnerRuntime(
         if kind == "camwall":
             return self._control_camwall(command.tail, chat_key,
                                          message=message)
+        if kind == "env":
+            return self._control_env(command.tail, chat_key,
+                                     message=message)
         if kind == "vtuber":
             return self._control_vtuber(command.tail, chat_key,
                                         message=message)

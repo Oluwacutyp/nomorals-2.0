@@ -22,6 +22,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Mapping, TypeVar
 
+from .easyenv import is_secret_name as _is_secret_key
+from .easyenv import mask_secret as _mask
+from .easyenv import parse_env_file as _parse_env_file
 from .errors import ConfigError
 
 __all__ = [
@@ -1857,18 +1860,11 @@ def _asdict(obj: Any, *, redact: bool = True) -> Any:
     return obj
 
 
-_SECRET_HINTS = ("token", "secret", "password", "api_key", "apikey", "credential")
-
-
-def _looks_secret(name: str) -> bool:
-    lowered = name.lower()
-    return any(hint in lowered for hint in _SECRET_HINTS)
-
-
-def _mask(value: str) -> str:
-    if len(value) <= 8:
-        return "***"
-    return f"{value[:4]}…{value[-4:]}"
+# The secret-name check ``_asdict`` uses — the same function as
+# ``_is_secret_key`` below, under its older name. Both live in
+# ``core.easyenv`` now (the easyenv.rs port's secret hygiene);
+# config keeps the local names as aliases so call sites don't move.
+_looks_secret = _is_secret_key
 
 
 def _env_file_candidates(environ: Mapping[str, str],
@@ -1885,34 +1881,6 @@ def _read_env_file(environ: Mapping[str, str], default_home: str) -> dict[str, s
         if env_path.is_file():
             return _parse_env_file(env_path)
     return {}
-
-
-def _parse_env_file(path: Path) -> dict[str, str]:
-    """Minimal .env parser: KEY=VALUE, # comments, optional quotes, `export` prefix."""
-    values: dict[str, str] = {}
-    if not path.is_file():
-        return values
-    for lineno, raw in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[len("export ") :].strip()
-        if "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
-        elif value.startswith("#"):
-            # `KEY=   # note` — the value IS the comment: empty, not "#" text
-            value = ""
-        elif " #" in value:
-            value = value.split(" #", 1)[0].strip()
-        if key:
-            values[key] = value
-    return values
 
 
 def _load_toml(path: Path) -> dict[str, Any]:
@@ -2798,15 +2766,8 @@ def config_env_status(
 
 
 # ── redaction + validation ───────────────────────────────────────────────────
-
-#: field-name fragments that mark a value as secret (case-insensitive).
-_SECRET_HINTS = ("token", "secret", "password", "passwd", "api_key",
-                 "apikey", "private_key", "auth", "credential", "bearer")
-
-
-def _is_secret_key(key: str) -> bool:
-    low = key.lower()
-    return any(h in low for h in _SECRET_HINTS)
+# (secret-name detection and masking live in core.easyenv now —
+# ``_is_secret_key`` / ``_mask`` are imported at the top of this file.)
 
 
 def redacted_dict(settings: "Settings | None" = None,
