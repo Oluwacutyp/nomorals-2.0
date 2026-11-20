@@ -136,6 +136,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "shorts": ["sh"],
     "video": ["vid"],
     "voice": ["vc"],
+    "mocap": [],
     "audio": ["au"],
     "weather": ["wx"],
     "workspace": ["ws"],
@@ -3020,13 +3021,21 @@ def _parser() -> argparse.ArgumentParser:
                                     help="LiveKit room name to join")
     v_live_video_start.add_argument(
         "--source", default="title",
-        choices=("title", "image", "scene"),
+        choices=("title", "image", "scene", "rig"),
         help="what the video track shows: title (a live card with "
              "the room and the clock), image (a still file), scene "
-             "(a motion-studio design, rendered live)")
+             "(a motion-studio design, rendered live), rig (a "
+             "VTuber rig driven by a BVH take)")
     v_live_video_start.add_argument(
         "--image", default="",
         help="still-image path, for --source image")
+    v_live_video_start.add_argument(
+        "--rig", default="",
+        help="rig definition JSON, for --source rig "
+             "(empty = bundled default rig)")
+    v_live_video_start.add_argument(
+        "--bvh", default="",
+        help="BVH take path, for --source rig")
     v_live_video_start.add_argument(
         "--design", default="",
         help="motion-studio design as JSON, for --source scene")
@@ -3069,6 +3078,96 @@ def _parser() -> argparse.ArgumentParser:
                                        help="Output as JSON")
     v_probe.add_argument("--json", action="store_true",
                          help="Output as JSON")
+
+    mocap = sub.add_parser("mocap", aliases=CLI_ALIASES["mocap"],
+        help="motion-capture state and the VTuber rig",
+        description=("nm mocap status\\n"
+                     "nm mocap rig list | load [--rig PATH] "
+                     "[--dialect bvh|xsens] [--remap PATH] "
+                     "[--width N] [--height N] [--fps N] "
+                     "[--smooth F]\\n"
+                     "nm mocap rig status [--session NAME]\\n"
+                     "nm mocap rig pose [--session NAME] "
+                     "[--frame '{joint: [values]}'] [--from-store] "
+                     "[--face '{...}'] [--text TEXT]\\n"
+                     "nm mocap rig render [--session NAME] "
+                     "--out PATH.png\\n"
+                     "nm mocap rig drive --bvh PATH [--session NAME] "
+                     "[--text TEXT] [--out DIR]\\n"
+                     "nm mocap rig export --bvh PATH --out PATH.bvh "
+                     "[--session NAME] [--text TEXT]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    mocap.add_argument("--json", action="store_true",
+                       help="Output as JSON")
+    mocap_sub = mocap.add_subparsers(dest="mocap_action",
+                                     required=True)
+    mocap_sub.add_parser("status",
+                         help="mocap store channels + engines")
+    m_rig = mocap_sub.add_parser(
+        "rig", help="the VTuber rig: load, pose, render, drive")
+    m_rig_sub = m_rig.add_subparsers(dest="mocap_rig_verb",
+                                     required=True)
+    m_rig_sub.add_parser("list", help="loaded rig sessions")
+    m_rig_load = m_rig_sub.add_parser(
+        "load", help="load a rig under a session name")
+    m_rig_load.add_argument(
+        "--rig", default="",
+        help="rig definition JSON (empty = bundled default rig)")
+    m_rig_load.add_argument(
+        "--dialect", default="bvh", choices=("bvh", "xsens"),
+        help="remap dialect (default bvh)")
+    m_rig_load.add_argument(
+        "--remap", default="",
+        help="remap table JSON (empty = bundled table)")
+    m_rig_load.add_argument("--width", type=int, default=640)
+    m_rig_load.add_argument("--height", type=int, default=360)
+    m_rig_load.add_argument("--fps", type=float, default=15.0)
+    m_rig_load.add_argument("--smooth", type=float, default=0.35)
+    m_rig_status = m_rig_sub.add_parser(
+        "status", help="a session's rig + remap + frame size")
+    m_rig_pose = m_rig_sub.add_parser(
+        "pose", help="drive one frame through the rig")
+    m_rig_pose.add_argument(
+        "--frame", default="",
+        help="one mocap frame as JSON {joint: [values]}")
+    m_rig_pose.add_argument(
+        "--from-store", action="store_true",
+        help="drive the latest frame off the skeleton channel")
+    m_rig_pose.add_argument(
+        "--require-fresh", action="store_true",
+        help="refuse a stale store channel instead of flagging it")
+    m_rig_pose.add_argument(
+        "--face", default="",
+        help="face input as JSON {blendshapes|viseme|text|"
+             "openness|centroid|laughter}")
+    m_rig_pose.add_argument("--text", default="",
+                            help="spoken text (visemes follow it)")
+    m_rig_render = m_rig_sub.add_parser(
+        "render", help="render the current pose to a PNG")
+    m_rig_render.add_argument("--out", default="",
+                              help="PNG output path")
+    m_rig_drive = m_rig_sub.add_parser(
+        "drive", help="drive a BVH take and render it")
+    m_rig_drive.add_argument("--bvh", default="",
+                             help="BVH take path")
+    m_rig_drive.add_argument("--text", default="",
+                             help="spoken text (visemes follow it)")
+    m_rig_drive.add_argument(
+        "--out", default="",
+        help="PNG output directory (empty = in-memory only)")
+    m_rig_export = m_rig_sub.add_parser(
+        "export", help="drive a BVH take and write it back as BVH")
+    m_rig_export.add_argument("--bvh", default="",
+                              help="BVH take path")
+    m_rig_export.add_argument("--out", default="",
+                              help="BVH output path")
+    m_rig_export.add_argument("--text", default="",
+                              help="spoken text (visemes follow it)")
+    for _sub in (m_rig_load, m_rig_status, m_rig_pose, m_rig_render,
+                 m_rig_drive, m_rig_export):
+        _sub.add_argument("--session", default="default",
+                          help="rig session name (default 'default')")
 
     inbox = sub.add_parser("inbox", aliases=CLI_ALIASES["inbox"],
         help="Drop-in inbox: drop a file, link, or note — Devon acts",

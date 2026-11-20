@@ -38,6 +38,7 @@ from .runtime_mission import RuntimeMissionMixin
 from .runtime_build import RuntimeBuildMixin
 from .runtime_schedule import RuntimeScheduleMixin
 from .runtime_voice import RuntimeVoiceMixin
+from .runtime_mocap import RuntimeMocapMixin
 from .runtime_memory import RuntimeMemoryMixin
 from .runtime_games import RuntimeGamesMixin
 from .runtime_provision import RuntimeProvisionMixin
@@ -406,6 +407,7 @@ class PartnerRuntime(
     RuntimeBuildMixin,
     RuntimeScheduleMixin,
     RuntimeVoiceMixin,
+    RuntimeMocapMixin,
     RuntimeMemoryMixin,
     RuntimeGamesMixin,
     RuntimeSystemMixin,
@@ -12287,6 +12289,9 @@ class PartnerRuntime(
             return self._control_speak(command.tail or arg, chat_key=chat_key)
         if kind == "voice":
             return self._control_voice(command.tail, chat_key,
+                                       message=message)
+        if kind == "mocap":
+            return self._control_mocap(command.tail, chat_key,
                                        message=message)
         if kind == "voices":
             return self._control_voices(command.tail or arg,

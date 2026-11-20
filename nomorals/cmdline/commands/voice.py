@@ -560,6 +560,7 @@ def _cmd_voice_live_video_start(args: argparse.Namespace,
         LiveKitUnavailable,
         LiveKitVideoSession,
         image_frame_source,
+        rig_frame_source,
         scene_frame_source,
         title_frame_source,
     )
@@ -594,6 +595,16 @@ def _cmd_voice_live_video_start(args: argparse.Namespace,
             frame_source = image_frame_source(
                 args.image, width=args.width, height=args.height)
             source_name = f"image:{Path(args.image).name}"
+        elif args.source == "rig":
+            if not (args.bvh or "").strip():
+                print("video source 'rig' needs --bvh <path>",
+                      file=sys.stderr)
+                return 2
+            frame_source = rig_frame_source(
+                (args.rig or "").strip() or None, args.bvh,
+                width=args.width, height=args.height,
+                text=args.text, loop=args.loop)
+            source_name = f"rig:{Path(args.bvh).name}"
         else:
             duration = args.duration if args.duration > 0 else 30.0
             frame_source = scene_frame_source(

@@ -153,6 +153,7 @@ from .commands.tui import _cmd_tui
 from .commands.update import _cmd_update
 from .commands.vision import _cmd_vision
 from .commands.voice import _cmd_voice
+from .commands.mocap import _cmd_mocap
 from .commands.weather import _cmd_weather
 from .commands.why import _cmd_why
 from .commands.wisdom import _cmd_wisdom
@@ -539,6 +540,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "trendops": _CommandSpec(_cmd_trendops),
     "studio": _CommandSpec(_cmd_studio),
     "voice": _CommandSpec(_cmd_voice),
+    "mocap": _CommandSpec(_cmd_mocap),
     "captcha": _CommandSpec(_cmd_captcha),
     "fonts": _CommandSpec(_cmd_fonts),
     "account": _CommandSpec(_cmd_account),

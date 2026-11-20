@@ -913,6 +913,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "upgrade": (0, None),    # /upgrade list|show|diff|approve|deny|applied — research→approve→evolve review loop
     "speak": (1, None),      # /speak <text> — neural TTS voice note back in chat
     "voice": (0, None),      # /voice … — the voice catalogue (list/use/say/clone/…)
+    "mocap": (0, None),      # /mocap … — mocap store + VTuber rig
     "clonevoice": (1, 1),  # /clonevoice <name> — attach a voice note, clone it
     "voices": (0, 0),      # /voices — list every voice, cloned vs built-in
     "bet": (0, None),        # /bet analyze <home> vs <away> [odds…] | bankroll | backtest

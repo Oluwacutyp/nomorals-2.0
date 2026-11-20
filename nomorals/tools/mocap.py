@@ -24,13 +24,16 @@ from ..media.mocap import (
     default_router,
     load_bvh_json,
 )
+from ..media.rig import FaceInput
 
 __all__ = ["register"]
 
 _ACTIONS = ("status", "engines", "route", "register", "publish", "read",
             "snapshot", "claim", "release", "subscribe", "poll",
             "unsubscribe", "bvh_write", "bvh_read", "kinect_fixture",
-            "kinect_status", "save", "load")
+            "kinect_status", "save", "load",
+            "rig_list", "rig_load", "rig_pose", "rig_render",
+            "rig_drive", "rig_export", "rig_status")
 
 _STORE = MocapStateStore()
 _ROUTER = default_router()
@@ -38,6 +41,129 @@ _EXPORTER = BvhExporter()
 
 _FIXTURES = (Path(__file__).resolve().parents[2]
              / "tests" / "fixtures" / "kinect")
+
+
+def _rig_action(action: str, node: str, args: dict,
+                sources: list[str], output: str) -> dict[str, Any]:
+    """Rig verbs on the mocap tool — one code path with the CLI
+    and chat, through the shared rig session registry."""
+    from ..media.mocap.bvh import SkeletonFrame
+    from ..media.rig import (
+        get_session,
+        list_sessions,
+        load_session,
+        load_take_bvh,
+    )
+    from ..media.rig.errors import RigError
+
+    session_name = (node or "").strip() or "default"
+    if action == "rig_list":
+        return {"sessions": list_sessions()}
+    if action == "rig_load":
+        session = load_session(
+            session_name,
+            rig_path=args.get("rig_path"),
+            remap_dialect=str(args.get("remap_dialect") or "bvh"),
+            remap_path=args.get("remap_path"),
+            width=int(args.get("width") or 640),
+            height=int(args.get("height") or 360),
+            fps=float(args.get("fps") or 15.0),
+            smooth=float(args.get("smooth", 0.35)))
+        return dict({"name": session_name, "ok": True},
+                    **session.to_dict())
+    if action == "rig_status":
+        session = get_session(session_name)
+        return dict({"name": session_name}, **session.to_dict())
+    session = get_session(session_name)
+    if action == "rig_pose":
+        face = _rig_face(args.get("face"))
+        if args.get("from_store"):
+            pose = session.drive_from_store(
+                _STORE, channel=str(args.get("channel") or "skeleton"),
+                require_fresh=bool(args.get("require_fresh", False)),
+                face=face)
+        else:
+            raw = args.get("frame")
+            frame = None
+            if raw is not None:
+                if not isinstance(raw, dict):
+                    raise ValueError(
+                        "rig_pose params.frame must be "
+                        "{joint: [values]}")
+                frame = SkeletonFrame(values={
+                    str(name): tuple(float(v) for v in values)
+                    for name, values in raw.items()})
+            pose = session.drive_frame(frame, face)
+        return dict({"session": session_name}, **pose.to_dict())
+    if action == "rig_render":
+        if not output:
+            raise ValueError("rig_render needs output=<path.png>")
+        pose = session.drive_frame(None)
+        rgb = session.render_frame(pose)
+        target = Path(output).expanduser().resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            from PIL import Image
+        except ImportError as exc:
+            raise RigError(
+                "rig rendering needs Pillow — it is not installed "
+                "on this machine (pip install Pillow)",
+                kind="missing_pil") from exc
+        Image.frombytes("RGB", (session.width, session.height),
+                        rgb).save(target)
+        return {"path": str(target), "pose": pose.to_dict(),
+                "session": session_name}
+    if action in ("rig_drive", "rig_export"):
+        if not sources:
+            raise ValueError(f"{action} needs sources=[path.bvh]")
+        take = load_take_bvh(sources[0])
+        posed = session.drive_take(
+            take["skeleton"], take["frames"],
+            text=(str(args.get("text") or "") or None))
+        if action == "rig_export":
+            if not output:
+                raise ValueError("rig_export needs output=<path.bvh>")
+            return dict(session.export_bvh(posed, output, store=_STORE),
+                        session=session_name)
+        out_dir = output or None
+        if out_dir is None:
+            return {"session": session_name,
+                    "frames": len(posed),
+                    "visemes": [pose.viseme for pose in posed],
+                    "rendered": "in-memory only — pass output=<dir> "
+                                "for PNG files"}
+        return {"session": session_name,
+                "frames": len(posed),
+                "visemes": [pose.viseme for pose in posed],
+                "rendered": session.render_take(posed, out_dir=out_dir)}
+    raise ValueError(f"unhandled mocap action {action!r}")
+
+
+def _rig_face(raw: Any) -> FaceInput | None:
+    """params.face dict -> FaceInput. Unknown keys are refused by
+    name, never ignored."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("rig face must be an object")
+    known = {"blendshapes", "viseme", "text", "openness",
+             "centroid", "laughter"}
+    unknown = sorted(set(raw) - known)
+    if unknown:
+        raise ValueError(
+            f"rig face has unknown keys: {', '.join(unknown)}")
+    blend = raw.get("blendshapes")
+    if blend is not None and not isinstance(blend, dict):
+        raise ValueError("rig face.blendshapes must be an object")
+    return FaceInput(
+        blendshapes=(dict(blend) if blend is not None else None),
+        viseme=(str(raw["viseme"]) if raw.get("viseme") else None),
+        text=(str(raw["text"]) if raw.get("text") else None),
+        openness=(float(raw["openness"])
+                  if raw.get("openness") is not None else None),
+        centroid=(float(raw["centroid"])
+                  if raw.get("centroid") is not None else None),
+        laughter=float(raw.get("laughter") or 0.0))
 
 
 def _params(params: dict | None) -> dict:
@@ -88,10 +214,27 @@ def register(registry: Any) -> None:
             "vendored Kinect fixture as depth + pointcloud, sources="
             "[fixtures dir]>; kinect_status=<probe the SDK/device>; "
             "save=<persist the store, output=<path>>; load=<restore "
-            "a saved store, sources=[path]>. action=<status|engines|"
+            "a saved store, sources=[path]>. Rig actions (VTuber "
+            "rig, HyperJail pattern): rig_list=<loaded rig "
+            "sessions>; rig_load=<load a rig, node=<session>, "
+            "params=<{rig_path, remap_dialect, remap_path, width, "
+            "height, fps, smooth}>>; rig_pose=<drive one frame, "
+            "node=<session>, params=<{frame: {joint: [values]}, "
+            "face: {blendshapes|viseme|text|openness|centroid|"
+            "laughter}, from_store: bool, require_fresh: bool}>>; "
+            "rig_render=<render the current pose to a PNG, node="
+            "<session>, output=<path.png>>; rig_drive=<drive a BVH "
+            "take and render it, node=<session>, sources=[path.bvh], "
+            "params=<{text, output_dir}>>; rig_export=<drive a BVH "
+            "take and write it back as BVH, node=<session>, "
+            "sources=[path.bvh], output=<path.bvh>, params=<{text}>>; "
+            "rig_status=<a session's rig + remap + frame size, node="
+            "<session>>. action=<status|engines|"
             "route|register|publish|read|snapshot|claim|release|"
             "subscribe|poll|unsubscribe|bvh_write|bvh_read|"
-            "kinect_fixture|kinect_status|save|load>; sources=<list "
+            "kinect_fixture|kinect_status|save|load|rig_list|"
+            "rig_load|rig_pose|rig_render|rig_drive|rig_export|"
+            "rig_status>; sources=<list "
             "of paths>; output=<path to write>."
         ),
         capability=Capability.FS_WRITE,
@@ -228,4 +371,6 @@ def register(registry: Any) -> None:
             _STORE = MocapStateStore.load(sources[0])
             return {"ok": True, "path": str(Path(sources[0]).resolve()),
                     "channels": _STORE.channels()}
+        if action.startswith("rig_"):
+            return _rig_action(action, node, args, sources, output)
         raise ValueError(f"unhandled mocap action {action!r}")

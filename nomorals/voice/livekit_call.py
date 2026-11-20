@@ -1621,6 +1621,51 @@ def scene_frame_source(design: dict[str, Any], *,
     return _source
 
 
+def rig_frame_source(rig_path: str | Path | None,
+                     take_path: str | Path, *, width: int = 640,
+                     height: int = 360, text: str = "",
+                     remap_dialect: str = "bvh",
+                     loop: bool = False) -> FrameSource:
+    """A VTuber rig, driven live into the room.
+
+    The rig (``rig_path``, or the bundled default when empty) is
+    driven by a BVH take (``take_path``) remapped through the named
+    dialect, and the posed frames render as a 2D puppet — the same
+    frames the rig renders to PNG offline, published here as a
+    live track instead. With ``text``, the visemes follow the text
+    on uniform timing. A missing rig or take, or a take with no
+    frames, refuses at build time, naming the path, instead of
+    joining a room with no picture.
+    """
+    from ..media.rig import (
+        RigSession,
+        default_remap,
+        load_take_bvh,
+    )
+    from ..media.rig.errors import RigError
+    from ..media.rig.rig import RigDefinition, default_rig
+
+    try:
+        rig = (RigDefinition.from_json(rig_path)
+               if rig_path else default_rig())
+        remap = default_remap(remap_dialect)
+        take = load_take_bvh(take_path)
+    except RigError as exc:
+        raise LiveKitUnavailable(
+            f"video rig is not usable: {exc}",
+            missing=(f"a rig file at {rig_path} and a BVH take at "
+                     f"{take_path}")) from exc
+    if not take["frames"]:
+        raise LiveKitUnavailable(
+            f"video rig take at {take_path} has no frames",
+            missing=f"a BVH take with frames at {take_path}")
+    session = RigSession(rig, remap, width=width, height=height,
+                         fps=15.0)
+    return session.frame_source(
+        take["skeleton"], take["frames"],
+        text=(text or ""), loop=loop)
+
+
 # ── the video session ──────────────────────────────────────────────────────
 
 
