@@ -16,9 +16,18 @@
 #include <cstdio>
 #include <vector>
 
+// Windows DLLs export nothing by default: mark the C ABI so an MSVC-built
+// .dll loads through ctypes exactly like the .so does.  GCC/Clang export
+// every symbol already, so the macro is empty there.
+#if defined(_WIN32) && defined(_MSC_VER)
+#define NM_EXPORT __declspec(dllexport)
+#else
+#define NM_EXPORT
+#endif
+
 extern "C" {
 
-const char* nm_mlp_version() { return "1.0.0"; }
+NM_EXPORT const char* nm_mlp_version() { return "1.0.0"; }
 
 // One training (or evaluation, lr == 0) batch.
 //
@@ -37,7 +46,7 @@ const char* nm_mlp_version() { return "1.0.0"; }
 //   count_out  — number of (context, target) pairs processed
 //
 // Returns the batch-mean negative log-likelihood (0.0 when count == 0).
-double nm_mlp_batch(
+NM_EXPORT double nm_mlp_batch(
     const int32_t* seqs, const int32_t* lens, int32_t n,
     double* embedding, double* hidden_w, double* hidden_b,
     double* out_w, double* out_b,

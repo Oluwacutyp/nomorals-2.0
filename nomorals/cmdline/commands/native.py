@@ -29,8 +29,15 @@ def _cmd_native(args, context) -> int:
     mlp = info.get("mlp") or {}
     search_backend = info.get("backend", "pure-python")
     train_backend = mlp.get("backend", "pure-python")
+    prov = info.get("provision") or {}
+    prov_line = ""
+    if prov.get("status"):
+        detail = (prov.get("detail") or "").strip()
+        prov_line = (f"\nprovision: {prov['status']}"
+                     + (f" — {detail}" if detail else ""))
     _emit(args, info,
           f"native vector search: {search_backend}\n"
           f"native mlp training: {train_backend}\n"
-          f"compiler: {info.get('compiler') or 'not found (pure-python fallback is fine)'}")
+          f"compiler: {info.get('compiler') or 'not found (pure-python fallback is fine)'}"
+          f"{prov_line}")
     return 0

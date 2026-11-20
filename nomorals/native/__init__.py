@@ -17,7 +17,12 @@ they are pure Python.  This package provides the C++ replacements:
 * ``load()`` / ``load_mlp()`` / ``load_bpe()`` / ``load_mem()`` — load each
                      shared library if built
 * ``build()``     — compiles all four in parallel with the local C++
-                     compiler (Termux: clang)
+                     compiler (Termux: clang; Windows: MinGW ``g++`` or
+                     MSVC ``cl.exe`` via ``vswhere``)
+* ``ensure_built()`` — build the missing libraries, installing a
+                     compiler first on Windows when none exists, and
+                     record the attempt so a failure is not retried
+                     on every boot
 * ``topk()`` / ``topk_flat()`` / ``dot()`` / ``normalize()`` — native when
                      available, pure-Python otherwise
 * ``mlp_batch()`` / ``bpe_train()`` / ``bpe_encode_word()`` /
@@ -34,8 +39,11 @@ from __future__ import annotations
 
 import array
 import concurrent.futures
+import contextlib
 import ctypes
+import hashlib
 import heapq
+import json
 import math
 import os
 import platform
@@ -43,8 +51,9 @@ import shutil
 import subprocess
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from ..core.logging_setup import get_logger
 
@@ -58,7 +67,9 @@ __all__ = [
     "bpe_train",
     "bpe_unpack",
     "build",
+    "detect_compiler",
     "dot",
+    "ensure_built",
     "find_compiler",
     "info",
     "lib_path",
@@ -73,6 +84,8 @@ __all__ = [
     "mlp_batch",
     "mlp_lib_path",
     "normalize",
+    "provision_compiler",
+    "provision_status",
     "python_dot",
     "python_topk",
     "simd_level",
@@ -98,7 +111,12 @@ BUILD_TARGETS = (
 
 
 def _lib_name(stem: str) -> str:
-    return f"{stem}.dylib" if platform.system() == "Darwin" else f"{stem}.so"
+    system = platform.system()
+    if system == "Darwin":
+        return f"{stem}.dylib"
+    if system == "Windows":
+        return f"{stem}.dll"
+    return f"{stem}.so"
 
 
 def lib_path() -> Path:
@@ -134,13 +152,126 @@ _LIBS: dict[str, ctypes.CDLL | None | _NotGiven] = {
 _LOAD_LOCK = threading.Lock()
 
 
-def find_compiler() -> str | None:
-    """The first working C++ compiler on PATH (c++, clang++, g++)."""
-    for candidate in ("c++", "clang++", "g++", "cc"):
+@dataclass(frozen=True)
+class Compiler:
+    """A C++ compiler :func:`detect_compiler` found.
+
+    ``kind`` is ``"gcc"``, ``"clang"`` or ``"msvc"``.  ``vcvarsall`` is
+    set only for an MSVC found through ``vswhere`` (not on PATH): the
+    build then runs inside that environment, which is what provides
+    the headers and libraries a bare ``cl.exe`` call lacks.
+    """
+
+    path: str
+    kind: str
+    vcvarsall: str | None = None
+
+
+def _compiler_kind(path: str) -> str:
+    name = os.path.basename(path).lower()
+    if "clang" in name:
+        return "clang"
+    if name in ("cl", "cl.exe"):
+        return "msvc"
+    return "gcc"
+
+
+def _find_vswhere() -> str | None:
+    """``vswhere.exe`` — the Visual Studio locator — or None."""
+    if platform.system() != "Windows":
+        return None
+    for root in (os.environ.get("PROGRAMFILES(X86)", ""),
+                 os.environ.get("PROGRAMFILES", "")):
+        if not root:
+            continue
+        candidate = os.path.join(
+            root, "Microsoft Visual Studio", "Installer", "vswhere.exe")
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _find_msvc() -> Compiler | None:
+    """MSVC via ``vswhere``: the newest ``cl.exe`` + its ``vcvarsall.bat``.
+
+    ``cl.exe`` on PATH is handled by :func:`detect_compiler` directly
+    (that environment already has the headers); this is the fallback
+    for a Visual Studio install that never entered PATH.
+    """
+    vswhere = _find_vswhere()
+    if vswhere is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [vswhere, "-latest", "-products", "*",
+             "-requires",
+             "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+             "-property", "installationPath"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    install = (proc.stdout or "").strip().splitlines()
+    if proc.returncode != 0 or not install:
+        return None
+    vcvarsall = os.path.join(install[0], "VC", "Auxiliary", "Build",
+                             "vcvarsall.bat")
+    if not os.path.isfile(vcvarsall):
+        return None
+    # Newest MSVC toolset wins; vcvarsall sets the environment either way.
+    cl_glob = sorted(
+        Path(install[0]).glob("VC/Tools/MSVC/*/bin/Hostx64/x64/cl.exe"))
+    cl_path = str(cl_glob[-1]) if cl_glob else "cl"
+    return Compiler(path=cl_path, kind="msvc", vcvarsall=vcvarsall)
+
+
+def detect_compiler() -> Compiler | None:
+    """The C++ compiler to build with, or None.
+
+    Order is the proven path first: on Windows MinGW/Clang ``g++`` /
+    ``clang++`` keep the GCC flags and the AVX2 dispatch, so they win
+    over MSVC; MSVC (``cl.exe`` on PATH, else via ``vswhere``) is the
+    fallback.  POSIX keeps the historical order.
+    """
+    if platform.system() == "Windows":
+        candidates = ("g++", "clang++", "c++", "cc")
+    else:
+        candidates = ("c++", "clang++", "g++", "cc")
+    for candidate in candidates:
         path = shutil.which(candidate)
         if path:
-            return path
+            return Compiler(path=path, kind=_compiler_kind(path))
+    if platform.system() == "Windows":
+        cl = shutil.which("cl") or shutil.which("cl.exe")
+        if cl:
+            return Compiler(path=cl, kind="msvc")
+        return _find_msvc()
     return None
+
+
+def find_compiler() -> str | None:
+    """The first working C++ compiler on PATH (c++, clang++, g++)."""
+    found = detect_compiler()
+    return found.path if found is not None else None
+
+
+def _msvc_command(compiler: Compiler, source: Path,
+                  target: Path) -> list[str]:
+    """The ``cl.exe`` invocation for one source.
+
+    ``/O2 /LD`` is the MSVC shape of the GCC ``-O3 -shared`` build:
+    ``/LD`` produces a DLL, ``/std:c++17`` matches the GCC standard
+    flag, ``/EHsc`` is the standard C++ exception model.  Through
+    ``vcvarsall`` the environment already carries the headers and
+    libraries; a bare ``cl`` on PATH is assumed to be the same.
+    """
+    args = ["cl", "/O2", "/LD", "/std:c++17", "/EHsc", "/nologo",
+            str(source), "/link", f"/OUT:{target}"]
+    if compiler.vcvarsall is not None:
+        inner = (f'call "{compiler.vcvarsall}" x64 && '
+                 + " ".join(args))
+        return ["cmd", "/c", inner]
+    return args
 
 
 def build(force: bool = False) -> tuple[bool, str]:
@@ -150,12 +281,16 @@ def build(force: bool = False) -> tuple[bool, str]:
     (``-O3 -fPIC -shared``): the SIMD kernels dispatch at *runtime* via
     ``__builtin_cpu_supports`` (usearch/SimSIMD pattern), so ``-march=native``
     is never used — on an AVX-512 host it would auto-vectorize the scalar
-    fallback and SIGILL on older CPUs.
+    fallback and SIGILL on older CPUs.  On Windows the same sources build
+    to ``.dll`` files: MinGW ``g++`` takes the GCC flags, MSVC ``cl.exe``
+    takes ``/O2 /LD /std:c++17`` (inside ``vcvarsall`` when the install
+    was found through ``vswhere`` rather than PATH).
     """
-    compiler = find_compiler()
-    if compiler is None:
+    detected = detect_compiler()
+    if detected is None:
         return False, "no C++ compiler found (need c++ / clang++ / g++ on PATH)"
-    is_clang = "clang" in os.path.basename(compiler)
+    compiler = detected.path
+    is_clang = detected.kind == "clang"
 
     def _compile_one(source: Path, stem: str) -> str:
         target = _HERE / _lib_name(stem)
@@ -163,13 +298,16 @@ def build(force: bool = False) -> tuple[bool, str]:
             return f"already built: {target.name}"
         if not source.is_file():
             raise FileNotFoundError(f"source missing: {source.name}")
-        # -O3: the kernels are strict-aliasing-clean (plain float/double/int
-        # arrays, no type punning); -fno-semantic-interposition keeps the
-        # hot loop intra-library on ELF.
-        cmd = [compiler, "-O3", "-fPIC", "-shared", "-std=c++17"]
-        if not is_clang and platform.system() != "Darwin":
-            cmd.append("-fno-semantic-interposition")
-        cmd += [str(source), "-o", str(target)]
+        if detected.kind == "msvc":
+            cmd = _msvc_command(detected, source, target)
+        else:
+            # -O3: the kernels are strict-aliasing-clean (plain float/double/int
+            # arrays, no type punning); -fno-semantic-interposition keeps the
+            # hot loop intra-library on ELF.
+            cmd = [compiler, "-O3", "-fPIC", "-shared", "-std=c++17"]
+            if not is_clang and platform.system() != "Darwin":
+                cmd.append("-fno-semantic-interposition")
+            cmd += [str(source), "-o", str(target)]
         started = time.time()
         proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
         if proc.returncode != 0:
@@ -206,6 +344,217 @@ def build(force: bool = False) -> tuple[bool, str]:
     return all_ok, "; ".join(results)
 
 
+# ── self-provision ───────────────────────────────────────────────────────
+# Devon builds her own accelerators: when the libraries are missing at
+# boot, ensure_built() builds them (installing a compiler first on
+# Windows when none exists) and records the outcome on disk, so a
+# failed attempt is never retried on every process start.  The
+# libraries are build artifacts — they were deliberately dropped from
+# the repo in 1954bd92, so a fresh checkout never has them.
+
+#: A failed attempt is retried at most once a day, or when the C++
+#: sources changed — a missing compiler never re-runs a winget
+#: install on every boot.
+_PROVISION_RETRY_S = 24 * 3600
+#: The last attempt record, next to the package (gitignored — it is
+#: machine state, not source).
+_PROVISION_STATE_FILE = _HERE / ".native-build-state.json"
+
+
+def _run_install(argv: list[str], timeout: int) -> tuple[int, str]:
+    """Run one install step; (returncode, combined output)."""
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace",
+                              timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return 124, f"timed out after {timeout}s"
+    except OSError as exc:
+        return 127, str(exc)
+    return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
+def _tail(output: str) -> str:
+    """The last line-ish of installer output for a one-line record."""
+    return " ".join((output or "").strip().split())[-200:]
+
+
+def _msys2_roots() -> tuple[str, ...]:
+    """Where a winget-installed MSYS2 can live (C:\\msys64 by default)."""
+    roots = [r"C:\msys64"]
+    for key in ("ProgramFiles", "ProgramFiles(x86)"):
+        base = os.environ.get(key, "")
+        if base:
+            roots.append(os.path.join(base, "msys64"))
+    return tuple(dict.fromkeys(roots))
+
+
+def provision_compiler(
+    *, runner: Callable[[list[str], int], tuple[int, str]] | None = None,
+) -> tuple[str | None, list[str]]:
+    """Install a C++ compiler on Windows and return its path.
+
+    Routes, in order (the pairing.py ``provision_node`` shape: every
+    route that fails or does not apply is recorded, and the runner is
+    injectable so tests stage whole machines and no real install ever
+    runs in one):
+
+    1. ``winget install MSYS2.MSYS2`` then ``pacman -S`` the ucrt64
+       GCC — the lightest real compiler on Windows.
+    2. ``winget install Microsoft.VisualStudio.2022.BuildTools`` with
+       the VCTools workload — multi-GB, the fallback only.
+
+    Returns ``(path, attempts)``: the compiler path when a route
+    landed one, else None with the attempts recorded.  Non-Windows
+    returns (None, [reason]) — no install route is attempted there.
+    """
+    attempts: list[str] = []
+    if platform.system() != "Windows":
+        return None, ["compiler provisioning is Windows-only"]
+    run = runner or _run_install
+    winget = shutil.which("winget")
+    if winget is None:
+        return None, ["winget is not available on this machine"]
+    # Route 1: MSYS2 + ucrt64 GCC.
+    rc, output = run([winget, "install", "-e", "--id", "MSYS2.MSYS2",
+                      "--silent", "--accept-source-agreements",
+                      "--accept-package-agreements"], 900)
+    if rc == 0:
+        bash_found = False
+        for root in _msys2_roots():
+            bash = os.path.join(root, "usr", "bin", "bash.exe")
+            gcc = os.path.join(root, "ucrt64", "bin", "g++.exe")
+            if not os.path.isfile(bash):
+                continue
+            bash_found = True
+            rc, output = run(
+                [bash, "-lc",
+                 "pacman -S --noconfirm mingw-w64-ucrt-x86_64-gcc"], 900)
+            if rc != 0:
+                attempts.append(
+                    f"MSYS2 pacman install failed (exit {rc}): "
+                    f"{_tail(output)}")
+                continue
+            if os.path.isfile(gcc):
+                return gcc, attempts
+            attempts.append(
+                "MSYS2 pacman ran, but ucrt64 g++ is not where it "
+                "should be")
+        if not bash_found:
+            attempts.append(
+                "MSYS2 installed, but no bash.exe found under "
+                + ", ".join(_msys2_roots()))
+    else:
+        attempts.append(
+            f"winget install of MSYS2 failed (exit {rc}): {_tail(output)}")
+    # Route 2: VS Build Tools + VCTools workload.
+    rc, output = run([winget, "install", "-e", "--id",
+                      "Microsoft.VisualStudio.2022.BuildTools",
+                      "--silent", "--accept-source-agreements",
+                      "--accept-package-agreements",
+                      "--override",
+                      "--add Microsoft.VisualStudio.Workload.VCTools "
+                      "--includeRecommended --quiet --norestart"], 1800)
+    if rc != 0:
+        attempts.append(
+            f"winget install of VS Build Tools failed (exit {rc}): "
+            f"{_tail(output)}")
+        return None, attempts
+    found = _find_msvc()
+    if found is not None:
+        return found.vcvarsall or found.path, attempts
+    attempts.append(
+        "VS Build Tools installed, but no vcvarsall was found afterwards")
+    return None, attempts
+
+
+def _source_hash() -> str:
+    """SHA-256 over the four C++ sources, in build order."""
+    digest = hashlib.sha256()
+    for source, _stem in BUILD_TARGETS:
+        try:
+            digest.update(source.read_bytes())
+        except OSError:
+            digest.update(source.name.encode("utf-8"))
+    return digest.hexdigest()
+
+
+def provision_status() -> dict[str, Any]:
+    """The last recorded self-provision attempt, or {} when none ran."""
+    try:
+        data = json.loads(
+            _PROVISION_STATE_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _record_provision(outcome: str, detail: str) -> None:
+    with contextlib.suppress(OSError):
+        # the record is a courtesy; a failed write never breaks a build
+        _PROVISION_STATE_FILE.write_text(json.dumps({
+            "source_hash": _source_hash(),
+            "outcome": outcome,
+            "detail": detail[:400],
+            "attempted_at": time.time(),
+        }), encoding="utf-8")
+
+
+def ensure_built(*, force: bool = False,
+                 provision: bool = True) -> dict[str, Any]:
+    """Build the missing native libraries, installing a compiler first.
+
+    Returns ``{"status", "detail", "missing"}`` where status is
+    ``"built"``, ``"build_failed"``, ``"no_compiler"`` or
+    ``"provision_failed"``.  A failed attempt is recorded on disk and
+    not retried for a day (or until the C++ sources change) — a
+    missing compiler never re-runs a winget install on every boot.
+    ``force`` re-attempts regardless of the record.  Never raises for
+    a missing compiler or a failed build: the caller falls back to
+    pure Python and the status says why.
+    """
+    missing = [stem for _src, stem in BUILD_TARGETS
+               if not (_HERE / _lib_name(stem)).exists()]
+    if not missing:
+        return {"status": "built",
+                "detail": "all four native libraries are built",
+                "missing": []}
+    state = provision_status()
+    now = time.time()
+    if (not force
+            and state.get("source_hash") == _source_hash()
+            and state.get("outcome") in ("build_failed", "no_compiler",
+                                         "provision_failed")
+            and now - float(state.get("attempted_at") or 0)
+            < _PROVISION_RETRY_S):
+        return {"status": state["outcome"],
+                "detail": state.get("detail", ""),
+                "missing": missing,
+                "attempted_at": state.get("attempted_at")}
+    compiler = detect_compiler()
+    if compiler is None and provision and platform.system() == "Windows":
+        path, attempts = provision_compiler()
+        if path is not None:
+            compiler = detect_compiler()
+        if compiler is None:
+            detail = ("; ".join(attempts)
+                      if attempts else "no C++ compiler on this machine")
+            _record_provision("provision_failed", detail)
+            return {"status": "provision_failed", "detail": detail,
+                    "missing": missing}
+    if compiler is None:
+        detail = "no C++ compiler on PATH"
+        _record_provision("no_compiler", detail)
+        return {"status": "no_compiler", "detail": detail,
+                "missing": missing}
+    ok, msg = build()
+    _record_provision("built" if ok else "build_failed", msg)
+    still_missing = [stem for _src, stem in BUILD_TARGETS
+                     if not (_HERE / _lib_name(stem)).exists()]
+    return {"status": "built" if ok else "build_failed",
+            "detail": msg, "missing": still_missing}
+
+
 def _load_one(slot: str) -> ctypes.CDLL | None | _NotGiven:
     current = _LIBS[slot]
     if current is not _NOT_GIVEN:
@@ -218,12 +567,30 @@ def _load_one(slot: str) -> ctypes.CDLL | None | _NotGiven:
         target = _HERE / _lib_name({"vec": "libvecsim", "mlp": "libmlptrain",
                                     "bpe": "libbpe", "mem": "libmemextract"}[slot])
         if not target.exists():
-            # LOUD fallback: the .so isn't built (common on Termux/aarch64
-            # where the shipped .so is x86-64-only).  Log at INFO so operators
-            # see it in normal startup logs, not buried in debug.
-            _log.info("native %s not built (%s missing) — using pure-Python "
-                      "fallback (no acceleration). Run `nm native --build` "
-                      "to compile for this machine.", slot, target.name)
+            # The library was never built — build artifacts are not
+            # committed (1954bd92 dropped them on purpose), so a fresh
+            # checkout never has them.  Say what Devon did or will do
+            # about it, never hand the owner a command: the boot hook
+            # builds these herself, and `nm native --build` stays as
+            # the manual override for anyone who wants it.
+            state = provision_status()
+            outcome = state.get("outcome", "")
+            detail = (state.get("detail") or "").strip()
+            if outcome == "built":
+                what = ("built at the last attempt but this library "
+                        "is still missing")
+            elif outcome == "build_failed":
+                what = (f"the last build attempt failed: {detail}"
+                        if detail else "the last build attempt failed")
+            elif outcome in ("no_compiler", "provision_failed"):
+                what = (f"no C++ compiler on this machine ({detail})"
+                        if detail
+                        else "no C++ compiler on this machine")
+            else:
+                what = "not built yet — Devon builds it at startup"
+            _log.info("native %s not built (%s missing) — %s; using "
+                      "pure-Python fallback (no acceleration).",
+                      slot, target.name, what)
             value: ctypes.CDLL | None | _NotGiven = None
         else:
             try:
@@ -770,6 +1137,7 @@ def info() -> dict[str, Any]:
         "compiler": find_compiler(),
         "backend": "native-cpp" if lib is not None else "pure-python",
         "simd": simd_level(),
+        "provision": provision_status(),
         "mlp": _kernel_block(mlp, mlp_lib_path()),
         "bpe": _kernel_block(bpe, bpe_lib_path()),
         "mem": _kernel_block(mem, mem_lib_path()),

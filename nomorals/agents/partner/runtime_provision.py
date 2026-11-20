@@ -110,6 +110,47 @@ class RuntimeProvisionMixin:
 
     # ── startup bridge ───────────────────────────────────────────────
 
+    def _ensure_native_built(self) -> dict[str, Any]:
+        """Best-effort native-accelerator build at boot.
+
+        Devon builds her own C++ kernels when they are missing (and
+        installs a compiler first on Windows when none exists) — the
+        owner never types a build command.  ``native.ensure_built``
+        records the attempt on disk and refuses to retry a failure
+        for a day, so this is one attempt per boot at most.  Returns
+        the ensure_built status dict; a failure here is a status,
+        never a broken boot.  Nothing is logged when the libraries
+        are already built — a quiet boot stays quiet.
+        """
+        try:
+            from ... import native as _native
+
+            missing_before = [
+                name for name, path in (
+                    ("vec", _native.lib_path()),
+                    ("mlp", _native.mlp_lib_path()),
+                    ("bpe", _native.bpe_lib_path()),
+                    ("mem", _native.mem_lib_path()))
+                if not path.exists()]
+            if not missing_before:
+                return {"status": "built",
+                        "detail": "all four native libraries are built",
+                        "missing": []}
+            result = _native.ensure_built()
+            status = result.get("status")
+            if status == "built":
+                _log.info("native accelerators built at startup: %s",
+                          result.get("detail", ""))
+            elif status in ("build_failed", "no_compiler",
+                            "provision_failed"):
+                _log.info("native accelerators unavailable at startup "
+                          "(%s): %s", status, result.get("detail", ""))
+            return result
+        except Exception:  # noqa: BLE001 - boot must not brick
+            _log.debug("native self-provision skipped", exc_info=True)
+            return {"status": "skipped",
+                    "detail": "provision hook failed", "missing": []}
+
     def _bridge_provisioned_credentials(self) -> list[str]:
         """Populate registry env keys from the vault at startup.
 

@@ -60,9 +60,18 @@ std::vector<std::string> decode_words(const int32_t* words, const int32_t* lens,
 
 } // namespace
 
+// Windows DLLs export nothing by default: mark the C ABI so an MSVC-built
+// .dll loads through ctypes exactly like the .so does.  GCC/Clang export
+// every symbol already, so the macro is empty there.
+#if defined(_WIN32) && defined(_MSC_VER)
+#define NM_EXPORT __declspec(dllexport)
+#else
+#define NM_EXPORT
+#endif
+
 extern "C" {
 
-const char* nm_bpe_version() { return "2.0.0"; }
+NM_EXPORT const char* nm_bpe_version() { return "2.0.0"; }
 
 // Train BPE merges.
 //
@@ -79,7 +88,7 @@ const char* nm_bpe_version() { return "2.0.0"; }
 // Wire per merge (5 int32 + variable): [len_l, bytes_l..., len_r, bytes_r...]
 // — written into merges_out as a flat int32 stream (UTF-8 bytes packed
 // four per int32, little-endian, final group zero-padded).
-int32_t nm_bpe_train(const int32_t* words, const int32_t* lens, const int32_t* freqs,
+NM_EXPORT int32_t nm_bpe_train(const int32_t* words, const int32_t* lens, const int32_t* freqs,
                      int32_t nwords, int32_t target_merges, int32_t min_frequency,
                      int32_t* merges_out, int32_t max_merges_capacity) {
     auto word_strs = decode_words(words, lens, nwords);
@@ -394,7 +403,7 @@ int32_t nm_bpe_train(const int32_t* words, const int32_t* lens, const int32_t* f
 // Returns the number of int32 written to out; out holds the final
 // symbols the same way merges do: [len, packed bytes] per symbol,
 // concatenated.
-int32_t nm_bpe_encode(const int32_t* word, int32_t len, const int32_t* merge_stream,
+NM_EXPORT int32_t nm_bpe_encode(const int32_t* word, int32_t len, const int32_t* merge_stream,
                       int32_t nmerge_ints, int32_t* out) {
     // 1) Rebuild the symbol table the train pass would have built:
     //    characters first (in first-seen order does NOT matter for

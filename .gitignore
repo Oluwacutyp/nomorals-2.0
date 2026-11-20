@@ -56,10 +56,14 @@ bridge/node_modules/
 bridge/.creds/
 bridge/media/
 
-# Native accelerator binaries — compiled locally via `nm native --build`;
-# the .cpp sources are committed, the built libraries are not
+# Native accelerator binaries — compiled locally (Devon builds them at
+# startup via `native.ensure_built`; `nm native --build` is the manual
+# override); the .cpp sources are committed, the built libraries are not
 nomorals/native/*.so
 nomorals/native/*.dylib
+nomorals/native/*.dll
+# Native self-provision state — machine-local attempt record, not source
+nomorals/native/.native-build-state.json
 
 # Backup coordinator (nomorals/backup) — binary snapshots NEVER in commit
 # history on schedule. The backup repo holds manifests ONLY; blobs go to

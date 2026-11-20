@@ -173,7 +173,34 @@ class NativeDoctorTest(unittest.TestCase):
         text = report_as_text(report)
         self.assertIn("native accelerators:", text)
         self.assertIn("missing", text)
-        self.assertIn("nm native --build", text)
+        # PIN UPDATE (gapfix, native self-provision): the doctor no
+        # longer hands the owner a build command — Devon builds the
+        # kernels herself at startup — so the hint says that instead
+        # of `nm native --build`.
+        self.assertIn("Devon builds this at startup", text)
+        self.assertNotIn("nm native --build", text)
+
+    def test_provision_status_passes_through(self) -> None:
+        from nomorals.compat import native_section
+        info = self._info(built=False, loaded=False)
+        info["provision"] = {"status": "no_compiler",
+                             "detail": "no compiler found on PATH",
+                             "missing": ["vecsim"]}
+        sec = native_section(info)
+        self.assertEqual(sec["provision"]["status"], "no_compiler")
+
+    def test_report_renders_no_compiler_honestly(self) -> None:
+        from nomorals.compat import feature_report, native_section, report_as_text
+        report = feature_report()
+        info = self._info(built=False, loaded=False)
+        info["provision"] = {"status": "no_compiler",
+                             "detail": "no compiler found on PATH",
+                             "missing": ["vecsim"]}
+        report["native"] = native_section(info)
+        text = report_as_text(report)
+        self.assertIn("no_compiler", text)
+        self.assertIn("no compiler found on PATH", text)
+        self.assertNotIn("nm native --build", text)
 
     def test_report_omits_section_when_native_unknown(self) -> None:
         from nomorals.compat import feature_report, report_as_text

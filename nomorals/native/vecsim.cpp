@@ -31,9 +31,18 @@
 #include <immintrin.h>
 #endif
 
+// Windows DLLs export nothing by default: mark the C ABI so an MSVC-built
+// .dll loads through ctypes exactly like the .so does.  GCC/Clang export
+// every symbol already, so the macro is empty there.
+#if defined(_WIN32) && defined(_MSC_VER)
+#define NM_EXPORT __declspec(dllexport)
+#else
+#define NM_EXPORT
+#endif
+
 extern "C" {
 
-const char* nm_vecsim_version(void) {
+NM_EXPORT const char* nm_vecsim_version(void) {
     return "2.0.0";
 }
 
@@ -48,9 +57,11 @@ inline float dot_scalar(const float* a, const float* b, std::int32_t n) {
     return acc;
 }
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
 // AVX2 kernel: 8-wide multiply-add, horizontal reduction, scalar tail.
 // Compiled for AVX2 regardless of the TU's -m flags; selected at runtime.
+// GCC/Clang only: __attribute__((target)) and __builtin_cpu_supports do
+// not exist on MSVC — there the scalar path below is the kernel.
 __attribute__((target("avx2")))
 float dot_avx2(const float* a, const float* b, std::int32_t n) {
     __m256 acc = _mm256_setzero_ps();
@@ -83,8 +94,8 @@ inline bool cpu_has_avx2(void) {
 // Which dot kernel is actually executing — the usearch
 // `metricImplementation()` idea: operators see the live path, not just
 // what was built.
-const char* nm_vecsim_simd_level(void) {
-#if defined(__x86_64__) || defined(_M_X64)
+NM_EXPORT const char* nm_vecsim_simd_level(void) {
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
     return cpu_has_avx2() ? "avx2" : "sse2";
 #elif defined(__aarch64__) || defined(_M_ARM64)
     return "neon";
@@ -94,8 +105,8 @@ const char* nm_vecsim_simd_level(void) {
 }
 
 // Dot product of two float32 vectors (runtime-dispatched).
-float nm_vecsim_dot(const float* a, const float* b, std::int32_t n) {
-#if defined(__x86_64__) || defined(_M_X64)
+NM_EXPORT float nm_vecsim_dot(const float* a, const float* b, std::int32_t n) {
+#if (defined(__x86_64__) || defined(_M_X64)) && (defined(__GNUC__) || defined(__clang__))
     if (n >= 16 && cpu_has_avx2()) {
         return dot_avx2(a, b, n);
     }
@@ -105,7 +116,7 @@ float nm_vecsim_dot(const float* a, const float* b, std::int32_t n) {
 
 // L2-normalize in place.  A zero vector is left unchanged.
 // Returns the original norm.
-float nm_vecsim_normalize(float* v, std::int32_t n) {
+NM_EXPORT float nm_vecsim_normalize(float* v, std::int32_t n) {
     float acc = 0.0f;
     for (std::int32_t i = 0; i < n; ++i) {
         acc += v[i] * v[i];
@@ -124,7 +135,7 @@ float nm_vecsim_normalize(float* v, std::int32_t n) {
 // Top-k rows of a row-major (rows x dim) matrix by dot product with query.
 // Fills out_scores / out_indices in DESCENDING score order.
 // Returns the number of pairs written (min(k, rows), or 0 on bad input).
-std::int32_t nm_vecsim_topk(const float* matrix, std::int32_t rows, std::int32_t dim,
+NM_EXPORT std::int32_t nm_vecsim_topk(const float* matrix, std::int32_t rows, std::int32_t dim,
                             const float* query, std::int32_t k,
                             float* out_scores, std::int32_t* out_indices) {
     if (matrix == nullptr || query == nullptr || out_scores == nullptr ||

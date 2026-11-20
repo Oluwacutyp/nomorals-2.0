@@ -186,10 +186,26 @@ def report_as_text(report: dict[str, Any]) -> str:
         if overall != "native":
             lines.append("          fallback: pure-python (correctness identical, "
                          "slower)")
-            compiler = nat.get("compiler")
-            if compiler:
-                lines.append(f"          build:    nm native --build  "
-                             f"(compiler: {compiler})")
+            # What Devon did / will do about the missing kernels — never
+            # a command for the owner to run: the boot hook builds these
+            # herself, and `nm native --build` stays as the manual
+            # override for anyone who wants it.
+            prov = nat.get("provision") or {}
+            status = prov.get("status")
+            detail = (prov.get("detail") or "").strip()
+            if status == "built":
+                lines.append("          build:    built — native-cpp active")
+            elif status in ("build_failed", "no_compiler",
+                            "provision_failed"):
+                lines.append("          build:    " + status
+                             + (f" — {detail}" if detail else ""))
+            elif nat.get("compiler"):
+                lines.append("          build:    Devon builds this at startup "
+                             f"(compiler: {nat['compiler']})")
+            elif str(report.get("platform", "")).startswith("Windows"):
+                lines.append("          build:    no C++ compiler on PATH — "
+                             "Devon tries to install one at startup; "
+                             "pure-python fallback until then")
             else:
                 lines.append("          build:    no C++ compiler on PATH — "
                              "pure-python fallback is the supported path")
@@ -227,6 +243,7 @@ def native_section(info: dict[str, Any]) -> dict[str, Any]:
         "kernels": kernels,
         "compiler": info.get("compiler"),
         "version": info.get("version"),
+        "provision": info.get("provision") or {},
         "fallback": "pure-python",
     }
 

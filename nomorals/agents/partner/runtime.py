@@ -3470,6 +3470,15 @@ class PartnerRuntime(
         # before anything can fail for a missing one. Best-effort — a
         # locked vault skips the bridge, never the boot.
         self._bridge_provisioned_credentials()
+        # Self-provisioned native accelerators: build the C++ kernels
+        # when they are missing, on a daemon thread — startup and chat
+        # readiness are never blocked by a compile (same shape as the
+        # boot mission resume above).
+        if not self.dry_run:
+            try:
+                self._start_native_build()
+            except Exception as exc:  # noqa: BLE001 - boot never dies here
+                _log.warning("native self-provision not started: %s", exc)
         started = self.gateway.start(self.on_message)
         # Shared bot registry (dupfix3): register this runtime's
         # bot ids and push the merged set into the userbot
@@ -5306,6 +5315,27 @@ class PartnerRuntime(
                 "from it.")
 
     # ── boot mission resumption ─────────────────────────────────────────
+
+    def _start_native_build(self) -> None:
+        """Spawn the native-accelerator build on a daemon thread.
+
+        The build (and a compiler install on Windows, when none
+        exists) takes minutes and must never hold up chat readiness;
+        the libraries load lazily, so a build that lands mid-process
+        is picked up by the next probe.  One attempt per boot at
+        most — ``native.ensure_built`` records failures on disk and
+        refuses to retry one for a day.
+        """
+
+        def _job() -> None:
+            try:
+                self._ensure_native_built()
+            except Exception:  # noqa: BLE001 - boot continues regardless
+                _log.exception("native self-provision failed")
+
+        thread = threading.Thread(target=_job, name="native-boot-build",
+                                  daemon=True)
+        thread.start()
 
     def _start_boot_mission_resume(self) -> None:
         """Spawn the boot mission-resumption sweep on a daemon thread.

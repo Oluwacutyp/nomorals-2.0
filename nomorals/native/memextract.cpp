@@ -458,9 +458,18 @@ static const int N_TAGS = (int)(sizeof(TAGS) / sizeof(TAGS[0]));
 
 // ── C ABI ────────────────────────────────────────────────────────────────────
 
+// Windows DLLs export nothing by default: mark the C ABI so an MSVC-built
+// .dll loads through ctypes exactly like the .so does.  GCC/Clang export
+// every symbol already, so the macro is empty there.
+#if defined(_WIN32) && defined(_MSC_VER)
+#define NM_EXPORT __declspec(dllexport)
+#else
+#define NM_EXPORT
+#endif
+
 extern "C" {
 
-const char* nm_memextract_version() { return "memextract-1"; }
+NM_EXPORT const char* nm_memextract_version() { return "memextract-1"; }
 
 // out[] receives:
 //   int32 count
@@ -472,7 +481,7 @@ const char* nm_memextract_version() { return "memextract-1"; }
 //     int32 tag_count
 //     per tag: int32 tag_len (bytes), bytes tag
 // Returns bytes written, or -1 if out_cap is too small, -2 on bad UTF-8.
-int32_t nm_memextract(const uint8_t* text, int32_t len, uint32_t* out,
+NM_EXPORT int32_t nm_memextract(const uint8_t* text, int32_t len, uint32_t* out,
                       int32_t out_cap) {
     std::vector<uint32_t> textcps;
     if (!utf8_decode(text, (size_t)len, &textcps)) return -2;
