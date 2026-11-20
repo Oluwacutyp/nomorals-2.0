@@ -93,6 +93,8 @@ __all__ = [
     "MEDIA_KINDS", "MakerError", "MakerService",
     "default_maker_chains",
     "render_card_png", "parse_card_request", "card_backdrop",
+    "lagos_day_window", "resolve_creative_format",
+    "platform_for_slot",
     "rembg_available", "ensure_rembg", "pick_rembg_model",
     "remove_background_bytes",
     "qrcode_available", "ensure_qrcode", "make_qr_png",
@@ -705,6 +707,77 @@ CARD_DESIGNS: tuple[str, ...] = (
     CARD_STYLES + tuple(PLATFORM_DESIGNS) + tuple(FEATURE_DESIGNS))
 
 
+# ── the creative rotation: one Lagos day+window rule ────────
+
+def lagos_day_window(*, now: float | None = None
+                     ) -> tuple[int, str]:
+    """(Lagos day ordinal, "morning"|"evening") for an instant
+    (default: right now).  The one clock the whole creative
+    family rotates on — the Motivation class's window rule:
+    morning is the Lagos day-part before noon, evening after.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    lagos = datetime.now(ZoneInfo("Africa/Lagos")) if now is None \
+        else datetime.fromtimestamp(now, ZoneInfo("Africa/Lagos"))
+    return (lagos.date().toordinal(),
+            "morning" if lagos.hour < 12 else "evening")
+
+
+def _creative_slot(day_ordinal: int, window: str) -> int:
+    """The one slot the creative family rotates on: the Lagos
+    day plus the window (morning 0, evening 1) — so morning
+    and evening differ, and days alternate.  The format is
+    the slot's parity; the platform rides the slot's pair
+    index (see ``platform_for_slot``).  One number, one
+    rule — no second clock anywhere in the family."""
+    return int(day_ordinal) + (
+        0 if str(window or "").strip().lower() == "morning" else 1)
+
+
+def resolve_creative_format(explicit: str = "", *,
+                            pref: str = "", day_ordinal: int,
+                            window: str = "morning") -> str:
+    """"card"|"chat" for a run: an explicit per-run pick wins,
+    then the class pref — "chat"/"screen" for the mock
+    conversation, "card" for the card always — and with
+    neither set the two alternate by Lagos day + window
+    (the slot is odd → chat).  "rotate"/"alternate" as an
+    explicit word or a pref is the same alternation, not a
+    third format.  The Motivation class's ``_resolve_format``
+    delegates here, so the family has exactly one
+    implementation of this rule."""
+    want = str(explicit or "").strip().lower()
+    if want in ("chat", "screen"):
+        return "chat"
+    if want == "card":
+        return "card"
+    p = str(pref or "").strip().lower()
+    if p in ("chat", "screen"):
+        return "chat"
+    if p == "card":
+        return "card"
+    return "chat" if _creative_slot(day_ordinal, window) % 2 else "card"
+
+
+def platform_for_slot(day_ordinal: int,
+                      window: str = "morning") -> str:
+    """The platform design for a slot: the registry in
+    order, cycled by the slot's PAIR index (slot // 2).
+    The format IS the slot's parity (even → card, odd →
+    chat), so a platform taken from the slot itself would
+    only ever show four of the eight platforms on card
+    days.  The pair index still derives from the same one
+    slot — no second rule — and eight consecutive card days
+    walk all eight platforms.  Morning and evening of one
+    day share the platform; the format is what differs
+    between them."""
+    names = tuple(PLATFORM_DESIGNS)
+    return names[(_creative_slot(day_ordinal, window) // 2)
+                 % len(names)]
+
+
 def _handle_of(name: str) -> str:
     """A display name as a platform handle: lower-cased, one
     token, platform-safe characters only."""
@@ -1133,7 +1206,8 @@ def _parse_comment_line(spec: str, depth: int,
 def parse_card_request(kind: str, tail: str, *,
                        reply_name: str = "",
                        reply_text: str = "",
-                       sender_name: str = ""
+                       sender_name: str = "",
+                       default_style: str | None = None
                        ) -> tuple[str, list[dict]]:
     """(style, entries) for a card command — or a MakerError
     carrying the usage line.  Grammar:
@@ -1150,9 +1224,13 @@ def parse_card_request(kind: str, tail: str, *,
       starts with ``>`` adds a comment — ``> Name | words``;
       ``>>`` replies to the comment above it (nesting depth
       1, ``>>>`` depth 2) where the platform nests.
+    ``default_style`` names the style when the tail names
+    none (the caller's rotation — a plain /qcard or /fakemsg
+    renders the platform of the slot); without it the kind's
+    own style stands, exactly as before.
     """
     kind = str(kind or "").strip().lower()
-    style = CARD_KINDS.get(kind, "quote")
+    style = default_style or CARD_KINDS.get(kind, "quote")
     tail = str(tail or "").strip()
     if kind in ("qcard", "fakemsg") and tail:
         first, _, rest = tail.partition(" ")
@@ -2019,6 +2097,7 @@ class MakerService:
              avatars: dict[int, Any] | None = None,
              backdrop: Any = None,
              audience: str = "",
+             force_format: str = "",
              send) -> dict[str, Any]:
         """Render + deliver one card.  ``avatars`` maps an
         entry index to the avatar the surface handed over
@@ -2047,24 +2126,79 @@ class MakerService:
         back to the still screen, then to the card, each
         failure named.  The backdrop image lands as the
         photo message inside the chat, never a placeholder
-        scene."""
+        scene.  With no format word at all the family
+        ROTATES by Lagos day + window (the owner's
+        2026-11-19 order — the screen shipped as an opt-in
+        and his phone never changed): card days render the
+        platform design of the slot, chat days the screen.
+        A named style (``/qcard facebook …``) wins over the
+        rotation — it is that platform's card, always.
+        ``force_format`` names the format from inside the
+        house (the screen rung's card fallback) and skips
+        the selection, so the fallback can never loop back
+        into the screen.
+        """
+        # Format selection for the screen family (qcard/fakemsg/
+        # meme2): an explicit per-run word wins — screen/chat
+        # for the mock conversation, card for the card, record
+        # for the recording — a named style wins over the
+        # rotation too.  Other kinds are single-style aliases
+        # (fakettc IS the ttc skin, nokiamsg the chat skin) —
+        # their identity is the style, so no rotation touches
+        # them.
         first, _, rest = str(tail or "").strip().partition(" ")
-        if (kind in ("qcard", "fakemsg", "meme2")
-                and first.strip().lower() in ("screen", "chat")):
-            record = False
+        first_l = first.strip().lower()
+        record = False
+        fmt = ""
+        day_ordinal = window = None
+        if kind in ("qcard", "fakemsg", "meme2"):
+            day_ordinal, window = lagos_day_window()
+        if force_format:
+            fmt = force_format
+        elif kind in ("qcard", "fakemsg", "meme2") and first_l in (
+                "screen", "chat"):
+            fmt = "screen"
             head, _, tail_rest = rest.strip().partition(" ")
             if head.strip().lower() == "record":
                 record = True
                 rest = tail_rest
+            tail = rest
+        elif kind in ("qcard", "fakemsg", "meme2") \
+                and first_l == "record":
+            fmt = "screen"
+            record = True
+            tail = rest
+        elif kind in ("qcard", "fakemsg", "meme2") \
+                and first_l == "card":
+            fmt = "card"
+            tail = rest
+        elif kind in ("qcard", "fakemsg", "meme2") \
+                and first_l in CARD_DESIGNS:
+            fmt = "card"
+        elif kind in ("qcard", "fakemsg", "meme2"):
+            # The shared resolver speaks the Motivation
+            # class's vocabulary ("card"/"chat"); this
+            # surface dispatches on "screen", so the chat
+            # answer maps to the screen rung.
+            fmt = "screen" if resolve_creative_format(
+                "", day_ordinal=day_ordinal,
+                window=window) == "chat" else "card"
+        if fmt == "screen":
             return self._card_screen(
-                kind, rest, reply_name=reply_name,
+                kind, tail, reply_name=reply_name,
                 reply_text=reply_text, sender_name=sender_name,
                 avatars=avatars, backdrop=backdrop,
-                audience=audience, send=send, record=record)
+                audience=audience, send=send, record=record,
+                default_style=(
+                    platform_for_slot(day_ordinal, window)
+                    if kind in ("qcard", "fakemsg") else None))
         try:
             style, entries = parse_card_request(
                 kind, tail, reply_name=reply_name,
-                reply_text=reply_text, sender_name=sender_name)
+                reply_text=reply_text, sender_name=sender_name,
+                default_style=(
+                    platform_for_slot(day_ordinal, window)
+                    if kind in ("qcard", "fakemsg") else None))
             for idx, avatar in (avatars or {}).items():
                 if 0 <= int(idx) < len(entries):
                     entries[int(idx)]["avatar"] = avatar
@@ -2102,7 +2236,9 @@ class MakerService:
                      backdrop: Any = None,
                      audience: str = "",
                      send,
-                     record: bool = False) -> dict[str, Any]:
+                     record: bool = False,
+                     default_style: str | None = None
+                     ) -> dict[str, Any]:
         """The mock-screen rung of the card surface: parse
         the entries with the card grammar, stage them as a
         chat exchange, and deliver through the mock organ's
@@ -2123,7 +2259,8 @@ class MakerService:
         try:
             _style, entries = parse_card_request(
                 kind, tail, reply_name=reply_name,
-                reply_text=reply_text, sender_name=sender_name)
+                reply_text=reply_text, sender_name=sender_name,
+                default_style=default_style)
         except MakerError as exc:
             return {"sent": False, "reason": str(exc)}
         names = [str(e.get("name") or "") for e in entries]
@@ -2180,7 +2317,7 @@ class MakerService:
             kind, tail, reply_name=reply_name,
             reply_text=reply_text, sender_name=sender_name,
             avatars=avatars, backdrop=backdrop,
-            audience=audience, send=send)
+            audience=audience, force_format="card", send=send)
         fallback["format"] = "card"
         reason = str(out.get("reason") or "the screen render failed")
         if record:

@@ -7,8 +7,9 @@ this mixin owns the live wiring:
 - **Commands**: /joke /dadjoke /progjoke /chuck /fact /fact2
   /catfact /numfact /advice /activity /history (text
   from health-checked source chains), /quote (a rendered
-  PNG CARD from the makers bigquote design since 2026-11-10
-  — text only as the named degradation; ``/quote chat``
+  PNG CARD — the platform design of the Lagos day + window
+  since 2026-11-19, rotating with the chat screen; text
+  only as the named degradation; ``/quote chat``
   names the mock-screen format instead), /dog /cat /fox /meme
   /nasa /pokemon (the picture ATTACHED through the expression
   send path, caption riding the media message — one message,
@@ -120,16 +121,20 @@ class RuntimeFunMixin:
 
     # ---- /quote ---------------------------------------------------
     def _fun_quote(self, tail: str, message=None):  # type: ignore[no-untyped-def]
-        """/quote delivers a rendered PNG card (the makers
-        bigquote design) — the words set on a backdrop, sent
-        as a photo.  A leading format word names the mock-
-        screen rung instead: ``/quote chat …`` stages the
-        quote as a chat exchange (``card`` names the default
-        explicitly); ``/quote chat record …`` records that
-        chat as a video instead (a recording that can't
-        encode falls back to the still screen, then the
-        card, each failure named in the result).  A screen
-        that can't render falls back
+        """/quote delivers a rendered card — the platform
+        design of the Lagos day + window (Facebook, X,
+        TikTok, Reddit, Instagram, Mastodon, Tinder, POF
+        and back), sent as a photo.  With no format word
+        the family ROTATES: card days render the platform
+        card, chat days stage the quote as a chat exchange.
+        A leading format word names the rung instead:
+        ``/quote chat …`` stages the quote as a chat
+        exchange (``card`` names the card side explicitly);
+        ``/quote chat record …`` (or ``/quote record …``)
+        records that chat as a video instead (a recording
+        that can't encode falls back to the still screen,
+        then the card, each failure named in the result).
+        A screen that can't render falls back
         to the card inside the service.  Text is the NAMED
         degradation only: when the renderer itself is
         unavailable the words post with a line saying the
@@ -140,9 +145,14 @@ class RuntimeFunMixin:
         service = self._fun_service()
         fmt = ""
         words = tail.split(None, 1)
-        if words and words[0].lower() in ("chat", "screen", "card"):
-            fmt = ("screen" if words[0].lower() in ("chat", "screen")
-                   else "card")
+        if words and words[0].lower() in (
+                "chat", "screen", "card", "record"):
+            first = words[0].lower()
+            if first == "record":
+                fmt = "record"
+            else:
+                fmt = ("screen" if first in ("chat", "screen")
+                       else "card")
             tail = words[1] if len(words) > 1 else ""
             rest = tail.split(None, 1)
             if fmt == "screen" and rest and rest[0].lower() == "record":

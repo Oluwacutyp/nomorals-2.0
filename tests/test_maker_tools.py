@@ -255,11 +255,19 @@ def test_parse_duo_needs_four_parts():
         parse_card_request("qcard", "")
 
 
-def test_service_card_delivers_through_send(tmp_path):
+def test_service_card_delivers_through_send(tmp_path, monkeypatch):
+    # A plain /qcard renders the rotating platform now
+    # (owner orders 2026-11-19/11-10), not the one "quote"
+    # skin — the slot is pinned so the test names it.
+    from nomorals.social.chat import makers as makers_mod
+
+    monkeypatch.setattr(
+        makers_mod, "lagos_day_window",
+        lambda *, now=None: (100, "morning"))
     send = _Send()
     out = _service(tmp_path).card(
         "qcard", "Ada | we ship at dawn", send=send)
-    assert out["sent"] is True and out["style"] == "quote"
+    assert out["sent"] is True and out["style"] == "tiktok"
     ref, caption = send.calls[0]
     assert ref.mime == "image/png"
     assert Path(ref.path).exists()

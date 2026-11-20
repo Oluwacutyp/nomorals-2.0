@@ -1221,23 +1221,32 @@ class FunService:
                    ) -> dict[str, Any]:
         """Fetch a quote → render it → attach it.
 
-        The default format is the PNG card (the makers
-        ``bigquote`` design over a backdrop).  ``format`` =
-        "screen"/"chat" picks the mock-screen rung instead:
-        the quote staged as a chat exchange through the
-        mock-screens organ (see :mod:`.mock_formats`) — the
-        backdrop image lands as the photo message inside
-        the chat, never a placeholder scene.  ``format`` =
-        "record" records that same chat as a video (the
-        screen recording, delivered as an mp4) — a recording
-        that can't encode falls back to the still screen,
-        then to the card, with each failure named.  A
-        screen that can't render falls back to the card with
-        the failure named in ``screen_error`` — never a dead
-        end.  Text remains only as the named degradation —
-        when the renderer itself is unavailable the result
-        carries ``card_error`` and the caller posts the
-        words WITH that naming, never as the silent default.
+        The default format ROTATES by Lagos day + window
+        (the owner's 2026-11-19 order — the screen shipped
+        as an opt-in and his phone never changed): card days
+        render the platform design of the slot, chat days
+        stage the quote as a mock chat.  ``format`` =
+        "screen"/"chat" picks the mock-screen rung instead
+        (the quote staged as a chat exchange through the
+        mock-screens organ — the backdrop image lands as the
+        photo message inside the chat, never a placeholder
+        scene); ``format`` = "card" names the card side
+        explicitly; ``format`` = "record" records that same
+        chat as a video (the screen recording, delivered as
+        an mp4) — a recording that can't encode falls back
+        to the still screen, then to the card, with each
+        failure named.  The card side is the platform design
+        of the slot — Facebook, X, TikTok, Reddit,
+        Instagram, Mastodon, Tinder, POF and back (his
+        2026-11-10 order: the designs should be varieties,
+        comment sections included) — never the one bigquote
+        design every day.  A screen that can't render falls
+        back to the card with the failure named in
+        ``screen_error`` — never a dead end.  Text remains
+        only as the named degradation — when the renderer
+        itself is unavailable the result carries
+        ``card_error`` and the caller posts the words WITH
+        that naming, never as the silent default.
         ``renderer`` / ``backdrop_fn`` are the test seams;
         the real ones are the makers organ's (lazy import —
         makers borrows this module's sniffers, so the import
@@ -1257,28 +1266,54 @@ class FunService:
                 return {"sent": False, "reason": (
                     "every /quote source answered empty — "
                     "try again in a bit")}
+            # Format selection: an explicit word wins
+            # (screen/chat for the mock conversation, card for
+            # the card, record for the recording); with none
+            # the family ROTATES by Lagos day + window — the
+            # one rule in makers.resolve_creative_format, shared
+            # with the Motivation class.  The card side is the
+            # platform design of the slot (his 2026-11-10
+            # order: varieties, comment sections included).
+            from .makers import (
+                FEATURE_DESIGNS,
+                lagos_day_window,
+                platform_for_slot,
+                resolve_creative_format,
+            )
+
+            raw = str(format or "").strip().lower()
+            record = raw == "record"
+            day_ordinal, window = lagos_day_window()
+            if raw in ("screen", "chat", "record"):
+                screen_wanted = True
+            else:
+                screen_wanted = resolve_creative_format(
+                    raw, day_ordinal=day_ordinal,
+                    window=window) == "chat"
             screen_error = ""
-            if str(format or "").strip().lower() in (
-                    "screen", "chat", "record"):
+            if screen_wanted:
                 out = self._quote_screen(
                     quote_text, author, text=text, source=source,
-                    send=send,
-                    record=str(format or "").strip().lower()
-                    == "record",
+                    send=send, record=record,
                     backdrop_fn=backdrop_fn)
                 if out.get("sent"):
                     return out
                 screen_error = str(
                     out.get("reason") or "the screen render failed")
+            style = platform_for_slot(day_ordinal, window)
             try:
                 if renderer is None or backdrop_fn is None:
                     from .makers import card_backdrop, render_card_png
 
                     renderer = renderer or render_card_png
                     backdrop_fn = backdrop_fn or card_backdrop
-                backdrop = backdrop_fn(seed=quote_text)
+                # Platform designs draw the post + its comment
+                # section over their own chrome — no backdrop
+                # rides (only the feature designs wear one).
+                backdrop = (backdrop_fn(seed=quote_text)
+                            if style in FEATURE_DESIGNS else None)
                 data, drawn = renderer(
-                    "bigquote",
+                    style,
                     [{"name": author or "Unknown",
                       "text": quote_text}],
                     backdrop=backdrop)

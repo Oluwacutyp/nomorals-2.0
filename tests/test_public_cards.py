@@ -274,13 +274,21 @@ class QuoteSourceTests(unittest.TestCase):
         def _boom(*a, **kw):
             raise RuntimeError("Pillow is gone")
 
+        # The renderer only runs on the card rung — pin the
+        # slot to a card day (the default rotates now, owner
+        # order 2026-11-19) so the test still exercises the
+        # card renderer's failure, not the screen.
+        from unittest.mock import patch
+
         service = FunService(
             media_dir=self._tmp(),
             chains={"quote": [LocalQuotesProvider(
                 rng=random.Random(3))]})
-        out = service.quote_card(
-            send=_Send(), renderer=_boom,
-            backdrop_fn=lambda seed="": None)
+        with patch("nomorals.social.chat.makers.lagos_day_window",
+                   lambda *, now=None: (100, "morning")):
+            out = service.quote_card(
+                send=_Send(), renderer=_boom,
+                backdrop_fn=lambda seed="": None)
         self.assertFalse(out["sent"])
         self.assertIn("card_error", out)
         self.assertTrue(out["text"])  # the words survive, named

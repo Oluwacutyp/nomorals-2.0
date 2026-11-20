@@ -133,11 +133,30 @@ def test_quote_screen_format_sends_a_png(tmp_path):
     assert "—" in caption  # the author rides the caption
 
 
-def test_quote_default_format_result_shape_unchanged(tmp_path):
+def test_quote_default_format_result_shape_unchanged(
+        tmp_path, monkeypatch):
+    # The default ROTATES now (owner order 2026-11-19 — the
+    # screen shipped as an opt-in and his phone never
+    # changed), so the shape is pinned per slot, not once:
+    # a card slot renders the platform card with no "format"
+    # key, a chat slot stages the screen.
+    from nomorals.social.chat import makers as makers_mod
+
+    monkeypatch.setattr(
+        makers_mod, "lagos_day_window",
+        lambda *, now=None: (100, "morning"))
     out = _quote_service(tmp_path).quote_card(
         send=_Send(), backdrop_fn=lambda seed="": None)
     assert out["sent"] is True, out
     assert "format" not in out and "screen_error" not in out
+    assert out["drawn"]["style"] == "tiktok", out
+    monkeypatch.setattr(
+        makers_mod, "lagos_day_window",
+        lambda *, now=None: (101, "morning"))
+    out = _quote_service(tmp_path).quote_card(
+        send=_Send(), backdrop_fn=lambda seed="": None)
+    assert out["sent"] is True, out
+    assert out["format"] == "screen", out
 
 
 def test_quote_screen_failure_falls_back_to_the_card(
@@ -219,11 +238,19 @@ def test_makers_screen_failure_falls_back_to_the_card(
     monkeypatch.setattr(
         "nomorals.social.chat.mock_screens.MockScreenService",
         _DeadScreens)
+    # The fallback card renders the rotating platform now
+    # (owner order 2026-11-19/11-10), not the one "quote"
+    # skin — the slot is pinned so the test names it.
+    from nomorals.social.chat import makers as makers_mod
+
+    monkeypatch.setattr(
+        makers_mod, "lagos_day_window",
+        lambda *, now=None: (100, "morning"))
     send = _Send()
     out = _maker_service(tmp_path).card(
         "qcard", "screen Ada | we ship at dawn", send=send)
     assert out["sent"] is True, out
-    assert out["style"] == "quote" and out["format"] == "card"
+    assert out["style"] == "tiktok" and out["format"] == "card"
     assert out["screen_error"] == "organ is down"
 
 

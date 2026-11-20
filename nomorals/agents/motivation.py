@@ -520,19 +520,16 @@ def _resolve_format(prefs: dict[str, Any], window: str,
     alternate).  With no pref set at all the class rotates
     too (the owner's 2026-11-19 order — the creative form
     was shipped as an opt-in and his mornings never
-    changed, so rotate is the default, not the card)."""
-    want = str(explicit or "").strip().lower()
-    if want in ("chat", "screen"):
-        return "chat"
-    if want == "card":
-        return "card"
-    pref = str(prefs.get("format") or "").strip().lower()
-    if pref in ("chat", "screen"):
-        return "chat"
-    if pref == "card":
-        return "card"
-    slot = int(day_ordinal) + (0 if window == "morning" else 1)
-    return "chat" if slot % 2 else "card"
+    changed, so rotate is the default, not the card).  The
+    rule itself lives in one place —
+    :func:`makers.resolve_creative_format`, shared with
+    /quote and the makers family — this delegates to it so
+    the family never drifts into a second rule."""
+    from ..social.chat.makers import resolve_creative_format
+
+    return resolve_creative_format(
+        explicit, pref=str(prefs.get("format") or ""),
+        day_ordinal=day_ordinal, window=window)
 
 
 def _render_piece_screen(context: Any, window: str, piece: str,
