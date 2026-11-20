@@ -39,6 +39,7 @@ from .runtime_build import RuntimeBuildMixin
 from .runtime_schedule import RuntimeScheduleMixin
 from .runtime_voice import RuntimeVoiceMixin
 from .runtime_mocap import RuntimeMocapMixin
+from .runtime_smarthome import RuntimeSmarthomeMixin
 from .runtime_memory import RuntimeMemoryMixin
 from .runtime_games import RuntimeGamesMixin
 from .runtime_provision import RuntimeProvisionMixin
@@ -408,6 +409,7 @@ class PartnerRuntime(
     RuntimeScheduleMixin,
     RuntimeVoiceMixin,
     RuntimeMocapMixin,
+    RuntimeSmarthomeMixin,
     RuntimeMemoryMixin,
     RuntimeGamesMixin,
     RuntimeSystemMixin,
@@ -12611,6 +12613,9 @@ class PartnerRuntime(
         if kind == "g2p":
             return self._control_g2p(command.tail, chat_key,
                                      message=message)
+        if kind == "smarthome":
+            return self._control_smarthome(command.tail, chat_key,
+                                           message=message)
         if kind == "vtuber":
             return self._control_vtuber(command.tail, chat_key,
                                         message=message)

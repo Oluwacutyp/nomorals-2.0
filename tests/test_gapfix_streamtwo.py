@@ -476,10 +476,10 @@ class ToolTest(unittest.TestCase):
         self.addCleanup(reset_projects)
         self.registry = _registry(self.tmp)
 
-    def test_tool_count_is_782_after_scene_project(self):
+    def test_tool_count_is_783_after_scene_project(self):
         # 778 after this lane (B.26) added scene_project; 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh
         # (777 after B.22 added show).
-        self.assertEqual(len(self.registry._tools), 782)
+        self.assertEqual(len(self.registry._tools), 783)
         self.assertIn("scene_project", self.registry._tools)
 
     def test_tool_create_list_status(self):

@@ -77,6 +77,13 @@ class WemoEmulator:
         self.ssdp_blackhole = False
         #: Failure injection: serve this raw body as setup.xml.
         self.description_override: bytes | None = None
+        #: Live GENA subscriptions: sid -> {device, callback, timeout}.
+        #: State changes queue NOTIFY propertysets here (the emulator
+        #: opens no sockets — the test delivers a queued NOTIFY to a
+        #: real listener itself, or asserts on the queue).
+        self.subscriptions: dict[str, dict[str, Any]] = {}
+        self.pending_notifies: list[dict[str, Any]] = []
+        self._sid_seq = 0
 
     # ── assertion surface ─────────────────────────────────────────────
     def control_calls(self) -> list[dict[str, Any]]:
@@ -97,7 +104,7 @@ class WemoEmulator:
         if self.ssdp_blackhole:
             return []
         if search_target not in (
-                "urn:Belkin:device:**", "ssdp:all",
+                "urn:Belkin:device:*", "urn:Belkin:device:**", "ssdp:all",
                 "upnp:rootdevice", "urn:Belkin:device:controllee:1"):
             return []
         return [{
@@ -128,9 +135,75 @@ class WemoEmulator:
             return 200, self._description(dev).encode("utf-8")
         if method == "POST" and path.startswith("/upnp/control/"):
             return self._soap(dev, path, headers, body)
+        if method in ("SUBSCRIBE", "UNSUBSCRIBE") and path.startswith(
+                "/upnp/event/"):
+            status, _headers = self._event_sub(dev, method, headers)
+            return status, b""
         self.log.append({"kind": "http", "method": method, "url": url,
                          "status": 404})
         return 404, b"not found"
+
+    def handle_gena(self, method: str, url: str,
+                    headers: dict[str, str]) -> dict[str, str]:
+        """GENA SUBSCRIBE/UNSUBSCRIBE through the transport seam;
+        returns the response headers (SID, TIMEOUT)."""
+        authority = url.split("://", 1)[-1].split("/", 1)[0]
+        dev = self._devices.get(authority)
+        if dev is None:
+            return {}
+        _status, resp_headers = self._event_sub(dev, method, headers)
+        return resp_headers
+
+    # ── GENA eventing ─────────────────────────────────────────────────
+    def _event_sub(self, dev: dict[str, Any], method: str,
+                   headers: dict[str, str]
+                   ) -> tuple[int, dict[str, str]]:
+        """SUBSCRIBE / UNSUBSCRIBE on an event URL.  Returns the
+        status and the response headers (SID, TIMEOUT)."""
+        if method == "UNSUBSCRIBE":
+            sid = headers.get("SID", "")
+            removed = self.subscriptions.pop(sid, None) is not None
+            self.log.append({"kind": "subscribe", "method": "UNSUBSCRIBE",
+                             "device": dev["name"], "sid": sid,
+                             "removed": removed, "status": 200})
+            return 200, {}
+        sid = headers.get("SID", "")
+        if sid and sid in self.subscriptions:
+            self.log.append({"kind": "subscribe", "method": "renew",
+                             "device": dev["name"], "sid": sid,
+                             "status": 200})
+            return 200, {"SID": sid, "TIMEOUT": "Second-300"}
+        self._sid_seq += 1
+        new_sid = f"uuid:emulator-{self._sid_seq}"
+        callback = headers.get("CALLBACK", "").strip("<>")
+        timeout = headers.get("TIMEOUT", "Second-300")
+        self.subscriptions[new_sid] = {
+            "device": dev["name"], "host": dev["host"],
+            "callback": callback, "timeout": timeout,
+        }
+        self.log.append({"kind": "subscribe", "method": "SUBSCRIBE",
+                         "device": dev["name"], "sid": new_sid,
+                         "callback": callback, "status": 200})
+        return 200, {"SID": new_sid, "TIMEOUT": timeout}
+
+    def _queue_notify(self, dev: dict[str, Any]) -> None:
+        """Queue a NOTIFY propertyset for every subscriber of this
+        device (the emulator opens no sockets — delivery is the
+        test's job)."""
+        body = (
+            '<?xml version="1.0"?>'
+            '<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0">'
+            "<e:property>"
+            f"<BinaryState>{dev['binary_state']}|0|0|0|0|0|0|0"
+            "</BinaryState>"
+            "</e:property></e:propertyset>").encode()
+        for sid, sub in self.subscriptions.items():
+            if sub["device"] != dev["name"]:
+                continue
+            self.pending_notifies.append({
+                "sid": sid, "callback": sub["callback"],
+                "device": dev["name"], "body": body,
+                "binary_state": dev["binary_state"]})
 
     def _description(self, dev: dict[str, Any]) -> str:
         services = [(_BASIC, "basicevent1")]
@@ -207,6 +280,7 @@ class WemoEmulator:
                                    f"bad BinaryState {value!r}")
             dev["binary_state"] = int(value)
             payload = f"<BinaryState>{value}</BinaryState>"
+            self._queue_notify(dev)
         elif action == "GetInsightParams":
             if dev["model"] != "Insight":
                 return self._fault(dev, action,
@@ -260,6 +334,13 @@ class WemoEmulatorTransport:
     def http_post(self, url: str, body: bytes, headers: dict[str, str],
                   timeout_s: float) -> tuple[int, bytes]:
         return self._emulator.handle_http("POST", url, headers, body)
+
+    def http_subscribe(self, url: str, headers: dict[str, str]
+                       ) -> dict[str, str]:
+        return self._emulator.handle_gena("SUBSCRIBE", url, headers)
+
+    def http_unsubscribe(self, url: str, sid: str) -> None:
+        self._emulator.handle_gena("UNSUBSCRIBE", url, {"SID": sid})
 
 
 # ── Z-Wave (RaZberry / Z-Way) ─────────────────────────────────────────

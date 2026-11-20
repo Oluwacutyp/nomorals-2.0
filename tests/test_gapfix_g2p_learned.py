@@ -19,7 +19,7 @@ What is pinned here:
 - the weights on disk are the shapes the Rust model trained with
   (hidden 256 throughout; the Rust source comments saying 64/128
   are stale — the .npy headers say 256);
-- wiring: the ``tonal_g2p`` tool is registered (782 tools), its
+- wiring: the ``tonal_g2p`` tool is registered (783 tools), its
   new ``arpabet`` action answers with the source named, ``nm g2p``
   works from the terminal, and ``/g2p`` answers in chat.
 """
@@ -152,14 +152,14 @@ class TestRungOrder:
 
 
 class TestWiring:
-    def test_tool_count_is_782_after_g2p_learned(self):
+    def test_tool_count_is_783_after_g2p_learned(self):
         from nomorals.tools.registry import ToolRegistry
 
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
         # 781 after this lane (B.27) added vtuber. 782 after this
-        # lane (C.2) registered tonal_g2p.
-        assert len(registry._tools) == 782
+        # lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome.
+        assert len(registry._tools) == 783
         assert "tonal_g2p" in registry._tools
 
     def test_tool_tonal_g2p_arpabet_action(self):

@@ -334,6 +334,67 @@ class SmartHomeIntegration:
             "backends": backends,
             "control_gate": self._gate().status(),
         }
+
+    # ── WeMo event subscriptions (wemo.rs subscriptions.rs) ──────────
+    # Listening only — a subscription never actuates, so it is ungated
+    # like a read.  These are sync (the backend is sync); the async
+    # tool calls them through ``asyncio.to_thread``.
+    def subscribe_wemo(self, device_id_or_name: str, *,
+                       timeout_s: int = 300,
+                       resubscribe_interval_s: float | None = None
+                       ) -> dict[str, Any]:
+        """SUBSCRIBE one native device's state changes.  Returns the
+        live subscription (SID, callback URL, timeout)."""
+        from .home.errors import HomeDeviceNotFoundError
+
+        backend, device = self._native_for(device_id_or_name)
+        if backend is None or device is None:
+            raise HomeDeviceNotFoundError(
+                backend="wemo", device_id=device_id_or_name)
+        try:
+            sub = backend.subscribe(
+                device.device_id, timeout_s=timeout_s,
+                resubscribe_interval_s=resubscribe_interval_s)
+        except NotImplementedError as exc:
+            raise DependencyError(
+                f"backend {backend.name!r} does not support "
+                f"subscriptions",
+                dependency="smarthome",
+                details={"reason": "no_subscriptions",
+                         "backend": backend.name}) from exc
+        return sub.to_dict()
+
+    def unsubscribe_wemo(self, sid: str) -> bool:
+        """End one subscription (any native backend that holds it)."""
+        for backend in self._native_backends():
+            try:
+                if backend.unsubscribe(sid):
+                    return True
+            except NotImplementedError:
+                continue
+        return False
+
+    def wemo_subscriptions(self) -> list[dict[str, Any]]:
+        """Every live native subscription, as data."""
+        out: list[dict[str, Any]] = []
+        for backend in self._native_backends():
+            try:
+                out.extend(s.to_dict()
+                           for s in backend.subscriptions())
+            except NotImplementedError:
+                continue
+        return out
+
+    def wemo_subscription_events(self, sid: str | None = None
+                                 ) -> list[dict[str, Any]]:
+        """Recorded subscription events (all, or one SID)."""
+        out: list[dict[str, Any]] = []
+        for backend in self._native_backends():
+            try:
+                out.extend(backend.subscription_events(sid))
+            except NotImplementedError:
+                continue
+        return out
     
     # ── Device Discovery ─────────────────────────────────────────────────────
     

@@ -145,6 +145,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "sceneproject": ["sproj"],
     "show": [],
     "vtuber": ["vt"],
+    "smarthome": ["smh"],
     "audio": ["au"],
     "weather": ["wx"],
     "workspace": ["ws"],
@@ -3912,6 +3913,46 @@ def _parser() -> argparse.ArgumentParser:
                                help="words to pronounce")
     g2p_sub.add_parser("status", help="learned-rung availability "
                         "+ lexicon stats")
+    smarthome = sub.add_parser("smarthome", aliases=CLI_ALIASES["smarthome"],
+        help="Smart home devices — WeMo + Z-Wave: discover, read, "
+             "control (gated), subscribe",
+        description=("nm smarthome discover | list | status --device "
+                     "ID|NAME | on|off|toggle --device ID|NAME | "
+                     "brightness --device ID|NAME --value 0-100 | "
+                     "enable|disable --device ID|NAME | gate | subscribe "
+                     "--device ID|NAME | unsubscribe --sid SID | "
+                     "subscriptions | events [--sid SID] | health"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    smarthome.add_argument("--json", action="store_true",
+                           help="Output as JSON")
+    smarthome_sub = smarthome.add_subparsers(dest="smarthome_action",
+                                             required=True)
+    smarthome_sub.add_parser("discover", help="scan for devices (SSDP)")
+    smarthome_sub.add_parser("list", help="cached devices, no scan")
+    smarthome_sub.add_parser("health", help="backends + gate status")
+    smarthome_sub.add_parser("gate", help="recorded control enables")
+    smarthome_sub.add_parser("subscriptions",
+                             help="live event subscriptions")
+    sm_events = smarthome_sub.add_parser(
+        "events", help="recorded subscription events")
+    sm_events.add_argument("--sid", default="",
+                           help="one subscription id (default all)")
+    sm_unsub = smarthome_sub.add_parser(
+        "unsubscribe", help="end one subscription")
+    sm_unsub.add_argument("--sid", default="",
+                          help="subscription id")
+    for _name in ("status", "on", "off", "toggle", "subscribe",
+                  "enable", "disable"):
+        _sub = smarthome_sub.add_parser(_name, help=f"{_name} a device")
+        _sub.add_argument("--device", default="",
+                          help="device id or friendly name")
+    sm_bright = smarthome_sub.add_parser(
+        "brightness", help="set brightness percent (dimmers)")
+    sm_bright.add_argument("--device", default="",
+                           help="device id or friendly name")
+    sm_bright.add_argument("--value", type=int, default=None,
+                           help="brightness percent 0-100")
 
     inbox = sub.add_parser("inbox", aliases=CLI_ALIASES["inbox"],
         help="Drop-in inbox: drop a file, link, or note — Devon acts",

@@ -330,6 +330,7 @@ MODULE_PINS: dict[str, int] = {
     # composition split, enforced by the test. Their imports are all
     # <= L5; the only static importer is cmdline trade (L7, downward).
     "nomorals.tools.deals": 5,       # -> integrations.naija_deals
+    "nomorals.tools.smarthome": 5,   # -> integrations.smarthome_integration
     "nomorals.tools.gameplayer": 5,  # -> games.player.session
     "nomorals.tools.games": 5,       # -> games.*
     "nomorals.tools.services": 5,    # -> connectors.registry

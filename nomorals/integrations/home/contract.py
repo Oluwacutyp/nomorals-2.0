@@ -206,6 +206,33 @@ class HomeBackend(abc.ABC):
         read back after the action — the device, not the request, is
         the truth."""
 
+    # ── event subscriptions (optional; a backend that offers them
+    #    overrides all three) ─────────────────────────────────────────
+    def subscribe(self, device_id: str, **kw: Any) -> Any:
+        """Subscribe to state-change events for one device.  Listening
+        only — never actuates.  Backends without eventing raise
+        ``NotImplementedError`` by name."""
+        raise NotImplementedError(
+            f"backend {self.name!r} does not support subscriptions")
+
+    def unsubscribe(self, subscription_id: str) -> bool:
+        """End one subscription.  Backends without eventing raise
+        ``NotImplementedError`` by name."""
+        raise NotImplementedError(
+            f"backend {self.name!r} does not support subscriptions")
+
+    def subscriptions(self) -> list[Any]:
+        """Live subscriptions on this backend (empty when the backend
+        has no eventing)."""
+        raise NotImplementedError(
+            f"backend {self.name!r} does not support subscriptions")
+
+    def subscription_events(self, sid: str | None = None) -> list[Any]:
+        """Recorded subscription events (all, or one SID).  Backends
+        without eventing raise ``NotImplementedError`` by name."""
+        raise NotImplementedError(
+            f"backend {self.name!r} does not support subscriptions")
+
     # ── status as data ────────────────────────────────────────────────
     def status(self) -> dict[str, Any]:
         """Backend + registry + gate posture, as data."""

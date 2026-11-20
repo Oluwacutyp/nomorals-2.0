@@ -33,9 +33,9 @@ the drive through a rig session (blendshapes land, the head
 lands — the rig-named bone bypasses the source remap, the
 defect the first drive had), the show seam (face-only show,
 overlay, unknown bone recorded once), and the wiring (tool
-count pinned at 782 — 777 after B.22 added show; 778 after
+count pinned at 783 — 777 after B.22 added show; 778 after
 B.26 added scene_project; 779 after this lane (B.23) added
-facemcap; 780 after this lane (B.25) added facemesh; 781 after this lane (B.27) added vtuber; 782 after this lane (C.2) registered tonal_g2p — plus the
+facemcap; 780 after this lane (B.25) added facemesh; 781 after this lane (B.27) added vtuber; 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome — plus the
 CLI and the chat verb).
 """
 
@@ -694,10 +694,10 @@ def _tool(registry, **kwargs):
         f"facemcap call failed: {getattr(outcome, 'error', outcome)}")
 
 
-def test_tool_count_is_782_after_facemcap():
+def test_tool_count_is_783_after_facemcap():
     registry = ToolRegistry(SimpleNamespace())
     registry.register_builtins()
-    assert len(registry._tools) == 782
+    assert len(registry._tools) == 783
     assert "facemcap" in registry._tools
 
 

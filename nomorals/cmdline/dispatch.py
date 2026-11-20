@@ -160,6 +160,7 @@ from .commands.facemcap import _cmd_facemcap
 from .commands.facemesh import _cmd_facemesh
 from .commands.g2p import _cmd_g2p
 from .commands.show import _cmd_show
+from .commands.smarthome import _cmd_smarthome
 from .commands.vtuber import _cmd_vtuber
 from .commands.sceneproject import _cmd_sceneproject
 from .commands.weather import _cmd_weather
@@ -554,6 +555,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "facemesh": _CommandSpec(_cmd_facemesh),
     "g2p": _CommandSpec(_cmd_g2p),
     "show": _CommandSpec(_cmd_show),
+    "smarthome": _CommandSpec(_cmd_smarthome),
     "vtuber": _CommandSpec(_cmd_vtuber),
     "sceneproject": _CommandSpec(_cmd_sceneproject),
     "captcha": _CommandSpec(_cmd_captcha),

@@ -17,7 +17,7 @@ The mined rules under test, each with its evidence in the store:
   supersedes it.
 * An accepted RFC writes a decision-journal entry.
 
-The tool count stays 774 — the secprobe wire-up added 25 tools; 775 after this lane (B.19) added scene_spawn. 776 after this lane (B.20) added cloudcam. 777 after this lane (B.22) added show. 778 after this lane (B.26) added scene_project. 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber. 782 after this lane (C.2) registered tonal_g2p.
+The tool count stays 774 — the secprobe wire-up added 25 tools; 775 after this lane (B.19) added scene_spawn. 776 after this lane (B.20) added cloudcam. 777 after this lane (B.22) added show. 778 after this lane (B.26) added scene_project. 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber. 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome.
 the RFC verbs ride the
 existing ``nm decisions`` / ``/decisions`` surface.
 """
@@ -518,8 +518,8 @@ class DispatcherTests(unittest.TestCase):
         registry.register_builtins()
         # Lane 128 adds no tool: the RFC verbs ride the existing
         # ``nm decisions`` / ``/decisions`` surface.
-        # 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber. 782 after this lane (C.2) registered tonal_g2p.
-        self.assertEqual(len(registry._tools), 782)
+        # 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber. 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome.
+        self.assertEqual(len(registry._tools), 783)
 
 
 if __name__ == "__main__":

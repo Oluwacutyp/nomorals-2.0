@@ -25,6 +25,11 @@ from __future__ import annotations
 from .contract import BackendCapabilities, HomeBackend, HomeDevice, clamp_int
 from .errors import ControlNotEnabledError, HomeDeviceNotFoundError
 from .gate import ControlGate
+from .subscriptions import (
+    WemoSubscription,
+    WemoSubscriptionManager,
+    parse_state,
+)
 from .wemo import UrllibWemoTransport, WemoBackend
 from .zwave import RazberryBackend, UrllibZwaveTransport
 
@@ -39,5 +44,8 @@ __all__ = [
     "UrllibWemoTransport",
     "UrllibZwaveTransport",
     "WemoBackend",
+    "WemoSubscription",
+    "WemoSubscriptionManager",
     "clamp_int",
+    "parse_state",
 ]

@@ -23,27 +23,42 @@ protocol from an independent implementation.
 
 from __future__ import annotations
 
+import dataclasses
 import socket
+import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from typing import Any, Protocol
+from urllib.parse import urlparse
 from xml.sax.saxutils import escape
 
 from ...core.errors import DependencyError, NetworkError
 from ...core.logging_setup import get_logger
 from .contract import BackendCapabilities, HomeBackend, HomeDevice, clamp_int
 from .gate import ControlGate
+from .subscriptions import (
+    WemoSubscription,
+    WemoSubscriptionManager,
+    parse_state,
+)
 
 __all__ = ["UrllibWemoTransport", "WemoBackend", "WemoTransport"]
 
 _log = get_logger(__name__)
 
 SSDP_ADDR = ("239.255.255.250", 1900)
-BELKIN_ST = "urn:Belkin:device:**"
+#: wemo.rs: ``ST: urn:Belkin:device:*``.
+BELKIN_ST = "urn:Belkin:device:*"
 BASIC_EVENT = "urn:Belkin:service:basicevent:1"
 BRIGHTNESS = "urn:Belkin:service:brightness:1"
 WEMO_PORTS = (49152, 49153, 49154, 49155)
+#: wemo.rs: the first control attempt gets 300ms; relocate + retry
+#: spend the rest of the budget.
+FIRST_ATTEMPT_TIMEOUT_S = 0.3
+RETRY_BUDGET_S = 5.0
+#: wemo.rs: M-SEARCH is resent every 300ms until the timeout lapses.
+SSDP_RESEND_INTERVAL_S = 0.3
 
 
 class WemoTransport(Protocol):
@@ -52,9 +67,9 @@ class WemoTransport(Protocol):
 
     def ssdp_search(self, search_target: str, timeout_s: float
                     ) -> list[dict[str, str]]:
-        """One M-SEARCH round; returns response header dicts
-        (keys upper-cased).  Raises ``OSError`` when the multicast
-        stack itself is unavailable."""
+        """M-SEARCH rounds until the timeout; returns response header
+        dicts (keys upper-cased).  Raises ``OSError`` when the
+        multicast stack itself is unavailable."""
         ...
 
     def http_get(self, url: str, timeout_s: float) -> tuple[int, bytes]:
@@ -64,17 +79,36 @@ class WemoTransport(Protocol):
                   timeout_s: float) -> tuple[int, bytes]:
         ...
 
+    def http_subscribe(self, url: str, headers: dict[str, str]
+                       ) -> dict[str, str]:
+        """GENA SUBSCRIBE (new or renewal); returns the response
+        headers (``SID``, ``TIMEOUT``).  Raises ``NetworkError`` /
+        ``DependencyError`` on failure."""
+        ...
+
+    def http_unsubscribe(self, url: str, sid: str) -> None:
+        """GENA UNSUBSCRIBE.  Raises ``OSError`` when the device is
+        unreachable (the caller drops the record anyway)."""
+        ...
+
 
 class UrllibWemoTransport:
     """The real transport: raw UDP multicast + urllib HTTP."""
 
+    def __init__(self, ssdp_addr: tuple[str, int] | None = None) -> None:
+        # Tests point the multicast at a loopback fake device; the
+        # default is the real SSDP multicast group.
+        self._ssdp_addr = ssdp_addr or SSDP_ADDR
+
     def ssdp_search(self, search_target: str, timeout_s: float
                     ) -> list[dict[str, str]]:
+        # wemo.rs: M-SEARCH with ST urn:Belkin:device:*, MX:5, resent
+        # every 300ms until the timeout lapses.
         request = (
             "M-SEARCH * HTTP/1.1\r\n"
-            f"HOST: {SSDP_ADDR[0]}:{SSDP_ADDR[1]}\r\n"
+            f"HOST: {self._ssdp_addr[0]}:{self._ssdp_addr[1]}\r\n"
             'MAN: "ssdp:discover"\r\n'
-            "MX: 2\r\n"
+            "MX: 5\r\n"
             f"ST: {search_target}\r\n"
             "\r\n"
         ).encode("ascii")
@@ -82,25 +116,33 @@ class UrllibWemoTransport:
                              socket.IPPROTO_UDP)
         try:
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 4)
-            sock.settimeout(timeout_s)
-            sock.sendto(request, SSDP_ADDR)
+            deadline = time.monotonic() + timeout_s
             responses: list[dict[str, str]] = []
             seen: set[bytes] = set()
             while True:
-                try:
-                    data, _addr = sock.recvfrom(65535)
-                except socket.timeout:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     break
-                if data in seen:
-                    continue
-                seen.add(data)
-                headers: dict[str, str] = {}
-                for line in data.decode("utf-8", "replace").split("\r\n"):
-                    if ":" in line:
-                        key, _, value = line.partition(":")
-                        headers[key.strip().upper()] = value.strip()
-                if headers:
-                    responses.append(headers)
+                sock.settimeout(min(SSDP_RESEND_INTERVAL_S, remaining))
+                try:
+                    sock.sendto(request, self._ssdp_addr)
+                except OSError:
+                    raise
+                while True:
+                    try:
+                        data, _addr = sock.recvfrom(65535)
+                    except socket.timeout:
+                        break
+                    if data in seen:
+                        continue
+                    seen.add(data)
+                    headers: dict[str, str] = {}
+                    for line in data.decode("utf-8", "replace").split("\r\n"):
+                        if ":" in line:
+                            key, _, value = line.partition(":")
+                            headers[key.strip().upper()] = value.strip()
+                    if headers:
+                        responses.append(headers)
             return responses
         finally:
             sock.close()
@@ -114,6 +156,33 @@ class UrllibWemoTransport:
         req = urllib.request.Request(url, data=body, headers=headers,
                                      method="POST")
         return self._open(req, timeout_s)
+
+    def http_subscribe(self, url: str, headers: dict[str, str]
+                       ) -> dict[str, str]:
+        req = urllib.request.Request(url, method="SUBSCRIBE")
+        for key, value in headers.items():
+            req.add_header(key, value)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                resp.read()
+                return {k.upper(): v for k, v in resp.headers.items()}
+        except urllib.error.HTTPError as exc:
+            raise DependencyError(
+                f"WeMo device at {url} refused SUBSCRIBE "
+                f"(HTTP {exc.code})",
+                dependency="wemo",
+                details={"reason": "subscribe_refused",
+                         "http_status": exc.code}) from exc
+        except OSError as exc:
+            raise NetworkError(
+                f"WeMo SUBSCRIBE to {url} failed: {exc}",
+                details={"url": url}) from exc
+
+    def http_unsubscribe(self, url: str, sid: str) -> None:
+        req = urllib.request.Request(url, method="UNSUBSCRIBE")
+        req.add_header("SID", sid)
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            resp.read()
 
     @staticmethod
     def _open(req: urllib.request.Request, timeout_s: float
@@ -168,19 +237,27 @@ def _parse_description(payload: bytes, location: str) -> HomeDevice:
         return ""
 
     services: dict[str, str] = {}
+    event_sub_urls: dict[str, str] = {}
     for el in device_el.iter():
         if _local(el.tag) != "service":
             continue
-        stype, curl = "", ""
+        stype, curl, eurl = "", "", ""
         for sub in el:
             if _local(sub.tag) == "serviceType":
                 stype = (sub.text or "").strip()
             elif _local(sub.tag) == "controlURL":
                 curl = (sub.text or "").strip()
+            elif _local(sub.tag) == "eventSubURL":
+                eurl = (sub.text or "").strip()
         if stype and curl:
             base = location.rsplit("/", 1)[0]
             services[stype] = curl if curl.startswith("http") else base + (
                 curl if curl.startswith("/") else "/" + curl)
+        if stype and eurl:
+            base = location.rsplit("/", 1)[0]
+            event_sub_urls[stype] = (
+                eurl if eurl.startswith("http") else base + (
+                    eurl if eurl.startswith("/") else "/" + eurl))
     if BASIC_EVENT not in services:
         raise DependencyError(
             f"WeMo device at {location} offers no basicevent service",
@@ -202,6 +279,7 @@ def _parse_description(payload: bytes, location: str) -> HomeDevice:
         address={
             "location": location,
             "services": services,
+            "event_sub_urls": event_sub_urls,
             "model": model,
             "serial": child("serialNumber"),
             "manufacturer": child("manufacturer"),
@@ -234,24 +312,45 @@ class WemoBackend(HomeBackend):
         known_hosts: tuple[str, ...] = (),
         ssdp_timeout_s: float = 3.0,
         http_timeout_s: float = 5.0,
+        ssdp_addr: tuple[str, int] | None = None,
+        retry_budget_s: float = RETRY_BUDGET_S,
+        first_attempt_timeout_s: float = FIRST_ATTEMPT_TIMEOUT_S,
     ) -> None:
         super().__init__(gate)
-        self._transport = transport or UrllibWemoTransport()
+        self._transport = transport or UrllibWemoTransport(
+            ssdp_addr=ssdp_addr)
         self._known_hosts = tuple(known_hosts)
         self._ssdp_timeout_s = ssdp_timeout_s
         self._http_timeout_s = http_timeout_s
+        self._retry_budget_s = retry_budget_s
+        self._first_attempt_timeout_s = first_attempt_timeout_s
+        # A transport without GENA support (a test double implementing
+        # only the original three-method seam, or a future transport)
+        # still constructs: subscribing then refuses by name
+        # (``no_subscribe_transport``) instead of AttributeError at
+        # construction.  The manager already handles a None fn.
+        self._subscriptions = WemoSubscriptionManager(
+            subscribe_fn=getattr(
+                self._transport, "http_subscribe", None),
+            unsubscribe_fn=getattr(
+                self._transport, "http_unsubscribe", None))
 
     def capabilities(self) -> BackendCapabilities:
         return BackendCapabilities(
             backend="wemo",
             transport="UPnP/SOAP over HTTP + SSDP discovery (sync)",
-            discovery="SSDP M-SEARCH → setup.xml; known-host probe "
-                      "fallback; named error when the ladder exhausts",
+            discovery="SSDP M-SEARCH (ST urn:Belkin:device:*, MX:5, "
+                      "resent every 300ms) → setup.xml; known-host "
+                      "probe fallback; named error when the ladder "
+                      "exhausts",
             readable=("binary_state", "insight_params", "brightness"),
             controllable=("turn_on", "turn_off", "toggle",
                           "set_brightness"),
             notes="Brightness only on devices offering the Belkin "
-                  "brightness service (dimmers).",
+                  "brightness service (dimmers). Control retries once "
+                  "after an SSDP relocate (devices change ports). "
+                  "Event subscriptions (SUBSCRIBE/NOTIFY, renewed "
+                  "every 30s) listen without actuating.",
         )
 
     # ── discovery: the degradation ladder ────────────────────────────
@@ -344,7 +443,8 @@ class WemoBackend(HomeBackend):
 
     # ── SOAP machinery ────────────────────────────────────────────────
     def _soap(self, device: HomeDevice, service: str, action: str,
-              args: dict[str, Any]) -> ET.Element:
+              args: dict[str, Any], timeout_s: float | None = None
+              ) -> ET.Element:
         url = device.address["services"][service]
         body = _soap_envelope(service, action, args)
         headers = {
@@ -353,7 +453,8 @@ class WemoBackend(HomeBackend):
         }
         try:
             status, payload = self._transport.http_post(
-                url, body, headers, self._http_timeout_s)
+                url, body, headers,
+                self._http_timeout_s if timeout_s is None else timeout_s)
         except OSError as exc:
             raise NetworkError(
                 f"WeMo SOAP {action} to {device.name!r} failed: {exc}",
@@ -388,7 +489,13 @@ class WemoBackend(HomeBackend):
     # ── reads ─────────────────────────────────────────────────────────
     def read_state(self, device_id: str) -> dict[str, Any]:
         device = self._resolve(device_id)
-        root = self._soap(device, BASIC_EVENT, "GetBinaryState", {})
+        return self._read_state(device, self._http_timeout_s)
+
+    def _read_state(self, device: HomeDevice,
+                    timeout_s: float) -> dict[str, Any]:
+        # wemo.rs: GetBinaryState carries <BinaryState>1</BinaryState>.
+        root = self._soap(device, BASIC_EVENT, "GetBinaryState",
+                          {"BinaryState": 1}, timeout_s=timeout_s)
         raw = _find_text(root, "BinaryState")
         if raw == "":
             raise DependencyError(
@@ -396,17 +503,16 @@ class WemoBackend(HomeBackend):
                 dependency="wemo",
                 details={"reason": "soap_parse",
                          "action": "GetBinaryState"})
-        # WeMo reports 0/1, and 8 for "on, state unknown" on some
-        # firmware — anything non-zero is on.
-        state: dict[str, Any] = {
-            "binary_state": clamp_int(raw, 0, 8),
-            "on": raw.strip() not in ("", "0"),
-        }
+        # wemo.rs State: Off=0, On=1, OnWithoutLoad=8 (Insight),
+        # anything else numeric is Unknown — the name is the truth,
+        # the raw value stays for the record.
+        state: dict[str, Any] = parse_state(raw)
         services = device.address["services"]
         if device.address.get("model") == "Insight":
             try:
                 root = self._soap(device, BASIC_EVENT,
-                                  "GetInsightParams", {})
+                                  "GetInsightParams", {},
+                                  timeout_s=timeout_s)
                 params = _find_text(root, "InsightParams")
                 fields = params.split("|")
                 if len(fields) > 7 and fields[7]:
@@ -414,28 +520,113 @@ class WemoBackend(HomeBackend):
                                                           10 ** 9)
             except (DependencyError, NetworkError) as exc:
                 _log.debug("wemo insight params unavailable for %s: %s",
-                           device_id, exc)
+                           device.device_id, exc)
                 state["insight_error"] = exc.code
         if BRIGHTNESS in services:
-            root = self._soap(device, BRIGHTNESS, "GetBrightness", {})
+            root = self._soap(device, BRIGHTNESS, "GetBrightness", {},
+                              timeout_s=timeout_s)
             bright = _find_text(root, "Brightness")
             if bright:
                 state["brightness"] = clamp_int(bright, 0, 255)
         return state
 
+    # ── relocate (wemo.rs: devices change ports — keep last known,
+    #    relocate via SSDP by serial, else by IP) ─────────────────────
+    def _relocate(self, device: HomeDevice) -> HomeDevice:
+        """Re-find a device whose port moved.  Serial first (the
+        device is the same device); IP second (a factory reset keeps
+        the address but changes the serial).  The registry keeps the
+        original device_id — the owner enabled control for that key."""
+        try:
+            responses = self._transport.ssdp_search(
+                BELKIN_ST, self._ssdp_timeout_s)
+        except OSError as exc:
+            raise NetworkError(
+                f"WeMo relocate for {device.name!r}: SSDP failed: {exc}",
+                details={"backend": "wemo",
+                         "device_id": device.device_id}) from exc
+        locations: list[str] = []
+        for headers in responses:
+            loc = headers.get("LOCATION", "")
+            if loc and loc not in locations:
+                locations.append(loc)
+        serial = device.address.get("serial", "")
+        last_ip = urlparse(device.address.get("location", "")).hostname
+        by_ip: HomeDevice | None = None
+        for loc in locations:
+            try:
+                status, payload = self._transport.http_get(
+                    loc, self._http_timeout_s)
+                if status != 200:
+                    continue
+                parsed = _parse_description(payload, loc)
+            except (OSError, DependencyError):
+                continue
+            if serial and parsed.address.get("serial") == serial:
+                return self._remember_relocated(device, parsed)
+            if (last_ip and urlparse(loc).hostname == last_ip
+                    and by_ip is None):
+                by_ip = parsed
+        if by_ip is not None:
+            return self._remember_relocated(device, by_ip)
+        raise NetworkError(
+            f"WeMo relocate for {device.name!r}: no device answered "
+            f"SSDP with serial {serial!r} or IP {last_ip!r}",
+            details={"backend": "wemo", "device_id": device.device_id,
+                     "serial": serial, "last_ip": last_ip or ""})
+
+    def _remember_relocated(self, old: HomeDevice,
+                            parsed: HomeDevice) -> HomeDevice:
+        updated = dataclasses.replace(parsed, device_id=old.device_id)
+        self._devices[old.device_id] = updated
+        _log.info("wemo relocated %s: %s -> %s", old.name,
+                  old.address.get("location"),
+                  parsed.address.get("location"))
+        return updated
+
     # ── control (only via HomeBackend.control's gate) ────────────────
     def _control(self, device: HomeDevice, action: str,
                  params: dict[str, Any]) -> dict[str, Any]:
+        """wemo.rs ``with_retry``: a 300ms first attempt, then an SSDP
+        relocate (by serial, else by IP) and a retry with the
+        remaining budget.  Only a transport failure relocates — a
+        device that answered with a fault has nothing to relocate to.
+        """
+        deadline = time.monotonic() + self._retry_budget_s
+        try:
+            return self._control_once(
+                device, action, params,
+                timeout_s=self._first_attempt_timeout_s)
+        except NetworkError as first_exc:
+            if time.monotonic() >= deadline:
+                raise
+            try:
+                relocated = self._relocate(device)
+            except (NetworkError, DependencyError) as exc:
+                raise NetworkError(
+                    f"WeMo control of {device.name!r} failed "
+                    f"({first_exc}) and relocate found no device: {exc}",
+                    details={"backend": "wemo",
+                             "device_id": device.device_id,
+                             "action": action}) from first_exc
+            remaining = max(0.1, deadline - time.monotonic())
+            return self._control_once(relocated, action, params,
+                                      timeout_s=remaining)
+
+    def _control_once(self, device: HomeDevice, action: str,
+                      params: dict[str, Any],
+                      timeout_s: float) -> dict[str, Any]:
         if action == "turn_on":
             self._soap(device, BASIC_EVENT, "SetBinaryState",
-                       {"BinaryState": 1})
+                       {"BinaryState": 1}, timeout_s=timeout_s)
         elif action == "turn_off":
             self._soap(device, BASIC_EVENT, "SetBinaryState",
-                       {"BinaryState": 0})
+                       {"BinaryState": 0}, timeout_s=timeout_s)
         elif action == "toggle":
-            current = self.read_state(device.device_id)
+            current = self._read_state(device, timeout_s)
             self._soap(device, BASIC_EVENT, "SetBinaryState",
-                       {"BinaryState": 0 if current["on"] else 1})
+                       {"BinaryState": 0 if current["on"] else 1},
+                       timeout_s=timeout_s)
         elif action == "set_brightness":
             if BRIGHTNESS not in device.address["services"]:
                 raise DependencyError(
@@ -446,9 +637,48 @@ class WemoBackend(HomeBackend):
                              "device_id": device.device_id})
             value = clamp_int(params.get("value", 0), 0, 255)
             self._soap(device, BRIGHTNESS, "SetBrightness",
-                       {"Brightness": value})
+                       {"Brightness": value}, timeout_s=timeout_s)
         else:  # pragma: no cover — contract validates actions first
             raise DependencyError(
                 f"unsupported WeMo action {action!r}", dependency="wemo")
         # The device, read back, is the truth — not the request.
-        return self.read_state(device.device_id)
+        return self._read_state(device, timeout_s)
+
+    # ── subscriptions (wemo.rs subscriptions.rs) ─────────────────────
+    # Listening only — a subscription never actuates, so it is ungated
+    # like a read.  The manager (one per backend) owns the callback
+    # listener and the 30s renewal daemon.
+    def subscribe(self, device_id: str, *,
+                  timeout_s: int = 300,
+                  resubscribe_interval_s: float | None = None
+                  ) -> WemoSubscription:
+        device = self._resolve(device_id)
+        event_url = device.address.get("event_sub_urls", {}).get(
+            BASIC_EVENT, "")
+        if not event_url:
+            raise DependencyError(
+                f"WeMo device {device.name!r} offers no basicevent "
+                f"event subscription URL",
+                dependency="wemo",
+                details={"reason": "no_event_sub_url",
+                         "device_id": device.device_id})
+        return self._subscriptions.subscribe(
+            device.device_id, device.name, event_url,
+            timeout_s=timeout_s,
+            resubscribe_interval_s=resubscribe_interval_s)
+
+    def unsubscribe(self, sid: str) -> bool:
+        return self._subscriptions.unsubscribe(sid)
+
+    def subscriptions(self) -> list[WemoSubscription]:
+        return self._subscriptions.subscriptions()
+
+    def subscription_events(self, sid: str | None = None
+                            ) -> list[dict[str, Any]]:
+        return self._subscriptions.events(sid)
+
+    def status(self) -> dict[str, Any]:
+        base = super().status()
+        base["subscriptions"] = [
+            sub.to_dict() for sub in self._subscriptions.subscriptions()]
+        return base

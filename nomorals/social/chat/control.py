@@ -921,6 +921,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "facemesh": (0, None),   # /facemesh … — MediaPipe Face Mesh capture, as face takes
     "g2p": (0, None),        # /g2p … — pronounce English words in Arpabet (owner-only)
     "vtuber": (0, None),     # /vtuber … — a scripted character performance on a stage
+    "smarthome": (0, None),  # /smarthome … — WeMo + Z-Wave home devices: discover, read, control (gated), subscribe
     "clonevoice": (1, 1),  # /clonevoice <name> — attach a voice note, clone it
     "voices": (0, 0),      # /voices — list every voice, cloned vs built-in
     "bet": (0, None),        # /bet analyze <home> vs <away> [odds…] | bankroll | backtest
@@ -4606,6 +4607,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/vtuber character <path.json> [name] | act <path.vtact.json> [name] | perform <show> <act> <character> | cue <show> <kind> <value> [seconds] | live <show> <receiver> | live-detach <show> | status [show] | tick [show] | stop [show] | list | drop [show]",
               "example": "/vtuber perform demo opener devon",
               "related": "/mocap /live /facemcap /cloudcam"},
+    "smarthome": {"what": "Smart home devices — WeMo (UPnP/SOAP + SSDP, wemo.rs port, pattern + protocol) and Z-Wave: discover devices on the network, read state, control on/off/toggle/brightness, and subscribe to state changes. Discovery and reads are open; control stays off per device until the owner enables it (/smarthome enable), and a relocated device (WeMo devices change ports) is re-found by SSDP — by serial, else by IP — and retried. (The `smarthome` brain tool and `nm smarthome` CLI drive the same devices.) Owner only.",
+              "usage": "/smarthome discover | list | status <device> | on|off|toggle <device> | brightness <device> <0-100> | enable|disable <device> | gate | subscribe <device> | unsubscribe <sid> | subscriptions | events [sid] | health",
+              "example": "/smarthome discover",
+              "related": "/mocap /live"},
     "shorts": {"what": "Devon's short-form content empire: niche → script → voiceover → AI visuals → beat-synced edit → captions → publish.",
               "usage": "/shorts make <niche> \"<topic>\" [--now] | /shorts niches | /shorts status | /shorts calendar | /shorts ledger",
               "example": "/shorts make motivation \"discipline beats motivation\" --now",
@@ -5091,7 +5096,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("decoding & crypto", ["decode", "cookies", "cookielab", "structure", "cipher",
                            "monitor", "investigate", "breach"]),
     ("media system", ["music", "distribute", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
-                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "g2p", "vtuber", "sham", "musicnote",
+                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "g2p", "vtuber", "sham", "musicnote", "smarthome",
                       "steal", "sticker", "convert", "gif", "emoji", "customemoji", "emojiart", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "models", "mcp", "a2a", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion",
@@ -5358,7 +5363,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("media system — music · playback · video · podcast",
      ["music", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
       "distribute", "dj", "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "produce", "like", "dislike",
-      "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "g2p", "vtuber", "sham", "musicnote",
+      "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "g2p", "vtuber", "sham", "musicnote", "smarthome",
       "steal", "sticker", "convert", "gif", "emoji", "customemoji",
       "emojiart", "react", "create",
       "awoo", "baka", "bite", "blush", "bonk", "bored",
@@ -5827,6 +5832,7 @@ LIST_ONELINERS: dict[str, str] = {
     "facemesh": "MediaPipe Face Mesh capture, as face takes — /facemesh capture | landmarks | status",
     "g2p": "pronounce English words in Arpabet — /g2p <word> | status",
     "vtuber": "a scripted character performance on a stage — /vtuber character | act | perform | cue | live | status | tick | stop",
+    "smarthome": "smart home devices — WeMo + Z-Wave — /smarthome discover | status | on | off | toggle | subscribe | health",
     "image": "look up an image (format, dims, seen-before) — or generate one from a prompt",
     "lens": "reverse image search",
     "schedule": "cron-style in-process jobs",

@@ -1800,17 +1800,17 @@ class UnificationTest(unittest.TestCase):
 
 
 class ToolCountTest(unittest.TestCase):
-    def test_tool_count_is_782_after_craftlibs(self):
+    def test_tool_count_is_783_after_craftlibs(self):
         # 732 after the craft-libs port (lane 113) at its base, 733
         # after the craft-launcher port (lane 112) landed between that
         # base and this rebase, 734 after the craft-fonts port
         # (lane 114) added the craftfonts tool, 735 after the
         # indd-utils port (lane 117) added the inddutils tool,
         # 748 after the auth-plugin wiring (5 new tools) on top of the bughunter port (lane 121) added 8
-        # bughunter tools. 749 after the mocap port (lane 125) added the mocap tool. 774 after the secprobe wire-up added 25 tools (scope_load, scope_check, param_mine, param_confirm, inject_probe, jwt_attack, graphql_probe, graphql_amplify, race_wave, cors_probe, csrf_poc, plan_next, plan_add, plan_resolve, leaks_harvest, dossier_build, ban_report, ban_state, ban_set_state, ban_appeal, report_capture, report_amplify, replay_run, replay_diagnose, sec_chain). 775 after this lane (B.19) added scene_spawn. 776 after this lane (B.20) added cloudcam. 777 after this lane (B.22) added show. 778 after this lane (B.26) added scene_project. 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber. 782 after this lane (C.2) registered tonal_g2p.
+        # bughunter tools. 749 after the mocap port (lane 125) added the mocap tool. 774 after the secprobe wire-up added 25 tools (scope_load, scope_check, param_mine, param_confirm, inject_probe, jwt_attack, graphql_probe, graphql_amplify, race_wave, cors_probe, csrf_poc, plan_next, plan_add, plan_resolve, leaks_harvest, dossier_build, ban_report, ban_state, ban_set_state, ban_appeal, report_capture, report_amplify, replay_run, replay_diagnose, sec_chain). 775 after this lane (B.19) added scene_spawn. 776 after this lane (B.20) added cloudcam. 777 after this lane (B.22) added show. 778 after this lane (B.26) added scene_project. 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber. 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome.
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 782)
+        self.assertEqual(len(registry._tools), 783)
         self.assertIn("craftlibs", registry._tools)
 
 
