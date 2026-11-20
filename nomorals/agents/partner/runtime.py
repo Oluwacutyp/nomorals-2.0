@@ -10632,15 +10632,32 @@ class PartnerRuntime(
             # after the platform are ignored (the platform is one
             # word) — a stop that refuses to stop is the bug
             # (owner 2026-11-14: "/stop takes at most 1 argument(s)").
+            #
+            # The confirmation must go out BEFORE the stop, not
+            # after: gateway.stop_one pops the adapter out of
+            # gateway.adapters, and _send_control_reply delivers
+            # through that same adapter — so a reply returned the
+            # normal way after a self-stop can never land: the
+            # owner sees nothing, the platform is dead without a
+            # word, and no /start can reach it from that surface
+            # (the stop itself is sticky, so it stays dead). The
+            # handler therefore sends the confirmation first and
+            # returns "" — the no-empty law keeps "" when a
+            # delivery was recorded during the dispatch
+            # (_note_control_delivery). A stop aimed at another
+            # platform keeps the normal return path: its adapter
+            # is still alive when the reply goes out.
             target = (arg or "").strip().lower()
+            arriving = ""
+            if message is not None:
+                try:
+                    arriving = str(
+                        getattr(message.chat, "platform", "") or ""
+                    ).strip().lower()
+                except Exception:  # noqa: BLE001 - no message shape, no stop
+                    arriving = ""
             if not target:
-                if message is not None:
-                    try:
-                        target = str(
-                            getattr(message.chat, "platform", "") or ""
-                        ).strip().lower()
-                    except Exception:  # noqa: BLE001 - no message shape, no stop
-                        target = ""
+                target = arriving
                 if not target:
                     return ("stop what? /stop <platform> — "
                             "/platforms lists what's running")
@@ -10649,10 +10666,69 @@ class PartnerRuntime(
                     names = list(self.gateway._snapshot_adapters().keys())
                 except Exception:  # noqa: BLE001 - no gateway, nothing to stop
                     names = []
+                if not names:
+                    return "nothing is running to stop"
+                if message is not None and arriving in names:
+                    # Stop every other platform first, then confirm
+                    # with the exact stopped set before stopping
+                    # the arriving one last.
+                    stopped = [n for n in names if n != arriving
+                               and self.stop_platform(n).get("ok")]
+                    text = "stopped: " + ", ".join(
+                        n for n in names if n in stopped or n == arriving)
+                    try:
+                        sent = self._send_control_reply(message, text)
+                    except Exception:  # noqa: BLE001 - confirmation
+                        # channel unavailable (a partial runtime in a
+                        # probe or test has no send stack): the stop
+                        # below still runs and the text goes out the
+                        # normal way. Never let the confirmation
+                        # eat the stop.
+                        sent = None
+                    result = self.stop_platform(arriving)
+                    if result.get("ok"):
+                        landed = sent is not None and (
+                            getattr(sent, "ok", False)
+                            or (isinstance(sent, dict)
+                                and bool(sent.get("ok"))))
+                        if landed:
+                            self._note_control_delivery()
+                            return ""
+                        _log.warning(
+                            "stop-all confirmation did not land on %s",
+                            arriving)
+                        return text
+                    return (f"{arriving}: "
+                            f"{result.get('error', 'could not stop')}")
                 stopped = [n for n in names if self.stop_platform(n).get("ok")]
                 if not stopped:
                     return "nothing is running to stop"
                 return f"stopped: {', '.join(stopped)}"
+            if message is not None and target == arriving:
+                try:
+                    sent = self._send_control_reply(
+                        message, f"{target}: stopped")
+                except Exception:  # noqa: BLE001 - confirmation
+                    # channel unavailable (a partial runtime in a
+                    # probe or test has no send stack): the stop
+                    # below still runs and the text goes out the
+                    # normal way. Never let the confirmation eat
+                    # the stop.
+                    sent = None
+                result = self.stop_platform(target)
+                if result.get("ok"):
+                    landed = sent is not None and (
+                        getattr(sent, "ok", False)
+                        or (isinstance(sent, dict)
+                            and bool(sent.get("ok"))))
+                    if landed:
+                        self._note_control_delivery()
+                        return ""
+                    _log.warning(
+                        "stop confirmation did not land on %s", target)
+                    return f"{target}: stopped"
+                return (f"{target}: "
+                        f"{result.get('error', 'could not stop')}")
             result = self.stop_platform(target)
             return (f"{target}: stopped" if result.get("ok")
                     else f"{target}: {result.get('error', 'could not stop')}")
