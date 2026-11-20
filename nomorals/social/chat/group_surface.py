@@ -665,14 +665,21 @@ class GroupSurface:
     TELEGRAM_FAMILY = ("telegram", "telegram-bot",
                        "telegram-personal")
 
-    def _claim_facts(self, group_key: str) -> tuple[bool, Any]:
-        """(designated, bot_admin) for the room, merged across
-        its Telegram family keys: designation on ANY family key
-        designates the room; a verified bot standing recorded by
-        the runtime's probe (which stamps only bot-platform keys)
-        is the room's standing on every surface. bot_admin keeps
-        its tri-state: True if any record verifies it, else False
-        if any record verifies a demotion, else None.
+    def _claim_facts(self, group_key: str) -> tuple[bool, Any, Any]:
+        """(designated, bot_admin, bot_present) for the room,
+        merged across its Telegram family keys: designation on
+        ANY family key designates the room; a verified bot
+        standing recorded by the runtime's probe (which stamps
+        only bot-platform keys) is the room's standing on every
+        surface. bot_admin and bot_present keep their tri-state:
+        True if any record verifies it, else False if any record
+        verifies the negative, else None.
+
+        bot_present is the membership fact — the bot is in the
+        room at all, admin or not — where bot_admin is only the
+        admin half of it. A member-but-not-admin bot is present
+        and answers commands, so arbitration reads presence
+        first and admin standing second.
 
         A pure read: the facts come through
         :meth:`GroupStore.peek_settings`, so asking never
@@ -715,7 +722,14 @@ class GroupSurface:
             bot_admin = False
         else:
             bot_admin = stamps[0] if stamps else None
-        return designated, bot_admin
+        present = [r.get("bot_present") for r in records]
+        if any(s is True for s in present):
+            bot_present: Any = True
+        elif any(s is False for s in present):
+            bot_present = False
+        else:
+            bot_present = present[0] if present else None
+        return designated, bot_admin, bot_present
 
     def claim_state(self, group_key: str) -> dict[str, Any]:
         """The room's §33 facts, exactly as recorded: owner
@@ -724,7 +738,8 @@ class GroupSurface:
         On Telegram the facts are read merged across the room's
         family keys (see TELEGRAM_FAMILY): ONE claim state per
         room, whichever surface asks."""
-        designated, bot_admin = self._claim_facts(group_key)
+        designated, bot_admin, bot_present = self._claim_facts(
+            group_key)
         platform = str(group_key).split(":", 1)[0]
         bot_platform = platform in BOT_PLATFORMS
         bot = bot_admin is True or (
@@ -734,6 +749,7 @@ class GroupSurface:
                   else "bot" if bot else "")
         return {"claimed": claimed, "designated": designated,
                 "bot_admin": bot_admin,
+                "bot_present": bot_present,
                 "bot_platform": bot_platform, "source": source}
 
     def system_output_allowed(self, group_key: str, *,
@@ -861,6 +877,30 @@ class GroupSurface:
             with contextlib.suppress(Exception):
                 durable.note_bot_admin(group_key, bool(is_admin),
                                        bot_jid=bot_jid)
+
+    def note_bot_presence(self, group_key: str, is_present: bool,
+                          bot_jid: str | None = None) -> None:
+        """Record whether Devon's bot is IN this room at all —
+        member or admin — as verified by the runtime's probe of
+        the bot's own member status. Only a CHANGE writes +
+        audits, mirroring :meth:`note_bot_admin`. Presence is
+        the fact command arbitration decides on (a member bot
+        answers commands too); the admin stamp alone cannot say
+        it. Local record only: every runtime probes with its own
+        adapter, so no durable row is needed for the fact to
+        reach the surface that decides. The bot JID rides the
+        audit line so a stamp is attributable to the bot it
+        belongs to."""
+        claim = dict(self.store.settings(group_key).get(
+            "system_claim") or {})
+        changed = claim.get("bot_present") is not bool(is_present)
+        if changed:
+            claim["bot_present"] = bool(is_present)
+            self.update_settings(group_key, system_claim=claim)
+            self._audit(group_key, "bot_claim",
+                        bot_present=bool(is_present),
+                        bot_jid=str(bot_jid or ""))
+            self.store.save()
 
     def _card_render(self, group_key: str, card: Any) -> str:
         """Render a typography Card (§27) for this group's

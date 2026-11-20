@@ -334,10 +334,14 @@ def test_group_owner_side_primary_answers_no_failover_at_8s(
 
 def test_group_bot_side_primary_answers_no_failover_at_3s(
         split_homes, shared_claims_file):
-    """(1) Group, bot side (3s fast window): the userbot answers
-    the group /ping first; the bot's copy loses the claim race
-    and defers on the fast window. The sweep must stand down on
-    the proven answer — no second pong."""
+    """(1) Group, bot side (3s fast window): the userbot's copy
+    DEFERS — it must never win the claim race for a group
+    command. (dupfix7, 2026-11-20: the setup this test used to
+    pin — "the userbot answers the group /ping first" — IS the
+    defect the owner reported: the userbot replying while the
+    public bot is in the group, prompt bot or slow. The no-double
+    property below is unchanged; the roles invert — the bot
+    answers, the userbot stands down on the proven answer.)"""
     home_a, home_b = split_homes
     ad_a = {"telegram-personal": BotAdapter(
         "telegram-personal", PERSONAL_BOT_ID, "De_von_bot")}
@@ -347,16 +351,18 @@ def test_group_bot_side_primary_answers_no_failover_at_3s(
     try:
         base = time.time()
         rt_b._process_inner(_group_msg("telegram", "/ping", "g2-1"))
-        assert len(_texts(ad_b["telegram"])) == 1
+        assert _texts(ad_b["telegram"]) == [], (
+            "the userbot must defer, never answer first")
+        assert _pending(rt_b) == 1, "the userbot copy must defer"
         rt_a._process_inner(_group_msg(
             "telegram-personal", "/ping", "g2-1"))
-        assert _texts(ad_a["telegram-personal"]) == []
-        assert _pending(rt_a) == 1, "the raced bot copy must defer"
-        rt_a._sweep_peer_deferrals(now=base + 5.0)
-        assert _texts(ad_a["telegram-personal"]) == [], (
-            "the fast-side sweep must not double-answer")
-        assert _pending(rt_a) == 0
-        assert len(_texts(ad_b["telegram"])) == 1
+        assert len(_texts(ad_a["telegram-personal"])) == 1, (
+            "the bot must answer once")
+        rt_b._sweep_peer_deferrals(now=base + 12.0)
+        assert _texts(ad_b["telegram"]) == [], (
+            "the userbot sweep must not double-answer")
+        assert _pending(rt_b) == 0
+        assert len(_texts(ad_a["telegram-personal"])) == 1
     finally:
         _stop(rt_a)
         _stop(rt_b)

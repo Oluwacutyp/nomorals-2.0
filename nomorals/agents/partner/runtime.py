@@ -2248,6 +2248,14 @@ class PartnerRuntime(
                         "command /%s in %s is unkeyable — deferral "
                         "refused, handling at once instead of "
                         "vanishing", command.kind, message.chat.key)
+                    if self._group_bot_verified_present(message):
+                        _log.warning(
+                            "command /%s in %s is unkeyable — "
+                            "deferral refused, but the bot is "
+                            "verified in this group — standing "
+                            "down without handling", command.kind,
+                            message.chat.key)
+                        return
                     _arb = "handle"
                 if _arb != "handle":
                     self._bump("controls")
@@ -2682,6 +2690,14 @@ class PartnerRuntime(
                         "command /%s in %s is unkeyable — deferral "
                         "refused, handling at once instead of "
                         "vanishing", _parsed.kind, message.chat.key)
+                    if self._group_bot_verified_present(message):
+                        _log.warning(
+                            "command /%s in %s is unkeyable — "
+                            "deferral refused, but the bot is "
+                            "verified in this group — standing "
+                            "down without handling", _parsed.kind,
+                            message.chat.key)
+                        return
                 if _arb == "down":
                     self._bump("controls")
                     _log.info(
@@ -6387,6 +6403,29 @@ class PartnerRuntime(
                 "runtime.PartnerRuntime._command_stands_down", exc)
             return False
 
+    def _group_bot_verified_present(self, message) -> bool:  # type: ignore[no-untyped-def]
+        """True when the bot's presence in this group is VERIFIED
+        (a probe stamped membership or admin standing) — the
+        userbot must not handle a group command here even when
+        its deferral could not be registered (an unkeyable copy
+        whose deferral fails). The bot's own copy of the same
+        command carries the message id and will answer it, so
+        standing down loses nothing. False on any doubt: the
+        no-vanish rule keeps its old shape where presence is
+        unproven. Never raises."""
+        try:
+            if getattr(message.chat, "kind", None) != ChatKind.GROUP:
+                return False
+            if str(getattr(message.chat, "platform", "") or "") \
+                    in ("telegram-bot", "telegram-personal"):
+                return False
+            state = self._group_surface().claim_state(
+                message.chat.key)
+            return (state.get("bot_present") is True
+                    or state.get("bot_admin") is True)
+        except Exception:  # noqa: BLE001 - unproven: not present
+            return False
+
     def _peer_bot_dm(self, message) -> str | None:  # type: ignore[no-untyped-def]
         """The bot account id when ``message`` sits in a DM with
         one of Devon's own bots on a NON-bot surface, else None.
@@ -6781,40 +6820,56 @@ class PartnerRuntime(
             if proven:
                 return "down"
             return "defer"
-        # (3) In a group where the bot's standing is VERIFIED
-        # (the merged §33 claim says bot_admin), group systems
-        # speak through the bot: a non-bot surface leaves group
-        # commands to it. Designated rooms without a bot keep
-        # their personal-surface handling — designation is not
-        # bot standing, and those rooms have no bot copy coming.
-        # Unproven standing with NO shared truth (groupdup2):
-        # a sibling runtime may own this room, and a per-home
-        # claim cannot see it — DEFER and watch the room
-        # instead of handling blind (fail to defer, never to
-        # double-handle). The shared file is what makes the
-        # fall-through to rule (4) safe: one claim ledger both
-        # runtimes write. Game commands never reach this rule —
-        # (1.5) above already decided them, and the
-        # peer-observation channel is what keeps a game command
-        # to one answer across surfaces.
+        # (3) In a group where the bot is VERIFIED present (the
+        # probe stamped its membership — admin or plain member),
+        # group systems speak through the bot: a non-bot surface
+        # leaves group commands to it. Designated rooms without
+        # a bot keep their personal-surface handling — designation
+        # is not bot standing, and those rooms have no bot copy
+        # coming. Where the bot is VERIFIED ABSENT (the probe
+        # found it is not a member at all) there is no twin copy
+        # coming either, so the claim race below decides.
+        # Unproven standing is the shape the old code got wrong:
+        # it fell through to the race, and the userbot — whose
+        # MTProto copy routinely arrives before the bot's Bot API
+        # poll — claimed first and answered group commands while
+        # the bot was in the room, prompt or slow. An unproven
+        # room DEFERS instead of racing: the sweep fails over if
+        # the bot never claims or answers, so a bot-less group
+        # still gets its answer, just after the short window.
+        # Game commands never reach this rule — (1.5) above
+        # already decided them, and the peer-observation channel
+        # is what keeps a game command to one answer across
+        # surfaces.
         if chat.kind == ChatKind.GROUP and not bot_surface:
             try:
                 surface = self._group_surface()
                 state = surface.claim_state(chat.key)
             except Exception:  # noqa: BLE001 - unproven, no down
                 state = None
-            if state and state.get("bot_admin") is True:
+            present = (state or {}).get("bot_present")
+            admin = (state or {}).get("bot_admin")
+            if present is True or admin is True:
                 # Verified standing is not a proven answer: the
-                # bot may be down even though it was admin when
-                # probed. Defer and watch for its answer; the
-                # sweep fails over if none comes. Only a proven
-                # answer stands this surface down at once — under
-                # any key shape (dupfix6, mode 4).
+                # bot may be down even though it was in the room
+                # when probed. Defer and watch for its answer;
+                # the sweep fails over if none comes. Only a
+                # proven answer stands this surface down at once
+                # — under any key shape (dupfix6, mode 4).
                 proven, _stamp = self._answer_proof(message)
                 if proven:
                     return "down"
                 return "defer"
             if not self._claims_are_shared():
+                return "defer"
+            if present is False or admin is False:
+                # Verified absent (or verified not operating
+                # here): no bot copy is coming — the claim race
+                # in rule (4) decides, as before.
+                pass
+            else:
+                # Unproven: the bot may be in this room. Never
+                # race it for the claim.
                 return "defer"
         # (4) One handling: claim this message identity. The same
         # message carries the same platform message id on every
@@ -7532,6 +7587,100 @@ class PartnerRuntime(
                         self._claims_are_shared(),
                         live["holder"], live["stamp"])
                     continue
+                # (2.5) Group presence gate (arbitration-stress):
+                # the bot's membership in this room is a
+                # probe-stamped fact, independent of the claims
+                # store — and a slow bot outlives its 600 s claim,
+                # so "claim expired + no answer" must never read
+                # as "the bot is down" while the bot is still in
+                # the room AND took this command. Presence alone
+                # is not evidence the bot took it: a member bot
+                # that never claimed the command is not working
+                # on it, and standing is not an answer — the
+                # sweep must still answer such a command
+                # (cmdsilence S3). Re-probe best-effort
+                # (TTL-gated, so the hot path pays a timestamp
+                # check when the standing is fresh) and read the
+                # fresh standing: present + a claim row from
+                # another surface on this key (live or expired)
+                # → hold the deferral, however slow the bot is;
+                # present but never claimed → the existing steps
+                # decide; provably absent → fail over below, even
+                # past the echo-blind rule (a probe stamp is
+                # positive proof from a channel the store outage
+                # cannot touch); unproven → the existing steps
+                # decide. Only group commands on a non-bot
+                # surface are gated — DMs and the bot's own
+                # deferrals keep their pinned behaviour.
+                presence_absent = False
+                if (record.get("turn_kind") == "command"
+                        and getattr(message.chat, "kind", None)
+                        == ChatKind.GROUP
+                        and platform not in ("telegram-bot",
+                                             "telegram-personal")):
+                    _present: Any = None
+                    _admin: Any = None
+                    try:
+                        _surface = self._group_surface()
+                        _probe = getattr(
+                            self, "_probe_bot_claim", None)
+                        if callable(_probe):
+                            with contextlib.suppress(Exception):
+                                _probe(_surface, str(
+                                    record.get("chat_key") or ""),
+                                    message)
+                        _state = _surface.claim_state(str(
+                            record.get("chat_key") or ""))
+                        _present = _state.get("bot_present")
+                        _admin = _state.get("bot_admin")
+                    except Exception:  # noqa: BLE001 - unproven
+                        _present = None
+                        _admin = None
+                    if _present is True or _admin is True:
+                        # Hold only when the bot took THIS
+                        # command: a claim row from another
+                        # surface on this key, live or expired
+                        # (the bot claimed and may still be
+                        # working past its claim's expiry), or a
+                        # holder this sweep itself recorded on
+                        # an earlier firing. A current-build
+                        # stamp is required — a pre-dupfix6
+                        # claim's missing answer proves nothing,
+                        # and the stale-build honest failure in
+                        # step (3) must still run for it.
+                        _own = self._claim_surface(platform)
+                        _took = False
+                        _holder = str(record.get("holder") or "")
+                        _hstamp = str(
+                            record.get("holder_stamp") or "")
+                        if (_holder and _holder != _own
+                                and _hstamp):
+                            _took = True
+                        else:
+                            _last = self._last_claim(
+                                message, answer_key)
+                            if (_last is not None
+                                    and str(_last[0] or "") not in (
+                                        "", _own)
+                                    and str(_last[2] or "")):
+                                _took = True
+                        if _took:
+                            rearmed = self._peer_deferral().rearm(
+                                record,
+                                deadline=sweep_now + WINDOW_S,
+                                now=sweep_now)
+                            _log.info(
+                                "dupfix7 hold: deferred /%s in "
+                                "%s not failing over — the bot "
+                                "is still in the room and took "
+                                "this command (%s)",
+                                record.get("kind"),
+                                record.get("chat_key"),
+                                "re-armed" if rearmed
+                                else "superseded, dropping")
+                            continue
+                    if _present is False:
+                        presence_absent = True
                 # (3) No live claim. The claim window bounds the
                 # wait: a primary that claimed at intake had
                 # until its claim's expiry to answer.
@@ -7550,10 +7699,15 @@ class PartnerRuntime(
                 # the claim window's bound, then end in an honest
                 # failure naming the store. An INCOMING deferral
                 # is not blinded (see the docstring: the pinned
-                # game stagger orders that race).
+                # game stagger orders that race). A group command
+                # whose probe stamped the bot ABSENT is not blind
+                # either (gate 2.5 above): the probe is positive
+                # proof from outside the store, so it fails over
+                # below instead of waiting out the bound.
                 is_echo = not bool(
                     getattr(message, "incoming", True))
-                if (not shared or not key_ok) and is_echo:
+                if (not shared or not key_ok) and is_echo \
+                        and not presence_absent:
                     if sweep_now < bound:
                         rearmed = self._peer_deferral().rearm(
                             record, deadline=bound, now=sweep_now)

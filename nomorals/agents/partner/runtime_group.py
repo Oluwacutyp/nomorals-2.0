@@ -637,14 +637,48 @@ class RuntimeGroupMixin:
 
     _BOT_CLAIM_TTL_S = 600
 
+    @staticmethod
+    def _mtproto_participant_status(participant_type: str) -> str:
+        """The Bot API status word for an MTProto participant
+        type (``admin_member_mtproto`` reports a type, not a
+        status — the probe reads one status language for both
+        adapters). "" when the type says nothing usable."""
+        ptype = str(participant_type or "")
+        for needle, status in (
+                ("Creator", "creator"),
+                ("Admin", "administrator"),
+                ("Left", "left"),
+                ("Banned", "kicked")):
+            if needle in ptype:
+                return status
+        return "member" if ptype else ""
+
     def _probe_bot_claim(self, surface, key, message) -> None:  # type: ignore[no-untyped-def]
-        """Keep the room's bot standing (§33a) honest: when a
-        BOT-platform session serves this group, verify the
-        bot's own member status through the adapter and stamp
-        the result on the surface — a demotion observed here
-        lapses the claim for every session at once.  Probed at
-        most once per room per TTL (the fact changes rarely);
-        an adapter that cannot say leaves the stamp alone.
+        """Keep the room's bot standing (§33a) honest: verify the
+        bot's own member status through the adapter and stamp the
+        result on the surface — a demotion observed here lapses
+        the claim for every session at once, and a departure
+        stamps the bot absent so the userbot may answer again.
+        Probed at most once per room per TTL (the fact changes
+        rarely); an adapter that cannot say leaves the stamp
+        alone.
+
+        The probe runs on EVERY surface that sees the room — the
+        userbot included. Its adapter carries no ``_bot_id`` (it
+        is the owner's account, not a bot), so the bot id comes
+        from the shared bot registry the bot runtime wrote at
+        startup; the lookup verb is ``admin_member`` or, on
+        MTProto, ``admin_member_mtproto`` (the same fallback pair
+        ``_group_admin_ok`` reads). Before this, the probe
+        returned early on the userbot without ever stamping —
+        the userbot's bot standing stayed unproven forever, and
+        command arbitration fell through to a first-claim-wins
+        race it usually won.
+
+        Both facts are stamped: ``bot_admin`` (as before) and
+        ``bot_present`` — member or admin. A member-but-not-admin
+        bot is present and answers commands; only a left/kicked
+        bot is absent.
 
         WhatsApp (groupdup): the adapter carries no ``_bot_id``
         — the bot's own member status is probed under its own
@@ -670,30 +704,65 @@ class RuntimeGroupMixin:
                 < self._BOT_CLAIM_TTL_S:
             return
         adapter = self._group_adapter(platform)
-        bot_id = getattr(adapter, "_bot_id", None) \
-            if adapter is not None else None
-        if bot_id is None and platform == "whatsapp":
-            bot_id = self._whatsapp_bot_account_id(adapter)
-        fn = getattr(adapter, "admin_member", None) \
-            if adapter is not None else None
-        if bot_id is None or fn is None:
+        if adapter is None:
+            return
+        # The bot id to look up: the adapter's own id on bot
+        # surfaces; on the userbot the ids the shared bot
+        # registry knows (the bot runtime wrote them at startup)
+        # — without a bot id there is nothing to probe. WhatsApp
+        # keeps its own proof path and never falls to the
+        # Telegram registry.
+        bot_ids: list[str] = []
+        own_bot_id = getattr(adapter, "_bot_id", None)
+        if own_bot_id:
+            bot_ids.append(str(own_bot_id))
+        if platform == "whatsapp":
+            wa_bot = self._whatsapp_bot_account_id(adapter)
+            if wa_bot and wa_bot not in bot_ids:
+                bot_ids.append(wa_bot)
+        elif not bot_ids:
+            try:
+                for known in sorted(self._bot_account_ids()):
+                    if known and str(known) not in bot_ids:
+                        bot_ids.append(str(known))
+            except Exception:  # noqa: BLE001 - unproven, unstamped
+                pass
+        fn = getattr(adapter, "admin_member", None) or getattr(
+            adapter, "admin_member_mtproto", None)
+        if not bot_ids or fn is None:
             return
         probes[key] = now
-        try:
-            info = fn(message.chat, str(bot_id))
-        except Exception:  # noqa: BLE001 - unproven, unstamped
-            return
-        if not isinstance(info, dict):
-            return
-        status = info.get("status") or info.get("role") or ""
-        if not status and isinstance(info.get("result"), dict):
-            status = info["result"].get("status") or ""
+        status = ""
+        probed_id = ""
+        for candidate in bot_ids:
+            try:
+                info = fn(message.chat, str(candidate))
+            except Exception:  # noqa: BLE001 - try the next id
+                continue
+            if not isinstance(info, dict):
+                continue
+            status = info.get("status") or info.get("role") or ""
+            if not status and isinstance(info.get("result"), dict):
+                status = info["result"].get("status") or ""
+            if not status:
+                status = self._mtproto_participant_status(
+                    str(info.get("participant_type") or ""))
+            if not status:
+                continue
+            probed_id = str(candidate)
+            break
         if not status:
             return
+        status = str(status).lower()
         surface.note_bot_admin(
-            key, str(status).lower() in (
+            key, status in (
                 "creator", "administrator", "admin", "owner"),
-            bot_jid=str(bot_id))
+            bot_jid=probed_id)
+        surface.note_bot_presence(
+            key, status in (
+                "creator", "administrator", "admin", "owner",
+                "member", "restricted"),
+            bot_jid=probed_id)
 
     def _whatsapp_bot_account_id(self, adapter) -> str | None:  # type: ignore[no-untyped-def]
         """This runtime's WhatsApp account JID when it is
@@ -12448,6 +12517,19 @@ class RuntimeGroupMixin:
                           "/gsettings system output on).")
         return key, None
 
+    #: The Bot API path has no member list, so the scan probes
+    #: each ledger member once — unbounded, at up to 40 s a
+    #: probe, which is how a big-group scan outlived the 600 s
+    #: command-claim window and armed the arbitration failover.
+    #: The probe loop is capped by count and by wall time; the
+    #: members past the budget keep their ledger-based row (they
+    #: are still judged for inactivity — only the deleted-marker
+    #: and still-in-group proof is missing) and the roster says
+    #: the scan was partial, so the result never claims a
+    #: completeness it did not reach.
+    _CLEANUP_PROBE_MAX = 300
+    _CLEANUP_PROBE_BUDGET_S = 180.0
+
     def _cleanup_roster(self, surface, key, message):  # type: ignore[no-untyped-def]
         """Assemble the member universe for a cleanup scan, from
         the best enumeration this deployment actually has:
@@ -12535,6 +12617,8 @@ class RuntimeGroupMixin:
         rows: list | None = None
         source = ""
         truncated = False
+        probed = 0
+        probes_truncated = False
         for plat, adapter in candidates:
             fn = getattr(adapter, "admin_members_full", None)
             if fn is None:
@@ -12570,7 +12654,10 @@ class RuntimeGroupMixin:
         if rows is None:
             # Bot API path: the ledger is the universe; probe
             # each known member once for the deleted marker and
-            # for proof they are still in the group at all.
+            # for proof they are still in the group at all. The
+            # loop is bounded (count + wall time): past the
+            # budget the remaining members keep their
+            # ledger-based row and the roster reports partial.
             probe = None
             probe_ref = None
             for plat, adapter in candidates:
@@ -12580,6 +12667,8 @@ class RuntimeGroupMixin:
                     probe, probe_ref = fn, ref(plat)
                     break
             rows = []
+            probe_deadline = (time.monotonic()
+                              + self._CLEANUP_PROBE_BUDGET_S)
             for uid, led in surface.members(key).items():
                 if led.get("left_ts"):
                     continue
@@ -12594,27 +12683,32 @@ class RuntimeGroupMixin:
                     "last_name": str(led.get("last_name") or ""),
                 }
                 if probe is not None:
-                    try:
-                        prof = probe(probe_ref, uid)
-                    except Exception:  # noqa: BLE001 - unprobed
-                        prof = None
-                    if isinstance(prof, dict) \
-                            and prof.get("ok"):
-                        if str(prof.get("status") or "").lower() \
-                                in ("left", "kicked"):
-                            continue  # already out — no ghost
-                        user = prof.get("user") or {}
-                        row["name"] = " ".join(filter(None, [
-                            str(user.get("first_name") or ""),
-                            str(user.get("last_name") or ""),
-                        ])).strip() or row["name"]
-                        row["last_name"] = str(
-                            user.get("last_name") or "")
-                        row["username"] = str(
-                            user.get("username") or "") \
-                            or row["username"]
-                        row["bot"] = bool(user.get("is_bot"))
-                        row["deleted"] = is_deleted_row(row)
+                    if probed >= self._CLEANUP_PROBE_MAX \
+                            or time.monotonic() > probe_deadline:
+                        probes_truncated = True
+                    else:
+                        probed += 1
+                        try:
+                            prof = probe(probe_ref, uid)
+                        except Exception:  # noqa: BLE001 - unprobed
+                            prof = None
+                        if isinstance(prof, dict) \
+                                and prof.get("ok"):
+                            if str(prof.get("status") or "").lower() \
+                                    in ("left", "kicked"):
+                                continue  # already out — no ghost
+                            user = prof.get("user") or {}
+                            row["name"] = " ".join(filter(None, [
+                                str(user.get("first_name") or ""),
+                                str(user.get("last_name") or ""),
+                            ])).strip() or row["name"]
+                            row["last_name"] = str(
+                                user.get("last_name") or "")
+                            row["username"] = str(
+                                user.get("username") or "") \
+                                or row["username"]
+                            row["bot"] = bool(user.get("is_bot"))
+                            row["deleted"] = is_deleted_row(row)
                 rows.append(row)
             source = ("my member ledger — the Bot API has no "
                       "member list, so this scan covers the "
@@ -12633,6 +12727,8 @@ class RuntimeGroupMixin:
                 break
         return {"rows": rows, "source": source,
                 "truncated": truncated,
+                "probed": probed,
+                "probes_truncated": probes_truncated,
                 "member_count": member_count,
                 "protected_ids": protected_ids,
                 "self_ids": self_ids,
@@ -12709,6 +12805,12 @@ class RuntimeGroupMixin:
             coverage.append("⚠ the member list hit its cap — "
                             "members past it are not in this "
                             "scan")
+        if roster.get("probes_truncated"):
+            coverage.append(
+                "⚠ the probe budget ran out — "
+                f"{len(roster['rows']) - roster.get('probed', 0)} "
+                f"member(s) went unchecked for the deleted "
+                f"marker in this scan")
         if roster["member_count"]:
             coverage.append(
                 f"Telegram counts "
@@ -12893,7 +12995,7 @@ class RuntimeGroupMixin:
                  [("🔍 Run the scan", "cleanup")]])
         days = days_override or int(
             cfg.get("inactive_days") or DEFAULT_INACTIVE_DAYS)
-        findings, _roster = self._cleanup_scan(
+        findings, roster = self._cleanup_scan(
             surface, key, message, days)
         targets = findings["deleted" if which == "deleted"
                            else "inactive"]
@@ -12903,7 +13005,12 @@ class RuntimeGroupMixin:
             return (f"nothing to remove — the scan found no "
                     f"{noun}s"
                     + (f" past {days} days." if which != "deleted"
-                       else "."))
+                       else ".")
+                    + (f" The scan was partial — "
+                       f"{len(roster['rows']) - roster.get('probed', 0)} "
+                       f"member(s) went unchecked for the deleted "
+                       f"marker."
+                       if roster.get("probes_truncated") else ""))
         adapter = self._group_adapter(message.chat.platform)
         removed: list = []
         failed: list = []
@@ -12921,6 +13028,12 @@ class RuntimeGroupMixin:
             f"🧹 {noun} cleanup: {len(removed)} removed · "
             f"{len(failed)} failed · {len(skipped)} skipped",
         ]
+        if roster.get("probes_truncated"):
+            lines.append(
+                f"⚠ the scan was partial — "
+                f"{len(roster['rows']) - roster.get('probed', 0)} "
+                f"member(s) went unchecked for the deleted "
+                f"marker")
         shown = 0
         for finding in removed:
             if shown < 20:

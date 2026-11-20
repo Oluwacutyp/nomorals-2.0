@@ -4274,7 +4274,16 @@ class TelegramAdapter(ChatAdapter):
 
     async def _member_role_coro(self, chat: ChatRef,
                                 user_id: str) -> dict[str, Any]:
-        """One member's participant type in a group/channel (MTProto)."""
+        """One member's participant type in a group/channel (MTProto).
+
+        A user who is not a participant reports as LEFT, not as
+        a lookup failure: the bot-claim probe reads this shape to
+        learn the bot has left a room (presence False), and a
+        network fault must never masquerade as a departure — so
+        only the not-a-participant error maps to left, and every
+        other failure stays a failure. The error is recognised
+        by class name (Telethon's ``UserNotParticipantError``),
+        never by message text."""
         from telethon.tl import functions
         entity = await self._resolve(chat)
         try:
@@ -4282,8 +4291,16 @@ class TelegramAdapter(ChatAdapter):
         except Exception as exc:
             record_failure('telegram.TelegramAdapter._member_role_coro', exc)
             return {"ok": False, "error": "user not found"}
-        result = await self._client(functions.channels.GetParticipantRequest(
-            channel=entity, participant=user))
+        try:
+            result = await self._client(
+                functions.channels.GetParticipantRequest(
+                    channel=entity, participant=user))
+        except Exception as exc:  # noqa: BLE001 - left vs fault
+            if type(exc).__name__ == "UserNotParticipantError":
+                return {"ok": True,
+                        "participant_type":
+                            "ChannelParticipantLeft"}
+            raise
         participant = getattr(result, "participant", None)
         ptype = type(participant).__name__ if participant else ""
         return {"ok": True, "participant_type": ptype}
