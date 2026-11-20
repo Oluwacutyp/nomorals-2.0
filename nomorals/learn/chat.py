@@ -11,6 +11,9 @@ Usage:
     /learn waec <subject> | waec grade <pct>
     /learn jamb <subject> | jamb formats | jamb packs | jamb align <q>
     /learn jamb misconceptions <q> | jamb bank | jamb ekiti
+    /learn genetics traits | alleles <trait> | cross <mother> x <father>
+    /learn genetics lesson [id] | predict <LABEL:ratio ...>
+    /learn genetics chisq <LABEL:count ...> | history
 
 Every verb delegates to nomorals.learn functions — nothing is
 re-implemented here. ``quiz start`` is honestly unavailable: ExamSim
@@ -41,7 +44,9 @@ def LEARN_USAGE() -> str:
         "  /learn mastery [weakest] — BKT mastery snapshot\n"
         "  /learn waec <subject> | waec grade <pct>\n"
         "  /learn jamb <subject> | jamb formats | jamb packs | jamb align <query>\n"
-        "  /learn jamb misconceptions <query> | jamb bank | jamb ekiti"
+        "  /learn jamb misconceptions <query> | jamb bank | jamb ekiti\n"
+        "  /learn genetics traits | alleles <trait> | cross <mother> x <father>\n"
+        "  /learn genetics lesson [id] | predict <LABEL:ratio ...> | chisq <LABEL:count ...>"
     )
 
 
@@ -74,6 +79,8 @@ def _control_learn(tail: str, *, chat_key: str = "") -> str:
         return _waec(rest)
     if verb == "jamb":
         return _jamb(rest)
+    if verb == "genetics":
+        return _genetics(rest, chat_key=chat_key)
     return LEARN_USAGE()
 
 
@@ -347,3 +354,214 @@ def _jamb(rest: str) -> str:
     for t in topics:
         lines.append(f"  {t.code.split()[-1]} {t.title}")
     return "\n".join(lines)
+
+
+# ── genetics ─────────────────────────────────────────────────────────────
+
+
+_GENETICS_USAGE = (
+    "🧬 /learn genetics — virtual fruit-fly crosses (Drosophila)\n"
+    "  /learn genetics traits — the 9 traits\n"
+    "  /learn genetics alleles <trait> — mutant alleles for a trait\n"
+    "  /learn genetics cross <mother> x <father> [--n N] [--seed S]\n"
+    "  /learn genetics lesson [id] — six guided lessons\n"
+    "  /learn genetics predict <LABEL:ratio ...> — score your prediction\n"
+    "  /learn genetics chisq <LABEL:count ...> — chi-square vs the last cross\n"
+    "  /learn genetics history — your crosses this chat\n"
+    "  parents look like: f E/WT AR/WT · m W · f SB/WT"
+)
+
+
+def _genetics(rest: str, *, chat_key: str = "") -> str:
+    from .genetics import TRAITS, GeneticsError, alleles_for, get_session
+
+    session = get_session(chat_key)
+    if not rest or rest.lower() == "help":
+        return _GENETICS_USAGE
+    verb, _, tail = rest.partition(" ")
+    verb = verb.lower()
+    tail = tail.strip()
+    try:
+        if verb == "traits":
+            lines = ["🧬 traits — 9, with their mutant alleles:"]
+            for abbr, trait in sorted(TRAITS.items()):
+                n = len(trait.alleles)
+                lines.append(f"  {abbr} — {trait.name} "
+                             f"({n} allele{'s' if n != 1 else ''})")
+            lines.append("Alleles of one: /learn genetics alleles <trait>")
+            return "\n".join(lines)
+        if verb == "alleles":
+            if not tail:
+                return "usage: /learn genetics alleles <trait> — e.g. /learn genetics alleles BC"
+            alleles = alleles_for(tail)
+            lines = [f"🧬 {alleles[0].trait.name} "
+                     f"({alleles[0].trait.abbr}) — {len(alleles)} alleles:"]
+            for allele in alleles:
+                marks = []
+                if allele.dominant:
+                    marks.append("dominant")
+                if allele.lethal:
+                    marks.append("lethal")
+                mark = f" ({', '.join(marks)})" if marks else " (recessive)"
+                lines.append(f"  {allele.code} — {allele.name} · "
+                             f"chr {allele.chromo} @ {allele.position}{mark}")
+            return "\n".join(lines)
+        if verb == "cross":
+            return _genetics_cross(tail, session)
+        if verb == "lesson":
+            return _genetics_lesson(tail, session)
+        if verb == "predict":
+            return _genetics_predict(tail, session)
+        if verb == "chisq":
+            return _genetics_chisq(tail, session)
+        if verb == "history":
+            from fractions import Fraction
+
+            if not session.history:
+                return "🧬 no crosses yet this chat — /learn genetics cross <mother> x <father>"
+            lines = [f"🧬 crosses this chat ({len(session.history)}):"]
+            for entry in session.history[-10:]:
+                top = max(entry["combined"].items(),
+                          key=lambda kv: float(Fraction(kv[1])))
+                lines.append(f"  {entry['kind']}: {entry['mother']} × "
+                             f"{entry['father']} → {top[0]} {top[1]}")
+            return "\n".join(lines)
+    except GeneticsError as exc:
+        return f"genetics: {exc.code} — {exc.detail}" if exc.detail else f"genetics: {exc.code}"
+    return _GENETICS_USAGE
+
+
+def _genetics_cross(tail, session):
+    import re
+
+    from .genetics import parse_genotype, predict, simulate
+
+    if not tail or " x " not in tail.lower():
+        return ("usage: /learn genetics cross <mother> x <father> "
+                "[--n N] [--seed S]\n"
+                "  e.g. /learn genetics cross f E/WT x m E/E")
+    n_seed = {"n": 0, "seed": 0}
+    for flag in ("n", "seed"):
+        match = re.search(rf"--{flag}\s+(\d+)", tail)
+        if match:
+            n_seed[flag] = int(match.group(1))
+            tail = tail[:match.start()].strip() + tail[match.end():].strip()
+    mother_spec, _, father_spec = tail.partition(" x ")
+    mother_spec = mother_spec.strip()
+    father_spec = father_spec.strip()
+    if not mother_spec or not father_spec:
+        return ("usage: /learn genetics cross <mother> x <father> "
+                "[--n N] [--seed S]")
+    mother = parse_genotype(mother_spec)
+    father = parse_genotype(father_spec)
+    result = predict(mother, father)
+    session.record_cross(mother_spec, father_spec, result)
+    lines = [f"🧬 {mother.describe()} × {father.describe()}",
+             "exact offspring:"]
+    lines.extend(result.ratio_lines())
+    sex_lines = result.sex_lines()
+    if sex_lines:
+        lines.append("by sex (sex-linked — read them separately):")
+        lines.extend(sex_lines)
+    if result.inviable > 0:
+        lines.append(f"  inviable conceptions: {result.inviable} "
+                     f"({float(result.inviable) * 100:.1f}% — lethal "
+                     "combinations, never born)")
+    lines.append("(phase: coupling — mutant alleles together on one "
+                 "chromosome; males do not recombine)")
+    if n_seed["n"]:
+        brood = simulate(mother, father, n=n_seed["n"],
+                         seed=n_seed["seed"])
+        shown = ", ".join(f"{label}: {count}"
+                          for label, count in sorted(brood.items()))
+        lines.append(f"brood of {n_seed['n']} (seed {n_seed['seed']}): {shown}")
+        lines.append("chi-square it: /learn genetics chisq "
+                     + " ".join(f"{label}:{count}"
+                                for label, count in sorted(brood.items())
+                                if label != "INVIABLE"))
+    return "\n".join(lines)
+
+
+def _genetics_lesson(tail, session):
+    from .genetics import lesson, list_lessons, parse_genotype, predict
+    if not tail:
+        lines = ["🧬 six lessons — genetics by doing:"]
+        for entry in list_lessons():
+            done = "✓" if entry["id"] in session.lessons_done else "·"
+            lines.append(f"  {done} {entry['id']} — {entry['title']}")
+        lines.append("Open one: /learn genetics lesson <id>")
+        return "\n".join(lines)
+    entry = lesson(tail)
+    mother = parse_genotype(entry["worked"][0])
+    father = parse_genotype(entry["worked"][1])
+    result = predict(mother, father)
+    lines = [f"🧬 {entry['title']}", "", entry["body"], "",
+             f"worked: {mother.describe()} × {father.describe()}"]
+    lines.extend(result.ratio_lines())
+    sex_lines = result.sex_lines()
+    if sex_lines:
+        lines.append("by sex:")
+        lines.extend(sex_lines)
+    if result.inviable > 0:
+        lines.append(f"  inviable: {result.inviable}")
+    practice_mother = parse_genotype(entry["practice"][0])
+    practice_father = parse_genotype(entry["practice"][1])
+    session.last_practice = (entry["practice"][0], entry["practice"][1],
+                             entry["id"])
+    lines.extend(["",
+                  f"practice: {practice_mother.describe()} × "
+                  f"{practice_father.describe()}",
+                  f"hint: {entry['hint']}",
+                  "predict it: /learn genetics predict "
+                  "<LABEL:ratio ...> — e.g. WT:3/4 E:1/4"])
+    return "\n".join(lines)
+
+
+def _genetics_predict(tail, session):
+    from .genetics import parse_genotype, parse_ratios, predict, score_prediction
+    if not tail:
+        return "usage: /learn genetics predict <LABEL:ratio ...> — e.g. /learn genetics predict WT:3/4 E:1/4"
+    predicted = parse_ratios(tail)
+    if session.last_practice is not None:
+        mother_spec, father_spec, lesson_id = session.last_practice
+        expected = predict(parse_genotype(mother_spec),
+                           parse_genotype(father_spec)).combined
+        target = f"lesson '{lesson_id}' practice"
+    elif session.last_cross is not None:
+        expected = session.last_cross.combined
+        target = "the last cross"
+    else:
+        return ("nothing to predict yet — open a lesson first "
+                "(/learn genetics lesson <id>) or run a cross.")
+    score = score_prediction(predicted, expected)
+    lines = [f"🧬 prediction vs {target}: {score.verdict}"]
+    for label in sorted(score.diffs):
+        diff = score.diffs[label]
+        if abs(diff) < 0.0005:
+            continue
+        sign = "+" if diff > 0 else ""
+        lines.append(f"  {label}: {sign}{diff:.2f} off")
+    if score.exact and session.last_practice is not None:
+        session.lessons_done.add(session.last_practice[2])
+        lines.append(f"✓ lesson '{session.last_practice[2]}' complete.")
+    return "\n".join(lines)
+
+
+def _genetics_chisq(tail, session):
+    from .genetics import GeneticsError, chi_square, parse_ratios
+
+    if not tail:
+        return "usage: /learn genetics chisq <LABEL:count ...> — e.g. /learn genetics chisq WT:90 E:30"
+    if session.last_cross is None:
+        return "no cross to test yet — run /learn genetics cross first."
+    ratios = parse_ratios(tail)
+    observed = {}
+    for label, value in ratios.items():
+        if value.denominator != 1:
+            raise GeneticsError("bad_ratio",
+                                f"chisq needs counts, got '{label}:{value}'")
+        observed[label] = int(value)
+    result = chi_square(observed, session.last_cross.combined)
+    return (f"🧬 chi-square: {result.statistic:.2f} on {result.dof} df, "
+            f"p = {result.p_value:.3f}\n{result.verdict}")
+

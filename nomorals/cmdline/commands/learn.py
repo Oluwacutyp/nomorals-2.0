@@ -19,7 +19,8 @@ def _cmd_learn(args: Any, context: Any) -> int:
               "       nm learn flashcards due [n] | stats | list | review <id> <1-4> | export <path>\n"
               "       nm learn mastery [weakest]\n"
               "       nm learn waec <subject> | waec grade <pct>\n"
-              "       nm learn jamb <subject> | jamb formats | jamb packs | jamb align <q> | jamb misconceptions <q> | jamb bank | jamb ekiti",
+              "       nm learn jamb <subject> | jamb formats | jamb packs | jamb align <q> | jamb misconceptions <q> | jamb bank | jamb ekiti\n"
+              "       nm learn genetics traits | alleles <trait> | cross <mother> x <father> | lesson [id] | predict <LABEL:ratio ...> | chisq <LABEL:count ...> | history",
               file=sys.stderr)
         return 2
     from ...learn.chat import control_learn

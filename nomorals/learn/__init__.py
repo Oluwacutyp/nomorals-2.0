@@ -6,7 +6,9 @@ modes, BKT mastery model, EMT expectation/misconception cycle, answer-guard);
 ``dialect.py`` is the Ekiti/Ilawe Ekiti flagship dialect tutor.
 ``curriculum.py`` is the WAEC/JAMB wedge: syllabus grounding, course
 generation, misconception bank from Chief Examiners' Reports, timed exam
-simulation, and study plans.
+simulation, and study plans. ``genetics.py`` is the Drosophila bench:
+exact fruit-fly crosses (Punnett ratios by rational arithmetic, real
+linkage, male achiasmy), chi-square, prediction scoring, six lessons.
 """
 
 from .curriculum import (
@@ -74,6 +76,27 @@ from .flashcards import (
     grade_for_verdict,
     notebooks_dir,
 )
+from .genetics import (
+    Allele,
+    ChiSquare,
+    CrossResult,
+    GeneticsError,
+    GeneticsSession,
+    Genotype,
+    Phenotype,
+    Trait,
+    alleles_for,
+    chi_square,
+    get_allele,
+    get_trait,
+    lesson,
+    list_lessons,
+    parse_genotype,
+    parse_ratios,
+    predict,
+    score_prediction,
+    simulate,
+)
 from .tutor import (
     BKT_DEFAULTS,
     Expectation,
@@ -96,6 +119,25 @@ from .tutor import (
 )
 
 __all__ = [
+    "Allele",
+    "ChiSquare",
+    "CrossResult",
+    "GeneticsError",
+    "GeneticsSession",
+    "Genotype",
+    "Phenotype",
+    "Trait",
+    "alleles_for",
+    "chi_square",
+    "get_allele",
+    "get_trait",
+    "lesson",
+    "list_lessons",
+    "parse_genotype",
+    "parse_ratios",
+    "predict",
+    "score_prediction",
+    "simulate",
     "MasteryModel",
     "BKT_DEFAULTS",
     "MistakeNotebook",
