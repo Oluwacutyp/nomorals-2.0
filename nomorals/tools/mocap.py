@@ -33,7 +33,9 @@ _ACTIONS = ("status", "engines", "route", "register", "publish", "read",
             "unsubscribe", "bvh_write", "bvh_read", "kinect_fixture",
             "kinect_status", "save", "load",
             "rig_list", "rig_load", "rig_pose", "rig_render",
-            "rig_drive", "rig_export", "rig_status")
+            "rig_drive", "rig_export", "rig_status",
+            "ingest_start", "ingest_stop", "ingest_status",
+            "ingest_tick", "ingest_publish")
 
 _STORE = MocapStateStore()
 _ROUTER = default_router()
@@ -41,6 +43,95 @@ _EXPORTER = BvhExporter()
 
 _FIXTURES = (Path(__file__).resolve().parents[2]
              / "tests" / "fixtures" / "kinect")
+
+
+def _ingest_options(args: dict) -> tuple[str, str, Any]:
+    """params -> (source name, source dir, IngestOptions).
+    Unknown keys are refused by name, never ignored."""
+    from ..media.mocap.ingest import IngestOptions
+
+    known = {"source", "source_dir", "fps", "wide", "depth_cull_mm",
+             "left_cull_mm", "right_cull_mm", "xoff_mm", "yoff_mm",
+             "zoff_mm", "stride", "max_frames", "zmq_endpoint",
+             "zmq_mode", "zmq_send_timeout_ms", "publish_store",
+             "publish_zmq", "device_index", "timeout_ms"}
+    unknown = sorted(set(args) - known)
+    if unknown:
+        raise ValueError(
+            f"ingest params have unknown keys: {', '.join(unknown)}")
+    source = str(args.get("source") or "fixture")
+    source_dir = str(args.get("source_dir") or "")
+    options = IngestOptions(
+        fps=float(args.get("fps") or 30.0),
+        wide=bool(args.get("wide", False)),
+        depth_cull_mm=int(args.get("depth_cull_mm") or 0),
+        left_cull_mm=int(args.get("left_cull_mm") or 0),
+        right_cull_mm=int(args.get("right_cull_mm") or 0),
+        xoff_mm=int(args.get("xoff_mm") or 0),
+        yoff_mm=int(args.get("yoff_mm") or 0),
+        zoff_mm=int(args.get("zoff_mm") or 0),
+        stride=int(args.get("stride") or 16),
+        max_frames=int(args.get("max_frames") or 0),
+        zmq_endpoint=str(args.get("zmq_endpoint")
+                         or "tcp://*:8888"),
+        zmq_mode=str(args.get("zmq_mode") or "bind"),
+        zmq_send_timeout_ms=int(args.get("zmq_send_timeout_ms")
+                                if args.get("zmq_send_timeout_ms")
+                                is not None else 1000),
+        publish_store=bool(args.get("publish_store", True)),
+        publish_zmq=bool(args.get("publish_zmq", True)),
+        device_index=int(args.get("device_index") or 0),
+        timeout_ms=int(args.get("timeout_ms") or 1000))
+    options.validate()
+    return source, source_dir, options
+
+
+def _ingest_action(action: str, node: str, args: dict,
+                   sources: list[str]) -> dict[str, Any]:
+    """Ingest verbs on the mocap tool — one code path with the
+    CLI and chat, through the shared ingest session registry."""
+    from ..media.mocap.ingest import (
+        drop_session,
+        get_session,
+        list_sessions,
+        open_session,
+        open_source,
+        publish_one_frame,
+    )
+
+    session_name = (node or "").strip() or "default"
+    if action == "ingest_status":
+        if node.strip():
+            return dict({"name": session_name},
+                        **get_session(session_name).status())
+        return {"sessions": list_sessions()}
+    if action == "ingest_publish":
+        source, source_dir, options = _ingest_options(args)
+        if sources:
+            source_dir = sources[0]
+        return publish_one_frame(_STORE, source, options,
+                                 source_dir=source_dir)
+    if action == "ingest_stop":
+        return drop_session(session_name)
+    if action == "ingest_tick":
+        session = get_session(session_name)
+        frames = int(args.get("frames") or 1)
+        return {"session": session_name,
+                "receipts": session.run(frames)}
+    if action == "ingest_start":
+        source, source_dir, options = _ingest_options(args)
+        if sources:
+            source_dir = sources[0]
+        src = open_source(source, options, source_dir=source_dir)
+        try:
+            session = open_session(session_name, src, options,
+                                   store=_STORE)
+        except Exception:
+            src.close()
+            raise
+        return dict({"name": session_name, "ok": True},
+                    **session.start())
+    raise ValueError(f"unhandled mocap action {action!r}")
 
 
 def _rig_action(action: str, node: str, args: dict,
@@ -229,12 +320,28 @@ def register(registry: Any) -> None:
             "take and write it back as BVH, node=<session>, "
             "sources=[path.bvh], output=<path.bvh>, params=<{text}>>; "
             "rig_status=<a session's rig + remap + frame size, node="
-            "<session>>. action=<status|engines|"
+            "<session>>. Ingest actions (Kinect → point cloud → "
+            "ZeroMQ, storytold/cloudcam pattern): ingest_start=<"
+            "start a polling session, node=<session>, sources=["
+            "recorded-frames dir for the file source], params=<{"
+            "source: live|fixture|file, source_dir, fps, wide, "
+            "depth_cull_mm, left_cull_mm, right_cull_mm, xoff_mm, "
+            "yoff_mm, zoff_mm, stride, max_frames, zmq_endpoint, "
+            "zmq_mode: bind|connect, zmq_send_timeout_ms, "
+            "publish_store, publish_zmq, "
+            "device_index, timeout_ms}>>; ingest_stop=<stop and "
+            "drop a session, node=<session>>; ingest_status=<a "
+            "session's frames/points/drops, node=<session> or "
+            "empty for all>; ingest_tick=<poll N frames by hand on "
+            "a stopped session, node=<session>, params=<{frames}>>; "
+            "ingest_publish=<one frame, no session, params=<same "
+            "as ingest_start>>. action=<status|engines|"
             "route|register|publish|read|snapshot|claim|release|"
             "subscribe|poll|unsubscribe|bvh_write|bvh_read|"
             "kinect_fixture|kinect_status|save|load|rig_list|"
             "rig_load|rig_pose|rig_render|rig_drive|rig_export|"
-            "rig_status>; sources=<list "
+            "rig_status|ingest_start|ingest_stop|ingest_status|"
+            "ingest_tick|ingest_publish>; sources=<list "
             "of paths>; output=<path to write>."
         ),
         capability=Capability.FS_WRITE,
@@ -373,4 +480,6 @@ def register(registry: Any) -> None:
                     "channels": _STORE.channels()}
         if action.startswith("rig_"):
             return _rig_action(action, node, args, sources, output)
+        if action.startswith("ingest_"):
+            return _ingest_action(action, node, args, sources)
         raise ValueError(f"unhandled mocap action {action!r}")

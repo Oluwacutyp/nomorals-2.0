@@ -27,8 +27,14 @@ class RuntimeMocapMixin:
         /mocap rig render [name]                  render the pose (PNG)
         /mocap rig drive <bvh> [text]             drive a take, render it
         /mocap rig export <bvh> [text]            drive a take, BVH back out
+        /mocap ingest start [live|fixture] [name] start polling a source
+        /mocap ingest stop [name]                 stop + drop a session
+        /mocap ingest status [name]               frames/points/drops
+        /mocap ingest tick [name] [n]             poll n frames by hand
+        /mocap ingest publish [live|fixture]      one frame, no session
         """
         from ...media.mocap.bvh import SkeletonFrame
+        from ...media.mocap.errors import MocapError
         from ...media.rig import (
             FaceInput,
             get_session,
@@ -47,6 +53,8 @@ class RuntimeMocapMixin:
                     + ", ".join(_STORE.channels())
                     + " | engines: "
                     + ", ".join(e["name"] for e in _STORE.engines()))
+        if parts[0] == "ingest":
+            return self._control_mocap_ingest(parts[1:])
         if parts[0] != "rig":
             return self._control_mocap_help()
         verb = parts[1] if len(parts) > 1 else ""
@@ -135,18 +143,129 @@ class RuntimeMocapMixin:
             record_failure(
                 "runtime_mocap.RuntimeMocapMixin._control_mocap", exc)
             return f"rig: {exc}"
+        except MocapError as exc:
+            record_failure(
+                "runtime_mocap.RuntimeMocapMixin._control_mocap", exc)
+            return f"ingest: {exc}"
         except Exception as exc:  # noqa: BLE001 - chat never dies
             record_failure(
                 "runtime_mocap.RuntimeMocapMixin._control_mocap", exc)
             return f"mocap failed: {exc}"
         return self._control_mocap_help()
 
+    def _control_mocap_ingest(self, parts: list[str]) -> str:
+        """``/mocap ingest …`` — the polling pipeline from chat.
+
+        Chat takes the simple shape only: a source name and a
+        session name. The full option set lives on the ``mocap``
+        brain tool and ``nm mocap ingest``. Named refusals (no
+        device, no pyzmq, unknown session) come back as plain
+        words, never a traceback.
+        """
+        from ...hardware.kinect import KinectError
+        from ...media.mocap.errors import MocapError
+        from ...media.mocap.ingest import (
+            IngestOptions,
+            drop_session,
+            get_session,
+            list_sessions,
+            open_session,
+            open_source,
+            publish_one_frame,
+        )
+        from ...tools.mocap import _STORE
+
+        if not parts:
+            return self._control_mocap_help()
+        verb = parts[0]
+        rest = parts[1:]
+        try:
+            if verb == "status":
+                if rest:
+                    status = get_session(rest[0]).status()
+                    return self._ingest_status_line(status)
+                sessions = list_sessions()
+                if not sessions:
+                    return "no ingest sessions running"
+                return "\n".join(
+                    self._ingest_status_line(s)
+                    for s in sessions)
+            if verb == "publish":
+                source = rest[0] if rest else "fixture"
+                receipt = publish_one_frame(
+                    _STORE, source, IngestOptions())
+                if receipt.get("frame") is None:
+                    return (f"ingest publish dropped: "
+                            f"{receipt.get('reason', 'unknown')}")
+                return (f"ingest publish: frame {receipt['frame']} "
+                        f"{receipt['points']} points "
+                        f"({receipt['color']})")
+            if verb == "stop":
+                name = rest[0] if rest else "default"
+                drop_session(name)
+                return f"ingest session {name} stopped"
+            if verb == "tick":
+                name = rest[0] if rest else "default"
+                count = int(rest[1]) if len(rest) > 1 else 1
+                session = get_session(name)
+                receipts = session.run(count)
+                done = [r for r in receipts
+                        if r.get("frame") is not None]
+                return (f"ingest {name}: {len(done)}/{count} frames, "
+                        f"{sum(r['points'] for r in done)} points")
+            if verb == "start":
+                source = rest[0] if rest else "fixture"
+                name = rest[1] if len(rest) > 1 else "default"
+                options = IngestOptions()
+                src = open_source(source, options)
+                try:
+                    session = open_session(name, src, options,
+                                           store=_STORE)
+                except Exception:
+                    src.close()
+                    raise
+                status = session.start()
+                return (f"ingest session {name} started "
+                        f"({source} @ {options.fps}fps, "
+                        f"ZeroMQ {options.zmq_endpoint}) — "
+                        f"state {status['state']}")
+        except MocapError as exc:
+            record_failure(
+                "runtime_mocap.RuntimeMocapMixin"
+                "._control_mocap_ingest", exc)
+            return f"ingest: {exc}"
+        except KinectError as exc:
+            record_failure(
+                "runtime_mocap.RuntimeMocapMixin"
+                "._control_mocap_ingest", exc)
+            return f"ingest: {exc}"
+        except (ValueError, TypeError) as exc:
+            return f"ingest: {exc}"
+        return self._control_mocap_help()
+
+    @staticmethod
+    def _ingest_status_line(status: dict) -> str:
+        drops = status["drops"]
+        return (f"{status['name']}: {status['state']} "
+                f"({status['source']}) frames={status['frames']} "
+                f"points={status['points_total']} "
+                f"last={status['points_last']} "
+                f"drops timeouts={drops['timeouts']} "
+                f"conversion={drops['conversion_errors']} "
+                f"store={drops['store_errors']} "
+                f"zmq={drops['zmq_errors']} "
+                f"fps {status['fps_achieved']}/{status['fps_target']}"
+                + (f" last error: {status['last_error']}"
+                   if status["last_error"] else ""))
+
     def _control_mocap_help(self) -> str:
         return (
             "/mocap status | rig list | rig load [name] | "
             "rig status [name] | rig pose [name] [frame JSON] | "
             "rig render [name] | rig drive <bvh> [text] | "
-            "rig export <bvh> [text]")
+            "rig export <bvh> [text] | ingest start [live|fixture] "
+            "[name] | ingest stop [name] | ingest status [name] | "
+            "ingest tick [name] [n] | ingest publish [live|fixture]")
 
     # ── cloudcam: /cloudcam ───────────────────────────────────────────
     def _control_cloudcam(self, tail: str, chat_key: str,

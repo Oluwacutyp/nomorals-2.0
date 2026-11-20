@@ -32,6 +32,8 @@ def _cmd_mocap(args: argparse.Namespace, context: Any) -> int:
     action = args.mocap_action
     if action == "rig":
         return _cmd_mocap_rig(args, context)
+    if action == "ingest":
+        return _cmd_mocap_ingest(args, context)
     if action == "status":
         from ...tools.mocap import _STORE
         return _out(args, {
@@ -39,6 +41,80 @@ def _cmd_mocap(args: argparse.Namespace, context: Any) -> int:
             "engines": [e["name"] for e in _STORE.engines()],
         })
     print(f"unknown mocap action: {action}", file=sys.stderr)
+    return 2
+
+
+def _ingest_options(args: argparse.Namespace):
+    """CLI flags -> IngestOptions (same defaults as the tool)."""
+    from ...media.mocap.ingest import IngestOptions
+
+    options = IngestOptions(
+        fps=args.fps, wide=args.wide,
+        depth_cull_mm=args.depth_cull, left_cull_mm=args.left_cull,
+        right_cull_mm=args.right_cull, xoff_mm=args.xoff,
+        yoff_mm=args.yoff, zoff_mm=args.zoff, stride=args.stride,
+        max_frames=args.max_frames, zmq_endpoint=args.zmq_endpoint,
+        zmq_mode=args.zmq_mode,
+        zmq_send_timeout_ms=args.zmq_send_timeout,
+        publish_store=not args.no_store,
+        publish_zmq=not args.no_zmq, device_index=args.device,
+        timeout_ms=args.timeout)
+    options.validate()
+    return options
+
+
+def _cmd_mocap_ingest(args: argparse.Namespace, context: Any) -> int:
+    """Route `nm mocap ingest` verbs — the same sessions the
+    ``mocap`` brain tool drives, from the terminal."""
+    from ...media.mocap.errors import MocapError
+    from ...media.mocap.ingest import (
+        drop_session,
+        get_session,
+        list_sessions,
+        open_session,
+        open_source,
+        publish_one_frame,
+    )
+    from ...tools.mocap import _STORE
+
+    verb = args.mocap_ingest_verb
+    name = (getattr(args, "session", "") or "").strip() or "default"
+    try:
+        if verb == "status":
+            if (getattr(args, "session", "") or "").strip():
+                return _out(args, dict({"name": name},
+                                       **get_session(name).status()))
+            return _out(args, {"sessions": list_sessions()})
+        if verb == "publish":
+            receipt = publish_one_frame(
+                _STORE, args.source, _ingest_options(args),
+                source_dir=(args.dir or ""))
+            return _out(args, receipt)
+        if verb == "stop":
+            return _out(args, drop_session(name))
+        if verb == "tick":
+            session = get_session(name)
+            return _out(args, {"session": name,
+                               "receipts": session.run(args.frames)})
+        if verb == "start":
+            options = _ingest_options(args)
+            src = open_source(args.source, options,
+                              source_dir=(args.dir or ""))
+            try:
+                session = open_session(name, src, options,
+                                       store=_STORE)
+            except Exception:
+                src.close()
+                raise
+            return _out(args, dict({"name": name, "ok": True},
+                                   **session.start()))
+    except MocapError as exc:
+        print(f"ingest: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - CLI reports, never dies
+        print(f"ingest failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"unknown mocap ingest verb: {verb}", file=sys.stderr)
     return 2
 
 

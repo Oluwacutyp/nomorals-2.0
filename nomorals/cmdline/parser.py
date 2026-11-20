@@ -3205,7 +3205,22 @@ def _parser() -> argparse.ArgumentParser:
                      "nm mocap rig drive --bvh PATH [--session NAME] "
                      "[--text TEXT] [--out DIR]\\n"
                      "nm mocap rig export --bvh PATH --out PATH.bvh "
-                     "[--session NAME] [--text TEXT]"),
+                     "[--session NAME] [--text TEXT]\\n"
+                     "nm mocap ingest start [--source live|fixture|"
+                     "file] [--dir PATH] [--fps N] [--wide] "
+                     "[--depth-cull MM] [--left-cull MM] "
+                     "[--right-cull MM] [--xoff MM] [--yoff MM] "
+                     "[--zoff MM] [--stride N] [--max-frames N] "
+                     "[--zmq-endpoint ADDR] [--zmq-mode bind|"
+                     "connect] [--zmq-send-timeout MS] [--no-store] "
+                     "[--no-zmq] "
+                     "[--session NAME]\\n"
+                     "nm mocap ingest stop [--session NAME]\\n"
+                     "nm mocap ingest status [--session NAME]\\n"
+                     "nm mocap ingest tick [--session NAME] "
+                     "[--frames N]\\n"
+                     "nm mocap ingest publish [--source live|"
+                     "fixture|file] [--dir PATH] [ingest options]"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     mocap.add_argument("--json", action="store_true",
@@ -3346,6 +3361,58 @@ def _parser() -> argparse.ArgumentParser:
                  cc_render):
         _sub.add_argument("--session", default="default",
                           help="cloudcam session name (default 'default')")
+    m_ingest = mocap_sub.add_parser(
+        "ingest", help="Kinect → point cloud → ZeroMQ ingestion")
+    m_ingest_sub = m_ingest.add_subparsers(
+        dest="mocap_ingest_verb", required=True)
+    m_ingest_start = m_ingest_sub.add_parser(
+        "start", help="start a polling ingest session")
+    m_ingest_stop = m_ingest_sub.add_parser(
+        "stop", help="stop and drop an ingest session")
+    m_ingest_status = m_ingest_sub.add_parser(
+        "status", help="an ingest session's frames/points/drops")
+    m_ingest_tick = m_ingest_sub.add_parser(
+        "tick", help="poll N frames by hand on a stopped session")
+    m_ingest_tick.add_argument("--frames", type=int, default=1)
+    m_ingest_publish = m_ingest_sub.add_parser(
+        "publish", help="one frame, no session")
+    for _sub in (m_ingest_start, m_ingest_publish):
+        _sub.add_argument(
+            "--source", default="fixture",
+            choices=("live", "fixture", "file"),
+            help="capture source (default fixture)")
+        _sub.add_argument(
+            "--dir", default="",
+            help="recorded-frames directory (file source)")
+        _sub.add_argument("--fps", type=float, default=30.0)
+        _sub.add_argument("--wide", action="store_true",
+                          help="wide FOV depth at 15 fps")
+        _sub.add_argument("--depth-cull", type=int, default=0)
+        _sub.add_argument("--left-cull", type=int, default=0)
+        _sub.add_argument("--right-cull", type=int, default=0)
+        _sub.add_argument("--xoff", type=int, default=0)
+        _sub.add_argument("--yoff", type=int, default=0)
+        _sub.add_argument("--zoff", type=int, default=0)
+        _sub.add_argument("--stride", type=int, default=16)
+        _sub.add_argument("--max-frames", type=int, default=0)
+        _sub.add_argument("--zmq-endpoint", default="tcp://*:8888")
+        _sub.add_argument("--zmq-mode", default="bind",
+                          choices=("bind", "connect"))
+        _sub.add_argument("--zmq-send-timeout", type=int, default=1000,
+                          help="ms a ZeroMQ send waits for a consumer "
+                          "(default 1000)")
+        _sub.add_argument("--no-store", action="store_true",
+                          help="skip the mocap store publish")
+        _sub.add_argument("--no-zmq", action="store_true",
+                          help="skip the ZeroMQ publish")
+        _sub.add_argument("--device", type=int, default=0)
+        _sub.add_argument("--timeout", type=int, default=1000)
+    for _sub in (m_ingest_start, m_ingest_stop, m_ingest_tick):
+        _sub.add_argument("--session", default="default",
+                          help="ingest session name (default 'default')")
+    m_ingest_status.add_argument(
+        "--session", default="",
+        help="ingest session name (empty = all sessions)")
 
     show = sub.add_parser("show", aliases=CLI_ALIASES["show"],
         help="one live run of mocap + rig + cloudcam, through named states",
