@@ -2601,6 +2601,10 @@ def _parser() -> argparse.ArgumentParser:
                      "nm voice stats [--json]\n"
                      "nm voice service list | serve <slug> --inputs JSON | "
                      "health <slug> | export-vits-probe | status\n"
+                     "nm voice model pack --acoustic A --vocoder V --name N "
+                     "--token T --author A --secret-file F --out M.dvmodel\n"
+                     "nm voice model inspect <file> [--full] | unpack "
+                     "<file> --out-dir D | register <file>\n"
                      "nm voice consent [--grant|--revoke] [--device ID]\n"
                      "nm voice purge\n"
                      "nm voice decrypt <file.enc> --key-file PATH\n"
@@ -2863,6 +2867,86 @@ def _parser() -> argparse.ArgumentParser:
         "status", help="registry + model-cache status")
     v_svc_status.add_argument("--json", action="store_true",
                               help="Output as JSON")
+    # -- voice model bundles: one sealed .dvmodel file per voice --------
+    v_model = voice_sub.add_parser(
+        "model",
+        help="voice model bundles: pack, inspect, unpack, register",
+        description=("nm voice model pack --acoustic A --vocoder V "
+                     "--name NAME --token TOKEN --author AUTHOR "
+                     "--secret-file PATH --out FILE.dvmodel "
+                     "[--expires-in-days N | --expires-at RFC3339] "
+                     "[--password P] [--replace]\n"
+                     "nm voice model inspect FILE.dvmodel [--full] "
+                     "[--secret-file PATH]\n"
+                     "nm voice model unpack FILE.dvmodel --out-dir DIR "
+                     "[--secret-file PATH] [--password P]\n"
+                     "nm voice model register FILE.dvmodel [--json]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    model_sub = v_model.add_subparsers(dest="voice_model_action",
+                                       required=True)
+    v_mod_pack = model_sub.add_parser(
+        "pack", help="seal acoustic + vocoder files into one bundle")
+    v_mod_pack.add_argument("--acoustic", required=True,
+                            help="acoustic model file (TorchScript .recast)")
+    v_mod_pack.add_argument("--vocoder", required=True,
+                            help="vocoder model file (TorchScript .pt)")
+    v_mod_pack.add_argument("--name", required=True,
+                            help="model display name, e.g. Morgan Freeman")
+    v_mod_pack.add_argument("--token", required=True,
+                            help="model primary key, e.g. dvm_morgan-1")
+    v_mod_pack.add_argument("--author", required=True,
+                            help="author username (20 chars max)")
+    v_mod_pack.add_argument("--out", required=True,
+                            help="output .dvmodel path")
+    v_mod_pack.add_argument("--secret", default="",
+                            help="sealing secret (prefer --secret-file)")
+    v_mod_pack.add_argument("--secret-file", default="",
+                            help="file holding the sealing secret")
+    v_mod_pack.add_argument("--version", default="1.0.0",
+                            help="file format version, semver (default 1.0.0)")
+    v_mod_pack.add_argument("--model-version", default="",
+                            help="model version, semver (default: --version)")
+    v_mod_pack.add_argument("--expires-at", default="",
+                            help="expiry timestamp, RFC3339")
+    v_mod_pack.add_argument("--expires-in-days", type=int, default=None,
+                            help="expiry in days from now")
+    v_mod_pack.add_argument("--password", default="",
+                            help="short password gating use of the bundle")
+    v_mod_pack.add_argument("--replace", action="store_true",
+                            help="overwrite an existing output file")
+    v_mod_pack.add_argument("--json", action="store_true",
+                            help="Output as JSON")
+    v_mod_insp = model_sub.add_parser(
+        "inspect", help="read a bundle's metadata")
+    v_mod_insp.add_argument("file", help="bundle path")
+    v_mod_insp.add_argument("--full", action="store_true",
+                            help="decrypt the sealed parts too (needs secret)")
+    v_mod_insp.add_argument("--secret", default="",
+                            help="sealing secret (prefer --secret-file)")
+    v_mod_insp.add_argument("--secret-file", default="",
+                            help="file holding the sealing secret")
+    v_mod_insp.add_argument("--json", action="store_true",
+                            help="Output as JSON")
+    v_mod_unpack = model_sub.add_parser(
+        "unpack", help="extract a bundle's acoustic + vocoder files")
+    v_mod_unpack.add_argument("file", help="bundle path")
+    v_mod_unpack.add_argument("--out-dir", required=True,
+                              help="directory for the extracted files")
+    v_mod_unpack.add_argument("--secret", default="",
+                              help="sealing secret (prefer --secret-file)")
+    v_mod_unpack.add_argument("--secret-file", default="",
+                              help="file holding the sealing secret")
+    v_mod_unpack.add_argument("--password", default="",
+                              help="bundle password, when one is set")
+    v_mod_unpack.add_argument("--allow-expired", action="store_true",
+                              help="use an expired bundle anyway")
+    v_mod_unpack.add_argument("--json", action="store_true",
+                            help="Output as JSON")
+    v_mod_reg = model_sub.add_parser(
+        "register", help="register a bundle file as a model service")
+    v_mod_reg.add_argument("file", help="bundle path")
+    v_mod_reg.add_argument("--json", action="store_true",
+                           help="Output as JSON")
     v_live_start = live_sub.add_parser(
         "start", help="join a LiveKit room and talk live")
     v_live_start.add_argument("--room", required=True,

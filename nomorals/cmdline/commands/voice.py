@@ -120,6 +120,8 @@ def _cmd_voice(args: argparse.Namespace, context: Any) -> int:
         return _cmd_voice_live(args, context)
     if action == "service":
         return _cmd_voice_service(args, context)
+    if action == "model":
+        return _cmd_voice_model(args, context)
     print(f"unknown voice action: {action}", file=sys.stderr)
     return 2
 
@@ -252,6 +254,164 @@ def _cmd_voice_service(args: argparse.Namespace, context: Any) -> int:
         return _emit(server.status())
 
     print(f"unknown voice service action: {action}", file=sys.stderr)
+    return 2
+
+
+def _voice_model_secret(args: argparse.Namespace) -> str:
+    """The bundle secret: --secret, then --secret-file, then the
+    NM_VOICE_BUNDLE_SECRET env var. Empty when none is given — the
+    caller refuses, naming it (a bundle is never sealed or opened
+    with an invented secret)."""
+    import os
+    if getattr(args, "secret", ""):
+        return str(args.secret)
+    secret_file = getattr(args, "secret_file", "") or ""
+    if secret_file:
+        try:
+            return Path(secret_file).read_text(
+                encoding="utf-8").strip()
+        except OSError as exc:
+            print(f"cannot read secret file {secret_file}: {exc}",
+                  file=sys.stderr)
+            return ""
+    return os.environ.get("NM_VOICE_BUNDLE_SECRET", "")
+
+
+def _voice_model_rfc3339(text: str) -> int:
+    """RFC3339 timestamp -> epoch seconds (the bundle's expiry unit)."""
+    from datetime import UTC, datetime
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"bad RFC3339 timestamp {text!r}: {exc}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return int(parsed.timestamp())
+
+
+def _cmd_voice_model(args: argparse.Namespace, context: Any) -> int:
+    """Route `nm voice model` subcommands (fakeyou-recast §3B.13)."""
+    from ...voice.model_bundle import (
+        ModelBundleError,
+        VoiceModel,
+        read_fast,
+        read_metadata,
+        register_model_bundle,
+        unpack_bundle,
+        write_bundle,
+    )
+
+    action = args.voice_model_action
+
+    def _emit(payload: Any) -> int:
+        if getattr(args, "json", False):
+            print(json.dumps(payload, indent=2, default=str))
+        elif isinstance(payload, dict) and "error" in payload:
+            print(f"error: {payload['error']}", file=sys.stderr)
+            return 1
+        elif isinstance(payload, dict) and payload.get("ok") is False:
+            print(f"error: {payload.get('error', 'failed')}",
+                  file=sys.stderr)
+            return 1
+        else:
+            print(json.dumps(payload, indent=2, default=str))
+        return 0
+
+    if action == "pack":
+        if args.expires_at and args.expires_in_days is not None:
+            print("cannot set both --expires-at and --expires-in-days",
+                  file=sys.stderr)
+            return 1
+        secret = _voice_model_secret(args)
+        if not secret:
+            print("a bundle needs a secret — pass --secret, "
+                  "--secret-file, or NM_VOICE_BUNDLE_SECRET",
+                  file=sys.stderr)
+            return 1
+        try:
+            expires_at = None
+            if args.expires_at:
+                expires_at = _voice_model_rfc3339(args.expires_at)
+            elif args.expires_in_days is not None:
+                expires_at = int(time.time()) + args.expires_in_days * 86400
+            acoustic = Path(args.acoustic).read_bytes()
+            vocoder = Path(args.vocoder).read_bytes()
+        except (OSError, ValueError) as exc:
+            print(f"pack failed: {exc}", file=sys.stderr)
+            return 1
+        model = VoiceModel(
+            format_version=args.version,
+            token=args.token, name=args.name, author=args.author,
+            model_version=args.model_version or args.version,
+            expires_at_s=expires_at,
+            password=args.password or None,
+            acoustic_model_bytes=acoustic, vocoder_model_bytes=vocoder)
+        try:
+            receipt = write_bundle(model, secret, args.out,
+                                   replace=args.replace)
+        except (ModelBundleError, FileExistsError, OSError) as exc:
+            print(f"pack failed: {exc}", file=sys.stderr)
+            return 1
+        if getattr(args, "json", False):
+            return _emit(receipt)
+        print(f"packed {receipt['token']} — {receipt['name']} "
+              f"({receipt['bytes']} bytes) -> {receipt['path']}")
+        print(f"sha256 {receipt['sha256']}")
+        return 0
+
+    if action == "inspect":
+        try:
+            if not args.full:
+                fast = read_fast(args.file)
+                return _emit(fast.to_dict())
+            secret = _voice_model_secret(args)
+            if not secret:
+                print("inspect --full needs the secret — pass --secret, "
+                      "--secret-file, or NM_VOICE_BUNDLE_SECRET",
+                      file=sys.stderr)
+                return 1
+            meta = read_metadata(args.file, secret)
+            return _emit(meta.to_dict())
+        except (ModelBundleError, FileNotFoundError, OSError) as exc:
+            print(f"inspect failed: {exc}", file=sys.stderr)
+            return 1
+
+    if action == "unpack":
+        secret = _voice_model_secret(args)
+        if not secret:
+            print("unpack needs the secret — pass --secret, "
+                  "--secret-file, or NM_VOICE_BUNDLE_SECRET",
+                  file=sys.stderr)
+            return 1
+        try:
+            receipt = unpack_bundle(
+                args.file, secret, args.out_dir,
+                password=args.password or None,
+                allow_expired=args.allow_expired)
+        except (ModelBundleError, FileNotFoundError, OSError) as exc:
+            print(f"unpack failed: {exc}", file=sys.stderr)
+            return 1
+        if getattr(args, "json", False):
+            return _emit(receipt)
+        print(f"unpacked {receipt['token']} — {receipt['name']}")
+        print(f"acoustic {receipt['acoustic_bytes']} bytes -> "
+              f"{receipt['acoustic_path']}")
+        print(f"vocoder {receipt['vocoder_bytes']} bytes -> "
+              f"{receipt['vocoder_path']}")
+        return 0
+
+    if action == "register":
+        try:
+            decl = register_model_bundle(args.file)
+        except (ModelBundleError, ValueError, FileNotFoundError,
+                OSError) as exc:
+            print(f"register failed: {exc}", file=sys.stderr)
+            return 1
+        return _emit({"registered": decl.ref, "task": decl.task,
+                      "artifact": decl.artifact.path,
+                      "sha256": decl.artifact.sha256})
+
+    print(f"unknown voice model action: {action}", file=sys.stderr)
     return 2
 
 

@@ -378,6 +378,8 @@ class RuntimeVoiceMixin:
         /voice rm <name>                         drop a catalogue voice
         /voice service list | health <slug> | status
                                                  model services (TorchScript)
+        /voice model list | inspect <path> | register <path>
+                                                 voice-model bundles (.dvmodel)
         """
         from ...voice.catalogue import default_catalogue
 
@@ -399,6 +401,13 @@ class RuntimeVoiceMixin:
         if verb == "service":
             from ...voice.services import control_service as _service_control
             return _service_control(rest)
+
+        # Voice-model bundles (fakeyou-recast §3B.13): list / inspect /
+        # register. Chat never carries a secret, so these only read the
+        # plaintext header — the sealed parts stay sealed.
+        if verb == "model":
+            from ...voice.model_bundle import control_model_bundle as _model_control
+            return _model_control(rest)
 
         if verb in ("list", "ls"):
             voices = cat.list()

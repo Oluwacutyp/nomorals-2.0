@@ -144,7 +144,7 @@ class ModelArtifact:
     name: str
     version: str
     task: str
-    format: str  # "torchscript" today; "state_dict" / "onnx" later
+    format: str  # "torchscript" today; "state_dict" / "onnx" / "dvmodel"
     path: str
     sha256: str = ""
     inputs: list[TensorSpec] = field(default_factory=list)
@@ -214,6 +214,12 @@ class ModelArtifact:
                     raise ValueError(
                         f"artifact {self.name}@{self.version}: no "
                         f"callable entry {self.entry!r} on the module")
+        elif self.format == "dvmodel":
+            # A voice-model bundle: prove the header (magic + fast
+            # metadata) reads. The sealed parts need the secret, so
+            # they are proven at open time, not at registration.
+            from .model_bundle import read_fast
+            read_fast(self.path)
         elif self.format not in ("state_dict", "onnx"):
             raise ValueError(f"artifact {self.name}@{self.version}: "
                              f"unknown format {self.format!r}")

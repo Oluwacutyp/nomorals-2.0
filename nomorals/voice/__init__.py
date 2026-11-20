@@ -113,6 +113,19 @@ from .money import (
     handle_voice_money,
     parse_voice_money,
 )
+from .model_bundle import (
+    BundleMetadata,
+    FastMetadata,
+    ModelBundleError,
+    VoiceModel,
+    control_model_bundle,
+    read_fast,
+    read_full,
+    read_metadata,
+    register_model_bundle,
+    validate_bundle,
+    write_bundle,
+)
 from .neural_emotion import render_emotional
 from .nl_director import Direction, parse_direction
 from .pingpong import (
@@ -359,4 +372,15 @@ __all__ = [
     "export_vits_probe_service",
     "service_executor",
     "service_health",
+    "BundleMetadata",
+    "FastMetadata",
+    "ModelBundleError",
+    "VoiceModel",
+    "control_model_bundle",
+    "read_fast",
+    "read_full",
+    "read_metadata",
+    "register_model_bundle",
+    "validate_bundle",
+    "write_bundle",
 ]
