@@ -26,8 +26,8 @@ drives it), pause holds the pose, stop exports BVH + releases
 the skeleton claim + stops the show-owned cloudcam poller, the
 bounded event journal (drops counted, never silent), the show
 brain tool, the `nm show` CLI, and the /live chat verb — with
-the tool count pinned at 783 (776 after B.20 added cloudcam;
-777 after this lane (B.22) added show. 778 after this lane (B.26) added scene_project. 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber; 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome).
+the tool count pinned at 784 (776 after B.20 added cloudcam;
+777 after this lane (B.22) added show. 778 after this lane (B.26) added scene_project. 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber; 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall).
 """
 
 from __future__ import annotations
@@ -153,11 +153,11 @@ def _registry(tmp_path):
     return registry
 
 
-def test_tool_count_is_783_after_show():
-    # 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber. 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome.
+def test_tool_count_is_784_after_show():
+    # 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber. 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall.
     registry = ToolRegistry(SimpleNamespace())
     registry.register_builtins()
-    assert len(registry._tools) == 783
+    assert len(registry._tools) == 784
     assert "show" in registry._tools
 
 

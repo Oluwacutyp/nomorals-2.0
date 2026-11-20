@@ -27,7 +27,7 @@ non-silence viseme, an audience cue lands at the next tick, the
 BVH export covers the performed poses), live MVN holding the take
 and driving the rig from a real encoded datagram, the vtuber brain
 tool, the `nm vtuber` CLI, and the /vtuber chat verb — with the
-tool count pinned at 783 (779 after B.23 added facemcap; 780 after this lane (B.25) added facemesh; 781 after this lane adds vtuber; 782 after this lane (C.2) registers tonal_g2p; 783 after this lane (C.1) added smarthome).
+tool count pinned at 784 (779 after B.23 added facemcap; 780 after this lane (B.25) added facemesh; 781 after this lane adds vtuber; 782 after this lane (C.2) registers tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall).
 """
 
 from __future__ import annotations
@@ -171,11 +171,11 @@ def _registry(tmp_path):
 # Tool count pin
 # ---------------------------------------------------------------------------
 
-def test_tool_count_is_783_after_vtuber():
-    # 781 after this lane (B.27) added vtuber. 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome.
+def test_tool_count_is_784_after_vtuber():
+    # 781 after this lane (B.27) added vtuber. 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall.
     registry = ToolRegistry(SimpleNamespace())
     registry.register_builtins()
-    assert len(registry._tools) == 783
+    assert len(registry._tools) == 784
 
 
 # ---------------------------------------------------------------------------

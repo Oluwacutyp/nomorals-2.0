@@ -161,6 +161,7 @@ from .commands.facemesh import _cmd_facemesh
 from .commands.g2p import _cmd_g2p
 from .commands.show import _cmd_show
 from .commands.smarthome import _cmd_smarthome
+from .commands.camwall import _cmd_camwall
 from .commands.game import _cmd_game
 from .commands.vtuber import _cmd_vtuber
 from .commands.sceneproject import _cmd_sceneproject
@@ -557,6 +558,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "g2p": _CommandSpec(_cmd_g2p),
     "show": _CommandSpec(_cmd_show),
     "smarthome": _CommandSpec(_cmd_smarthome),
+    "camwall": _CommandSpec(_cmd_camwall),
     "game": _CommandSpec(_cmd_game),
     "vtuber": _CommandSpec(_cmd_vtuber),
     "sceneproject": _CommandSpec(_cmd_sceneproject),

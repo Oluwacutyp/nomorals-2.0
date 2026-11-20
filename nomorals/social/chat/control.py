@@ -925,6 +925,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "g2p": (0, None),        # /g2p … — pronounce English words in Arpabet (owner-only)
     "vtuber": (0, None),     # /vtuber … — a scripted character performance on a stage
     "smarthome": (0, None),  # /smarthome … — WeMo + Z-Wave home devices: discover, read, control (gated), subscribe
+    "camwall": (0, None),    # /camwall … — IP cameras wall: load, start, status, export, serve (owner-only)
     "clonevoice": (1, 1),  # /clonevoice <name> — attach a voice note, clone it
     "voices": (0, 0),      # /voices — list every voice, cloned vs built-in
     "bet": (0, None),        # /bet analyze <home> vs <away> [odds…] | bankroll | backtest
@@ -4614,6 +4615,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/smarthome discover | list | status <device> | on|off|toggle <device> | brightness <device> <0-100> | enable|disable <device> | gate | subscribe <device> | unsubscribe <sid> | subscriptions | events [sid] | health",
               "example": "/smarthome discover",
               "related": "/mocap /live"},
+    "camwall": {"what": "IP cameras wall — constantly refreshing IP camera feeds (ip-security-camera-viewer port, MIT): a wall of cameras from a JSON config (full-url, or remote/local host + image path, optional MJPEG + basic auth), each with its own request queue and throttle, refreshed on a loop a slow camera never stalls; the wall exports as a page (multiview grid, click for singleview, right-click to pause). Fetches go only to the cameras in the owner's config — never to a URL typed in chat. An unreachable camera refuses by name (camera_unreachable), never a fake frame. (The `camwall` brain tool and `nm camwall` CLI drive the same walls.) Owner only.",
+              "usage": "/camwall load [config] [rows N] [server local|remote] | list | status [wall] | start [wall] | stop [wall] | tick [wall] | pause|resume|focus <camera> [wall] | wall [wall] | server local|remote [wall] | rows <1-6> [wall] | snapshot <camera> <path> [wall] | export <dir> [wall] | serve <dir> | unserve <dir> | served",
+              "example": "/camwall load",
+              "related": "/mocap /live /cloudcam"},
     "shorts": {"what": "Devon's short-form content empire: niche → script → voiceover → AI visuals → beat-synced edit → captions → publish.",
               "usage": "/shorts make <niche> \"<topic>\" [--now] | /shorts niches | /shorts status | /shorts calendar | /shorts ledger",
               "example": "/shorts make motivation \"discipline beats motivation\" --now",
@@ -5092,14 +5097,14 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
       "blackjack", "roulette", "slots", "miniapp", "gtrip", "predict",
       "gomoku", "reversi", "checkers", "20q", "rps", "digits",
       "sudoku", "anagram", "cryptogram", "math", "npc", "dm", "charagent",
-      "pvp", "raid"]),
+      "pvp", "raid", "laser"]),
     ("voice & vision", ["tts", "speak", "stt", "voice", "look", "image", "lens",
                         "vision", "voices", "clonevoice", "sing",
                         "translate", "tl"]),
     ("decoding & crypto", ["decode", "cookies", "cookielab", "structure", "cipher",
                            "monitor", "investigate", "breach"]),
     ("media system", ["music", "distribute", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
-                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "g2p", "vtuber", "sham", "musicnote", "smarthome",
+                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "g2p", "vtuber", "sham", "musicnote", "smarthome", "camwall",
                       "steal", "sticker", "convert", "gif", "emoji", "customemoji", "emojiart", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "models", "mcp", "a2a", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion",
@@ -5267,6 +5272,7 @@ _GAME_HELP: dict[str, str] = {
     "20q": "20 questions — she thinks of something, you ask yes/no (20 max).",
     "rps": "rock paper scissors — best of five vs the house.",
     "digits": "digit memory — repeat the digits back, they grow every round.",
+    "laser": "laser asteroids — fly the ship, blast the rocks, big ones split in two.",
 }
 def _wrap_commands(kinds: list[str], width: int = 64) -> list[str]:
     """Wrap ``/cmd`` tokens so a catalog line never runs long in chat.
@@ -5366,7 +5372,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("media system — music · playback · video · podcast",
      ["music", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
       "distribute", "dj", "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "produce", "like", "dislike",
-      "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "g2p", "vtuber", "sham", "musicnote", "smarthome",
+      "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "g2p", "vtuber", "sham", "musicnote", "smarthome", "camwall",
       "steal", "sticker", "convert", "gif", "emoji", "customemoji",
       "emojiart", "react", "create",
       "awoo", "baka", "bite", "blush", "bonk", "bored",
@@ -5427,7 +5433,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "blackjack", "roulette", "slots", "miniapp", "gtrip", "predict",
       "gomoku", "reversi", "checkers", "20q", "rps", "digits",
       "sudoku", "anagram", "cryptogram", "math", "npc", "dm", "charagent",
-      "pvp", "raid"]),
+      "pvp", "raid", "laser"]),
     ("voice & vision",
      ["tts", "speak", "stt", "voice", "look", "image", "lens",
       "vision", "voices", "clonevoice", "sing", "translate", "tl"]),
@@ -5836,6 +5842,7 @@ LIST_ONELINERS: dict[str, str] = {
     "g2p": "pronounce English words in Arpabet — /g2p <word> | status",
     "vtuber": "a scripted character performance on a stage — /vtuber character | act | perform | cue | live | status | tick | stop",
     "smarthome": "smart home devices — WeMo + Z-Wave — /smarthome discover | status | on | off | toggle | subscribe | health",
+    "camwall": "IP cameras wall — constantly refreshing cameras — /camwall load | status | start | export | serve",
     "image": "look up an image (format, dims, seen-before) — or generate one from a prompt",
     "lens": "reverse image search",
     "schedule": "cron-style in-process jobs",

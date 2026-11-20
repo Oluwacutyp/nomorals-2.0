@@ -146,6 +146,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "show": [],
     "vtuber": ["vt"],
     "smarthome": ["smh"],
+    "camwall": ["cw"],
     "game": [],
     "audio": ["au"],
     "weather": ["wx"],
@@ -4056,6 +4057,104 @@ def _parser() -> argparse.ArgumentParser:
     g_render = game_sub.add_parser("render", help="show the live board")
     g_render.add_argument("--png", default="",
                           help="also save one frame as a PNG (laser only)")
+    camwall = sub.add_parser("camwall", aliases=CLI_ALIASES["camwall"],
+        help="IP cameras wall — constantly refreshing cameras: load, "
+             "start, export, serve",
+        description=("nm camwall load [config] [--rows N] [--server "
+                     "local|remote] | list | status [--wall NAME] | start "
+                     "[--wall NAME] | stop [--wall NAME] | drop [--wall "
+                     "NAME] | tick [--wall NAME] [--wait] | pause|resume|"
+                     "focus --camera NAME [--wall NAME] | wall [--wall "
+                     "NAME] | server --value local|remote [--wall NAME] | "
+                     "rows --value N [--wall NAME] | add --camera "
+                     "'{...}' [--wall NAME] | snapshot --camera NAME "
+                     "--output PATH [--wall NAME] | export --output DIR "
+                     "[--wall NAME] [--title T] [--overwrite] | serve "
+                     "--output DIR [--host H] [--port N] | unserve "
+                     "--output DIR | served"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    camwall.add_argument("--json", action="store_true",
+                         help="Output as JSON")
+    camwall_sub = camwall.add_subparsers(dest="camwall_action",
+                                         required=True)
+    cw_load = camwall_sub.add_parser(
+        "load", help="load a wall from a cameras config")
+    cw_load.add_argument("config", nargs="?", default=None,
+                         help="cameras config path or JSON "
+                              "(default ~/.nomorals/camwall/cameras.json)")
+    cw_load.add_argument("--rows", type=int, default=2,
+                         help="images per row, 1-6 (default 2)")
+    cw_load.add_argument("--server", default="remote",
+                         help="which host each camera uses: "
+                              "local|remote (default remote)")
+    cw_load.add_argument("--wall", default="default",
+                         help="wall name (default default)")
+    camwall_sub.add_parser("list", help="walls loaded now")
+    for _name in ("status", "start", "stop", "drop", "tick", "wall"):
+        _sub = camwall_sub.add_parser(_name, help=f"{_name} a wall")
+        _sub.add_argument("--wall", default="default",
+                          help="wall name (default default)")
+        if _name == "tick":
+            _sub.add_argument("--wait", action="store_true",
+                              help="wait for the tick's fetches")
+    for _name in ("pause", "resume", "focus"):
+        _sub = camwall_sub.add_parser(_name, help=f"{_name} a camera")
+        _sub.add_argument("--camera", default="",
+                          help="camera name or id")
+        _sub.add_argument("--wall", default="default",
+                          help="wall name (default default)")
+    cw_server = camwall_sub.add_parser(
+        "server", help="which host each camera uses")
+    cw_server.add_argument("--value", default="remote",
+                           help="local|remote")
+    cw_server.add_argument("--wall", default="default",
+                           help="wall name (default default)")
+    cw_rows = camwall_sub.add_parser(
+        "rows", help="images per row (1-6)")
+    cw_rows.add_argument("--value", type=int, default=2,
+                         help="images per row")
+    cw_rows.add_argument("--wall", default="default",
+                         help="wall name (default default)")
+    cw_add = camwall_sub.add_parser(
+        "add", help="add a camera (JSON: name + full-url, or "
+                    "remote-host + image)")
+    cw_add.add_argument("--camera", dest="camera_json", default="{}",
+                        help="camera as JSON")
+    cw_add.add_argument("--wall", default="default",
+                        help="wall name (default default)")
+    cw_snap = camwall_sub.add_parser(
+        "snapshot", help="save a camera's latest frame")
+    cw_snap.add_argument("--camera", default="",
+                         help="camera name or id")
+    cw_snap.add_argument("--output", default="",
+                         help="path to write the JPEG to")
+    cw_snap.add_argument("--wall", default="default",
+                         help="wall name (default default)")
+    cw_export = camwall_sub.add_parser(
+        "export", help="export the wall as a page")
+    cw_export.add_argument("--output", default="",
+                           help="directory to write the page to")
+    cw_export.add_argument("--wall", default="default",
+                           help="wall name (default default)")
+    cw_export.add_argument("--title", default="",
+                           help="page title (default the wall name)")
+    cw_export.add_argument("--overwrite", action="store_true",
+                           help="export into a non-empty directory")
+    cw_serve = camwall_sub.add_parser(
+        "serve", help="serve an exported wall on loopback")
+    cw_serve.add_argument("--output", default="",
+                          help="exported wall directory")
+    cw_serve.add_argument("--host", default="127.0.0.1",
+                          help="bind host (default 127.0.0.1; 0.0.0.0 "
+                               "exposes the wall on the network)")
+    cw_serve.add_argument("--port", type=int, default=0,
+                          help="port (default ephemeral)")
+    cw_unserve = camwall_sub.add_parser(
+        "unserve", help="stop serving an exported wall")
+    cw_unserve.add_argument("--output", default="",
+                            help="exported wall directory")
+    camwall_sub.add_parser("served", help="wall servers running now")
 
     inbox = sub.add_parser("inbox", aliases=CLI_ALIASES["inbox"],
         help="Drop-in inbox: drop a file, link, or note — Devon acts",

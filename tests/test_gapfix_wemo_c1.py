@@ -816,14 +816,14 @@ class TestSmarthomeSurface:
             "discover", "test-key")
         assert "Kitchen Plug" in found
 
-    def test_tool_count_is_783_after_c1_added_smarthome(self):
-        # 782 after this lane (C.1) registered tonal_g2p; 783 after this lane (C.1) added smarthome.
+    def test_tool_count_is_784_after_c1_added_smarthome(self):
+        # 782 after this lane (C.1) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall.
         from types import SimpleNamespace
 
         from nomorals.tools.registry import ToolRegistry
         count = len(ToolRegistry(SimpleNamespace()).register_builtins()
                     ._tools)
-        assert count == 783
+        assert count == 784
 
 
 class _NoCredentials:

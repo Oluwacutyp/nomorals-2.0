@@ -1,0 +1,18 @@
+body { margin: 0; background: #101418; color: #e8edf2;
+  font-family: system-ui, sans-serif; }
+#bar { display: flex; gap: 12px; align-items: center;
+  padding: 10px 14px; background: #1a2129; }
+#title { font-weight: 700; }
+#status { color: #9fb0c0; flex: 1; }
+#wallbtn { background: #2b3948; color: #e8edf2; border: 1px solid #43566b;
+  padding: 6px 12px; cursor: pointer; }
+#wall { display: grid; grid-template-columns: repeat(var(--rows, 2), 1fr);
+  gap: 8px; padding: 8px; }
+.cam { background: #000; position: relative; min-height: 180px; }
+.cam img { width: 100%; display: block; }
+.camtitle { position: absolute; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.65); color: #e8edf2;
+  font-size: 12px; padding: 4px 6px; }
+#single { padding: 8px; }
+#singleimg img { width: 100%; display: block; }
+#singlestats { padding: 8px 4px; color: #9fb0c0; }
