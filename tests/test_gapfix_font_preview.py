@@ -234,11 +234,11 @@ def test_health_shape(tmp_path):
 
 # ── tool wiring: no new tool, preview rides craftfonts ───────────
 
-def test_tool_count_stays_775(tmp_path):
+def test_tool_count_stays_776(tmp_path):
     # No new brain tool: the preview rides the existing craftfonts
     # tool (its render action already reached the typography
-    # organ), so the registry count did not move then; 775 after this lane (B.19) added scene_spawn.
-    assert len(_registry()._tools) == 775
+    # organ), so the registry count did not move then; 775 after this lane (B.19) added scene_spawn. 776 after this lane (B.20) added cloudcam.
+    assert len(_registry()._tools) == 776
 
 
 def test_tool_preview_action_renders_png(tmp_path):

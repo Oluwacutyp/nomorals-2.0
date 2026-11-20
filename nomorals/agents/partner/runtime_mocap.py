@@ -147,3 +147,106 @@ class RuntimeMocapMixin:
             "rig status [name] | rig pose [name] [frame JSON] | "
             "rig render [name] | rig drive <bvh> [text] | "
             "rig export <bvh> [text]")
+
+    # ── cloudcam: /cloudcam ───────────────────────────────────────────
+    def _control_cloudcam(self, tail: str, chat_key: str,
+                          message: Any = None) -> str:
+        """Streamed point clouds, live from any chat.
+
+        /cloudcam start [name] [source]    open a stream
+        /cloudcam stop [name]               stop the poller
+        /cloudcam status [name]             one session's state
+        /cloudcam list                      loaded sessions
+        /cloudcam tick [name]               stage the latest frame
+        /cloudcam export [name]             latest frame as PLY
+        /cloudcam render [name]             latest frame as a PNG
+        """
+        from ...media.cloudcam import (
+            get_session,
+            list_sessions,
+            load_session,
+            render_projection,
+            write_ply,
+        )
+        from ...media.cloudcam.errors import CloudCamError
+
+        parts = (tail or "").split()
+        if not parts:
+            return self._control_cloudcam_help()
+        verb = parts[0]
+        rest = parts[1:]
+        name = "default"
+        if verb in ("start", "stop", "status", "tick", "export",
+                    "render") and rest:
+            name = rest[0]
+            rest = rest[1:]
+        try:
+            if verb == "list":
+                sessions = list_sessions()
+                lines = ["cloudcam sessions:"]
+                for entry in sessions:
+                    lines.append(
+                        f"  {entry['name']}: {entry['source']} "
+                        f"{'running' if entry['running'] else 'stopped'} "
+                        f"({entry['ring_frames_received']} frames, "
+                        f"{entry['ring_dropped_frames']} dropped, "
+                        f"last frame {entry['latest_points']} points)")
+                return "\n".join(lines)
+            if verb == "start":
+                source = (rest[0] if rest else "idle").strip().lower()
+                store = None
+                if source == "store":
+                    from ...tools.mocap import _STORE
+                    store = _STORE
+                session = load_session(name, source=source, store=store)
+                info = session.start()
+                return (f"cloudcam {name} streaming from "
+                        f"{info['source']} "
+                        f"({info['grid']}, ring {info['ring_capacity']})")
+            if verb == "stop":
+                session = get_session(name)
+                session.stop()
+                return f"cloudcam {name} stopped"
+            if verb == "status":
+                return json.dumps(get_session(name).status(), indent=2)
+            if verb in ("tick", "stage"):
+                receipt = get_session(name).tick()
+                if receipt["placeholder"]:
+                    return (f"cloudcam {name}: no frame yet — "
+                            f"placeholder grid "
+                            f"({receipt['width']}x{receipt['height']})")
+                return (f"cloudcam {name}: frame {receipt['frame_seq']} "
+                        f"staged — {receipt['packed']} points, "
+                        f"{receipt['hidden']} hidden, "
+                        f"{receipt['dropped']} dropped "
+                        f"({receipt['ring_dropped_frames']} dropped in "
+                        f"the ring)")
+            if verb in ("export", "render"):
+                session = get_session(name)
+                points = session.latest_points()
+                if not points:
+                    return (f"cloudcam {name} has staged no frame yet "
+                            f"— start a source and tick first")
+                if verb == "export":
+                    result = write_ply(points, f"cloudcam-{name}.ply")
+                    return (f"exported {result['points']} points to "
+                            f"{result['path']}")
+                result = render_projection(points,
+                                           f"cloudcam-{name}.png")
+                return (f"rendered {result['plotted']} points to "
+                        f"{result['path']} ({result['view']} view)")
+        except CloudCamError as exc:
+            record_failure(
+                "runtime_mocap.RuntimeMocapMixin._control_cloudcam", exc)
+            return f"cloudcam: {exc}"
+        except Exception as exc:  # noqa: BLE001 - chat never dies
+            record_failure(
+                "runtime_mocap.RuntimeMocapMixin._control_cloudcam", exc)
+            return f"cloudcam failed: {exc}"
+        return self._control_cloudcam_help()
+
+    def _control_cloudcam_help(self) -> str:
+        return (
+            "/cloudcam start [name] [source zmq|store|file|idle] | "
+            "stop [name] | status [name] | list | tick [name] | "
+            "export [name] | render [name]")

@@ -389,7 +389,7 @@ class PreprocessTests(unittest.TestCase):
 
 
 class RegistryTests(unittest.TestCase):
-    def test_tool_count_still_775(self):
+    def test_tool_count_still_776(self):
         # This lane adds NO brain tool: the VITS capability is exercised
         # through the prepare/train CLIs and the lazily-registered TTS
         # backend, not a new tool.
@@ -397,13 +397,13 @@ class RegistryTests(unittest.TestCase):
         # fix-up ship: the registry moved 735 -> 749 through later
         # ships (bughunter +8, auth-plugin wiring +5, mocap +1);
         # 749 -> 774 through the secprobe wire-up (+25 tools);
-        # 774 -> 775 through this lane (B.19, scene_spawn); the
+        # 774 -> 775 through this lane (B.19, scene_spawn); 775 -> 776 through this lane (B.20, cloudcam); the
         # assertion's meaning (no new tool from this lane) is
         # unchanged.
         from nomorals.tools.registry import ToolRegistry
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 775)
+        self.assertEqual(len(registry._tools), 776)
 
     def test_vits_backend_registered_but_unavailable_here(self):
         from nomorals.voice.tts import (

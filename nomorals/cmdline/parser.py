@@ -91,6 +91,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "fonts": ["font"],
     "cards": ["cd"],
     "cipher": ["cip"],
+    "cloudcam": ["cc"],
     "code": ["c"],
     "graph": [],
     "commands": ["cmd"],
@@ -3276,6 +3277,74 @@ def _parser() -> argparse.ArgumentParser:
                  m_rig_drive, m_rig_export):
         _sub.add_argument("--session", default="default",
                           help="rig session name (default 'default')")
+
+    cloudcam = sub.add_parser("cloudcam", aliases=CLI_ALIASES["cloudcam"],
+        help="streamed point clouds: worker thread + ring buffer",
+        description=("nm cloudcam start [--session NAME] "
+                     "[--source zmq|store|file|idle] "
+                     "[--endpoint tcp://*:8888] [--path FILE] "
+                     "[--width N] [--height N] [--capacity N]\\n"
+                     "nm cloudcam stop [--session NAME]\\n"
+                     "nm cloudcam status [--session NAME]\\n"
+                     "nm cloudcam list\\n"
+                     "nm cloudcam tick [--session NAME]\\n"
+                     "nm cloudcam stage [--session NAME]\\n"
+                     "nm cloudcam export [--session NAME] --out PATH.ply\\n"
+                     "nm cloudcam render [--session NAME] --out PATH.png "
+                     "[--view top|front] [--img-width N] "
+                     "[--img-height N]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    cloudcam.add_argument("--json", action="store_true",
+                          help="Output as JSON")
+    cloudcam_sub = cloudcam.add_subparsers(dest="cloudcam_action",
+                                           required=True)
+    cloudcam_sub.add_parser("list", help="loaded cloudcam sessions")
+    cloudcam_sub.add_parser("status",
+                            help="one session's stream state")
+    cloudcam_sub.add_parser("stop", help="stop a session's poller")
+    cloudcam_sub.add_parser("tick",
+                            help="stage the latest frame")
+    cloudcam_sub.add_parser("stage",
+                            help="stage the latest frame")
+    cc_start = cloudcam_sub.add_parser(
+        "start", help="open a stream under a session name")
+    cc_start.add_argument(
+        "--source", default="idle",
+        choices=("idle", "zmq", "store", "file"),
+        help="frame source (default idle)")
+    cc_start.add_argument("--endpoint", default="",
+                          help="ZeroMQ endpoint (default tcp://*:8888)")
+    cc_start.add_argument("--path", default="",
+                          help="frames file (.json or .ply)")
+    cc_start.add_argument("--width", type=int, default=256,
+                          help="stage grid width (default 256)")
+    cc_start.add_argument("--height", type=int, default=256,
+                          help="stage grid height (default 256)")
+    cc_start.add_argument("--capacity", type=int, default=10,
+                          help="ring frames (default 10)")
+    cc_export = cloudcam_sub.add_parser(
+        "export", help="write the latest frame as PLY")
+    cc_export.add_argument("--out", default="",
+                           help="PLY output path")
+    cc_render = cloudcam_sub.add_parser(
+        "render", help="render the latest frame as a PNG projection")
+    cc_render.add_argument("--out", default="",
+                           help="PNG output path")
+    cc_render.add_argument("--view", default="top",
+                           choices=("top", "front"),
+                           help="projection view (default top)")
+    cc_render.add_argument("--img-width", dest="width_png", type=int,
+                           default=640, help="PNG width (default 640)")
+    cc_render.add_argument("--img-height", dest="height_png", type=int,
+                           default=360, help="PNG height (default 360)")
+    for _sub in (cloudcam_sub.choices["status"],
+                 cloudcam_sub.choices["stop"],
+                 cloudcam_sub.choices["tick"],
+                 cloudcam_sub.choices["stage"], cc_start, cc_export,
+                 cc_render):
+        _sub.add_argument("--session", default="default",
+                          help="cloudcam session name (default 'default')")
 
     inbox = sub.add_parser("inbox", aliases=CLI_ALIASES["inbox"],
         help="Drop-in inbox: drop a file, link, or note — Devon acts",

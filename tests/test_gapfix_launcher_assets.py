@@ -573,7 +573,7 @@ def test_resize_without_ffmpeg_is_an_honest_refusal(
 # ---------------------------------------------------------------------------
 
 
-def test_tool_registered_and_counts_775() -> None:
+def test_tool_registered_and_counts_776() -> None:
     registry = _registry()
     spec = registry.get("craftlauncher")
     assert spec is not None
@@ -583,8 +583,8 @@ def test_tool_registered_and_counts_775() -> None:
     # 774 after the secprobe wire-up added 25 tools; this
     # lane adds no tool — the new actions ride the existing
     # action-dispatched craftlauncher tool.
-    # 775 after this lane (B.19) added scene_spawn.
-    assert len(registry._tools) == 775
+    # 775 after this lane (B.19) added scene_spawn. 776 after this lane (B.20) added cloudcam.
+    assert len(registry._tools) == 776
 
 
 def test_tool_shots_lists_the_catalog() -> None:
