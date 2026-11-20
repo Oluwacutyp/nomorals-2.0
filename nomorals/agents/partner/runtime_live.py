@@ -2351,12 +2351,15 @@ class RuntimeLiveMixin:
                 return (f"unknown slot {slot!r} — "
                         f"slots: {', '.join(BRIEFING_SLOTS)}")
             if verb == "catchup":
+                # Explicit catch-up: the owner asked for it, so a
+                # missed slot runs on demand.  (Automatic boot
+                # catch-up never fires a missed slot late.)
                 if slot in BRIEFING_SLOTS:
-                    r = check_slot_catchup(self.context, slot)
+                    r = check_slot_catchup(self.context, slot, explicit=True)
                     return f"{slot} catch-up: {r}"
                 if slot in ("all", ""):
                     from ..morning_pulse import check_all_catchup
-                    return f"catch-up: {check_all_catchup(self.context)}"
+                    return f"catch-up: {check_all_catchup(self.context, explicit=True)}"
                 return (f"unknown slot {slot!r} — "
                         f"slots: {', '.join(BRIEFING_SLOTS)}")
             if verb == "stories":

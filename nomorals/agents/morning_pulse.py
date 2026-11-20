@@ -159,13 +159,14 @@ def _pulse_due_today(context: Any) -> float:
         return 0.0
 
 
-def check_pulse_catchup(context: Any) -> dict[str, Any]:
-    """Boot-time catch-up for the pulse (mirrors briefing.check_catchup).
+def check_pulse_catchup(context: Any, *, explicit: bool = False) -> dict[str, Any]:
+    """Catch-up for the pulse (mirrors briefing.check_catchup).
 
-    If the pulse is enabled, today's pulse time has passed, and no pulse
-    has *delivered* since then, run it once now — never a backlog, never
-    a duplicate.  This covers the case the scheduler's ``fire_now``
-    policy misses: a pulse that fired but failed to deliver.  Safe to
+    A missed pulse is SKIPPED, never fired late (owner order
+    2026-11-20): if today's pulse time passed without a delivery, the
+    miss is journaled and the next firing stays on the clock.  Only an
+    explicit catch-up — the ``pulse`` tool's ``catchup`` action, or
+    ``/pulse catchup`` — runs the missed pulse on demand.  Safe to
     call on every boot.  Never raises.
     """
     try:
@@ -180,8 +181,12 @@ def check_pulse_catchup(context: Any) -> dict[str, Any]:
         if last_ts >= due and (marker.get("delivered_text")
                                or marker.get("delivered_audio")):
             return {"catchup": False, "reason": "already delivered"}
-        _log.info("morning-pulse: catch-up firing (last delivered run "
-                  "before today's %s)", pulse_time(context))
+        if not explicit:
+            reason = _journal_missed_skip(context, "morning",
+                                          PULSE_JOB_NAME, due, now)
+            return {"catchup": False, "reason": reason}
+        _log.info("morning-pulse: explicit catch-up firing (last delivered "
+                  "run before today's %s)", pulse_time(context))
         result = run_pulse(context)
         result["catchup"] = True
         return result
@@ -192,11 +197,14 @@ def check_pulse_catchup(context: Any) -> dict[str, Any]:
 
 # ── scheduler registration ───────────────────────────────────────────────
 
-#: Execution policies for the pulse job: it must fire even if the phone
-#: was off at 23:00 (fire_now), must never stack two pulses
-#: (overlap=skip), and gets a generous wall-clock cap for TTS.
+#: Execution policies for the pulse job: a missed pulse is SKIPPED,
+#: never fired late (owner order 2026-11-20 — a missed morning/evening
+#: pulse firing hours late throws the day's clock off balance); the
+#: next firing stays on the clock (missed_fire_policy=skip, now
+#: phase-preserving in the scheduler).  Pulses must never stack two
+#: (overlap=skip), and get a generous wall-clock cap for TTS.
 PULSE_POLICIES = {
-    "missed_fire_policy": "fire_now",
+    "missed_fire_policy": "skip",
     "overlap_policy": "skip",
     "run_timeout_s": 1800.0,
 }
@@ -215,8 +223,8 @@ def ensure_pulse_job(context: Any) -> dict[str, Any]:
     """Register the single durable ``morning-pulse`` job (idempotent).
 
     Runs ``daily HH:MM`` at the configured pulse time (default 23:00) in
-    America/Denver, with ``missed_fire_policy=fire_now`` (a phone that
-    was off at 23:00 still gets its pulse on next boot),
+    America/Denver, with ``missed_fire_policy=skip`` (a missed pulse is
+    skipped, never fired late — the next firing stays on the clock),
     ``overlap_policy=skip`` (pulses never stack), and a 30-minute
     run cap for TTS.  Safe to call on every boot.  If the owner changed
     the time — or the policies drifted — the job is replaced.
@@ -294,6 +302,25 @@ def _ledger(context: Any, kind: str, summary: str, *,
                       metadata=metadata)
     except Exception:  # noqa: BLE001
         _log.debug("morning-pulse ledger write failed", exc_info=True)
+
+
+def _journal_missed_skip(context: Any, slot: str, job_name: str,
+                         due: float, now: float) -> str:
+    """Journal a missed slot as skipped, never fired late.
+
+    Returns the reason string.  The miss is visible in the autonomy
+    ledger (kind ``skipped``, lateness + policy in the metadata) and
+    in the log — never silent.
+    """
+    lateness = int(now - due)
+    reason = (f"missed: skipped — {slot} slot was {lateness}s late, "
+              f"not fired (missed_fire_policy=skip); next firing stays "
+              f"on the clock")
+    _log.info("pulse/%s: %s", slot, reason)
+    _ledger(context, "skipped", reason, ok=True, metadata={
+        "slot": slot, "job": job_name, "lateness_s": lateness,
+        "missed_fire_policy": "skip"})
+    return reason
 
 
 def _emit_bus(data: dict[str, Any]) -> None:
@@ -862,9 +889,12 @@ def register(registry: Any) -> None:
                 }
             return out if slot == "all" else out.get(slot, {})
         if act == "catchup":
+            # Explicit catch-up: the owner asked for it, so a missed
+            # slot runs on demand.  (Automatic boot catch-up never
+            # fires a missed slot late — see check_slot_catchup.)
             if slot == "all":
-                return check_all_catchup(context)
-            return check_slot_catchup(context, slot)
+                return check_all_catchup(context, explicit=True)
+            return check_slot_catchup(context, slot, explicit=True)
         if act == "config":
             if slot == "all":
                 return {s: {
@@ -2019,11 +2049,18 @@ def ensure_pulse_jobs(context: Any) -> dict[str, Any]:
     return out
 
 
-def check_slot_catchup(context: Any, slot: str = "morning") -> dict[str, Any]:
-    """Boot-time catch-up for one slot.  Never raises."""
+def check_slot_catchup(context: Any, slot: str = "morning", *,
+                       explicit: bool = False) -> dict[str, Any]:
+    """Catch-up for one slot.  Never raises.
+
+    Automatic (boot) catch-up never fires a missed slot late — the
+    miss is journaled as skipped and the next firing stays on the
+    clock.  Only an explicit catch-up (``/pulse catchup``, the pulse
+    tool's ``catchup`` action) runs the missed slot on demand.
+    """
     slot = (slot or "morning").strip().lower()
     if slot == "morning":
-        return check_pulse_catchup(context)  # existing path
+        return check_pulse_catchup(context, explicit=explicit)
     try:
         if not slot_enabled(context, slot):
             return {"catchup": False, "reason": f"{slot} disabled"}
@@ -2036,7 +2073,11 @@ def check_slot_catchup(context: Any, slot: str = "morning") -> dict[str, Any]:
         if last_ts >= due and (marker.get("delivered_text")
                                or marker.get("delivered_audio")):
             return {"catchup": False, "reason": "already delivered"}
-        _log.info("pulse/%s: catch-up firing", slot)
+        if not explicit:
+            reason = _journal_missed_skip(
+                context, slot, BRIEFING_SLOTS[slot]["job_name"], due, now)
+            return {"catchup": False, "reason": reason}
+        _log.info("pulse/%s: explicit catch-up firing", slot)
         result = run_slot(context, slot)
         result["catchup"] = True
         return result
@@ -2046,12 +2087,16 @@ def check_slot_catchup(context: Any, slot: str = "morning") -> dict[str, Any]:
                 "reason": f"{type(exc).__name__}: {exc}"}
 
 
-def check_all_catchup(context: Any) -> dict[str, Any]:
-    """Boot-time catch-up for every enabled slot.  Never raises."""
+def check_all_catchup(context: Any, *, explicit: bool = False) -> dict[str, Any]:
+    """Catch-up for every enabled slot.  Never raises.
+
+    Automatic (boot) catch-up never fires a missed slot late; see
+    :func:`check_slot_catchup`.
+    """
     out: dict[str, Any] = {}
     for slot in BRIEFING_SLOTS:
         try:
-            out[slot] = check_slot_catchup(context, slot)
+            out[slot] = check_slot_catchup(context, slot, explicit=explicit)
         except Exception as exc:  # noqa: BLE001
             out[slot] = {"catchup": False,
                          "reason": f"{type(exc).__name__}: {exc}"}

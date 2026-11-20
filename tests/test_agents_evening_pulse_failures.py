@@ -135,7 +135,9 @@ def test_63_list_failure_recorded_and_proceeds_to_add(tmp_path):
 def test_63_control_already_scheduled_skips_add(tmp_path):
     FakeSched, cap = _fake_sched(
         [{"id": "old1", "name": "evening-pulse", "spec": "19:00",
-          "missed_fire_policy": "fire_now", "overlap_policy": "skip",
+          # stored policy matches the live engine's skip (owner order
+          # 2026-11-20: a missed pulse is skipped, never fired late)
+          "missed_fire_policy": "skip", "overlap_policy": "skip",
           "run_timeout_s": 1800}])
     with patch.object(sched_mod, "Scheduler", FakeSched):
         r = ep.ensure_evening_pulse_job(_ctx(tmp_path))

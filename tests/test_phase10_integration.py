@@ -19,10 +19,13 @@ class TestPulseCatchupWiring:
         assert "ensure_pulse_jobs" in src
         # The chain must still REACH the original pulse catch-up: the
         # all-slot walk delegates per slot, and the morning slot is
-        # the existing check_pulse_catchup path.
+        # the existing check_pulse_catchup path. The calls now thread
+        # the explicit flag (owner order 2026-11-20): automatic boot
+        # catch-up skips a missed slot, only an explicit catch-up
+        # fires it — the wiring is the same chain, with the flag.
         pulse = open("nomorals/agents/morning_pulse.py").read()
-        assert "check_slot_catchup(context, slot)" in pulse
-        assert "return check_pulse_catchup(context)" in pulse
+        assert "check_slot_catchup(context, slot, explicit=explicit)" in pulse
+        assert "return check_pulse_catchup(context, explicit=explicit)" in pulse
 
 
 class TestImprovementQueueWiring:

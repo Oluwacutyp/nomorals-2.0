@@ -92,7 +92,9 @@ class SpecMatchTests(unittest.TestCase):
 
 class PulsePoliciesTests(unittest.TestCase):
     def test_policies_shape(self):
-        self.assertEqual(PULSE_POLICIES["missed_fire_policy"], "fire_now")
+        # Owner order 2026-11-20: a missed pulse is skipped, never
+        # fired late — the next firing stays on the clock.
+        self.assertEqual(PULSE_POLICIES["missed_fire_policy"], "skip")
         self.assertEqual(PULSE_POLICIES["overlap_policy"], "skip")
         self.assertEqual(PULSE_POLICIES["run_timeout_s"], 1800.0)
 
@@ -106,7 +108,9 @@ class PulsePoliciesTests(unittest.TestCase):
                    return_value=sched):
             ensure_pulse_job(_ctx())
         _, kwargs = sched.add.call_args
-        self.assertEqual(kwargs.get("missed_fire_policy"), "fire_now")
+        # Owner order 2026-11-20: a missed pulse is skipped, never
+        # fired late.
+        self.assertEqual(kwargs.get("missed_fire_policy"), "skip")
         self.assertEqual(kwargs.get("overlap_policy"), "skip")
         self.assertEqual(kwargs.get("run_timeout_s"), 1800.0)
 

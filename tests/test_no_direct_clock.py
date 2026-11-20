@@ -153,6 +153,16 @@ BASELINE: dict[str, int] = {
     # the never-raises test's instant is never read (construction
     # booms first).
     "tests/test_gapfix_health_drift.py": 3,
+    # Grandfathered (missed-fire fix, owner order 2026-11-20): 22 reads
+    # stay on the real clock — the scheduler's tick() reads time.time()
+    # internally with no now seam, so the pins must anchor "now" and the
+    # missed firings to the same real clock: a frozen seed would read
+    # days old on the scheduler's clock and every missed-fire pin
+    # (grace, phase, next-on-the-clock) would measure the wrong
+    # interval. Threading a now seam through tick/_apply_missed_fire
+    # would be a production API change in a hygiene lane for a
+    # non-regression (H21 precedent).
+    "tests/test_gapfix_missedfire.py": 22,
     # Grandfathered (batch H42): 2 reads stay on the real clock.
     # (1) _FakeScheduler._loop's live tick — the thread IS the
     # scheduler's heartbeat; _scheduler_probe judges its freshness

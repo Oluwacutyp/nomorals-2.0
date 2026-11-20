@@ -649,7 +649,10 @@ class PulseCatchupTests(unittest.TestCase):
         self.assertEqual(m["stages"], ["news", "compose"])
         self.assertGreater(m["ts"], 0)
 
-    def test_catchup_fires_when_nothing_delivered(self):
+    def test_catchup_skips_missed_pulse_when_automatic(self):
+        # Owner order 2026-11-20: a missed pulse is skipped, never
+        # fired late — the automatic (boot) catch-up journals the miss
+        # and the next firing stays on the clock.
         import nomorals.agents.morning_pulse as mp
         ctx = self._ctx()
         ran = []
@@ -662,6 +665,25 @@ class PulseCatchupTests(unittest.TestCase):
                           return_value=time.time() - 3600), \
              patch.object(mp, "run_pulse", side_effect=fake_pulse):
             res = mp.check_pulse_catchup(ctx)
+        self.assertFalse(res["catchup"])
+        self.assertIn("missed: skipped", res["reason"])
+        self.assertEqual(len(ran), 0)
+
+    def test_catchup_fires_when_explicit(self):
+        # The explicit catch-up (/pulse catchup, the pulse tool's
+        # catchup action) still runs the missed pulse on demand.
+        import nomorals.agents.morning_pulse as mp
+        ctx = self._ctx()
+        ran = []
+
+        def fake_pulse(c):
+            ran.append(1)
+            return {"ok": True, "delivered_text": True}
+
+        with patch.object(mp, "_pulse_due_today",
+                          return_value=time.time() - 3600), \
+             patch.object(mp, "run_pulse", side_effect=fake_pulse):
+            res = mp.check_pulse_catchup(ctx, explicit=True)
         self.assertTrue(res["catchup"])
         self.assertEqual(len(ran), 1)
 

@@ -33,9 +33,10 @@ Execution policies (per-job data, not code branches):
   fractional jitter.  Native implementation, no external deps.
 * **Missed-fire policy** — when a firing is missed (bot down, tick
   stalled, pressure deferral), ``missed_fire_policy`` decides:
-  ``fire_now`` (coalesce and run once), ``skip`` (drop it, reschedule
-  from now), ``next_only`` (advance the schedule past the missed firing
-  without running).
+  ``fire_now`` (coalesce and run once), ``skip`` / ``next_only``
+  (drop it without running — the next firing lands on the schedule's
+  own clock, the first firing after now on the grid the missed
+  firing sat on, so a miss never shifts the phase).
 * **Overlap policy** — when a job is due while its previous run is still
   executing: ``concurrent`` (run anyway), ``skip`` (drop this firing),
   ``queue`` (leave for the next tick).
@@ -76,6 +77,7 @@ the Notifier, so alerts are durable and multi-channel.
 from __future__ import annotations
 
 import json
+import math
 import os
 import random
 import re
@@ -1342,10 +1344,18 @@ class Scheduler:
                              policy: str) -> None:
         """Move the schedule past a missed firing without executing.
 
-        ``skip`` reschedules from *now*; ``next_only`` keeps the
-        schedule's phase by stepping forward from the missed firing
-        itself (the next firing after the missed one).  One-shot jobs
-        simply disable — a missed one-shot never fires late.
+        Both ``skip`` and ``next_only`` land the next firing on the
+        schedule's own clock — the first firing strictly after ``now``
+        on the grid the missed firing sat on — so a miss never shifts
+        the phase.  An ``every`` job steps forward from the missed
+        firing by its interval; a ``cron`` / ``daily`` / ``rrule`` job
+        takes its next wall-clock occurrence after ``now`` (those
+        grids are absolute, so "after now" IS on the clock).  The old
+        ``skip`` rescheduled from ``now`` (``now + interval`` for
+        ``every``), which moved the phase to the late moment — a
+        30-minute job missed by 40 minutes came back 40 minutes off
+        its grid, and every later firing inherited the shift.  One-shot
+        jobs simply disable — a missed one-shot never fires late.
         """
         kind = row["kind"]
         if kind == "at":
@@ -1353,34 +1363,30 @@ class Scheduler:
             still_enabled = False
         elif kind == "every":
             interval = max(10.0, float(row["spec"] or 10.0))
-            if policy == "skip":
-                next_run, still_enabled = now + interval, True
-            else:  # next_only — keep phase
-                nxt = float(row.get("next_run") or now)
-                while nxt <= now:
-                    nxt += interval
-                next_run, still_enabled = nxt, True
+            missed = float(row.get("next_run") or now)
+            # First grid point strictly after now, anchored at the
+            # missed firing — arithmetic, not a loop: a job missed by
+            # days with a 10s floor must not iterate period by period.
+            steps = math.ceil((now - missed) / interval)
+            next_run = missed + max(1, steps) * interval
+            if next_run <= now:
+                next_run += interval
+            still_enabled = True
         elif kind == "cron":
             tz = str(row.get("timezone") or "")
-            base = (datetime.fromtimestamp(now)
-                    if policy == "skip"
-                    else datetime.fromtimestamp(float(row.get("next_run") or now)))
-            next_run = _next_cron(str(row["spec"]), base, tz)
+            next_run = _next_cron(str(row["spec"]),
+                                  datetime.fromtimestamp(now), tz)
             still_enabled = True
         elif kind == "rrule":
             tz = str(row.get("timezone") or "")
-            base_ts = (now if policy == "skip"
-                       else float(row.get("next_run") or now))
             nxt = _rrule_next(str(row["spec"]),
-                              float(row.get("created_at") or now), base_ts, tz)
+                              float(row.get("created_at") or now), now, tz)
             next_run, still_enabled = ((nxt, True) if nxt is not None
                                        else (None, False))
         else:  # daily
             tz = str(row.get("timezone") or "")
-            base = (datetime.fromtimestamp(now)
-                    if policy == "skip"
-                    else datetime.fromtimestamp(float(row.get("next_run") or now)))
-            next_run = _next_daily(str(row["spec"]), base, tz)
+            next_run = _next_daily(str(row["spec"]),
+                                   datetime.fromtimestamp(now), tz)
             still_enabled = True
         with self.db.transaction():
             self.db.execute(

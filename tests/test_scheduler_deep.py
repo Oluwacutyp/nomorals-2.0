@@ -144,8 +144,13 @@ class MissedFireTests(unittest.TestCase):
         outcomes = self.sched.tick()
         self.assertEqual(len(outcomes), 0)
         row = self.sched._find(job["id"])
-        # rescheduled from now (every 1h), not from the stale firing
-        self.assertGreater(row["next_run"], time.time() + 3500)
+        # Phase-preserving skip (owner order 2026-11-20): stepped
+        # forward from the missed firing by the interval, so the next
+        # firing lands on the 1h grid within the next hour — the phase
+        # never moves to the late moment.
+        now = time.time()
+        self.assertGreater(row["next_run"], now)
+        self.assertLess(row["next_run"], now + 3600)
         runs = self.sched.recent_runs(job["id"])
         self.assertEqual(len(runs), 1)
         self.assertIn("skipped", runs[0]["result"])

@@ -38,7 +38,10 @@ DEFAULT_PULSE_TIME = "13:00"
 PULSE_TIMEZONE = "America/Denver"
 
 PULSE_POLICIES = {
-    "missed_fire_policy": "fire_now",
+    # Mirrors the live engine (morning_pulse.PULSE_POLICIES): a missed
+    # pulse is skipped, never fired late (owner order 2026-11-20).
+    # This module registers nothing; the dict is import compatibility.
+    "missed_fire_policy": "skip",
     "overlap_policy": "skip",
     "run_timeout_s": 1800,
 }
