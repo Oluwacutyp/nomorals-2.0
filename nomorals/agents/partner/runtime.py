@@ -12451,6 +12451,9 @@ class PartnerRuntime(
         if kind == "facemcap":
             return self._control_facemcap(command.tail, chat_key,
                                           message=message)
+        if kind == "facemesh":
+            return self._control_facemesh(command.tail, chat_key,
+                                          message=message)
         if kind == "live":
             return self._control_live(command.tail, chat_key,
                                       message=message)

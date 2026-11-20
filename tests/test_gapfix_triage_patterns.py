@@ -15,7 +15,7 @@ only, no upstream code or text vendored):
 
 The tests prove the tables' edges: every threshold boundary, every
 truth-table row (all 256 signal combinations), and the tool surface
-that exercises both — with the tool count pinned at 774. 775 after this lane (B.19) added scene_spawn. 776 after this lane (B.20) added cloudcam. 777 after this lane (B.22) added show. 778 after this lane (B.26) added scene_project. 779 after this lane (B.23) added facemcap.
+that exercises both — with the tool count pinned at 774. 775 after this lane (B.19) added scene_spawn. 776 after this lane (B.20) added cloudcam. 777 after this lane (B.22) added show. 778 after this lane (B.26) added scene_project. 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh.
 """
 from __future__ import annotations
 
@@ -900,8 +900,8 @@ class TestToolSurface(unittest.TestCase):
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
         # Lane 123 adds no tool: the four new actions ride the
-        # existing action-dispatched "triage" tool. 749 after the mocap port (lane 125) added the mocap tool. 774 after the secprobe wire-up added 25 tools (scope_load, scope_check, param_mine, param_confirm, inject_probe, jwt_attack, graphql_probe, graphql_amplify, race_wave, cors_probe, csrf_poc, plan_next, plan_add, plan_resolve, leaks_harvest, dossier_build, ban_report, ban_state, ban_set_state, ban_appeal, report_capture, report_amplify, replay_run, replay_diagnose, sec_chain). 775 after B.19 added scene_spawn; 776 after B.20 added cloudcam; 777 after B.22 added show; 778 after B.26 added scene_project; 779 after this lane (B.23) added facemcap.
-        self.assertEqual(len(registry._tools), 779)
+        # existing action-dispatched "triage" tool. 749 after the mocap port (lane 125) added the mocap tool. 774 after the secprobe wire-up added 25 tools (scope_load, scope_check, param_mine, param_confirm, inject_probe, jwt_attack, graphql_probe, graphql_amplify, race_wave, cors_probe, csrf_poc, plan_next, plan_add, plan_resolve, leaks_harvest, dossier_build, ban_report, ban_state, ban_set_state, ban_appeal, report_capture, report_amplify, replay_run, replay_diagnose, sec_chain). 775 after B.19 added scene_spawn; 776 after B.20 added cloudcam; 777 after B.22 added show; 778 after B.26 added scene_project; 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh.
+        self.assertEqual(len(registry._tools), 780)
         self.assertIn("triage", registry._tools)
 
     def test_sync_stores_reactions_and_association(self) -> None:

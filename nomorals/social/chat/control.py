@@ -918,6 +918,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "live": (0, None),       # /live … — one live run of mocap + rig + cloudcam, through named states
     "project": (0, None),    # /project … — scene projects: one directory tying scenes, takes, rigs and assets together (owner-only)
     "facemcap": (0, None),   # /facemcap … — ARKit LiveLink CSV facial capture, as face takes
+    "facemesh": (0, None),   # /facemesh … — MediaPipe Face Mesh capture, as face takes
     "clonevoice": (1, 1),  # /clonevoice <name> — attach a voice note, clone it
     "voices": (0, 0),      # /voices — list every voice, cloned vs built-in
     "bet": (0, None),        # /bet analyze <home> vs <away> [odds…] | bankroll | backtest
@@ -4591,6 +4592,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/facemcap load <path> [name] | list | status [name] | drive <name> [rig] | frame <name> [n] | export <name> | render <name> [n] | attach <name> <show> | drop [name]",
               "example": "/facemcap load takes/smile.morph_anim.json",
               "related": "/mocap /live /cloudcam"},
+    "facemesh": {"what": "MediaPipe Face Mesh capture — a camera recording becomes a face take: any webcam or phone camera, free, open, CPU. A video file runs through Face Landmarker; its 468 landmarks become the rig's 52 ARKit blendshape weights plus the head bone, and the frames land as a face take in the shared take registry, so /facemcap drive/render/export/attach work on it. (The `facemesh` brain tool and `nm facemesh` CLI drive the same takes.) Owner only.",
+              "usage": "/facemesh capture <path> [name] | landmarks <path> [n] | status",
+              "example": "/facemesh capture takes/smile.mp4",
+              "related": "/facemcap /mocap /live"},
     "shorts": {"what": "Devon's short-form content empire: niche → script → voiceover → AI visuals → beat-synced edit → captions → publish.",
               "usage": "/shorts make <niche> \"<topic>\" [--now] | /shorts niches | /shorts status | /shorts calendar | /shorts ledger",
               "example": "/shorts make motivation \"discipline beats motivation\" --now",
@@ -5076,7 +5081,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("decoding & crypto", ["decode", "cookies", "cookielab", "structure", "cipher",
                            "monitor", "investigate", "breach"]),
     ("media system", ["music", "distribute", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
-                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "sham", "musicnote",
+                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "sham", "musicnote",
                       "steal", "sticker", "convert", "gif", "emoji", "customemoji", "emojiart", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "models", "mcp", "a2a", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion",
@@ -5343,7 +5348,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("media system — music · playback · video · podcast",
      ["music", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
       "distribute", "dj", "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "produce", "like", "dislike",
-      "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "sham", "musicnote",
+      "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "sham", "musicnote",
       "steal", "sticker", "convert", "gif", "emoji", "customemoji",
       "emojiart", "react", "create",
       "awoo", "baka", "bite", "blush", "bonk", "bored",
@@ -5809,6 +5814,7 @@ LIST_ONELINERS: dict[str, str] = {
     "live": "one live run of mocap + rig + cloudcam, through named states — /live create | start | tick | run | stop | export",
     "project": "scene projects — one directory tying scenes, takes, rigs and assets together — /project create | open | validate | add-scene | bind-show",
     "facemcap": "ARKit LiveLink CSV facial capture, as face takes — /facemcap load | list | status | drive | frame | export | render | attach",
+    "facemesh": "MediaPipe Face Mesh capture, as face takes — /facemesh capture | landmarks | status",
     "image": "look up an image (format, dims, seen-before) — or generate one from a prompt",
     "lens": "reverse image search",
     "schedule": "cron-style in-process jobs",

@@ -583,8 +583,8 @@ def test_tool_registered_and_counts_778() -> None:
     # 774 after the secprobe wire-up added 25 tools; this
     # lane adds no tool — the new actions ride the existing
     # action-dispatched craftlauncher tool.
-    # 775 after this lane (B.19) added scene_spawn. 776 after this lane (B.20) added cloudcam. 777 after this lane (B.22) added show. 778 after this lane (B.26) added scene_project. 779 after this lane (B.23) added facemcap.
-    assert len(registry._tools) == 779
+    # 775 after this lane (B.19) added scene_spawn. 776 after this lane (B.20) added cloudcam. 777 after this lane (B.22) added show. 778 after this lane (B.26) added scene_project. 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh.
+    assert len(registry._tools) == 780
 
 
 def test_tool_shots_lists_the_catalog() -> None:

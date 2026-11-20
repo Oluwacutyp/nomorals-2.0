@@ -93,6 +93,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "cipher": ["cip"],
     "cloudcam": ["cc"],
     "facemcap": ["fc"],
+    "facemesh": ["fm"],
     "code": ["c"],
     "graph": [],
     "commands": ["cmd"],
@@ -3749,6 +3750,40 @@ def _parser() -> argparse.ArgumentParser:
     for _sub in (facemcap_sub.choices["status"], fc_load,
                  fc_drive, fc_frame, fc_export, fc_render,
                  facemcap_sub.choices["drop"], fc_attach):
+        _sub.add_argument("--session", default="default",
+                          help="face take name (default 'default')")
+
+    facemesh = sub.add_parser("facemesh", aliases=CLI_ALIASES["facemesh"],
+        help="MediaPipe Face Mesh capture, as face takes",
+        description=("nm facemesh capture [--session NAME] --path "
+                     "PATH.mp4 [--max-frames N]\\n"
+                     "nm facemesh landmarks [--session NAME] --path "
+                     "PATH.mp4|PATH.jpg [--max-frames N]\\n"
+                     "nm facemesh status"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    facemesh.add_argument("--json", action="store_true",
+                          help="Output as JSON")
+    facemesh_sub = facemesh.add_subparsers(dest="facemesh_action",
+                                           required=True)
+    fm_capture = facemesh_sub.add_parser(
+        "capture", help="run a video through Face Mesh and "
+        "register the take")
+    fm_capture.add_argument("--path", default="",
+                            help="video file path")
+    fm_capture.add_argument("--max-frames", type=int, default=None,
+                            help="cap on frames read")
+    fm_landmarks = facemesh_sub.add_parser(
+        "landmarks", help="landmarks and blendshapes from an "
+        "image or the first frames of a video")
+    fm_landmarks.add_argument("--path", default="",
+                              help="image or video file path")
+    fm_landmarks.add_argument("--max-frames", type=int, default=1,
+                              help="frames from a video (default 1)")
+    facemesh_sub.add_parser("status", help="mediapipe / model / "
+                            "ffmpeg availability")
+    for _sub in (fm_capture, fm_landmarks,
+                 facemesh_sub.choices["status"]):
         _sub.add_argument("--session", default="default",
                           help="face take name (default 'default')")
 

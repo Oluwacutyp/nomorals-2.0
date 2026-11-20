@@ -22,6 +22,7 @@ __all__ = [
     "get_take",
     "list_takes",
     "load_take",
+    "register_take",
     "reset_takes",
 ]
 
@@ -67,6 +68,20 @@ def load_take(name: str, path: str | Path, *,
             f"face take {target} must be .morph_anim.json, "
             f".json, or .csv, got {suffix or 'no suffix'}",
             kind="bad_take")
+    _TAKES[name] = take
+    return take
+
+
+def register_take(name: str, take: FaceTake) -> FaceTake:
+    """Register an in-memory take under a name — the same
+    store a file load lands in, for takes built by another
+    organ (facemesh captures from a camera, not a CSV).
+    Loading the same name twice replaces it, here too."""
+    name = (name or "").strip()
+    if not name:
+        raise FaceMocapError("take name must not be empty",
+                             kind="bad_take")
+    take.name = name
     _TAKES[name] = take
     return take
 

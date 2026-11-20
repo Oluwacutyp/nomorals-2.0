@@ -614,6 +614,99 @@ class RuntimeMocapMixin:
             "drive <name> [rig] | frame <name> [n] | export <name> | "
             "render <name> [n] | attach <name> <show> | drop [name]")
 
+    # ── facemesh: /facemesh ───────────────────────────────────────
+    def _control_facemesh(self, tail: str, chat_key: str,
+                          message: Any = None) -> str:
+        """MediaPipe Face Mesh capture, as face takes.
+
+        /facemesh capture <path> [name]  run a video through
+                                        Face Mesh, register the
+                                        take in the shared registry
+        /facemesh landmarks <path> [n]   landmarks + blendshapes
+                                        from an image or the first
+                                        n frames of a video
+        /facemesh status                 mediapipe / model /
+                                        ffmpeg availability
+        """
+        from ...media.facemcap.registry import register_take
+        from ...media.facemesh import (
+            FaceMeshError,
+            capture_image,
+            capture_video,
+            mediapipe_status,
+        )
+
+        parts = (tail or "").split()
+        if not parts:
+            return self._control_facemesh_help()
+        verb = parts[0]
+        rest = parts[1:]
+        try:
+            if verb == "status":
+                status = mediapipe_status()
+                lines = ["facemesh status:"]
+                lines.append(
+                    "  mediapipe: "
+                    + (f"{status['mediapipe_version']}"
+                       if status["mediapipe"] else "not installed"))
+                lines.append(
+                    "  model: "
+                    + (f"{status['model_bytes']} bytes"
+                       if status["model_ok"] else "not downloaded"))
+                lines.append(
+                    "  ffmpeg: "
+                    + ("yes" if status["ffmpeg"] else "no"))
+                return "\n".join(lines)
+            if verb == "capture":
+                if not rest:
+                    return self._control_facemesh_help()
+                name = rest[1] if len(rest) > 1 else "default"
+                result = capture_video(rest[0], name=name)
+                register_take(name, result.take)
+                return (f"facemesh {result.take.name} captured: "
+                        f"{result.take.total} frames, "
+                        f"{result.take.fps}fps, "
+                        f"{result.take.duration_s:.2f}s, "
+                        f"{result.frames_read} read, "
+                        f"{result.frames_skipped} skipped "
+                        "(no face)")
+            if verb == "landmarks":
+                if not rest:
+                    return self._control_facemesh_help()
+                path = rest[0]
+                suffix = path.rsplit(".", 1)[-1].lower()
+                if suffix in ("mp4", "mov", "mkv", "avi", "webm"):
+                    n = int(rest[1]) if len(rest) > 1 else 1
+                    result = capture_video(path, max_frames=n)
+                    frame = result.take.frames[0]
+                    return json.dumps({
+                        "source": path,
+                        "landmarks": result.first_landmarks,
+                        "blendshapes": frame.blendshapes,
+                        "bones": frame.bones}, indent=2)
+                result = capture_image(path)
+                frame = result.take.frames[0]
+                return json.dumps({
+                    "source": path,
+                    "landmarks": result.first_landmarks,
+                    "blendshapes": frame.blendshapes,
+                    "bones": frame.bones}, indent=2)
+        except FaceMeshError as exc:
+            record_failure(
+                "runtime_mocap.RuntimeMocapMixin._control_facemesh",
+                exc)
+            return f"facemesh: {exc}"
+        except Exception as exc:  # noqa: BLE001 - chat never dies
+            record_failure(
+                "runtime_mocap.RuntimeMocapMixin._control_facemesh",
+                exc)
+            return f"facemesh failed: {exc}"
+        return self._control_facemesh_help()
+
+    def _control_facemesh_help(self) -> str:
+        return ("/facemesh capture <path> [name] | "
+                "landmarks <path> [n] | status")
+
     # ── show: /live ───────────────────────────────────────────────
     def _control_live(self, tail: str, chat_key: str,
                       message: Any = None) -> str:
