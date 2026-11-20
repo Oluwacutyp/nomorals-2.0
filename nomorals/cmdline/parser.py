@@ -139,6 +139,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "voice": ["vc"],
     "mocap": [],
     "scene": ["sc"],
+    "show": [],
     "audio": ["au"],
     "weather": ["wx"],
     "workspace": ["ws"],
@@ -3345,6 +3346,99 @@ def _parser() -> argparse.ArgumentParser:
                  cc_render):
         _sub.add_argument("--session", default="default",
                           help="cloudcam session name (default 'default')")
+
+    show = sub.add_parser("show", aliases=CLI_ALIASES["show"],
+        help="one live run of mocap + rig + cloudcam, through named states",
+        description=("nm show create [--session NAME] [--take PATH.bvh] "
+                     "[--rig NAME] [--cloudcam NAME] "
+                     "[--cloudcam-source zmq|store|file|idle] "
+                     "[--endpoint tcp://*:8888] [--path FILE] "
+                     "[--fps N] [--render-dir DIR] "
+                     "[--export-path PATH.bvh]\\n"
+                     "nm show list\\n"
+                     "nm show status [--session NAME]\\n"
+                     "nm show start [--session NAME]\\n"
+                     "nm show pause [--session NAME]\\n"
+                     "nm show resume [--session NAME]\\n"
+                     "nm show stop [--session NAME]\\n"
+                     "nm show tick [--session NAME]\\n"
+                     "nm show run [--session NAME] [--ticks N] "
+                     "[--interval SECONDS] [--export PATH.bvh]\\n"
+                     "nm show events [--session NAME] [--limit N]\\n"
+                     "nm show export [--session NAME] --out PATH.bvh\\n"
+                     "nm show attach-rig [--session NAME] <rig session>\\n"
+                     "nm show attach-cloudcam [--session NAME] "
+                     "<cloudcam session>\\n"
+                     "nm show load-take [--session NAME] --take PATH.bvh\\n"
+                     "nm show drop [--session NAME]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    show.add_argument("--json", action="store_true",
+                      help="Output as JSON")
+    show_sub = show.add_subparsers(dest="show_action", required=True)
+    show_sub.add_parser("list", help="loaded shows")
+    show_sub.add_parser("status", help="one show's state")
+    show_sub.add_parser("start", help="arm, then go live")
+    show_sub.add_parser("pause", help="hold the show")
+    show_sub.add_parser("resume", help="resume a paused show")
+    show_sub.add_parser("stop", help="stop the show")
+    show_sub.add_parser("tick", help="one schedule step")
+    show_run = show_sub.add_parser("run", help="run bounded ticks")
+    show_run.add_argument("--ticks", type=int, default=30,
+                          help="ticks to run (1..3600, default 30)")
+    show_run.add_argument("--interval", type=float, default=0.0,
+                          help="seconds between ticks (default 0)")
+    show_run.add_argument("--export", default="",
+                          help="BVH path to export after the run")
+    show_events = show_sub.add_parser("events", help="the show's journal")
+    show_events.add_argument("--limit", type=int, default=50,
+                             help="events to show (default 50)")
+    show_export = show_sub.add_parser(
+        "export", help="write the driven poses as BVH")
+    show_export.add_argument("--out", default="",
+                             help="BVH output path")
+    show_attach_rig = show_sub.add_parser(
+        "attach-rig", help="attach a rig session")
+    show_attach_rig.add_argument("value", help="rig session name")
+    show_attach_cc = show_sub.add_parser(
+        "attach-cloudcam", help="attach a cloudcam session")
+    show_attach_cc.add_argument("value", help="cloudcam session name")
+    show_load_take = show_sub.add_parser(
+        "load-take", help="load a BVH/JSON take")
+    show_load_take.add_argument("--take", default="",
+                                help="BVH or JSON take path")
+    show_create = show_sub.add_parser("create", help="load a show")
+    show_create.add_argument("--take", default="",
+                             help="BVH or JSON take path")
+    show_create.add_argument("--rig", default="",
+                             help="rig session name")
+    show_create.add_argument("--cloudcam", default="",
+                             help="cloudcam session name")
+    show_create.add_argument("--cloudcam-source", default="",
+                             choices=("", "idle", "zmq", "store", "file"),
+                             help="cloudcam source (default none)")
+    show_create.add_argument("--endpoint", default="",
+                             help="ZeroMQ endpoint (default tcp://*:8888)")
+    show_create.add_argument("--path", default="",
+                             help="frames file (.json or .ply)")
+    show_create.add_argument("--fps", type=float, default=15.0,
+                             help="show fps (default 15)")
+    show_create.add_argument("--render-dir", default="",
+                             help="PNG per tick, written here")
+    show_create.add_argument("--export-path", default="",
+                             help="BVH path, auto-exported on stop")
+    show_sub.add_parser("drop", help="stop and drop a show")
+    for _sub in (show_sub.choices["status"],
+                 show_sub.choices["start"],
+                 show_sub.choices["pause"],
+                 show_sub.choices["resume"],
+                 show_sub.choices["stop"],
+                 show_sub.choices["tick"], show_run, show_events,
+                 show_export, show_attach_rig, show_attach_cc,
+                 show_load_take, show_create,
+                 show_sub.choices["drop"]):
+        _sub.add_argument("--session", default="default",
+                          help="show name (default 'default')")
 
     inbox = sub.add_parser("inbox", aliases=CLI_ALIASES["inbox"],
         help="Drop-in inbox: drop a file, link, or note — Devon acts",

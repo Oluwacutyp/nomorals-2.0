@@ -12372,6 +12372,9 @@ class PartnerRuntime(
         if kind == "cloudcam":
             return self._control_cloudcam(command.tail, chat_key,
                                           message=message)
+        if kind == "live":
+            return self._control_live(command.tail, chat_key,
+                                      message=message)
         if kind == "voices":
             return self._control_voices(command.tail or arg,
                                         chat_key=chat_key)

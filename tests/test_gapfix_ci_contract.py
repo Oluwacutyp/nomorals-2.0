@@ -300,15 +300,15 @@ class RealRepoTests(unittest.TestCase):
         missing = old_runs - new_runs
         self.assertEqual(missing, set())
 
-    # 775 after this lane (B.19) added scene_spawn. 776 after this lane (B.20) added cloudcam.
-    def test_tool_count_still_776(self):
+    # 775 after this lane (B.19) added scene_spawn. 776 after this lane (B.20) added cloudcam. 777 after this lane (B.22) added show.
+    def test_tool_count_still_777(self):
         from types import SimpleNamespace
 
         from nomorals.tools.registry import ToolRegistry
 
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 776)
+        self.assertEqual(len(registry._tools), 777)
 
 
 class CliTests(unittest.TestCase):

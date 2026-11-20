@@ -250,3 +250,170 @@ class RuntimeMocapMixin:
             "/cloudcam start [name] [source zmq|store|file|idle] | "
             "stop [name] | status [name] | list | tick [name] | "
             "export [name] | render [name]")
+
+    # ── show: /live ───────────────────────────────────────────────
+    def _control_live(self, tail: str, chat_key: str,
+                      message: Any = None) -> str:
+        """One live run of mocap + rig + cloudcam, through named
+        states.
+
+        /live create [name]                load a show
+        /live list                         loaded shows
+        /live status [name]                one show's state
+        /live start [name]                 arm, then go live
+        /live pause [name]                 hold the show
+        /live resume [name]                resume a paused show
+        /live stop [name]                  stop the show
+        /live tick [name]                  one schedule step
+        /live run [name] [ticks]           run bounded ticks (max 150)
+        /live events [name]                the show's journal
+        /live export [name]                driven poses as BVH
+        /live load-take [name] <path>      load a BVH/JSON take
+        /live attach-rig [show] <rig>      attach a rig session
+        /live attach-cloudcam [show] <cam> attach a cloudcam session
+        /live drop [name]                  stop and drop a show
+        """
+        from ...media.show import (
+            drop_show,
+            get_show,
+            list_shows,
+            load_show,
+        )
+        from ...media.show.errors import ShowError
+        from ...tools.mocap import _STORE
+        from ...tools.show import ensure_defaults
+
+        parts = (tail or "").split()
+        if not parts:
+            return self._control_live_help()
+        verb = parts[0]
+        rest = parts[1:]
+        name = "default"
+        if verb in ("create", "start", "pause", "resume", "stop",
+                    "tick", "status", "events", "export", "load-take",
+                    "drop", "attach-rig", "attach-cloudcam") and rest:
+            name = rest[0]
+            rest = rest[1:]
+        try:
+            if verb == "list":
+                shows = list_shows()
+                lines = ["shows:"]
+                for entry in shows:
+                    lines.append(
+                        f"  {entry['name']}: {entry['state']} "
+                        f"(tick {entry['tick']}, "
+                        f"{entry['posed']} poses, "
+                        f"rig {entry['rig'] or 'none'})")
+                return "\n".join(lines)
+            if verb == "create":
+                load_show(name, _STORE)
+                return (f"show {name} created (idle — /live start "
+                        f"{name} to go live)")
+            if verb == "run":
+                # /live run [name] [ticks] — a bare number is ticks
+                # for the default show, not a show name.
+                ticks = 30
+                if rest and rest[0].isdigit():
+                    ticks = int(rest[0])
+                elif rest:
+                    name = rest[0]
+                    if len(rest) > 1:
+                        ticks = int(rest[1])
+                if ticks > 150:
+                    return ("show run is capped at 150 ticks in "
+                            "chat — use nm show run for longer runs")
+                show = get_show(name)
+                attached = ensure_defaults(show)
+                status = show.run(ticks)
+                extra = (f" (auto-attached {', '.join(attached)})"
+                         if attached else "")
+                return (f"show {name} ran {ticks} ticks — "
+                        f"{status['state']} (tick {status['tick']}, "
+                        f"{status['posed']} poses){extra}")
+            if verb not in ("status", "start", "pause", "resume",
+                            "stop", "tick", "events", "export",
+                            "load-take", "attach-rig", "attach-cloudcam",
+                            "drop"):
+                return self._control_live_help()
+            show = get_show(name)
+            if verb == "status":
+                return json.dumps(show.status(), indent=2)
+            if verb == "start":
+                attached = ensure_defaults(show)
+                status = show.start()
+                extra = (f" (auto-attached {', '.join(attached)})"
+                         if attached else "")
+                return (f"show {name} live{extra} — "
+                        f"tick {status['tick']}")
+            if verb == "pause":
+                show.pause()
+                return f"show {name} paused"
+            if verb == "resume":
+                show.resume()
+                return f"show {name} live again"
+            if verb == "stop":
+                show.stop()
+                return f"show {name} stopped"
+            if verb == "tick":
+                receipt = show.step()
+                pose = receipt["pose"]
+                return (
+                    f"show {name}: tick {receipt['tick']} "
+                    f"({receipt['state']})"
+                    + (f" — pose f:{pose['seq']} viseme "
+                       f"{pose['viseme']}" if pose else "")
+                    + (" — holding" if receipt["held"] else ""))
+            if verb == "events":
+                events = show.events(10)
+                lines = [f"show {name} events:"]
+                for event in events:
+                    lines.append(f"  t{event['tick']} {event['kind']}")
+                return "\n".join(lines)
+            if verb == "export":
+                result = show.export(f"show-{name}.bvh")
+                return (f"exported {result['frames']} frames to "
+                        f"{result['path']}")
+            if verb == "load-take":
+                if not rest:
+                    return "/live load-take [name] <path.bvh|path.json>"
+                info = show.load_take(rest[0])
+                return (f"show {name} take loaded: "
+                        f"{info['total']} frames from {info['name']}")
+            if verb == "attach-rig":
+                if not rest:
+                    return "/live attach-rig [show] <rig session>"
+                from ...media.rig import (
+                    get_session as get_rig_session,
+                )
+                result = show.attach_rig(get_rig_session(rest[0]))
+                return f"show {name} rig: {result['rig']}"
+            if verb == "attach-cloudcam":
+                if not rest:
+                    return ("/live attach-cloudcam [show] "
+                            "<cloudcam session>")
+                from ...media.cloudcam import (
+                    get_session as get_cc_session,
+                )
+                result = show.attach_cloudcam(
+                    get_cc_session(rest[0]))
+                return f"show {name} cloudcam: {result['cloudcam']}"
+            if verb == "drop":
+                drop_show(name)
+                return f"show {name} dropped"
+        except ShowError as exc:
+            record_failure(
+                "runtime_mocap.RuntimeMocapMixin._control_live", exc)
+            return f"live: {exc}"
+        except Exception as exc:  # noqa: BLE001 - chat never dies
+            record_failure(
+                "runtime_mocap.RuntimeMocapMixin._control_live", exc)
+            return f"live failed: {exc}"
+        return self._control_live_help()
+
+    def _control_live_help(self) -> str:
+        return (
+            "/live create [name] | list | status [name] | start [name] "
+            "| pause [name] | resume [name] | stop [name] | tick [name] "
+            "| run [name] [ticks] | events [name] | export [name] | "
+            "load-take [name] <path> | attach-rig [show] <rig> | "
+            "attach-cloudcam [show] <cam> | drop [name]")

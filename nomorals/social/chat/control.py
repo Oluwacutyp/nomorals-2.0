@@ -915,6 +915,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "voice": (0, None),      # /voice … — the voice catalogue (list/use/say/clone/…)
     "mocap": (0, None),      # /mocap … — mocap store + VTuber rig
     "cloudcam": (0, None),   # /cloudcam … — streamed point clouds
+    "live": (0, None),       # /live … — one live run of mocap + rig + cloudcam, through named states
     "clonevoice": (1, 1),  # /clonevoice <name> — attach a voice note, clone it
     "voices": (0, 0),      # /voices — list every voice, cloned vs built-in
     "bet": (0, None),        # /bet analyze <home> vs <away> [odds…] | bankroll | backtest
@@ -4576,6 +4577,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/cloudcam start [name] [source zmq|store|file|idle] | stop [name] | status [name] | list | tick [name] | export [name] | render [name]",
               "example": "/cloudcam start",
               "related": "/mocap /blender"},
+    "live": {"what": "One live run of mocap + rig + cloudcam, through named states — idle → arming → live → paused → live → stopping → done. Every live tick runs capture → drive → render → publish: a BVH take steps into the store's skeleton channel, the rig drives the newest frame (holding the last pose when nothing new arrived), the posed frame renders, the cloudcam stages the latest point-cloud frame. (The `show` brain tool and `nm show` CLI drive the same shows.) Owner only.",
+              "usage": "/live create [name] | list | status [name] | start [name] | pause [name] | resume [name] | stop [name] | tick [name] | run [name] [ticks] | events [name] | export [name] | load-take [name] <path> | attach-rig [show] <rig> | attach-cloudcam [show] <cam> | drop [name]",
+              "example": "/live start",
+              "related": "/mocap /cloudcam /blender"},
     "shorts": {"what": "Devon's short-form content empire: niche → script → voiceover → AI visuals → beat-synced edit → captions → publish.",
               "usage": "/shorts make <niche> \"<topic>\" [--now] | /shorts niches | /shorts status | /shorts calendar | /shorts ledger",
               "example": "/shorts make motivation \"discipline beats motivation\" --now",
@@ -5061,7 +5066,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("decoding & crypto", ["decode", "cookies", "cookielab", "structure", "cipher",
                            "monitor", "investigate", "breach"]),
     ("media system", ["music", "distribute", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
-                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "sham", "musicnote",
+                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "sham", "musicnote",
                       "steal", "sticker", "convert", "gif", "emoji", "customemoji", "emojiart", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "models", "mcp", "a2a", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion",
@@ -5328,7 +5333,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("media system — music · playback · video · podcast",
      ["music", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
       "distribute", "dj", "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "produce", "like", "dislike",
-      "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "sham", "musicnote",
+      "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "sham", "musicnote",
       "steal", "sticker", "convert", "gif", "emoji", "customemoji",
       "emojiart", "react", "create",
       "awoo", "baka", "bite", "blush", "bonk", "bored",
@@ -5791,6 +5796,7 @@ LIST_ONELINERS: dict[str, str] = {
     "blender": "steer the live Blender session — /blender status | scene | look | code <bpy> | import <glb|fbx>",
     "mocap": "motion-capture state + the VTuber rig — /mocap status | rig list | rig load | rig pose | rig render | rig drive <bvh>",
     "cloudcam": "streamed point clouds — /cloudcam start | status | tick | export | render",
+    "live": "one live run of mocap + rig + cloudcam, through named states — /live create | start | tick | run | stop | export",
     "image": "look up an image (format, dims, seen-before) — or generate one from a prompt",
     "lens": "reverse image search",
     "schedule": "cron-style in-process jobs",

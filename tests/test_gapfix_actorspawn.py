@@ -3,7 +3,7 @@ spawn into Scene3D documents — placement, lifecycle, budget,
 cleanup, and the CLI + tool surfaces.
 
 The registry counts 776 tools: 774 after the secprobe wire-up
-added 25 tools, 775 after this lane (B.19) added scene_spawn. 776 after this lane (B.20) added cloudcam.
+added 25 tools, 775 after this lane (B.19) added scene_spawn. 776 after this lane (B.20) added cloudcam. 777 after this lane (B.22) added show.
 """
 
 from __future__ import annotations
@@ -107,12 +107,12 @@ def _err(outcome) -> str:
 # tool count pin
 # ---------------------------------------------------------------------------
 
-def test_tool_count_is_776_after_actorspawn():
+def test_tool_count_is_777_after_actorspawn():
     # 774 after the secprobe wire-up added 25 tools. 775 after this
     # lane (B.19) added scene_spawn.
     registry = ToolRegistry(SimpleNamespace())
     registry.register_builtins()
-    assert len(registry._tools) == 776
+    assert len(registry._tools) == 777
     assert "scene_spawn" in registry._tools
 
 

@@ -9,7 +9,7 @@ never-imported ``_init_.py``. This file proves the wiring end to end
 against a local server: cookies ride on requests, Set-Cookie is stored
 (including on an error response), post() covers the plugins' shapes,
 all 12 plugins register, the forge stores + verifies a session, and
-the registry counts 774 tools. 775 after this lane (B.19) added scene_spawn. 776 after this lane (B.20) added cloudcam.
+the registry counts 774 tools. 775 after this lane (B.19) added scene_spawn. 776 after this lane (B.20) added cloudcam. 777 after this lane (B.22) added show.
 """
 from __future__ import annotations
 
@@ -233,13 +233,13 @@ class AuthWiringTests(unittest.TestCase):
         self.assertIn(b"/Contents 3 0 R", data)
 
     # -- registry ------------------------------------------------------
-    def test_tool_count_is_776_after_auth_wiring(self):
+    def test_tool_count_is_777_after_auth_wiring(self):
         # 748 after the auth-plugin wiring added 5 tools (session_forge,
         # session_verify, payload_png_bomb, payload_svg_bomb,
         # payload_keylogger) on top of the bughunter port (lane 121). 749 after the mocap port (lane 125) added the mocap tool. 774 after the secprobe wire-up added 25 tools (scope_load, scope_check, param_mine, param_confirm, inject_probe, jwt_attack, graphql_probe, graphql_amplify, race_wave, cors_probe, csrf_poc, plan_next, plan_add, plan_resolve, leaks_harvest, dossier_build, ban_report, ban_state, ban_set_state, ban_appeal, report_capture, report_amplify, replay_run, replay_diagnose, sec_chain).
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 776)
+        self.assertEqual(len(registry._tools), 777)
         for name in ("session_forge", "session_verify", "payload_png_bomb",
                      "payload_svg_bomb", "payload_keylogger"):
             self.assertIn(name, registry._tools)
