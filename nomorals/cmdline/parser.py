@@ -3222,7 +3222,17 @@ def _parser() -> argparse.ArgumentParser:
                      "nm mocap ingest tick [--session NAME] "
                      "[--frames N]\\n"
                      "nm mocap ingest publish [--source live|"
-                     "fixture|file] [--dir PATH] [ingest options]"),
+                     "fixture|file] [--dir PATH] [ingest options]\n"
+                     "nm mocap mvn listen [--session NAME] "
+                     "[--host HOST] [--port N] [--legacy]\\n"
+                     "nm mocap mvn send [--session NAME] "
+                     "[--host HOST] [--port N] [--avatar N]\\n"
+                     "nm mocap mvn replay --pcap PATH [--session NAME] "
+                     "[--host HOST] [--port N]\\n"
+                     "nm mocap mvn stop [--session NAME]\\n"
+                     "nm mocap mvn status [--session NAME]\\n"
+                     "nm mocap mvn decode --pcap PATH\\n"
+                     "nm mocap mvn names"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     mocap.add_argument("--json", action="store_true",
@@ -3295,6 +3305,65 @@ def _parser() -> argparse.ArgumentParser:
                  m_rig_drive, m_rig_export):
         _sub.add_argument("--session", default="default",
                           help="rig session name (default 'default')")
+    m_mvn = mocap_sub.add_parser(
+        "mvn", help="Xsens MVN wire: listen, send, replay, decode")
+    m_mvn_sub = m_mvn.add_subparsers(dest="mocap_mvn_verb",
+                                     required=True)
+    m_mvn_listen = m_mvn_sub.add_parser(
+        "listen", help="listen for MVN datagrams on UDP")
+    m_mvn_listen.add_argument(
+        "--host", default="0.0.0.0",
+        help="bind host (default 0.0.0.0)")
+    m_mvn_listen.add_argument(
+        "--port", type=int, default=9763,
+        help="UDP port (default 9763)")
+    m_mvn_listen.add_argument(
+        "--legacy", action="store_true",
+        help="name segments by the spec 23-segment table")
+    m_mvn_send = m_mvn_sub.add_parser(
+        "send", help="send the latest store frame as one 02 datagram")
+    m_mvn_send.add_argument(
+        "--host", default="127.0.0.1",
+        help="target host (default 127.0.0.1)")
+    m_mvn_send.add_argument(
+        "--port", type=int, default=9763,
+        help="UDP port (default 9763)")
+    m_mvn_send.add_argument(
+        "--avatar", type=int, default=0,
+        help="avatar ID in the datagram (default 0)")
+    m_mvn_replay = m_mvn_sub.add_parser(
+        "replay", help="replay a pcap of MVN packets to a host")
+    m_mvn_replay.add_argument("--pcap", default="",
+                              help="pcap file path")
+    m_mvn_replay.add_argument(
+        "--host", default="127.0.0.1",
+        help="target host (default 127.0.0.1)")
+    m_mvn_replay.add_argument(
+        "--port", type=int, default=9763,
+        help="UDP port (default 9763)")
+    m_mvn_replay.add_argument(
+        "--pace", type=float, default=5.0,
+        help="ms between packets (default 5)")
+    m_mvn_replay.add_argument(
+        "--loop-gap", type=float, default=500.0,
+        help="ms between loops (default 500)")
+    m_mvn_sub.add_parser("stop", help="stop an MVN session")
+    m_mvn_sub.add_parser("status", help="MVN sessions")
+    m_mvn_decode = m_mvn_sub.add_parser(
+        "decode", help="decode a pcap through the receiver, no UDP")
+    m_mvn_decode.add_argument("--pcap", default="",
+                              help="pcap file path")
+    m_mvn_sub.add_parser(
+        "names", help="the 2022 wire table + the spec 23-segment table")
+    for _sub in (m_mvn_listen, m_mvn_send, m_mvn_replay):
+        _sub.add_argument("--session", default="default",
+                          help="MVN session name (default 'default')")
+    m_mvn_sub.choices["stop"].add_argument(
+        "--session", default="default",
+        help="MVN session name (default 'default')")
+    m_mvn_sub.choices["status"].add_argument(
+        "--session", default="",
+        help="one MVN session (empty = all sessions)")
 
     cloudcam = sub.add_parser("cloudcam", aliases=CLI_ALIASES["cloudcam"],
         help="streamed point clouds: worker thread + ring buffer",

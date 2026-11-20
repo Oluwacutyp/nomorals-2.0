@@ -33,6 +33,13 @@ class RuntimeMocapMixin:
         /mocap ingest status [name]               frames/points/drops
         /mocap ingest tick [name] [n]             poll n frames by hand
         /mocap ingest publish [live|fixture]      one frame, no session
+        /mocap mvn listen [name] [host] [port]    listen for MVN datagrams
+        /mocap mvn send [name] [host] [port]      send one store frame
+        /mocap mvn replay <pcap> [name]           replay a capture to a host
+        /mocap mvn stop [name]                    stop an MVN session
+        /mocap mvn status [name]                  MVN sessions
+        /mocap mvn decode <pcap>                  decode a capture, no UDP
+        /mocap mvn names                          the MVN segment tables
         """
         from ...media.mocap.bvh import SkeletonFrame
         from ...media.mocap.errors import MocapError
@@ -56,6 +63,8 @@ class RuntimeMocapMixin:
                     + ", ".join(e["name"] for e in _STORE.engines()))
         if parts[0] == "ingest":
             return self._control_mocap_ingest(parts[1:])
+        if parts[0] == "mvn":
+            return self._control_mocap_mvn(parts[1:], chat_key)
         if parts[0] != "rig":
             return self._control_mocap_help()
         verb = parts[1] if len(parts) > 1 else ""
@@ -266,7 +275,100 @@ class RuntimeMocapMixin:
             "rig render [name] | rig drive <bvh> [text] | "
             "rig export <bvh> [text] | ingest start [live|fixture] "
             "[name] | ingest stop [name] | ingest status [name] | "
-            "ingest tick [name] [n] | ingest publish [live|fixture]")
+            "ingest tick [name] [n] | ingest publish [live|fixture] | mvn listen [name] [host] [port] | mvn send [name] [host] [port] | mvn replay <pcap> [name] | mvn stop [name] | mvn status [name] | mvn decode <pcap> | mvn names")
+
+    def _control_mocap_mvn(self, parts: list[str],
+                           chat_key: str) -> str:
+        """Xsens MVN wire, live from any chat — the same sessions
+        the ``mocap`` brain tool and ``nm mocap mvn`` drive."""
+        from ...media.mocap.errors import MocapError
+        from ...tools.mocap import _mvn_action
+
+        if not parts:
+            return self._control_mocap_help()
+        verb = parts[0]
+        rest = parts[1:]
+        name = "default"
+        if verb in ("listen", "send", "replay", "stop", "status") \
+                and rest:
+            name = rest[0]
+            rest = rest[1:]
+        try:
+            if verb == "listen":
+                host = rest[0] if rest else "0.0.0.0"
+                port = int(rest[1]) if len(rest) > 1 else 9763
+                info = _mvn_action("mvn_listen", name,
+                                   {"host": host, "port": port}, [])
+                return (f"mvn {name} listening on "
+                        f"{info['target']}")
+            if verb == "send":
+                host = rest[0] if rest else "127.0.0.1"
+                port = int(rest[1]) if len(rest) > 1 else 9763
+                receipt = _mvn_action(
+                    "mvn_send", name,
+                    {"host": host, "port": port}, [])
+                note = (f" unmapped: {', '.join(receipt['unmapped'])}"
+                        if receipt["unmapped"] else "")
+                return (f"mvn {name} sent sample "
+                        f"{receipt['sample']} "
+                        f"({receipt['segments']} segments, "
+                        f"{receipt['sent']} bytes){note}")
+            if verb == "replay":
+                if not rest:
+                    return "/mocap mvn replay needs a pcap path"
+                info = _mvn_action("mvn_replay", name, {}, [rest[0]])
+                return (f"mvn {name} replaying {rest[0]} to "
+                        f"{info['target']}")
+            if verb == "stop":
+                _mvn_action("mvn_stop", name, {}, [])
+                return f"mvn {name} stopped"
+            if verb == "status":
+                if name != "default" or rest:
+                    info = _mvn_action("mvn_status", name, {}, [])
+                    return json.dumps(info, indent=2)
+                info = _mvn_action("mvn_status", "", {}, [])
+                sessions = info["sessions"]
+                if not sessions:
+                    return "mvn sessions: none"
+                lines = ["mvn sessions:"]
+                for entry in sessions:
+                    lines.append(
+                        f"  {entry['name']}: {entry['kind']} "
+                        f"{entry['target']} "
+                        f"({entry['counts']})")
+                return "\n".join(lines)
+            if verb == "decode":
+                if not rest:
+                    return "/mocap mvn decode needs a pcap path"
+                info = _mvn_action("mvn_decode", "", {}, [rest[0]])
+                return (f"mvn decode {rest[0]}: "
+                        f"{info['pcap_counts']['packets']} packets, "
+                        f"{info['frames']} frames, "
+                        f"{info['tables']} name tables, "
+                        f"{info['dropped']} dropped")
+            if verb == "names":
+                info = _mvn_action("mvn_names", "", {}, [])
+                return (f"mvn wire table: "
+                        f"{len(info['wire_2022'])} segments "
+                        f"(Pelvis 1 … LeftFifthTip 63); spec table: "
+                        f"{len(info['spec_23_segment'])} segments "
+                        f"(LeftFoot 23, LeftToe 24, no ID 22)")
+        except MocapError as exc:
+            record_failure(
+                "runtime_mocap.RuntimeMocapMixin._control_mocap_mvn",
+                exc)
+            return f"mvn: {exc}"
+        except (OSError, ValueError) as exc:
+            record_failure(
+                "runtime_mocap.RuntimeMocapMixin._control_mocap_mvn",
+                exc)
+            return f"mvn: {exc}"
+        except Exception as exc:  # noqa: BLE001 - chat never dies
+            record_failure(
+                "runtime_mocap.RuntimeMocapMixin._control_mocap_mvn",
+                exc)
+            return f"mocap failed: {exc}"
+        return self._control_mocap_help()
 
     # ── cloudcam: /cloudcam ───────────────────────────────────────────
     def _control_cloudcam(self, tail: str, chat_key: str,

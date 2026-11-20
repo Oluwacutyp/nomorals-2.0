@@ -34,6 +34,8 @@ def _cmd_mocap(args: argparse.Namespace, context: Any) -> int:
         return _cmd_mocap_rig(args, context)
     if action == "ingest":
         return _cmd_mocap_ingest(args, context)
+    if action == "mvn":
+        return _cmd_mocap_mvn(args, context)
     if action == "status":
         from ...tools.mocap import _STORE
         return _out(args, {
@@ -226,6 +228,62 @@ def _cmd_mocap_rig(args: argparse.Namespace, context: Any) -> int:
         print(f"rig: {exc}", file=sys.stderr)
         return 1
     print(f"unknown mocap rig verb: {verb}", file=sys.stderr)
+    return 2
+
+
+def _cmd_mocap_mvn(args: argparse.Namespace, context: Any) -> int:
+    """Route `nm mocap mvn` verbs."""
+    from ...media.mocap.errors import MocapError
+    from ...media.mocap.mvn import MVN_DEFAULT_PORT
+
+    verb = args.mocap_mvn_verb
+    name = (getattr(args, "session", "") or "").strip() or "default"
+    host = (getattr(args, "host", "") or "").strip()
+    port = getattr(args, "port", 0) or MVN_DEFAULT_PORT
+    try:
+        from ...tools.mocap import _mvn_action
+        params: dict[str, Any] = {}
+        if verb == "listen":
+            params = {"host": host or "0.0.0.0", "port": port,
+                      "legacy": bool(args.legacy)}
+            return _out(args, _mvn_action(
+                "mvn_listen", name, params, []))
+        if verb == "send":
+            params = {"host": host or "127.0.0.1", "port": port,
+                      "avatar_id": int(args.avatar or 0)}
+            return _out(args, _mvn_action(
+                "mvn_send", name, params, []))
+        if verb == "replay":
+            if not args.pcap:
+                print("mvn replay needs --pcap <path>",
+                      file=sys.stderr)
+                return 2
+            params = {"host": host or "127.0.0.1", "port": port,
+                      "pace_ms": float(args.pace or 5.0),
+                      "loop_gap_ms": float(args.loop_gap or 500.0)}
+            return _out(args, _mvn_action(
+                "mvn_replay", name, params, [args.pcap]))
+        if verb == "stop":
+            return _out(args, _mvn_action("mvn_stop", name, {}, []))
+        if verb == "status":
+            node = name if args.session else ""
+            return _out(args, _mvn_action("mvn_status", node, {}, []))
+        if verb == "decode":
+            if not args.pcap:
+                print("mvn decode needs --pcap <path>",
+                      file=sys.stderr)
+                return 2
+            return _out(args, _mvn_action(
+                "mvn_decode", "", {}, [args.pcap]))
+        if verb == "names":
+            return _out(args, _mvn_action("mvn_names", "", {}, []))
+    except MocapError as exc:
+        print(f"mvn: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"mvn: {exc}", file=sys.stderr)
+        return 1
+    print(f"unknown mocap mvn verb: {verb}", file=sys.stderr)
     return 2
 
 

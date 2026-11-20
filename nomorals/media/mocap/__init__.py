@@ -8,7 +8,10 @@ Devon's engines into the store (``kinect_bridge``), and the
 Kinect → point cloud → ZeroMQ ingestion pipeline (``ingest``
 over the clone's chunked wire in ``wire``) — storytold/cloudcam's
 pattern, no upstream code (see ``SURVEY.md`` in
-``~/workspace/cloudcam-ingest-verify/``).
+``~/workspace/cloudcam-ingest-verify/``), and the Xsens
+MVN wire — packet encode/decode, a receiver and sender that move
+frames between the wire and the store, and a pcap replayer
+(``mvn``).
 
 The pattern is artcraftx's cross-engine tasks table + provider
 router, re-expressed for live mocap state — pattern only, no
@@ -60,6 +63,37 @@ from .kinect_bridge import (
     KinectProducer,
     load_bvh_json,
 )
+from .mvn import (
+    MVN_DEFAULT_PORT,
+    MVN_NAMES,
+    MVN_SEGMENT_IDS,
+    MvnAssembler,
+    MvnDatagram,
+    MvnHeader,
+    MvnNameTable,
+    MvnReceiver,
+    MvnReplayer,
+    MvnSender,
+    MvnSession,
+    decode_datagram,
+    decode_header,
+    decode_name_table,
+    encode_datagram,
+    encode_header,
+    frame_to_mvn_items,
+    get_receiver,
+    get_replayer,
+    get_sender,
+    iter_pcap,
+    mvn_pose_to_frame,
+    mvn_skeleton,
+    name_for_id,
+    read_pcap,
+    start_receiver,
+    start_replayer,
+    start_sender,
+    stop_session,
+)
 from .router import MocapRouter, default_router
 from .state import MocapStateStore
 from .wire import (
@@ -92,9 +126,20 @@ __all__ = [
     "KinectProducer",
     "LiveKinectSource",
     "MAX_SEND_POINTS_PER_PACKET",
+    "MVN_DEFAULT_PORT",
+    "MVN_NAMES",
+    "MVN_SEGMENT_IDS",
     "MocapError",
     "MocapRouter",
     "MocapStateStore",
+    "MvnAssembler",
+    "MvnDatagram",
+    "MvnHeader",
+    "MvnNameTable",
+    "MvnReceiver",
+    "MvnReplayer",
+    "MvnSender",
+    "MvnSession",
     "POINT_DATA_BEGIN_PAYLOAD_COMMAND",
     "POINT_DATA_CONTINUE_PAYLOAD_COMMAND",
     "Point",
@@ -107,20 +152,38 @@ __all__ = [
     "WireError",
     "ZmqPublisher",
     "capture_to_points",
+    "decode_datagram",
     "decode_frame",
+    "decode_header",
+    "decode_name_table",
     "default_router",
     "drop_session",
     "encode_data_length",
+    "encode_datagram",
     "encode_frame",
+    "encode_header",
+    "frame_to_mvn_items",
+    "get_receiver",
+    "get_replayer",
+    "get_sender",
     "get_session",
     "hierarchy_joints",
+    "iter_pcap",
     "list_sessions",
     "load_bvh_json",
+    "mvn_pose_to_frame",
+    "mvn_skeleton",
+    "name_for_id",
     "open_session",
     "open_source",
     "parse_bvh",
     "publish_one_frame",
+    "read_pcap",
     "skeleton_from_dict",
     "skeleton_to_dict",
+    "start_receiver",
+    "start_replayer",
+    "start_sender",
+    "stop_session",
     "write_bvh",
 ]

@@ -35,7 +35,9 @@ _ACTIONS = ("status", "engines", "route", "register", "publish", "read",
             "rig_list", "rig_load", "rig_pose", "rig_render",
             "rig_drive", "rig_export", "rig_status",
             "ingest_start", "ingest_stop", "ingest_status",
-            "ingest_tick", "ingest_publish")
+            "ingest_tick", "ingest_publish",
+            "mvn_listen", "mvn_send", "mvn_replay", "mvn_stop",
+            "mvn_status", "mvn_decode", "mvn_names")
 
 _STORE = MocapStateStore()
 _ROUTER = default_router()
@@ -230,6 +232,121 @@ def _rig_action(action: str, node: str, args: dict,
     raise ValueError(f"unhandled mocap action {action!r}")
 
 
+def _mvn_name_map() -> dict[str, str]:
+    """Take joint names to Xsens names, through the shared rig
+    bone: BVH joint -> rig bone (bvh dialect), rig bone ->
+    Xsens name (inverse xsens dialect). A joint whose rig bone
+    has no Xsens name is left out — the sender counts it."""
+    from ..media.rig import default_remap
+    bvh = default_remap("bvh").mapping
+    xsens = default_remap("xsens").mapping
+    bone_to_xsens = {bone: name for name, bone in xsens.items()}
+    return {joint: bone_to_xsens[bone]
+            for joint, bone in bvh.items()
+            if bone in bone_to_xsens}
+
+
+def _mvn_action(action: str, node: str, args: dict,
+                sources: list[str]) -> dict[str, Any]:
+    """MVN verbs on the mocap tool — one code path with the CLI
+    and chat, through the shared MVN session registry."""
+    from ..media.mocap.errors import MocapError
+    from ..media.mocap.mvn import (
+        MVN_DEFAULT_PORT,
+        MVN_NAMES,
+        MVN_SEGMENT_IDS,
+        MvnReceiver,
+        get_sender,
+        get_session,
+        list_sessions,
+        read_pcap,
+        start_receiver,
+        start_replayer,
+        start_sender,
+        stop_session,
+    )
+
+    name = (node or "").strip() or "default"
+    if action == "mvn_status":
+        if (node or "").strip():
+            return dict({"name": name}, **get_session(name).to_dict())
+        return {"sessions": list_sessions()}
+    if action == "mvn_stop":
+        return stop_session(name)
+    if action == "mvn_names":
+        return {
+            "wire_2022": [{"id": i + 1, "name": joint}
+                          for i, joint in enumerate(MVN_NAMES)],
+            "spec_23_segment": [
+                {"id": seg_id, "name": seg_name}
+                for seg_id, seg_name in sorted(
+                    MVN_SEGMENT_IDS.items())],
+            "note": ("wire_2022 is the 63-segment order a live "
+                     "13 table reports; spec_23_segment is the "
+                     "spec §3.1 table (LeftFoot 23, LeftToe 24, "
+                     "no ID 22) for old captures"),
+        }
+    if action == "mvn_listen":
+        host = str(args.get("host") or "0.0.0.0")
+        port = int(args.get("port") or MVN_DEFAULT_PORT)
+        return start_receiver(
+            name, _STORE, host=host, port=port,
+            legacy=bool(args.get("legacy", False)))
+    if action == "mvn_send":
+        host = str(args.get("host") or "127.0.0.1")
+        port = int(args.get("port") or MVN_DEFAULT_PORT)
+        try:
+            sender = get_sender(name)
+        except MocapError:
+            start_sender(
+                name, _STORE, host=host, port=port,
+                name_map=_mvn_name_map(),
+                avatar_id=int(args.get("avatar_id") or 0))
+            sender = get_sender(name)
+        return dict({"session": name},
+                    **sender.send_frame(host, port))
+    if action == "mvn_replay":
+        if not sources:
+            raise ValueError("mvn_replay needs sources=[path.pcap]")
+        host = str(args.get("host") or "127.0.0.1")
+        port = int(args.get("port") or MVN_DEFAULT_PORT)
+        return start_replayer(
+            name, sources[0], host=host, port=port,
+            pace_ms=float(args.get("pace_ms") or 5.0),
+            loop_gap_ms=float(args.get("loop_gap_ms") or 500.0))
+    if action == "mvn_decode":
+        if not sources:
+            raise ValueError("mvn_decode needs sources=[path.pcap]")
+        packets, pcap_counts = read_pcap(sources[0])
+        scratch = MocapStateStore()
+        receiver = MvnReceiver(scratch)
+        for packet in packets:
+            receiver.feed(packet.payload)
+        tables = {
+            avatar: list(table.names)
+            for avatar, table in receiver._tables.items()}
+        last_frame = None
+        try:
+            view = scratch.read("skeleton")
+            frames = view["payload"].get("frames") or []
+            if frames:
+                last_frame = frames[-1].get("Pelvis")
+        except MocapError:
+            pass
+        return {
+            "pcap": str(Path(sources[0]).resolve()),
+            "pcap_counts": pcap_counts,
+            "datagrams": receiver.counts["datagrams"],
+            "frames": receiver.counts["frames"],
+            "tables": receiver.counts["tables"],
+            "dropped": receiver.counts["dropped"],
+            "dropped_by_reason": dict(receiver.dropped_by_reason),
+            "table_names": tables,
+            "last_pelvis": last_frame,
+        }
+    raise ValueError(f"unhandled mocap action {action!r}")
+
+
 def _rig_face(raw: Any) -> FaceInput | None:
     """params.face dict -> FaceInput. Unknown keys are refused by
     name, never ignored."""
@@ -335,13 +452,26 @@ def register(registry: Any) -> None:
             "empty for all>; ingest_tick=<poll N frames by hand on "
             "a stopped session, node=<session>, params=<{frames}>>; "
             "ingest_publish=<one frame, no session, params=<same "
-            "as ingest_start>>. action=<status|engines|"
+            "as ingest_start>>. "
+            "MVN actions (Xsens MVN wire, xsens-packet-"
+            "send pattern): mvn_listen=<listen for MVN datagrams on "
+            "UDP, node=<session>, params=<{host, port, legacy}>>; "
+            "mvn_send=<send the latest store frame as one 02 "
+            "datagram, node=<session>, params=<{host, port, "
+            "avatar_id}>>; mvn_replay=<replay a pcap of MVN packets "
+            "to a host, node=<session>, sources=[path.pcap], params="
+            "<{host, port, pace_ms, loop_gap_ms}>>; mvn_stop=<stop a "
+            "session, node=<session>>; mvn_status=<sessions, or one "
+            "session with node=<session>>; mvn_decode=<decode a pcap "
+            "through the receiver, no UDP, sources=[path.pcap]>; "
+            "mvn_names=<the 2022 wire table + the spec 23-segment "
+            "table>. action=<status|engines|"
             "route|register|publish|read|snapshot|claim|release|"
             "subscribe|poll|unsubscribe|bvh_write|bvh_read|"
             "kinect_fixture|kinect_status|save|load|rig_list|"
             "rig_load|rig_pose|rig_render|rig_drive|rig_export|"
             "rig_status|ingest_start|ingest_stop|ingest_status|"
-            "ingest_tick|ingest_publish>; sources=<list "
+            "ingest_tick|ingest_publish|mvn_listen|mvn_send|mvn_replay|mvn_stop|mvn_status|mvn_decode|mvn_names>; sources=<list "
             "of paths>; output=<path to write>."
         ),
         capability=Capability.FS_WRITE,
@@ -482,4 +612,6 @@ def register(registry: Any) -> None:
             return _rig_action(action, node, args, sources, output)
         if action.startswith("ingest_"):
             return _ingest_action(action, node, args, sources)
+        if action.startswith("mvn_"):
+            return _mvn_action(action, node, args, sources)
         raise ValueError(f"unhandled mocap action {action!r}")
