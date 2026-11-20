@@ -15,7 +15,13 @@ import json
 import sys
 from typing import Any
 
-from ...media.g2p_en import g2p_en, learned_status, lexicon_stats
+from ...media.g2p_en import (
+    g2p_en,
+    learned_status,
+    lexicon_stats,
+    load_cmudict,
+    load_overrides,
+)
 
 
 def _out(args: argparse.Namespace, obj: Any) -> int:
@@ -42,7 +48,36 @@ def _cmd_g2p(args: argparse.Namespace, context: Any) -> int:
             "learned_arrays": learned["arrays"],
             "lexicon_bundled": stats["bundled"],
             "lexicon_user": stats["user"],
+            "lexicon_override": stats["override"],
+            "lexicon_total": stats["total"],
             "lexicon_files": stats["user_files"],
+            "lexicon_override_files": stats["override_files"],
+        })
+    if action == "tiers":
+        stats = lexicon_stats()
+        tiers = stats["tiers"]
+        return _out(args, {
+            "tiers": tiers,
+            "total": stats["total"],
+            "user_files": stats["user_files"],
+            "override_files": stats["override_files"],
+        })
+    if action in ("load", "override"):
+        path = getattr(args, "path", "")
+        if not path:
+            print(f"{action} needs a CMUdict-format file path",
+                  file=sys.stderr)
+            return 2
+        try:
+            added = (load_cmudict(path) if action == "load"
+                     else load_overrides(path))
+        except (OSError, ValueError) as exc:
+            print(f"{action} failed: {exc}", file=sys.stderr)
+            return 1
+        return _out(args, {
+            "loaded": path,
+            "tier": "user" if action == "load" else "override",
+            "added": added,
         })
     if action == "pronounce":
         words = list(getattr(args, "words", []) or [])

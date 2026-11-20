@@ -3979,8 +3979,11 @@ def _parser() -> argparse.ArgumentParser:
 
     g2p = sub.add_parser("g2p", aliases=CLI_ALIASES["g2p"],
         help="Pronounce English words in Arpabet",
-        description=("nm g2p pronounce <word> [word ...]\\n"
-                     "nm g2p status"),
+        description=("nm g2p pronounce <word> [word ...]\n"
+                     "nm g2p status\n"
+                     "nm g2p tiers\n"
+                     "nm g2p load <cmudict file>\n"
+                     "nm g2p override <cmudict file>"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     g2p.add_argument("--json", action="store_true",
@@ -3993,6 +3996,16 @@ def _parser() -> argparse.ArgumentParser:
                                help="words to pronounce")
     g2p_sub.add_parser("status", help="learned-rung availability "
                         "+ lexicon stats")
+    g2p_sub.add_parser("tiers", help="the lexicon tiers in "
+                        "precedence order — per-tier counts + files")
+    g2p_load = g2p_sub.add_parser(
+        "load", help="layer a CMUdict-format file into the user tier")
+    g2p_load.add_argument("path", help="CMUdict-format file to load")
+    g2p_override = g2p_sub.add_parser(
+        "override", help="layer a CMUdict-format file into the "
+        "overrides tier (the owner's corrections, highest precedence)")
+    g2p_override.add_argument("path",
+                              help="CMUdict-format file to load")
     smarthome = sub.add_parser("smarthome", aliases=CLI_ALIASES["smarthome"],
         help="Smart home devices — WeMo + Z-Wave: discover, read, "
              "control (gated), subscribe",

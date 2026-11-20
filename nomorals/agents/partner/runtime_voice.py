@@ -185,8 +185,20 @@ class RuntimeVoiceMixin:
                                 (lexicon / learned / rules)
         /g2p status             learned-rung availability +
                                 lexicon stats
+        /g2p tiers              the lexicon tiers in precedence
+                                order — per-tier counts + files
+        /g2p load <path>        layer a CMUdict-format file into
+                                the user tier
+        /g2p override <path>    layer a CMUdict-format file into
+                                the overrides tier (highest)
         """
-        from ...media.g2p_en import g2p_en, learned_status, lexicon_stats
+        from ...media.g2p_en import (
+            g2p_en,
+            learned_status,
+            lexicon_stats,
+            load_cmudict,
+            load_overrides,
+        )
 
         parts = (tail or "").split()
         if not parts:
@@ -200,8 +212,38 @@ class RuntimeVoiceMixin:
                             else "unavailable ("
                             + str(learned["reason"]) + ")"))
             lines.append(f"  lexicon: {stats['bundled']} bundled + "
-                         f"{stats['user']} user")
+                         f"{stats['user']} user + "
+                         f"{stats['override']} override")
             return "\n".join(lines)
+        if parts[0].lower() == "tiers":
+            stats = lexicon_stats()
+            tiers = stats["tiers"]
+            lines = ["g2p tiers (highest first):"]
+            for name in ("override", "user", "core"):
+                lines.append(f"  {name}: {tiers.get(name, 0)} words")
+            if stats["user_files"]:
+                lines.append("  user files: "
+                             + ", ".join(stats["user_files"]))
+            if stats["override_files"]:
+                lines.append("  override files: "
+                             + ", ".join(stats["override_files"]))
+            return "\n".join(lines)
+        if parts[0].lower() in ("load", "override"):
+            if len(parts) < 2:
+                return (f"usage: /g2p {parts[0].lower()} "
+                        "<cmudict file path>")
+            path = parts[1]
+            try:
+                if parts[0].lower() == "load":
+                    added = load_cmudict(path)
+                    tier = "user"
+                else:
+                    added = load_overrides(path)
+                    tier = "override"
+            except (OSError, ValueError) as exc:
+                return f"g2p {parts[0].lower()} failed: {exc}"
+            return (f"g2p {parts[0].lower()}: loaded {path} into "
+                    f"the {tier} tier (+{added} new words)")
         try:
             lines = []
             for word in parts:
@@ -216,7 +258,8 @@ class RuntimeVoiceMixin:
             return f"g2p failed: {exc}"
 
     def _control_g2p_help(self) -> str:
-        return "/g2p <word> [word ...] | status"
+        return ("/g2p <word> [word ...] | status | tiers | "
+                "load <path> | override <path>")
 
     def _control_stt(self, tail: str) -> str:
         """Transcribe an audio file with the best available STT backend."""

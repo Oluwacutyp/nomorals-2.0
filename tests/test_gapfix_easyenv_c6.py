@@ -556,17 +556,20 @@ class TestChat:
             assert "/env get" in found
 
 
-# -- tool count: this lane adds NO brain tool, so the count stays 784 -------
+# -- tool count: this lane adds NO brain tool, so the count stays 785 -------
+# (785 after C.8 added the robot tool; the easyenv lane's 784 pin was
+# updated by the parent at the C.9 ship because the C.8 bump missed it.)
 
 
 class TestToolCount:
-    def test_tool_count_still_784(self):
+    def test_tool_count_still_785(self):
         # 782 after C.2 registered the (previously dead) tonal_g2p tool;
-        # 783 after C.1 added smarthome; 784 after C.4 added camwall.
+        # 783 after C.1 added smarthome; 784 after C.4 added camwall;
+        # 785 after C.8 added robot.
         # C.6 adds no tool — the env surface is `nm env` + `/env` over
         # the core/easyenv organ — so the count does not move.
         from nomorals.tools.registry import ToolRegistry
 
         count = len(ToolRegistry(SimpleNamespace()).register_builtins()
                     ._tools)
-        assert count == 784
+        assert count == 785

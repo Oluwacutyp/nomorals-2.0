@@ -8,11 +8,23 @@ first and rules second, exactly the CMUdict architecture (the
 ``arpabet.rs`` donor pattern from the storyteller-era mining):
 
 1. **Lexicon** — word → arpabet phonemes with lexical stress
-   (``0`` none, ``1`` primary, ``2`` secondary on vowels). A curated
-   core of CMUdict entries is bundled below; a full CMUdict-format
-   file can be layered on top with :func:`load_cmudict` (or the
-   ``NM_CMUDICT_PATH`` env var) — coverage is data, reported by
-   :func:`lexicon_stats`, never implied.
+   (``0`` none, ``1`` primary, ``2`` secondary on vowels), as
+   *tiers* in precedence order (:mod:`nomorals.media.arpabet`):
+   overrides (the owner's corrections, loaded with
+   :func:`load_overrides` or ``NM_G2P_OVERRIDES_PATH``) >
+   user (CMUdict-format files via :func:`load_cmudict` or the
+   ``NM_CMUDICT_PATH`` env var) > core (the bundled curated
+   core below). Every lookup names the tier that answered
+   (``G2PWord.tier``), and :func:`lexicon_stats` reports
+   per-tier counts — coverage is data, never implied. Files
+   parse strictly: a malformed line fails the load with the
+   line number and the offending text named
+   (``ArpabetError``), never a silent skip; an empty file is
+   refused loudly. The phoneme inventory is the full Arpabet
+   set (31 consonants, 19 vowel bases) — a user file may use
+   ``AX`` / ``DX`` / ``EL`` / ``Q`` and the rest; entries with
+   those phonemes used to be silently dropped by the old
+   filter.
 2. **Learned model** — for out-of-lexicon words, the seq2seq GRU
    ported from echelon/grapheme_to_phoneme.rs
    (:mod:`nomorals.media.g2p_learned`, the §3C.2 port): it predicts
@@ -24,10 +36,10 @@ first and rules second, exactly the CMUdict architecture (the
    learned rung is unavailable, an ordered grapheme rule table
    (digraphs before single letters). This path is *approximate by
    construction* and says so: every result carries its ``source``
-   (``"lexicon"`` / ``"lexicon_user"`` / ``"learned"`` / ``"rules"``)
-   and its ``rung`` (``"g2p_en"``), so a consumer can tell a
-   dictionary pronunciation from a model prediction from a rule
-   guess at a glance.
+   (``"lexicon"`` / ``"lexicon_user"`` / ``"lexicon_override"`` /
+   ``"learned"`` / ``"rules"``) and its ``rung`` (``"g2p_en"``),
+   so a consumer can tell a dictionary pronunciation from a
+   model prediction from a rule guess at a glance.
 
 Heteronyms (``read``, ``live``, ``use``) resolve to the lexicon's
 first entry, as in CMUdict; alternates in a user file ``WORD(1)``
@@ -45,14 +57,15 @@ fall back honestly.
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass, field
 from typing import Optional
+
+from .arpabet import Arpabet, Tier, TieredLexicon
 
 __all__ = [
     "ARPABET_VOWELS", "ARPABET_CONSONANTS", "G2PWord",
     "g2p_en", "phonemize", "phonemize_flat",
-    "load_cmudict", "lexicon_stats", "learned_status",
+    "load_cmudict", "load_overrides", "lexicon_stats", "learned_status",
     "strip_stress", "base_phoneme",
     "RUNG",
 ]
@@ -60,14 +73,20 @@ __all__ = [
 #: The rung name recorded on every result — provenance, not prose.
 RUNG = "g2p_en"
 
+#: The full Arpabet vowel bases (the donor's 19 — the old set
+#: missed AX / AXR / IX / UX, so a user file using them had those
+#: phonemes silently dropped on load).
 ARPABET_VOWELS = frozenset({
-    "AA", "AE", "AH", "AO", "AW", "AY", "EH", "ER", "EY", "IH", "IY",
-    "OW", "OY", "UH", "UW",
+    "AA", "AE", "AH", "AO", "AW", "AX", "AXR", "AY", "EH", "ER",
+    "EY", "IH", "IX", "IY", "OW", "OY", "UH", "UW", "UX",
 })
 
+#: The full Arpabet consonants (the donor's 31 — the old set
+#: missed DX / EL / EM / EN / NX / Q / WH).
 ARPABET_CONSONANTS = frozenset({
-    "B", "CH", "D", "DH", "F", "G", "HH", "JH", "K", "L", "M", "N",
-    "NG", "P", "R", "S", "SH", "T", "TH", "V", "W", "Y", "Z", "ZH",
+    "B", "CH", "D", "DH", "DX", "EL", "EM", "EN", "F", "G", "HH",
+    "JH", "K", "L", "M", "N", "NG", "NX", "P", "Q", "R", "S",
+    "SH", "T", "TH", "V", "W", "WH", "Y", "Z", "ZH",
 })
 
 _STRESS_DIGITS = "012"
@@ -150,6 +169,11 @@ _CORE_LEXICON: dict[str, str] = {
 _user_lexicon: dict[str, list[str]] = {}
 _user_loaded_from: list[str] = []
 
+#: The owner's corrections — highest precedence, loaded with
+#: :func:`load_overrides` (or ``NM_G2P_OVERRIDES_PATH``).
+_overrides_lexicon: dict[str, list[str]] = {}
+_overrides_loaded_from: list[str] = []
+
 
 def _parse_entry(phones: str) -> list[str]:
     return [p for p in phones.split() if p]
@@ -159,42 +183,45 @@ _BUNDLED: dict[str, list[str]] = {
     w: _parse_entry(p) for w, p in _CORE_LEXICON.items()}
 
 
+#: The lexicon as ordered tiers — overrides > user > core. The
+#: tiers wrap the module-level dicts above by reference, so the
+#: existing ``_user_lexicon.clear()`` / ``_user_loaded_from``
+#: contract (and the tests that lean on it) keeps working.
+_LEXICON = TieredLexicon([
+    Tier("override", "lexicon_override",
+         Arpabet(_overrides_lexicon), _overrides_loaded_from),
+    Tier("user", "lexicon_user",
+         Arpabet(_user_lexicon), _user_loaded_from),
+    Tier("core", "lexicon", Arpabet(_BUNDLED), []),
+])
+
+
 def load_cmudict(path: str) -> int:
     """Layer a CMUdict-format file over the bundled core lexicon.
 
     Format per line: ``WORD  PH PH PH`` (comment lines start with
     ``;;;``); ``WORD(1)`` alternates are parsed but only each word's
     first pronunciation is kept, matching the first-entry rule.
-    Returns the number of *new* words added. Raises ``OSError`` /
-    ``ValueError`` for an unreadable or empty file — a dictionary
-    that fails to load must say so, never silently shrink coverage.
+    Returns the number of *new* words added. Raises ``ValueError``
+    (an :class:`ArpabetError`) for an unreadable, empty, or
+    malformed file — a malformed line names its line number and
+    text instead of being silently skipped, and a dictionary
+    that fails to load must say so, never silently shrink
+    coverage.
     """
-    added = 0
-    seen: set[str] = set()
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line or line.startswith(";;;"):
-                continue
-            parts = line.split()
-            if len(parts) < 2:
-                continue
-            word = re.sub(r"\(\d+\)$", "", parts[0]).lower()
-            if word in seen:
-                continue
-            seen.add(word)
-            phones = [p for p in parts[1:]
-                      if base_phoneme(p) in ARPABET_VOWELS
-                      or base_phoneme(p) in ARPABET_CONSONANTS]
-            if not phones:
-                continue
-            if word not in _user_lexicon and word not in _BUNDLED:
-                added += 1
-            _user_lexicon[word] = phones
-    if not seen:
-        raise ValueError(f"no CMUdict entries parsed from {path!r}")
-    _user_loaded_from.append(path)
-    return added
+    return _LEXICON.load_into_tier(path, "user")
+
+
+def load_overrides(path: str) -> int:
+    """Layer a CMUdict-format file over everything as the
+    owner's corrections tier.
+
+    Same format and failure modes as :func:`load_cmudict`, but
+    the words land in the overrides tier — the highest
+    precedence — so they answer before the user layer and the
+    bundled core. Returns the number of *new* words added.
+    """
+    return _LEXICON.load_into_tier(path, "override")
 
 
 def _env_cmudict() -> None:
@@ -208,14 +235,30 @@ def _env_cmudict() -> None:
             _user_loaded_from.append(path)
 
 
+def _env_overrides() -> None:
+    path = os.environ.get("NM_G2P_OVERRIDES_PATH", "").strip()
+    if path and path not in _overrides_loaded_from:
+        try:
+            load_overrides(path)
+        except (OSError, ValueError):
+            # same rule as _env_cmudict: a bad env file must not
+            # break synthesis; it is recorded as attempted.
+            _overrides_loaded_from.append(path)
+
+
 def lexicon_stats() -> dict:
-    """Coverage as data: how many words each lexicon layer holds."""
+    """Coverage as data: how many words each lexicon tier holds."""
     _env_cmudict()
+    _env_overrides()
+    tiers = _LEXICON.stats()
     return {
         "bundled": len(_BUNDLED),
         "user": len(_user_lexicon),
-        "total": len(set(_BUNDLED) | set(_user_lexicon)),
+        "override": len(_overrides_lexicon),
+        "total": tiers["total"],
         "user_files": list(_user_loaded_from),
+        "override_files": list(_overrides_loaded_from),
+        "tiers": tiers["tiers"],
         "rung": RUNG,
     }
 
@@ -306,12 +349,17 @@ class G2PWord:
     word: str
     phonemes: list[str] = field(default_factory=list)
     source: str = "rules"          # "lexicon" | "lexicon_user" |
-                                   # "learned" | "rules"
+                                   # "lexicon_override" | "learned" |
+                                   # "rules"
     rung: str = RUNG
+    tier: str = ""                 # the lexicon tier that answered
+                                   # ("core" | "user" | "override"),
+                                   # "" for learned / rules
 
     def to_dict(self) -> dict:
         return {"word": self.word, "phonemes": list(self.phonemes),
-                "source": self.source, "rung": self.rung}
+                "source": self.source, "rung": self.rung,
+                "tier": self.tier}
 
 
 _TOKEN_EDGE = "\"'.,;:!?()[]{}“”‘’—–-"
@@ -341,22 +389,23 @@ def learned_status() -> dict:
 def g2p_en(word: str) -> G2PWord:
     """Pronounce one English word: ``(phonemes, source)`` as data.
 
-    Lexicon first (bundled core, then the user layer), the learned
+    Lexicon first — the tiers in precedence order (overrides,
+    then the user layer, then the bundled core) — the learned
     GRU for out-of-lexicon words, letter-to-sound rules for the
     rest (and when the learned rung is unavailable). Internal
     apostrophes are kept (``don't`` is a lexicon word). Never raises.
     """
     _env_cmudict()
+    _env_overrides()
     raw = (word or "").strip()
     w = _normalize(raw)
     if not w or not any(c.isalpha() for c in w):
         return G2PWord(word=raw, phonemes=[], source="rules")
-    if w in _user_lexicon:
-        return G2PWord(word=raw, phonemes=list(_user_lexicon[w]),
-                       source="lexicon_user")
-    if w in _BUNDLED:
-        return G2PWord(word=raw, phonemes=list(_BUNDLED[w]),
-                       source="lexicon")
+    hit = _LEXICON.lookup(w)
+    if hit is not None:
+        phones, tier_name, source = hit
+        return G2PWord(word=raw, phonemes=list(phones),
+                       source=source, tier=tier_name)
     try:
         from .g2p_learned import predict_word
         learned = predict_word(w)

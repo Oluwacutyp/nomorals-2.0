@@ -1048,7 +1048,8 @@ def register(registry: Any) -> None:
             "language → phonemes) | tones | detect | check | fix | units "
             "(text, language → language-agnostic ToneUnits) | arpabet "
             "(word → English Arpabet via the lexicon → learned-GRU → "
-            "rules rung, source named). "
+            "rules rung, source and lexicon tier named) | tiers "
+            "(the lexicon tiers — per-tier counts + files). "
         ),
         capability=Capability.FS_WRITE,
     )
@@ -1063,8 +1064,17 @@ def register(registry: Any) -> None:
             result = _g2p_en(word)
             return {"ok": True, "word": result.word,
                     "phonemes": result.phonemes,
-                    "source": result.source, "rung": result.rung,
+                    "source": result.source, "tier": result.tier,
+                    "rung": result.rung,
                     "learned": _learned_status()}
+        if action == "tiers":
+            from .g2p_en import lexicon_stats as _lexicon_stats
+            stats = _lexicon_stats()
+            return {"ok": True, "tiers": stats["tiers"],
+                    "total": stats["total"],
+                    "user_files": stats["user_files"],
+                    "override_files": stats["override_files"],
+                    "rung": stats["rung"]}
         if action == "g2p":
             return {"ok": True, "phonemes": g2p(word, language),
                     "syllables": syllabify(word, language),
