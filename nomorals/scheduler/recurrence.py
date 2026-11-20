@@ -15,7 +15,10 @@ Stdlib only (``datetime`` / ``zoneinfo`` / ``calendar``).  Two engines:
        ?    day-of-month or day-of-week → "no specific value" (like ``*``)
 
    Everything else is classic cron: ``*``, ``*/n``, ``a-b``, ``a-b/n``,
-   ``a,b,c``.  Weekday 0 and 7 both mean Sunday.  When day-of-month *and*
+   ``a,b,c``.  Weekday 0 and 7 both mean Sunday.  Month names
+   (``JAN``–``DEC``, full names too) and day names (``MON``–``SUN``)
+   work in their fields, in lists, ranges and steps (``JAN-MAR``,
+   ``MON-FRI``).  When day-of-month *and*
    day-of-week are both restricted they keep classic cron OR semantics.
 
    ``next_cron`` / ``prev_cron`` search a full leap-cycle horizon
@@ -69,6 +72,10 @@ __all__ = [
     "parse_cron",
     "cron_matches",
     "next_cron",
+    "next_n_cron",
+    "inspect_cron",
+    "parse_cron_preview_args",
+    "render_cron_preview",
     "prev_cron",
     "validate_cron",
     "describe_cron",
@@ -106,20 +113,37 @@ def _parse_simple_set(field: str, lo: int, hi: int) -> set[int]:
         stepped = "/" in part
         if stepped:
             part, step_s = part.split("/", 1)
-            step = int(step_s)
+            try:
+                step = int(step_s)
+            except ValueError:
+                raise ValueError(
+                    f"bad cron step {step_s!r} in field {field!r}") from None
             if step < 1:
                 raise ValueError(f"bad cron step in {field!r}")
         if part in ("*", "", "?"):
             lo_p, hi_p = lo, hi
         elif "-" in part:
             a_s, b_s = part.split("-", 1)
-            lo_p, hi_p = int(a_s), int(b_s)
+            try:
+                lo_p, hi_p = int(a_s), int(b_s)
+            except ValueError:
+                raise ValueError(
+                    f"bad cron range {part!r} in field {field!r}") from None
         elif stepped:
             # Vixie cron semantics: "a/n" means a..max step n — NOT
             # just {a} (the old reading silently dropped the step).
-            lo_p, hi_p = int(part), hi
+            try:
+                lo_p = int(part)
+            except ValueError:
+                raise ValueError(
+                    f"bad cron value {part!r} in field {field!r}") from None
+            hi_p = hi
         else:
-            lo_p = hi_p = int(part)
+            try:
+                lo_p = hi_p = int(part)
+            except ValueError:
+                raise ValueError(
+                    f"bad cron value {part!r} in field {field!r}") from None
         if lo_p < lo or hi_p > hi or lo_p > hi_p:
             raise ValueError(f"cron value out of range in {field!r}")
         out.update(range(lo_p, hi_p + 1, step))
@@ -181,6 +205,30 @@ class _DomMatcher:
 
 #: Day-name → cron weekday number (Sunday=0).
 _DOW_NAMES = {"SUN": 0, "MON": 1, "TUE": 2, "WED": 3, "THU": 4, "FRI": 5, "SAT": 6}
+
+#: Month-name → month number. Abbreviations + full names (mirrors
+#: ``_MONTH_WORDS`` in the natural-language section, plus SEPT).
+#: Named ``_CRON_MONTH_NAMES`` because ``_MONTH_NAMES`` below is the
+#: display list (``["", "January", …]``) used by the describers.
+_CRON_MONTH_NAMES = {
+    "JAN": 1, "JANUARY": 1, "FEB": 2, "FEBRUARY": 2, "MAR": 3,
+    "MARCH": 3, "APR": 4, "APRIL": 4, "MAY": 5, "JUN": 6, "JUNE": 6,
+    "JUL": 7, "JULY": 7, "AUG": 8, "AUGUST": 8, "SEP": 9, "SEPT": 9,
+    "SEPTEMBER": 9, "OCT": 10, "OCTOBER": 10, "NOV": 11,
+    "NOVEMBER": 11, "DEC": 12, "DECEMBER": 12,
+}
+
+
+def _month_name_to_num(token: str) -> str:
+    """Rewrite month names (JAN, JANUARY, …) to month numbers.
+
+    Longest names first: ``JANUARY`` must be rewritten before ``JAN``
+    (and ``SEPT`` before ``SEP``) or the abbreviation's word boundary
+    never matches inside the longer name.
+    """
+    for name in sorted(_CRON_MONTH_NAMES, key=len, reverse=True):
+        token = re.sub(rf"\b{name}\b", str(_CRON_MONTH_NAMES[name]), token)
+    return token
 
 
 def _pos_int(val: str, what: str) -> int:
@@ -333,12 +381,15 @@ class CronSpec:
         self.minute = _parse_simple_set(minute_s, 0, 59)
         self.hour = _parse_simple_set(hour_s, 0, 23)
         self.dom = _DomMatcher(dom_s)
-        self.month = _parse_simple_set(month_s, 1, 12)
+        self.month = _parse_simple_set(
+            _month_name_to_num(month_s.strip().upper()), 1, 12)
         self.dow = _DowMatcher(dow_s)
-        # canonical form: normalized fields joined (extras preserved)
+        # canonical form: normalized fields joined (extras preserved);
+        # month and weekday names stay as written (uppercased), mirroring
+        # how dow keeps MON.
         self.expression = (
             f"{minute_s.strip()} {hour_s.strip()} {dom_s.strip().upper()} "
-            f"{month_s.strip()} {dow_s.strip().upper()}"
+            f"{month_s.strip().upper()} {dow_s.strip().upper()}"
         )
 
     def matches(self, dt: datetime) -> bool:
@@ -538,6 +589,120 @@ def next_cron(expr: str, after: datetime, timezone: str = "") -> float:
             f"cron expression can never match (no matching day in a "
             f"full leap cycle): {expr!r}")
     return found
+
+
+def next_n_cron(expr: str, after: datetime, n: int,
+                timezone: str = "") -> list[float]:
+    """Next ``n`` firings strictly after ``after`` matching the cron.
+
+    Chains :func:`next_cron` (each firing is the next search's pivot,
+    so every returned instant satisfies the spec). ``n <= 0`` → ``[]``.
+    ``n`` is capped at 100 — a preview list, not an unbounded stream;
+    larger asks raise ValueError. Raises ValueError on garbage,
+    :class:`CronTimezoneError` on an unknown zone,
+    :class:`CronNeverMatchesError` when the expression can never match.
+    Returns unix timestamps, strictly increasing.
+    """
+    if n <= 0:
+        return []
+    if n > 100:
+        raise ValueError(f"next_n_cron caps at 100 firings, got {n}")
+    zone = _resolve_cron_tz(timezone)
+    out: list[float] = []
+    pivot = after
+    for _ in range(n):
+        found = next_cron(expr, pivot, timezone)
+        out.append(found)
+        pivot = (datetime.fromtimestamp(found, tz=zone) if zone is not None
+                 else datetime.fromtimestamp(found))
+    return out
+
+
+def inspect_cron(expr: str, *, after: datetime | None = None, n: int = 3,
+                 timezone: str = "") -> dict[str, Any]:
+    """Validate + describe + preview a cron expression, in one call.
+
+    The inspection surface (``/schedule cron``, ``nm schedule cron``)
+    calls this so the parse / proof / preview logic lives in the
+    engine, not in two surface handlers. Returns ``{"expression":
+    canonical, "description": plain words, "timezone": resolved zone
+    name or "", "next": [unix timestamps]}``. ``n`` must be 1..10.
+    Raises ValueError on garbage, :class:`CronTimezoneError` on an
+    unknown zone, :class:`CronNeverMatchesError` when the expression
+    can never match.
+    """
+    if not 1 <= n <= 10:
+        raise ValueError(f"preview count must be 1..10, got {n}")
+    spec = validate_cron(expr, timezone)
+    base = after if after is not None else datetime.now()
+    return {
+        "expression": spec.expression,
+        "description": describe_cron(expr),
+        "timezone": (timezone or "").strip(),
+        "next": next_n_cron(expr, base, n, timezone),
+    }
+
+
+def parse_cron_preview_args(words: list[str]) -> tuple[str, str, int]:
+    """Shared argument grammar for the cron inspection surfaces.
+
+    ``words`` = the words after the ``cron`` verb — ``/schedule cron …``
+    and ``nm schedule cron …`` both feed their word list here, so the
+    two surfaces can never drift apart. The first five words are the
+    expression; the rest are option pairs: ``tz <IANA>`` (also
+    ``--tz``) and ``n <1..10>`` (also ``--n``). Returns
+    ``(expression, timezone, n)``. Raises ValueError with a usage hint
+    on bad input.
+    """
+    if len(words) < 5:
+        raise ValueError(
+            "need a 5-field cron expression — e.g. cron 0 9 * JAN MON")
+    expr = " ".join(words[:5])
+    timezone = ""
+    n = 3
+    rest = words[5:]
+    i = 0
+    while i < len(rest):
+        key = rest[i].lower().lstrip("-")
+        if key == "tz" and i + 1 < len(rest):
+            timezone = rest[i + 1]
+            i += 2
+        elif key == "n" and i + 1 < len(rest):
+            try:
+                n = int(rest[i + 1])
+            except ValueError:
+                raise ValueError(
+                    f"n must be a number 1..10, got {rest[i + 1]!r}"
+                    ) from None
+            if not 1 <= n <= 10:
+                raise ValueError(f"n must be 1..10, got {n}")
+            i += 2
+        else:
+            raise ValueError(
+                f"unknown option {rest[i]!r} — options: tz <IANA> n <1..10>")
+    return expr, timezone, n
+
+
+def render_cron_preview(result: dict[str, Any]) -> str:
+    """Render an :func:`inspect_cron` result as plain lines.
+
+    ``cron <canonical expression>`` / the plain-words description /
+    the next firings (in the requested zone when given, else local
+    time). Both inspection surfaces print exactly this.
+    """
+    zone = result["timezone"]
+    frame = ZoneInfo(zone) if zone else None
+    stamps = []
+    for ts in result["next"]:
+        dt = (datetime.fromtimestamp(ts, tz=frame) if frame is not None
+              else datetime.fromtimestamp(ts))
+        stamps.append(dt.strftime("%Y-%m-%d %H:%M"))
+    label = zone if zone else "local time"
+    return "\n".join([
+        f"cron {result['expression']}",
+        result["description"],
+        f"next ({label}): " + ", ".join(stamps),
+    ])
 
 
 def validate_cron(expr: str, timezone: str = "") -> CronSpec:

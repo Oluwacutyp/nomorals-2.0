@@ -667,8 +667,11 @@ class ImpossibleAndRefusalTests(unittest.TestCase):
 
     def test_garbage_is_parse_error_not_never_matches(self):
         pivot = datetime(2026, 1, 1, tzinfo=UTC)
+        # C.10: "0 0 * JAN *" was garbage here before month names
+        # landed — JAN is a valid month name now, so it moved to
+        # test_validate_cron_accepts_satisfiable; "FOO" stays garbage.
         for bad in ("", "not a cron", "61 * * * *", "* * * *",
-                    "0 0 * JAN *", "0 0 * * 8", "*/0 * * * *",
+                    "0 0 * FOO *", "0 0 * * 8", "*/0 * * * *",
                     "0 0 32 * *", "0 24 * * *"):
             with self.subTest(expr=bad):
                 with self.assertRaises(ValueError) as cm:
@@ -678,7 +681,7 @@ class ImpossibleAndRefusalTests(unittest.TestCase):
 
     def test_validate_cron_accepts_satisfiable(self):
         for expr in ("0 0 29 2 *", "0 9 * * MON-FRI", "*/15 * * * *",
-                     "0 9 L * *", "0 0 31 2 0"):
+                     "0 9 L * *", "0 0 31 2 0", "0 0 * JAN *"):
             with self.subTest(expr=expr):
                 spec = validate_cron(expr, DENVER)
                 self.assertIsInstance(spec, CronSpec)

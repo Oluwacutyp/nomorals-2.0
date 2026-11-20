@@ -14,8 +14,13 @@ the chat command writes to): at / every / daily, with
     nm schedule enable|disable <name-or-id>
     nm schedule routine <name-or-id> <on|off>
     nm schedule run <name-or-id>
+    nm schedule cron <minute hour day month weekday> [tz <IANA>] [n <1..10>] [--json]
 
 ``when``: 'at 2026-12-25 09:00' | 'every 30m' | 'daily 02:00' | '22:00' | '30m'
+
+The ``cron`` verb inspects an expression WITHOUT creating a job:
+validates it, describes it in plain words, lists the next firings.
+Month names work (``JAN``–``DEC``, full names too), as do day names.
 
 The ``add`` argument parsing is identical to ``/schedule add``: every word
 after ``<name>`` up to the first ``message|tool|command`` keyword is the
@@ -52,6 +57,8 @@ def _usage() -> int:
           "       nm schedule enable|disable <name-or-id>\n"
           "       nm schedule routine <name-or-id> <on|off>\n"
           "       nm schedule run <name-or-id>\n"
+          "       nm schedule cron <minute hour day month weekday> "
+          "[tz <IANA>] [n <1..10>] [--json]\n"
           "when: 'at 2026-12-25 09:00' | 'every 30m' | 'daily 02:00' | "
           "'22:00' | '30m' | 'daily 22:00 America/New_York' | 'cron 0 22 * * *'",
           file=sys.stderr)
@@ -81,11 +88,54 @@ def _cmd_schedule(args: Any, context: Any) -> int:
             return _schedule_routine(context, words[1:])
         if verb == "run":
             return _schedule_run(context, words[1:])
+        if verb == "cron":
+            return _schedule_cron(args, words[1:])
     except Exception as exc:  # noqa: BLE001 - fail fast with the real error
         print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     print(f"unknown schedule verb: {verb}", file=sys.stderr)
     return 2
+
+
+def _schedule_cron(args: Any, words: list[str]) -> int:
+    """``nm schedule cron <expr> [tz <IANA>] [n <1..10>] [--json]``.
+
+    Inspect a cron expression without creating a job: validate it,
+    describe it in plain words, list the next firings. Garbage,
+    impossible expressions and unknown zones are refused by name
+    (exit 1, message on stderr) — nothing is stored.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from ...scheduler.recurrence import (
+        inspect_cron,
+        parse_cron_preview_args,
+        render_cron_preview,
+    )
+
+    try:
+        expr, timezone, n = parse_cron_preview_args(words)
+        result = inspect_cron(expr, n=n, timezone=timezone)
+    except ValueError as exc:
+        print(f"cron: {exc}", file=sys.stderr)
+        return 1
+    if _as_json(args):
+        frame = ZoneInfo(timezone) if timezone else None
+        print(json.dumps({
+            "expression": result["expression"],
+            "description": result["description"],
+            "timezone": result["timezone"],
+            "next": [
+                (datetime.fromtimestamp(ts, tz=frame).isoformat()
+                 if frame is not None
+                 else datetime.fromtimestamp(ts).isoformat())
+                for ts in result["next"]
+            ],
+        }, indent=2))
+        return 0
+    print(render_cron_preview(result))
+    return 0
 
 
 def _as_json(args: Any) -> bool:

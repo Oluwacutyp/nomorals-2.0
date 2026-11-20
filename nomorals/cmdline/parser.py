@@ -7055,6 +7055,7 @@ def _parser() -> argparse.ArgumentParser:
                      "nm schedule rm <name-or-id>\n"
                      "nm schedule enable|disable <name-or-id>\n"
                      "nm schedule run <name-or-id>\n"
+                     "nm schedule cron <minute hour day month weekday> [tz <IANA>] [n <1..10>]\n"
                      "when: 'at 2026-12-25 09:00' | 'every 30m' | "
                      "'daily 02:00' | '22:00' | '30m'"),
         formatter_class=argparse.RawDescriptionHelpFormatter,

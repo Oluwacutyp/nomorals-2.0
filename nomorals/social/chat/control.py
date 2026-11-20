@@ -774,7 +774,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "sing": (1, None),       # /sing <melody> — sing it (C4:0.5:hello …)
     # (no second "say" entry: the single entry above covers all three forms)
     "look": (1, None),       # /look <path|url> [focus] — screen-reader analysis
-    "schedule": (0, None),   # /schedule add|list|rm|enable|disable|run|status
+    "schedule": (0, None),   # /schedule add|list|rm|enable|disable|run|status|cron
     "db": (0, None),         # /db tables | schema <t> | query <sql> | counts
     "artifact": (0, None),   # /artifact list | info <ref> | search <words> | send <ref> [as <fmt>] | export <ref|facet> — saved artifacts, sent to this chat
     "api": (0, None),        # /api list | <connector> [json params]
@@ -3797,9 +3797,9 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "look": {"what": "screen-reader analysis of a screenshot or image URL (she actually sees the pixels).",
              "usage": "/look <path|url> [focus]", "example": "/look /sdcard/pic.jpg what app is this",
              "related": "/image /lens"},
-    "schedule": {"what": "cron-style jobs that run in-process: at / every / daily.",
-                 "usage": "/schedule add <name> <when> <action> | list | rm | enable | disable | run | status",
-                 "example": "/schedule add backup daily 02:00 backup",
+    "schedule": {"what": "cron-style jobs that run in-process: at / every / daily; 'cron <expr>' inspects a cron expression (month names JAN-DEC work) without creating a job.",
+                 "usage": "/schedule add <name> <when> <action> | list | rm | enable | disable | run | status | cron <minute hour day month weekday> [tz <IANA>] [n <1..10>]",
+                 "example": "/schedule cron 0 9 * JAN MON",
                  "related": "/task"},
     "db": {"what": "inspect the database: tables, schema, counts, or a query.",
            "usage": "/db tables | schema <t> | query <sql> | counts",
@@ -5864,7 +5864,7 @@ LIST_ONELINERS: dict[str, str] = {
     "robot": "robot daemon — drive, map, localize — /robot drive 100 100 2 | scan | map | localize",
     "image": "look up an image (format, dims, seen-before) — or generate one from a prompt",
     "lens": "reverse image search",
-    "schedule": "cron-style in-process jobs",
+    "schedule": "cron-style in-process jobs — add/list/run, or 'cron <expr>' to inspect an expression",
     "db": "inspect the database (tables|schema|query|counts)",
     "artifact": "saved artifacts: list, info, search bodies, send (or convert) one, export bundles",
     "goals": "goal classes board: goals by domain class, measured vs self-reported progress, briefing/review/focus",

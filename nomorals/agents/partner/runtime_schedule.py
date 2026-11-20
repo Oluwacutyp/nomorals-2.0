@@ -164,14 +164,40 @@ class RuntimeScheduleMixin:
             except (LookupError, AmbiguousRef) as exc:
                 return str(exc)
             return f"ran {outcome['name']}: {outcome['result'][:400]}"
+        if verb == "cron":
+            return self._schedule_cron(parts[1:])
         return ("usage: /schedule add <name> <when> <message|tool|command> <...> [options] | list | "
                 "health | runs <name> | rm <name> | enable|disable <name> | run <name> | "
-                "routine <name> <on|off>\n"
+                "routine <name> <on|off> | cron <expr> [tz <IANA>] [n <1..10>]\n"
                 "  when: 'at 2026-12-25 09:00' | 'every 30m' | '22:00' | 'daily 22:00 America/New_York'\n"
                 "        | 'cron 0 22 * * *' (minute hour day month weekday)\n"
+                "  cron: inspect an expression without creating a job — "
+                "e.g. /schedule cron 0 9 * JAN MON"
                 "  action: message goodnight | tool web_research {\"query\":\"ai news\"} | command python3 -V\n"
                 "  options: tz <IANA> | after <job> | retry <n> [delay <secs>] | routine [on|off] "
                 "(quiet on success; failures still surface)")
+
+    def _schedule_cron(self, words: list[str]) -> str:
+        """``/schedule cron <expr> [tz <IANA>] [n <k>]`` — inspect a cron
+        expression without creating a job: validate it, describe it in
+        plain words, list the next firings. Garbage, impossible
+        expressions and unknown zones are refused by name — nothing is
+        stored, nothing is silently misread.
+        """
+        from ...scheduler.recurrence import (
+            inspect_cron,
+            parse_cron_preview_args,
+            render_cron_preview,
+        )
+
+        try:
+            expr, timezone, n = parse_cron_preview_args(words)
+            return render_cron_preview(
+                inspect_cron(expr, n=n, timezone=timezone))
+        except ValueError as exc:
+            return (f"cron: {exc}\n"
+                    "usage: /schedule cron <minute hour day month weekday> "
+                    "[tz <IANA>] [n <1..10>]")
 
     def _schedule_health(self, scheduler: Any) -> str:
         """Owner-visible scheduler health: ``/schedule health``.

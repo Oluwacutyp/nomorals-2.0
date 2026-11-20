@@ -2,7 +2,7 @@
 
 Production-grade scheduler with:
 - Persistent SQLite storage (+ per-execution history with retention)
-- Calendar-grade cron (L/LW/nW/n#k/nL/?, day names) and RFC 5545 RRULE
+- Calendar-grade cron (L/LW/nW/n#k/nL/?, day names, month names) and RFC 5545 RRULE
 - Timezone-aware scheduling (IANA zones, DST-safe)
 - Missed-fire policies (fire_now / skip) with staleness bounds + startup catch-up
 - Overlap protection, run timeouts, retries with exponential backoff,
@@ -489,11 +489,14 @@ class CronParser:
     - ``L`` / ``LW`` / ``nW`` in day-of-month (last day, last weekday,
       nearest weekday)
     - ``n#k`` / ``nL`` in day-of-week (k-th / last *n* weekday)
-    - ``?`` (no specific value), day names (``MON-FRI``)
+    - ``?`` (no specific value), day names (``MON-FRI``), month names
+      (``JAN-MAR``, full names too)
 
     Examples:
         "0 9 * * *"        - 9am every day
         "0 9 * * MON-FRI"  - 9am weekdays
+        "0 9 * JAN *"      - 9am every day in January
+        "0 9 * JAN-MAR *"  - 9am every day, January through March
         "*/15 * * * *"     - Every 15 minutes
         "0 0 1 * *"        - Midnight on 1st of each month
         "0 9 L * *"        - 9am on the last day of each month
@@ -503,6 +506,17 @@ class CronParser:
     DAY_NAMES = {
         "SUN": 0, "MON": 1, "TUE": 2, "WED": 3,
         "THU": 4, "FRI": 5, "SAT": 6,
+    }
+
+    #: Month names → month number (abbreviations + full names, mirroring
+    #: ``recurrence._MONTH_NAMES``; kept here so this parser stays
+    #: usable without importing the recurrence module's privates).
+    MONTH_NAMES = {
+        "JAN": 1, "JANUARY": 1, "FEB": 2, "FEBRUARY": 2, "MAR": 3,
+        "MARCH": 3, "APR": 4, "APRIL": 4, "MAY": 5, "JUN": 6, "JUNE": 6,
+        "JUL": 7, "JULY": 7, "AUG": 8, "AUGUST": 8, "SEP": 9, "SEPT": 9,
+        "SEPTEMBER": 9, "OCT": 10, "OCTOBER": 10, "NOV": 11,
+        "NOVEMBER": 11, "DEC": 12, "DECEMBER": 12,
     }
 
     @classmethod
@@ -521,7 +535,8 @@ class CronParser:
             p.strip() for p in spec.expression.split())
         out["minute"] = cls._parse_field(minute_s, 0, 59)
         out["hour"] = cls._parse_field(hour_s, 0, 23)
-        out["month"] = cls._parse_field(month_s, 1, 12)
+        out["month"] = cls._parse_field(
+            cls._resolve_month_names(month_s), 1, 12)
         out["day_of_month"] = (cls._parse_field(dom_s, 1, 31)
                                if _is_plain_field(dom_s) else dom_s)
         out["day_of_week"] = (cls._parse_day_field(dow_s)
@@ -553,6 +568,20 @@ class CronParser:
     def _resolve_day_name(cls, token: str) -> str:
         token = token.strip().upper()
         return str(cls.DAY_NAMES[token]) if token in cls.DAY_NAMES else token
+
+    @classmethod
+    def _resolve_month_names(cls, field: str) -> str:
+        """Rewrite month names (JAN, JANUARY, …) to numbers.
+
+        Longest names first: ``JANUARY`` must be rewritten before
+        ``JAN`` (and ``SEPT`` before ``SEP``) or the abbreviation's
+        word boundary never matches inside the longer name.
+        """
+        field = field.upper()
+        for name in sorted(cls.MONTH_NAMES, key=len, reverse=True):
+            field = re.sub(rf"\b{name}\b", str(cls.MONTH_NAMES[name]),
+                           field)
+        return field
 
     @classmethod
     def _parse_day_field(cls, field: str) -> set[int]:
