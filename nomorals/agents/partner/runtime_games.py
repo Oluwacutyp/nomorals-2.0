@@ -3949,6 +3949,86 @@ class RuntimeGamesMixin:
             return "\n".join(lines) if lines else "no market sources yet"
         return f"unknown /markets verb {verb!r}\n{_usage()}"
 
+    # ── Pattern study: /pattern ────────────────────────────────────
+    def _control_pattern(self, tail: str, chat_key: str) -> str:
+        """/pattern — study plain-words market patterns, watch them live.
+
+        /pattern study <rule> — parse the rule, backtest it against real
+            history, store it (e.g. /pattern study Friday high <
+            Thursday high => Monday low <= Friday low for XAUUSD)
+        /pattern list         — every studied pattern + its score
+        /pattern watch <id>   — arm a pattern's live watch
+        /pattern unwatch <id> — disarm it
+        /pattern check        — one live-watch sweep now
+        /pattern status [id]  — one pattern's score, refreshed
+        /pattern remove <id>  — forget a studied pattern
+        """
+        from ..marketdesk.patterns import (
+            RULE_SYNTAX,
+            check_watches,
+            list_patterns,
+            pattern_status,
+            remove_pattern,
+            render_check,
+            render_pattern_list,
+            render_status,
+            render_study,
+            set_watching,
+            study_rule,
+        )
+
+        settings = getattr(getattr(self, "context", None),
+                           "settings", None)
+        parts = (tail or "").strip().split(None, 1)
+        verb = parts[0].lower() if parts else ""
+        rest = parts[1].strip() if len(parts) > 1 else ""
+
+        def _usage() -> str:
+            return ("/pattern study <rule> — study a plain-words pattern "
+                    "against real history\n"
+                    "/pattern list — studied patterns + scores\n"
+                    "/pattern watch <id> | unwatch <id> — arm/disarm the "
+                    "live watch\n"
+                    "/pattern check — one live-watch sweep now\n"
+                    "/pattern status [id] — one pattern's score, refreshed\n"
+                    "/pattern remove <id> — forget a studied pattern\n"
+                    "rule syntax: Friday high < Thursday high => Monday "
+                    "low <= Friday low for XAUUSD")
+
+        if verb in ("", "help"):
+            return _usage()
+        if verb == "study":
+            if not rest:
+                return "study needs a rule — " + RULE_SYNTAX
+            return render_study(study_rule(rest, settings=settings))
+        if verb == "list":
+            return render_pattern_list(list_patterns(settings=settings))
+        if verb in ("watch", "unwatch"):
+            if not rest:
+                return f"{verb} needs a pattern id — see /pattern list"
+            out = set_watching(rest.split()[0], verb == "watch",
+                               settings=settings)
+            if not out.get("ok"):
+                return f"pattern {verb} failed: {out.get('error')}"
+            p = out["pattern"]
+            return (f"pattern {p['id']} — watching "
+                    f"{'on' if p['watching'] else 'off'} ({p['name']})")
+        if verb == "check":
+            return render_check(check_watches(settings=settings))
+        if verb == "status":
+            if not rest:
+                return render_pattern_list(list_patterns(settings=settings))
+            return render_status(pattern_status(
+                rest.split()[0], settings=settings))
+        if verb == "remove":
+            if not rest:
+                return "remove needs a pattern id — see /pattern list"
+            out = remove_pattern(rest.split()[0], settings=settings)
+            if not out.get("ok"):
+                return f"pattern remove failed: {out.get('error')}"
+            return f"forgot pattern {out['removed']}"
+        return f"unknown /pattern verb {verb!r}\n{_usage()}"
+
     # ── ApkForge: /apk (A1 dissect + A2 workbench) ─────────────────
     def _control_apk(self, tail: str, chat_key: str = "") -> str:
         """/apk — ApkForge, the APK workbench.

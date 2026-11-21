@@ -12655,6 +12655,8 @@ class PartnerRuntime(
             return self._control_desk(command.tail or arg, chat_key=chat_key)
         if kind == "markets":
             return self._control_markets(command.tail or arg, chat_key=chat_key)
+        if kind == "pattern":
+            return self._control_pattern(command.tail or arg, chat_key=chat_key)
         if kind == "apk":
             return self._control_apk(command.tail or arg, chat_key=chat_key)
         if kind == "re":

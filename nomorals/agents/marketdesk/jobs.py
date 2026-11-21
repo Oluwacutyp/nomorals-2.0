@@ -16,6 +16,11 @@ Jobs:
   callable time windows and publish the calls (>= 2 minutes of lead
   is enforced inside the engine, not here).  Also routine: calls
   self-publish through the Notifier.
+* ``marketdesk pattern watch`` — every 30m, sweep every armed pattern
+  (tool ``marketdesk``, action ``patterns``, verb ``check``): a Friday
+  whose condition held records a trigger with the expectation and the
+  historical hit rate; a Monday bar that has landed resolves the
+  pending trigger into a journaled outcome. Also routine.
 
 Idempotent by name; no-ops when the jobs already exist.
 """
@@ -25,16 +30,20 @@ from __future__ import annotations
 from typing import Any
 
 __all__ = ["ensure_marketdesk_jobs", "MARKETDESK_STUDY_JOB",
-           "MARKETDESK_SIGNALS_JOB"]
+           "MARKETDESK_SIGNALS_JOB", "MARKETDESK_PATTERN_WATCH_JOB"]
 
 MARKETDESK_STUDY_JOB = "marketdesk study"
 MARKETDESK_SIGNALS_JOB = "marketdesk signals"
+MARKETDESK_PATTERN_WATCH_JOB = "marketdesk pattern watch"
 
 _JOBS = (
     (MARKETDESK_STUDY_JOB, "every 30m",
      {"tool": "marketdesk", "args": {"action": "study"}}),
     (MARKETDESK_SIGNALS_JOB, "every 10m",
      {"tool": "marketdesk", "args": {"action": "signals", "deliver": True}}),
+    (MARKETDESK_PATTERN_WATCH_JOB, "every 30m",
+     {"tool": "marketdesk",
+      "args": {"action": "patterns", "verb": "check"}}),
 )
 
 

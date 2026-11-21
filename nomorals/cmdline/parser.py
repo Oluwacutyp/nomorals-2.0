@@ -83,6 +83,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "groups": [],
     "digest": [],
     "markets": [],
+    "pattern": [],
     "pump": [],
     "book": ["bk"],
     "books": ["library", "lib"],
@@ -2541,6 +2542,38 @@ def _parser() -> argparse.ArgumentParser:
     markets_sub.add_parser("library", help="per-symbol study records")
     markets_sub.add_parser("collect", help="fetch daily + hourly bars")
     markets_sub.add_parser("sources", help="market sources on the registry")
+
+    pattern_p = sub.add_parser("pattern", aliases=CLI_ALIASES["pattern"],
+        help="pattern study: plain-words market patterns proven against history, watched live (analysis only)",
+        description=("nm pattern study <rule>\n"
+                     "nm pattern list\n"
+                     "nm pattern watch <id> | unwatch <id>\n"
+                     "nm pattern check\n"
+                     "nm pattern status [id]\n"
+                     "nm pattern remove <id>\n"
+                     "rule syntax: Friday high < Thursday high => Monday low <= Friday low for XAUUSD"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    pattern_sub = pattern_p.add_subparsers(dest="pattern_action", required=True)
+    p_study = pattern_sub.add_parser("study", help="parse a plain-words rule, backtest it, store it")
+    p_study.add_argument("rule", nargs="+", help="the rule, e.g. Friday high < Thursday high => Monday low <= Friday low for XAUUSD")
+    p_study.add_argument("--json", action="store_true", help="Output as JSON")
+    p_list = pattern_sub.add_parser("list", help="studied patterns + scores")
+    p_list.add_argument("--json", action="store_true", help="Output as JSON")
+    p_watch = pattern_sub.add_parser("watch", help="arm a pattern's live watch")
+    p_watch.add_argument("pattern_id", help="pattern id from nm pattern list")
+    p_watch.add_argument("--json", action="store_true", help="Output as JSON")
+    p_unwatch = pattern_sub.add_parser("unwatch", help="disarm a pattern's live watch")
+    p_unwatch.add_argument("pattern_id", help="pattern id from nm pattern list")
+    p_unwatch.add_argument("--json", action="store_true", help="Output as JSON")
+    p_check = pattern_sub.add_parser("check", help="one live-watch sweep now")
+    p_check.add_argument("--json", action="store_true", help="Output as JSON")
+    p_status = pattern_sub.add_parser("status", help="one pattern's score, refreshed")
+    p_status.add_argument("pattern_id", nargs="?", default="", help="pattern id (default: list all)")
+    p_status.add_argument("--json", action="store_true", help="Output as JSON")
+    p_remove = pattern_sub.add_parser("remove", help="forget a studied pattern")
+    p_remove.add_argument("pattern_id", help="pattern id from nm pattern list")
+    p_remove.add_argument("--json", action="store_true", help="Output as JSON")
 
     pump_p = sub.add_parser("pump", aliases=CLI_ALIASES["pump"],
         help="pump.fun intelligence desk: dossiers, de-rug gate, graded signal calls (signals only — never trades)",

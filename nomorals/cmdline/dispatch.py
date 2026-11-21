@@ -51,6 +51,7 @@ from .commands.community import _cmd_community
 from .commands.groups import _cmd_groups
 from .commands.digest import _cmd_digest
 from .commands.markets import _cmd_markets
+from .commands.pattern import _cmd_pattern
 from .commands.pump import _cmd_pump
 from .commands.book import _cmd_book
 from .commands.account import _cmd_account
@@ -586,6 +587,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "groups": _CommandSpec(_cmd_groups),
     "digest": _CommandSpec(_cmd_digest),
     "markets": _CommandSpec(_cmd_markets),
+    "pattern": _CommandSpec(_cmd_pattern),
     "pump": _CommandSpec(_cmd_pump),
     "build": _CommandSpec(_cmd_build),
     "weather": _CommandSpec(_cmd_weather),

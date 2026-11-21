@@ -336,7 +336,9 @@ class _FakeScheduler:
 def test_ensure_marketdesk_jobs_idempotent():
     sched = _FakeScheduler()
     out = ensure_marketdesk_jobs(sched)
-    assert len(out) == 2 and all(o.get("scheduled") for o in out)
+    # 3, not 2: the pattern-study lane added the "marketdesk pattern
+    # watch" job (live pattern sweep every 30m) beside study + signals.
+    assert len(out) == 3 and all(o.get("scheduled") for o in out)
     out2 = ensure_marketdesk_jobs(sched)
     assert all(o.get("already_scheduled") for o in out2)
     tools = {j["payload"]["tool"] for j in sched.jobs}
