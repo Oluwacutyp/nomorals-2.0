@@ -37,6 +37,7 @@ from .take import Landmarks, landmarks_to_take
 
 __all__ = [
     "CaptureResult",
+    "FrameFaceDetector",
     "VideoInfo",
     "capture_camera",
     "capture_image",
@@ -230,6 +231,105 @@ def _landmarks_of(result, index: int = 0) -> Landmarks | None:
         return None
     return [(float(pt.x), float(pt.y), float(pt.z))
             for pt in faces[index]]
+
+
+class FrameFaceDetector:
+    """One live video frame to a face observation.
+
+    A single IMAGE-mode landmarker held across frames — the
+    landmarker is the expensive part to build, so a caller that
+    watches a room (the LiveKit video session) builds one of
+    these and feeds it every frame instead of opening a new
+    landmarker per frame. :meth:`detect` returns a plain-dict
+    summary (JSON-safe, journal-safe — no raw landmark arrays),
+    or ``{"face": False, ...}`` when the frame holds no face:
+    a missing face is reported, never zero-filled. Raises
+    ``FaceMeshError`` at construction when mediapipe or the
+    model is unavailable — the caller names the reason and
+    carries on without face watch instead of faking a face.
+    """
+
+    def __init__(self, *, install: bool = True,
+                 download: bool = True) -> None:
+        # Lazy: the blendshape math is only needed when a detector
+        # actually runs, not at import.
+        from .landmarks import landmarks_to_blendshapes, matrix_to_euler_zxy  # noqa: PLC0415
+
+        self._to_blendshapes = landmarks_to_blendshapes
+        self._to_euler = matrix_to_euler_zxy
+        # mediapipe first: when it is absent the refusal names it,
+        # instead of the model check below blaming a missing file.
+        ensure_mediapipe(install=install)
+        model = ensure_model(download=download)
+        self._landmarker = _landmarker(
+            model_path=str(model), mode="IMAGE", install=install)
+        self._closed = False
+
+    def detect(self, rgb: bytes, width: int, height: int
+               ) -> dict[str, object]:
+        """One RGB24 frame to its face observation.
+
+        ``{"face": True, "landmarks": 468, "smile": 0.0..1,
+        "jaw_open": 0.0..1, "blink_left": 0.0..1,
+        "blink_right": 0.0..1, "head_deg": (z, x, y) | None,
+        "center": (x, y), "size": w}`` — centre/size are
+        normalised 0..1 face-box fractions. ``{"face": False}``
+        when no face is in the frame.
+        """
+        if self._closed:
+            raise FaceMeshError("face detector is closed",
+                                kind="missing_model")
+        if len(rgb) != width * height * 3:
+            raise FaceMeshError(
+                f"frame is {len(rgb)} bytes for a {width}x{height} "
+                "RGB24 frame",
+                kind="bad_landmarks")
+        result = self._landmarker.detect(_mp_image(rgb, width, height))
+        lm = _landmarks_of(result)
+        if lm is None:
+            return {"face": False}
+        weights = self._to_blendshapes(lm)
+        xs = [pt[0] for pt in lm]
+        ys = [pt[1] for pt in lm]
+        head: tuple[float, float, float] | None = None
+        matrix = _matrix_of(result)
+        if matrix is not None:
+            try:
+                head = self._to_euler(matrix)
+            except FaceMeshError:
+                head = None
+        smile = (float(weights.get("mouthSmileLeft", 0.0))
+                 + float(weights.get("mouthSmileRight", 0.0))) / 2.0
+        return {
+            "face": True,
+            "landmarks": len(lm),
+            "smile": round(min(1.0, max(0.0, smile)), 3),
+            "jaw_open": round(float(weights.get("jawOpen", 0.0)), 3),
+            "blink_left": round(
+                float(weights.get("eyeBlinkLeft", 0.0)), 3),
+            "blink_right": round(
+                float(weights.get("eyeBlinkRight", 0.0)), 3),
+            "head_deg": ([round(v, 1) for v in head]
+                         if head is not None else None),
+            "center": [round((min(xs) + max(xs)) / 2, 3),
+                       round((min(ys) + max(ys)) / 2, 3)],
+            "size": round(max(max(xs) - min(xs), max(ys) - min(ys)),
+                          3),
+        }
+
+    def close(self) -> None:
+        """Release the landmarker. Idempotent."""
+        if self._closed:
+            return
+        self._closed = True
+        with contextlib.suppress(Exception):  # noqa: BLE001 — best effort
+            self._landmarker.close()
+
+    def __enter__(self) -> FrameFaceDetector:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
 
 def capture_video(path: str | Path, *, name: str | None = None,

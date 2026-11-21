@@ -17,11 +17,23 @@ ONLY. The pick is from the code actually read, not from memory:
   LiveKit signalling protocol (protobuf over WebSocket) would still have
   to be hand-built, and it drags heavier native deps (av/ffmpeg) for
   less. It buys nothing the official SDK does not already do.
-* ``livekit-agents`` (1.8.10) is NOT adopted: it bundles its own
-  STT/LLM/TTS plugin pipeline and turn detector. Adopting it would fork
-  a SECOND voice system beside Devon's own brain, TTS and STT rungs —
-  the exact parallel system this rung must not build. Devon uses the
-  thin room client (``livekit.rtc``) and keeps her own pipeline.
+* ``livekit-agents`` (1.8.13, PyPI wheel inspected 2026-11-20) is
+  NOT adopted — re-decided with fresh evidence, not inherited:
+  it requires ``livekit==1.2.1``, a direct conflict with this
+  rung's pinned ``livekit`` 1.1.21 (adopting forces an SDK major
+  upgrade + a re-proof of the whole call path); it drags
+  ``av``/``numpy``/``openai``/``pydantic``/opentelemetry/
+  prometheus-client/``sounddevice``/``livekit-blingfire``/
+  ``livekit-local-inference``, and its STT/LLM/TTS come from
+  ``livekit-plugins-*`` packages — a SECOND voice pipeline beside
+  Devon's own brain, TTS and STT rungs. Its ``AgentSession``
+  owns the turn loop; Devon's loop already exists and is tested.
+  What "Agents" adds that Devon lacked is agent SEMANTICS, and
+  those are built onto this participant instead: in-call function
+  tools (agent mode runs the real ``ToolCallingLoop`` per turn),
+  data-channel text turns (``publish_text``/``poll_text``,
+  topic ``devon-chat``), room awareness (join/leave journalled),
+  and inbound-video face observations (the facemesh rung).
 * The SDK is Apache-2.0, zero $ cost self-hosted: the LiveKit server
   itself is open-source (Apache-2.0, Go on Pion WebRTC); ``livekit-server
   --dev`` runs a local room on 127.0.0.1:7880 with the devkey/secret
@@ -131,6 +143,7 @@ __all__ = [
     "video_session_status",
     "live_video_status",
     "LIVEKIT_SAMPLE_RATE",
+    "AGENT_TEXT_TOPIC",
     "VIDEO_IDENTITY",
     "VIDEO_DEFAULT_SIZE",
     "VIDEO_DEFAULT_FPS",
@@ -162,6 +175,9 @@ _END_WORDS = {"exit", "quit", "goodbye", "bye", "stop listening"}
 #: The video session joins as a second participant, so it can run
 #: beside the voice call in the same room.
 VIDEO_IDENTITY = "devon-video"
+#: Data-channel topic for text turns in the room: a participant
+#: typing on this topic gets a spoken answer AND the text back.
+AGENT_TEXT_TOPIC = "devon-chat"
 #: Default publish size and rate for the video track.
 VIDEO_DEFAULT_SIZE = (640, 360)
 VIDEO_DEFAULT_FPS = 15.0
@@ -407,6 +423,21 @@ class LiveKitTransport(Protocol):
         """Identities currently publishing an audio track."""
         ...
 
+    def publish_text(self, text: str, *, topic: str = AGENT_TEXT_TOPIC,
+                     timeout: float = 5.0) -> None:
+        """Publish one text message to the room (data channel).
+
+        Transports that predate the data channel simply do not
+        define this — the session asks with ``getattr`` and a
+        voice-only transport is a voice-only call, never an error.
+        """
+        ...
+
+    def poll_text(self, timeout: float = 0.05
+                  ) -> tuple[str, str, str] | None:
+        """One inbound text message (text, identity, topic), or None."""
+        ...
+
     def is_connected(self) -> bool: ...
 
     def disconnect(self) -> None: ...
@@ -496,6 +527,8 @@ class RtcTransport:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._inbound: queue.Queue[bytes] = queue.Queue(maxsize=512)
+        self._inbound_text: queue.Queue = queue.Queue(maxsize=64)
+        self._dropped_text = 0
         self._room: Any = None
         self._source: Any = None
         self._streams: dict[str, Any] = {}
@@ -600,6 +633,27 @@ class RtcTransport:
         self._note_publisher(identity, False)
         self._note_video_publisher(identity, False)
 
+    def _on_data_received(self, packet: Any) -> None:
+        """One data-channel packet into the inbound text queue.
+
+        Undecodable bytes are dropped and counted, never guessed
+        at — a text turn must be text the room really sent.
+        """
+        try:
+            raw = bytes(getattr(packet, "data", b"") or b"")
+            text = raw.decode("utf-8")
+        except Exception:  # noqa: BLE001 — undecodable data is dropped
+            self._dropped_text += 1
+            return
+        participant = getattr(packet, "participant", None)
+        identity = str(getattr(participant, "identity", "")
+                       or "remote")
+        topic = str(getattr(packet, "topic", "") or "")
+        try:
+            self._inbound_text.put_nowait((text, identity, topic))
+        except queue.Full:
+            self._dropped_text += 1
+
     async def _pump_audio(self, track: Any, identity: str) -> None:
         """Drain one subscribed audio track into the inbound queue."""
         from livekit import rtc as _rtc
@@ -674,6 +728,7 @@ class RtcTransport:
         room.on("track_unsubscribed", self._on_track_unsubscribed)
         room.on("participant_disconnected",
                 self._on_participant_disconnected)
+        room.on("data_received", self._on_data_received)
         await room.connect(url, token)
         source = _rtc.AudioSource(LIVEKIT_SAMPLE_RATE, 1, loop=loop)
         track = _rtc.LocalAudioTrack.create_audio_track(
@@ -746,6 +801,32 @@ class RtcTransport:
         with self._publishers_lock:
             return sorted(self._publishers)
 
+    def publish_text(self, text: str, *, topic: str = AGENT_TEXT_TOPIC,
+                     timeout: float = 5.0) -> None:
+        """Publish one text message on the data channel.
+
+        Reliable, on ``topic`` (default ``devon-chat``) — the room
+        sees her answer as text as well as hearing it. Raises
+        LiveKitUnavailable when no room is live; a publish error
+        from the SDK propagates for the caller to classify (the
+        session treats it as best-effort: voice is the channel).
+        """
+        if self._room is None:
+            raise LiveKitUnavailable("not connected to a LiveKit room",
+                                     missing="a LiveKit room connection")
+        self._run_coro(
+            self._room.local_participant.publish_data(
+                text.encode("utf-8"), reliable=True, topic=topic),
+            timeout=timeout)
+
+    def poll_text(self, timeout: float = 0.05
+                  ) -> tuple[str, str, str] | None:
+        """One inbound text message (text, identity, topic), or None."""
+        try:
+            return self._inbound_text.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
     def publish_video_frame(self, rgb: bytes, width: int, height: int,
                             *, timeout: float = 5.0) -> None:
         """Publish one RGB24 frame on the video track.
@@ -817,14 +898,22 @@ class LiveCallReport:
     session_id: str
     room: str = ""
     turns: int = 0
+    text_turns: int = 0
     barge_ins: int = 0
+    #: Tool names used across the call, deduped in first-use order
+    #: (agent mode only; plain calls leave this empty).
+    tools_used: list[str] = field(default_factory=list)
+    #: Remote identities seen publishing audio during the call.
+    participants_seen: list[str] = field(default_factory=list)
     latencies_ms: list[float] = field(default_factory=list)
     end_reason: str = "completed"  # completed | user-exit | remote-left |
                                    # no-remote | stopped | error
     error: str = ""
     #: per turn: {"turn": n, "heard": str, "said": [sentences actually
-    #: played], "barged": bool}. History records what was *played*, not
-    #: what was generated — the local session's lesson, kept here.
+    #: played], "barged": bool, "source": "voice" | "text",
+    #: "tools": [tool names this turn], "text_reply_sent": bool}.
+    #: History records what was *played*, not what was generated —
+    #: the local session's lesson, kept here.
     spoken: list[dict[str, Any]] = field(default_factory=list)
 
     def latency_stats(self) -> dict[str, float]:
@@ -844,7 +933,10 @@ class LiveCallReport:
             "session_id": self.session_id,
             "room": self.room,
             "turns": self.turns,
+            "text_turns": self.text_turns,
             "barge_ins": self.barge_ins,
+            "tools_used": list(self.tools_used),
+            "participants_seen": list(self.participants_seen),
             "end_reason": self.end_reason,
             "error": self.error,
             "ear_to_ear_ms_p50": stats["p50"],
@@ -863,13 +955,22 @@ class LiveCallReport:
             (f"  ear-to-ear latency  p50 {stats['p50']:.0f}ms  "
              f"p95 {stats['p95']:.0f}ms  (n={stats['count']})"),
         ]
+        if self.text_turns or self.tools_used or self.participants_seen:
+            lines.append(
+                f"  text turns {self.text_turns}   tools used "
+                f"{', '.join(self.tools_used) or 'none'}   "
+                f"participants {', '.join(self.participants_seen) or '—'}")
         if self.error:
             lines.append(f"  ⚠ {self.error}")
         for turn in self.spoken:
             heard = (turn.get("heard") or "")[:70]
             said = turn.get("said") or []
             barged = "  ⏭ barged" if turn.get("barged") else ""
-            lines.append(f"  ┌ turn {turn.get('turn')}{barged}")
+            source = turn.get("source") or "voice"
+            tools = turn.get("tools") or []
+            lines.append(f"  ┌ turn {turn.get('turn')} [{source}]"
+                         + (f"  🔧 {', '.join(tools)}" if tools else "")
+                         + barged)
             if heard:
                 lines.append(f"  │ you: {heard}")
             for s in said[:4]:
@@ -915,6 +1016,7 @@ class LiveKitCallSession:
         max_wait_remote_s: float = DEFAULT_MAX_WAIT_REMOTE_S,
         remote_silence_end_s: float = REMOTE_SILENCE_END_S,
         bus: Any = None,
+        tools_used: list[str] | None = None,
     ) -> None:
         self.session_id = new_short_id()
         self.think = think
@@ -933,6 +1035,13 @@ class LiveKitCallSession:
         self._bus = global_bus if bus is None else bus
         self.state = "idle"
         self._stop = threading.Event()
+        #: Tool names used across the call, first-use order. The
+        #: agent think appends to this SAME list object (passed in
+        #: by the caller that built think), so the report can read
+        #: it without the session ever importing the tool loop.
+        self.tools_used: list[str] = (
+            tools_used if tools_used is not None else [])
+        self._participants_seen: set[str] = set()
         self._tmp = self.data_dir / "tmp"
         self._in16 = bytearray()   # downsampled inbound PCM buffer (FIFO:
                                    # pending audio, then barge audio, then
@@ -1024,11 +1133,25 @@ class LiveKitCallSession:
                     report.end_reason = "completed"
                     break
                 self._set_state("listening")
+                self._note_participants()
                 heard = self._listen_utterance(vad)
                 if heard is None:  # remote left
                     report.end_reason = "remote-left"
                     break
-                pcm16, first_speech_ts = heard
+                kind, payload, first_speech_ts = heard
+                if kind == "text":
+                    transcript = str(payload or "").strip()
+                    if not transcript:
+                        continue
+                    _log.info("live call %s heard (text): %r",
+                              self.session_id, transcript[:120])
+                    self._set_state("thinking")
+                    if self._run_turn(transcript, 0.0, "text",
+                                      report) == "user-exit":
+                        report.end_reason = "user-exit"
+                        break
+                    continue
+                pcm16 = payload
                 if not pcm16:
                     continue
                 wav_path = self._store_utterance(pcm16, report.turns)
@@ -1040,33 +1163,10 @@ class LiveKitCallSession:
                           transcript[:120])
                 if not transcript:
                     continue
-                if transcript.lower().strip(" .!") in _END_WORDS:
+                if self._run_turn(transcript, first_speech_ts,
+                                  "voice", report) == "user-exit":
                     report.end_reason = "user-exit"
                     break
-
-                reply = self.think(transcript) or ""
-                plan = speakify(reply, cap_secs=self.speech_cap_secs)
-
-                self._set_state("speaking")
-                outcome, played = self._speak(plan, first_speech_ts, report)
-                report.turns += 1
-                report.spoken.append({
-                    "turn": report.turns,
-                    "heard": transcript,
-                    "said": played,
-                    "barged": outcome != "done",
-                })
-                self._journal("voice.livekit.turn", {
-                    "turn": report.turns,
-                    "heard_chars": len(transcript),
-                    "said_sentences": len(played),
-                    "barged": outcome != "done",
-                })
-                if outcome == "barged":
-                    report.barge_ins += 1
-                    self._journal("voice.livekit.barge_in",
-                                  {"turn": report.turns})
-                    continue
         except KeyboardInterrupt:  # noqa: E106 - deliberate
             report.end_reason = "stopped"
         except Exception as exc:  # noqa: BLE001 - a call must end cleanly
@@ -1075,6 +1175,8 @@ class LiveKitCallSession:
             _log.exception("live call %s failed", self.session_id)
         finally:
             self._set_state("ended")
+            report.tools_used = list(self.tools_used)
+            report.participants_seen = sorted(self._participants_seen)
             try:
                 transport.disconnect()
             except Exception as exc:  # noqa: BLE001 — best effort
@@ -1088,6 +1190,130 @@ class LiveKitCallSession:
             })
             self._save_report(report)
         return report
+
+    # -- one turn (voice or text) ----------------------------------------
+    def _drain_tools_used(self) -> list[str]:
+        """Tools the think callable used for the turn just run.
+
+        The agent think carries a ``drain_tools_used()`` hook (the
+        plain think has none → no tools). The session never imports
+        the tool loop — the hook is the seam.
+        """
+        drain = getattr(self.think, "drain_tools_used", None)
+        if not callable(drain):
+            return []
+        try:
+            tools = drain() or []
+        except Exception:  # noqa: BLE001 — a drain never breaks a call
+            return []
+        return [str(t) for t in tools]
+
+    def _run_turn(self, transcript: str, first_speech_ts: float,
+                  source: str, report: LiveCallReport) -> str:
+        """Think, speak, record one turn. Returns "done" | "barged" |
+        "user-exit".
+
+        ``source`` is "voice" (heard over audio) or "text" (typed in
+        the room): a text turn's reply is spoken AND published back
+        as text, so the typer sees the answer. An empty reply still
+        counts as a turn — the same as the voice path before it, so
+        a silent brain is visible in the report instead of hidden.
+        """
+        if transcript.lower().strip(" .!") in _END_WORDS:
+            return "user-exit"
+        reply = self.think(transcript) or ""
+        turn_tools = self._drain_tools_used()
+        for name in turn_tools:
+            if name not in self.tools_used:
+                self.tools_used.append(name)
+        plan = speakify(reply, cap_secs=self.speech_cap_secs)
+
+        self._set_state("speaking")
+        outcome, played = self._speak(plan, first_speech_ts, report)
+        text_reply_sent = False
+        if source == "text" and played:
+            text_reply_sent = self._publish_reply_text(
+                " ".join(played))
+        report.turns += 1
+        if source == "text":
+            report.text_turns += 1
+        report.spoken.append({
+            "turn": report.turns,
+            "heard": transcript,
+            "said": played,
+            "barged": outcome != "done",
+            "source": source,
+            "tools": turn_tools,
+            "text_reply_sent": text_reply_sent,
+        })
+        self._journal("voice.livekit.turn", {
+            "turn": report.turns,
+            "heard_chars": len(transcript),
+            "said_sentences": len(played),
+            "barged": outcome != "done",
+            "source": source,
+            "tools": turn_tools,
+        })
+        if turn_tools:
+            self._journal("voice.livekit.agent_tools", {
+                "turn": report.turns,
+                "tools": turn_tools,
+            })
+        if outcome == "barged":
+            report.barge_ins += 1
+            self._journal("voice.livekit.barge_in",
+                          {"turn": report.turns})
+            return "barged"
+        return "done"
+
+    def _poll_text_now(self) -> str | None:
+        """One queued text message, or None. Never raises.
+
+        Transports without a data channel simply have no
+        ``poll_text`` — the call stays voice-only.
+        """
+        poll = getattr(self.transport, "poll_text", None)
+        if poll is None:
+            return None
+        try:
+            item = poll(timeout=0.0)
+        except Exception:  # noqa: BLE001 — a text poll never breaks a call
+            return None
+        if item is None:
+            return None
+        text, _identity, _topic = item
+        return text
+
+    def _publish_reply_text(self, text: str) -> bool:
+        """Publish the spoken reply back as room text. Best effort:
+        a failed publish is logged and the turn still counts —
+        voice is the channel, text is the courtesy copy."""
+        publish = getattr(self.transport, "publish_text", None)
+        if publish is None or not text:
+            return False
+        try:
+            publish(text)
+        except Exception as exc:  # noqa: BLE001 — best effort
+            _log.warning("live call text reply failed: %s", exc)
+            return False
+        return True
+
+    def _note_participants(self) -> None:
+        """Journal audio publishers joining/leaving the room."""
+        if self.transport is None:
+            return
+        try:
+            current = set(self.transport.remote_audio_publishers())
+        except Exception:  # noqa: BLE001 — publisher reads never break a call
+            return
+        for identity in sorted(current - self._participants_seen):
+            self._participants_seen.add(identity)
+            self._journal("voice.livekit.participant_joined",
+                          {"identity": identity})
+        for identity in sorted(self._participants_seen - current):
+            self._participants_seen.discard(identity)
+            self._journal("voice.livekit.participant_left",
+                          {"identity": identity})
 
     # -- wait + calibrate --------------------------------------------------
     def _wait_for_remote(self) -> str:
@@ -1160,15 +1386,18 @@ class LiveKitCallSession:
         return head
 
     def _listen_utterance(self, vad: Any
-                          ) -> tuple[bytes, float] | None:
+                          ) -> tuple[str, bytes | str, float] | None:
         """Capture one utterance: speech … then `silence_ms` of quiet.
 
-        Returns (pcm16, first_speech_ts) or None when the remote side
-        has gone (no audio publisher and no frames for
-        ``remote_silence_end_s``). Audio that arrived during the
-        previous reply — drained into the inbound FIFO by ``_speak`` —
-        is consumed here in arrival order, so an interruption is never
-        lost and never double-counted.
+        Returns ("voice", pcm16, first_speech_ts), ("text", text, 0.0)
+        when a participant typed in the room instead of speaking, or
+        None when the remote side has gone (no audio publisher and no
+        frames for ``remote_silence_end_s``). Text is checked every
+        loop pass, so a typed message never waits out a quiet room.
+        Audio that arrived during the previous reply — drained into
+        the inbound FIFO by ``_speak`` — is consumed here in arrival
+        order, so an interruption is never lost and never
+        double-counted.
         """
         from collections import deque
 
@@ -1181,7 +1410,10 @@ class LiveKitCallSession:
         silence_s = max(0.1, self.silence_ms / 1000.0)
         while True:
             if self._stop.is_set():
-                return b"", 0.0
+                return ("voice", b"", 0.0)
+            text = self._poll_text_now()
+            if text is not None:
+                return ("text", text, 0.0)
             chunk = self._next_16k_chunk(timeout=0.2)
             if chunk is None:
                 # No frames: quiet, or the remote side is gone. Silence
@@ -1194,7 +1426,7 @@ class LiveKitCallSession:
                         > self.remote_silence_end_s):
                     return None
                 if in_speech and time.time() - last_speech_ts > silence_s:
-                    return b"".join(chunks), first_speech_ts
+                    return ("voice", b"".join(chunks), first_speech_ts)
                 continue
             if not in_speech:
                 prebuffer.append(chunk)
@@ -1213,7 +1445,7 @@ class LiveKitCallSession:
                 idle_chunks += 1
                 if idle_chunks >= vad.silence_chunks:
                     pcm = b"".join(chunks[:len(chunks) - idle_chunks])
-                    return pcm, first_speech_ts
+                    return ("voice", pcm, first_speech_ts)
             # else: pre-speech silence — only the prebuffer keeps it
 
     # -- speak (with barge-in) -------------------------------------------------
@@ -1685,6 +1917,11 @@ class LiveVideoReport:
     frames_published: int = 0
     frames_received: dict[str, int] = field(default_factory=dict)
     snapshots: dict[str, str] = field(default_factory=dict)
+    #: Per publisher: {"frames_seen", "frames_with_face", "last",
+    #: "last_ts"} — the facemesh observations, when face watch ran.
+    faces: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: "off" | "on" | "unavailable: <reason>" (mediapipe/model absent).
+    face_watch: str = "off"
     duration_s: float = 0.0
     end_reason: str = "completed"  # completed | stopped | source-ended |
                                    # error
@@ -1698,6 +1935,8 @@ class LiveVideoReport:
             "frames_published": self.frames_published,
             "frames_received": dict(self.frames_received),
             "snapshots": dict(self.snapshots),
+            "faces": {k: dict(v) for k, v in self.faces.items()},
+            "face_watch": self.face_watch,
             "duration_s": round(self.duration_s, 2),
             "end_reason": self.end_reason,
             "error": self.error,
@@ -1712,12 +1951,22 @@ class LiveVideoReport:
              f"{self.frames_published}   {self.duration_s:.1f}s   "
              f"ended: {self.end_reason}"),
         ]
+        if self.face_watch != "off":
+            lines.append(f"  face watch: {self.face_watch}")
         if self.error:
             lines.append(f"  ⚠ {self.error}")
         for identity, count in sorted(self.frames_received.items()):
             snap = self.snapshots.get(identity, "")
             lines.append(f"  👁 {identity}: {count} frames received"
                          + (f" — snapshot {snap}" if snap else ""))
+            face = self.faces.get(identity)
+            if face:
+                last = face.get("last") or {}
+                seen = ("face" if last.get("face") else "no face")
+                lines.append(
+                    f"     face: {seen} "
+                    f"({face.get('frames_with_face', 0)}/"
+                    f"{face.get('frames_seen', 0)} frames)")
         lines.append(bar)
         return "\n".join(lines)
 
@@ -1755,6 +2004,8 @@ class LiveKitVideoSession:
         snapshot_every_s: float = VIDEO_SNAPSHOT_EVERY_S,
         source_name: str = "",
         bus: Any = None,
+        face_watch: bool = False,
+        face_detector: Any = None,
     ) -> None:
         self.session_id = new_short_id()
         self.frame_source = frame_source
@@ -1774,6 +2025,18 @@ class LiveKitVideoSession:
         self._frames_received: dict[str, int] = {}
         self._snapshots: dict[str, str] = {}
         self._last_snapshot_ts: dict[str, float] = {}
+        #: Face watch: inbound frames through the facemesh rung.
+        #: ``face_detector`` is an injected detector — a callable
+        #: ``(rgb, w, h) -> dict | None`` or an object with a
+        #: ``detect(rgb, w, h)`` method (the real
+        #: ``FrameFaceDetector``). Without one, the session builds
+        #: the real detector at start; when mediapipe or the model
+        #: is absent the watch degrades to "unavailable: <reason>"
+        #: and the video still runs.
+        self.face_watch = face_watch
+        self._face_detector = face_detector
+        self._face_watch_state = "on" if face_watch else "off"
+        self._face_observations: dict[str, dict[str, Any]] = {}
 
     # -- journal ---------------------------------------------------------
     def _journal(self, topic: str, data: dict[str, Any]) -> None:
@@ -1867,6 +2130,12 @@ class LiveKitVideoSession:
                       {"state": "connected",
                        "source": self.source_name})
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        if self.face_watch:
+            # Settle the watch state before publishing: when the
+            # detector cannot be built, the report says so from the
+            # start instead of claiming "on" for a session that
+            # never watched a face.
+            self._face_detector_for()
 
         t0 = time.time()
         period = 1.0 / max(1.0, self.fps)
@@ -1914,6 +2183,9 @@ class LiveKitVideoSession:
             report.frames_published = self._frames_published
             report.frames_received = dict(self._frames_received)
             report.snapshots = dict(self._snapshots)
+            report.faces = {k: dict(v) for k, v
+                            in self._face_observations.items()}
+            report.face_watch = self._face_watch_state
             self._set_state("ended")
             try:
                 transport.disconnect()
@@ -1952,6 +2224,83 @@ class LiveKitVideoSession:
                 continue
             self._last_snapshot_ts[identity] = now
             self._save_snapshot(identity, rgb, w, h)
+            if self.face_watch:
+                self._observe_face(identity, rgb, w, h, now)
+
+    # -- inbound video → face observations -------------------------------
+    def _face_detector_for(self) -> Any | None:
+        """The face detector, building the real one on first use.
+
+        Never installs or downloads under pytest (the same rule as
+        ``provision_livekit``): a test that enables face watch on a
+        box without mediapipe gets the honest "unavailable", not a
+        pip install. On a live box the detector self-provisions.
+        """
+        if self._face_detector is not None:
+            return self._face_detector
+        if not self.face_watch:
+            return None
+        if self._face_watch_state.startswith("unavailable"):
+            return None
+        try:
+            from ..media.facemesh.capture import FrameFaceDetector
+        except Exception as exc:  # noqa: BLE001 — watch degrades
+            self._face_watch_state = f"unavailable: {exc}"
+            return None
+        under_pytest = "pytest" in sys.modules
+        try:
+            self._face_detector = FrameFaceDetector(
+                install=not under_pytest, download=not under_pytest)
+        except Exception as exc:  # noqa: BLE001 — watch degrades
+            self._face_watch_state = f"unavailable: {exc}"
+            return None
+        return self._face_detector
+
+    def _detect_face(self, rgb: bytes, width: int, height: int
+                     ) -> dict[str, Any] | None:
+        """One frame through the detector. None = no observation
+        (no detector, or the frame could not be read) — never a
+        faked face."""
+        detector = self._face_detector_for()
+        if detector is None:
+            return None
+        try:
+            if hasattr(detector, "detect"):
+                return detector.detect(rgb, width, height)
+            return detector(rgb, width, height)
+        except Exception as exc:  # noqa: BLE001 — a bad frame never
+            # breaks the video; the failure is recorded, the frame
+            # is counted as seen without an observation.
+            record_failure("livekit_call.LiveKitVideoSession."
+                           "_detect_face", exc)
+            return None
+
+    def _observe_face(self, identity: str, rgb: bytes, width: int,
+                      height: int, now: float) -> None:
+        """Run face watch on one snapshot-cadence frame.
+
+        At most one observation per publisher per
+        ``snapshot_every_s`` — the same throttle as snapshots, so
+        the CPU pass stays bounded while the room is watched.
+        """
+        entry = self._face_observations.setdefault(identity, {
+            "frames_seen": 0, "frames_with_face": 0,
+            "last": None, "last_ts": 0.0})
+        entry["frames_seen"] += 1
+        obs = self._detect_face(rgb, width, height)
+        if obs is None:
+            return
+        if obs.get("face"):
+            entry["frames_with_face"] += 1
+        entry["last"] = obs
+        entry["last_ts"] = now
+        self._journal("voice.livekit.face_seen", {
+            "identity": identity,
+            "face": bool(obs.get("face")),
+            "smile": obs.get("smile"),
+            "jaw_open": obs.get("jaw_open"),
+            "head_deg": obs.get("head_deg"),
+        })
 
     def _save_snapshot(self, identity: str, rgb: bytes, width: int,
                        height: int) -> None:
@@ -2110,6 +2459,9 @@ def video_session_status(session_id: str = "") -> dict[str, Any]:
             "frames_published": session._frames_published,
             "frames_received": dict(session._frames_received),
             "snapshots": dict(session._snapshots),
+            "face_watch": session._face_watch_state,
+            "faces": {k: dict(v) for k, v
+                      in session._face_observations.items()},
         }
     else:
         with _ACTIVE_VIDEO_LOCK:

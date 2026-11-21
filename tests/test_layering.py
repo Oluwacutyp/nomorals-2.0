@@ -336,6 +336,13 @@ MODULE_PINS: dict[str, int] = {
     "nomorals.tools.services": 5,    # -> connectors.registry
     "nomorals.tools.trading": 5,     # -> connectors.* + agents.financial_expert
     "nomorals.tools.braineval": 5,   # tool surface over agents.braineval (the eval-pack engine)
+    # LiveKit Agents lane: tools.voice_live is a tool surface over the
+    # L5 tool-loop organ (agents.partner.tool_loop) — agent mode runs
+    # each live-call turn through the real ReAct loop, and face watch
+    # composes the L4 facemesh rung. Same shape as tools.braineval;
+    # the registry loads it dynamically by dotted name, never by
+    # static import (its only static importers are tests).
+    "nomorals.tools.voice_live": 5,
     # T1.6 (pass #96): the foundation-vs-composition split completed for
     # the remaining agent-composed tool modules. Each is a tool *surface*
     # over an L5 organ — it composes that organ the way tools.deals

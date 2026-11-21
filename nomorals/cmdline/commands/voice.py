@@ -618,6 +618,7 @@ def _cmd_voice_live_video_start(args: argparse.Namespace,
             data_dir=data_dir,
             width=args.width, height=args.height, fps=args.fps,
             source_name=source_name,
+            face_watch=getattr(args, "face_watch", False),
         )
     except LiveKitUnavailable as exc:
         print(f"cannot start the live video: {exc}", file=sys.stderr)

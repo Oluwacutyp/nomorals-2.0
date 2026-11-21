@@ -217,6 +217,44 @@ class TestLiveSignal(unittest.TestCase):
             f"unexpected connect failure (not the known ICE wall): "
             f"{outcome}")
 
+    def test_agent_session_joins_real_room(self):
+        """An agent-mode session traverses the real join path.
+
+        The same two honest outcomes as the signal test: on a host
+        with working UDP the session joins and ends "no-remote"
+        (nobody came within the short wait); on this box the join
+        raises the ICE-wall classification. A 401 / signal error
+        fails — that would be a real regression in token minting or
+        the server, not the wall.
+        """
+        import tempfile
+
+        from nomorals.voice.livekit_call import (
+            LiveKitCallSession,
+            LiveKitConfig,
+            LiveKitUnavailable,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session = LiveKitCallSession(
+                think=lambda text: "Hello.",
+                stt=lambda path: "",
+                tts=lambda text, profile: {},
+                config=LiveKitConfig.from_env(),
+                room="live-room",
+                data_dir=tmpdir,
+                max_wait_remote_s=5.0,
+                bus=False,
+                tools_used=[])
+            try:
+                report = session.start(max_turns=0)
+            except LiveKitUnavailable as exc:
+                self.assertIn("media connection (ICE)", str(exc))
+                self.assertIn("UDP", exc.missing)
+                return
+            self.assertEqual(report.end_reason, "no-remote")
+            self.assertEqual(report.tools_used, [])
+
 
 if __name__ == "__main__":
     unittest.main()

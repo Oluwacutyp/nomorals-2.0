@@ -2737,7 +2737,7 @@ def _parser() -> argparse.ArgumentParser:
                      "nm voice live status [--json]\n"
                      "nm voice live video start --room NAME "
                      "[--source title|image|scene] [--image PATH] "
-                     "[--design JSON] [--duration S] [--fps N]\n"
+                     "[--design JSON] [--duration S] [--fps N] [--face-watch]\n"
                      "nm voice live video status | end | snapshot "
                      "[--identity ID] [--json]"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -3180,6 +3180,12 @@ def _parser() -> argparse.ArgumentParser:
         "--no-loop", dest="loop", action="store_false",
         help="a scene source ends the session at the scene end "
              "instead of looping")
+    v_live_video_start.add_argument(
+        "--face-watch", action="store_true",
+        help="watch the room's video with the facemesh rung (who is "
+             "on camera, smiling, blinking, head pose); when "
+             "mediapipe or the model is absent the report says so "
+             "and the video still runs")
     v_live_video_start.add_argument("--json", action="store_true",
                                     help="Output as JSON")
     v_live_video_status = video_sub.add_parser(

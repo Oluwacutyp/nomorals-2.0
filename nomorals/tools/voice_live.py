@@ -16,12 +16,30 @@ sitting in it. The video session joins as a second participant
 (identity ``devon-video``), so it can run beside the voice call.
 
 The think path here is the brain itself (``brain_for`` + a rolling
-in-session history) — NOT the PartnerRuntime: that runtime is L5 and
-this module is L4, so it cannot be imported here. The CLI
+in-session history) — NOT the PartnerRuntime: the CLI
 (``nm voice live start``) wires the full PartnerRuntime instead, with
 durable conversation memory; the tool path keeps session-scoped
 history only, and says so. STT reuses the ``transcribe`` tool (the
-voice-note path); TTS reuses ``UniversalTTS``.
+voice-note path); TTS reuses ``UniversalTTS``. This module is pinned
+L5 in ``tests/test_layering.py`` (a tool surface over the L5
+tool-loop organ) — that pin is what lets agent mode import the loop
+below; the plain think path still imports nothing above L3.
+
+Agent mode (``voice_live_start(..., agent=True)``) runs each turn
+through the real ReAct tool loop (``agents.partner.tool_loop``) —
+the brain sees the live registry and can DO things mid-call, not
+just talk. This module is pinned L5 in ``tests/test_layering.py``
+for exactly that composition (a tool surface over the L5 tool-loop
+organ, the same shape as ``tools.braineval``). The loop is
+voice-bounded (3 iterations, 60 s, 3 tool calls per turn); its
+stall/budget degradation is the honest path when the model loops
+or dies. Per-turn tools ride ``think.drain_tools_used()`` into the
+call report — the session never imports the loop itself.
+
+Face watch (``video_live_start(..., face_watch=True)``) runs inbound
+room frames through the facemesh rung (landmarks → blendshapes +
+head pose) at the snapshot cadence; mediapipe/model absent means
+the report says ``unavailable`` and the video still runs.
 """
 
 from __future__ import annotations
@@ -134,11 +152,71 @@ def _build_tts(context: Any, data_dir: str) -> Any:
     return _tts
 
 
+def _build_agent_think(context: Any, registry: Any, session_id: str,
+                       tools_used: list[str]) -> Any:
+    """Agent-mode think: the turn runs through the real ReAct loop.
+
+    The brain is the loop's LLM, the live registry is its tools.
+    Voice-bounded: 3 iterations, 60 s total, 3 tool calls per turn —
+    a call is a conversation, not a batch job, and a slow tool must
+    not hold the room silent. The loop's own stall/budget
+    degradation is the honest path: think returns "" and the turn
+    is skipped, never faked. Per-turn tools ride
+    ``drain_tools_used()`` — the session's seam for the report.
+    """
+    from ..agents.partner.tool_loop import ToolCallingLoop
+    from ..llm.base import Message
+    from ..llm.brain import brain_for
+
+    brain = brain_for(context)
+    history: list[Any] = _HISTORY.setdefault(session_id, [])
+    turn_tools: list[str] = []
+
+    def _think(transcript: str) -> str:
+        turn_tools.clear()
+        loop = ToolCallingLoop(
+            brain, registry,
+            max_iterations=3, total_timeout_s=60.0,
+            max_tool_calls_per_turn=3)
+        try:
+            result = loop.run(
+                transcript, actor="owner",
+                history=list(history[-_MAX_HISTORY_TURNS * 2:]),
+                loop_ctx={"chat_kind": "dm", "platform": "livekit",
+                          "chat_key": f"livekit:{session_id}"})
+        except Exception as exc:  # noqa: BLE001 — a dead loop is silence
+            _log.warning("live call agent loop failed: %s", exc)
+            return ""
+        for name in result.tools_used:
+            turn_tools.append(name)
+            if name not in tools_used:
+                tools_used.append(name)
+        if not result.ok:
+            _log.warning("live call agent loop degraded: %s",
+                         result.error or result.degrade_note)
+            return ""
+        text = (result.answer or "").strip()
+        history.append(Message.user(transcript))
+        if text:
+            history.append(Message.assistant(text))
+        return text
+
+    def _drain() -> list[str]:
+        out = list(turn_tools)
+        turn_tools.clear()
+        return out
+
+    _think.drain_tools_used = _drain  # type: ignore[attr-defined]
+    return _think
+
+
 def _build_session(registry: Any, room: str, *, profile: str = "",
-                   max_wait_remote: float = 120.0) -> LiveKitCallSession:
+                   max_wait_remote: float = 120.0,
+                   agent: bool = False) -> LiveKitCallSession:
     """Assemble a live-call session from the registry's context."""
     context = getattr(registry, "context", None)
     data_dir = _voice_data_dir(context)
+    tools_used: list[str] = []
     session = LiveKitCallSession(
         think=lambda text: "",  # replaced below, once the id exists
         stt=_build_stt(context),
@@ -149,9 +227,14 @@ def _build_session(registry: Any, room: str, *, profile: str = "",
         profile=profile,
         max_wait_remote_s=max_wait_remote,
         bus=None,
+        tools_used=tools_used,
     )
     # the think closure keys history by the real session id
-    session.think = _build_think(context, session.session_id)
+    if agent:
+        session.think = _build_agent_think(
+            context, registry, session.session_id, tools_used)
+    else:
+        session.think = _build_think(context, session.session_id)
     return session
 
 
@@ -160,13 +243,16 @@ def _build_video_session(registry: Any, room: str, *,
                          design: Any = None, duration: float = 0.0,
                          text: str = "", fps: float = 15.0,
                          width: int = 640, height: int = 360,
-                         loop: bool = True) -> LiveKitVideoSession:
+                         loop: bool = True,
+                         face_watch: bool = False) -> LiveKitVideoSession:
     """Assemble a live-video session from the registry's context.
 
     ``source`` picks the picture: "title" (a live card with the room
     and the clock), "image" (a still file, letterboxed), or "scene"
     (a motion-studio design dict, rendered frame by frame, looping
-    until the call ends unless ``loop`` is False).
+    until the call ends unless ``loop`` is False). ``face_watch``
+    runs inbound frames through the facemesh rung (see the video
+    session — mediapipe absent means the report says so).
     """
     context = getattr(registry, "context", None)
     data_dir = _voice_data_dir(context)
@@ -205,6 +291,7 @@ def _build_video_session(registry: Any, room: str, *,
         width=width, height=height, fps=fps,
         source_name=source_name,
         bus=None,
+        face_watch=face_watch,
     )
 
 
@@ -221,7 +308,13 @@ def register(registry: Any) -> None:
             "session id; the call runs in the background. Needs a "
             "LiveKit server (LIVEKIT_URL plus LIVEKIT_TOKEN or "
             "LIVEKIT_API_KEY + LIVEKIT_API_SECRET) and the livekit SDK "
-            "(`nm voice live provision`). One live call at a time."
+            "(`nm voice live provision`). One live call at a time. "
+            "With agent=true, each turn runs through her real tool "
+            "loop, so she can DO things in the call (look things up, "
+            "run tools) instead of only talking; the report names "
+            "every tool she used. Participants can also type in the "
+            "room (data channel, topic 'devon-chat'): she hears the "
+            "text as a turn and answers in voice and in text."
         ),
         capability=Capability.NET_OUT,
         parameters={
@@ -232,11 +325,15 @@ def register(registry: Any) -> None:
                               "someone to join before giving up "
                               "(default 120)",
             "profile": "str (optional) — TTS voice profile name",
+            "agent": "bool (optional) — agent mode: run each turn "
+                     "through the tool loop so Devon can use tools "
+                     "mid-call (default false)",
         },
     )
     def _voice_live_start(room: str, max_turns: int = 0,
                          max_wait_remote: float = 120.0,
-                         profile: str = "") -> dict[str, Any]:
+                         profile: str = "",
+                         agent: bool = False) -> dict[str, Any]:
         # cheap pre-flight first: no brain/TTS is built for a call that
         # cannot start (the session re-checks the same config itself).
         config = LiveKitConfig.from_env()
@@ -251,7 +348,8 @@ def register(registry: Any) -> None:
                     "missing": "a room name"}
         try:
             session = _build_session(registry, room, profile=profile,
-                                     max_wait_remote=max_wait_remote)
+                                     max_wait_remote=max_wait_remote,
+                                     agent=agent)
             start_live_call(session, max_turns=max_turns)
         except LiveKitUnavailable as exc:
             return {"ok": False, "error": str(exc),
@@ -259,7 +357,8 @@ def register(registry: Any) -> None:
         except Exception as exc:  # noqa: BLE001 — start never raises
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         return {"ok": True, "session_id": session.session_id,
-                "room": room, "state": session.state}
+                "room": room, "state": session.state,
+                "agent": agent}
 
     @registry.register(
         "voice_live_status",
@@ -308,6 +407,11 @@ def register(registry: Any) -> None:
             "background. Sources: 'title' (a live card with the room "
             "and the clock), 'image' (a still file), 'scene' (a "
             "motion-studio design dict, rendered frame by frame). "
+            "With face_watch=true, inbound room frames also run "
+            "through the facemesh rung (who is on camera, smiling, "
+            "blinking, head pose) at the snapshot cadence; when "
+            "mediapipe or the model is absent the report says so "
+            "and the video still runs. "
             "Needs a LiveKit server (LIVEKIT_URL plus LIVEKIT_TOKEN or "
             "LIVEKIT_API_KEY + LIVEKIT_API_SECRET) and the livekit SDK "
             "(`nm voice live provision`). One live video session at a "
@@ -332,6 +436,8 @@ def register(registry: Any) -> None:
                            "seconds (0 = until stopped)",
             "loop": "bool (optional) — loop a scene source (default "
                     "true; false ends the session at the scene end)",
+            "face_watch": "bool (optional) — watch the room's video "
+                          "with the facemesh rung (default false)",
         },
     )
     def _video_live_start(
@@ -339,7 +445,8 @@ def register(registry: Any) -> None:
             design: Any = None, duration: float = 0.0,
             text: str = "", fps: float = 15.0, width: int = 640,
             height: int = 360, max_duration: float = 0.0,
-            loop: bool = True) -> dict[str, Any]:
+            loop: bool = True, face_watch: bool = False
+            ) -> dict[str, Any]:
         config = LiveKitConfig.from_env()
         missing = config.missing()
         if missing:
@@ -354,7 +461,8 @@ def register(registry: Any) -> None:
             session = _build_video_session(
                 registry, room, source=source, image=image,
                 design=design, duration=duration, text=text, fps=fps,
-                width=width, height=height, loop=loop)
+                width=width, height=height, loop=loop,
+                face_watch=face_watch)
             start_video_session(session, max_duration_s=max_duration)
         except LiveKitUnavailable as exc:
             return {"ok": False, "error": str(exc),
@@ -363,7 +471,8 @@ def register(registry: Any) -> None:
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
         return {"ok": True, "session_id": session.session_id,
                 "room": room, "state": session.state,
-                "source": session.source_name}
+                "source": session.source_name,
+                "face_watch": face_watch}
 
     @registry.register(
         "video_live_status",
