@@ -630,27 +630,28 @@ class Database:
                   timeout: float | None = None) -> Any:
         """Wait for a job, converting its outcome (or a timeout) loudly.
 
-        ``timeout`` defaults to the module constant, resolved at CALL
-        time (never as a def-time default) so a patched
-        ``_WRITE_LOCK_TIMEOUT_S`` — the dbstall suite patches it to 0.5
-        — actually shortens the wait.  A thread inside
-        :meth:`write_timeout` uses that block's shorter bound instead,
-        and the timeout is counted on the block's state.
-        """
-
+   # nomorals/storage/db.py:633-708 (Upgraded _wait_job + write_timeout)
+    def _wait_job(self, job: _WriteJob, *, what: str,
+                  timeout: float | None = None) -> Any:
         if timeout is None:
             timeout = getattr(self._local, "write_timeout_s", None)
-            if timeout is None:
-                timeout = _WRITE_LOCK_TIMEOUT_S
+        if timeout is None:
+            timeout = _WRITE_LOCK_TIMEOUT_S
         state = getattr(self._local, "write_timeout_state", None)
         if state is not None and state.wedged:
-            # The writer is already proven wedged for this block — do
-            # not burn another full wait re-proving it. The queued job
-            # is cancelled (the actor skips cancelled jobs), so the
-            # write never applies late; the next block re-probes.
-            job.cancelled = True
-            state.deferred += 1
-            raise self._holder_timeout_error(what, timeout)
+            # Smart re-probe: if the writer actor is STILL holding a transaction
+            # or active job, fail fast in 0ms as designed. If the writer is now
+            # completely idle, un-wedge and let this job run!
+            actor = self._writer_actor
+            still_held = (
+                actor is not None
+                and (actor.txn_owner is not None or actor.current_job_owner() is not None)
+            )
+            if still_held:
+                job.cancelled = True
+                state.deferred += 1
+                raise self._holder_timeout_error(what, timeout)
+            state.wedged = False
         if not job.event.wait(timeout):
             job.cancelled = True
             if state is not None:
@@ -663,37 +664,24 @@ class Database:
 
     @contextmanager
     def write_timeout(self, seconds: float) -> Iterator[_WriteTimeoutState]:
-        """Bound how long THIS thread waits for a writer-actor write.
-
-        A thread-scoped override of ``_WRITE_LOCK_TIMEOUT_S`` for one
-        block: every :meth:`_wait_job` inside the block waits at most
-        ``seconds`` for the writer instead of 30s, and every write that
-        times out is counted on the yielded state (``state.deferred``).
-
-        This is for sweeps whose writes are idempotent bookkeeping that
-        the next pass re-derives — a resident tick that must complete
-        even while another thread holds a write transaction open. It is
-        NOT a cap on the work: the sweep still runs every step; only
-        the wait for a wedged writer is bounded, and the deferral is
-        counted and reported. After the first timeout in the block,
-        later waits fail fast (same error, counted) instead of burning
-        another full wait re-proving a writer already known wedged.
-        Never use it around a write whose effect must land exactly
-        once, right now (a timed-out write is cancelled and never
-        applies late).
-        """
         prev_timeout = getattr(self._local, "write_timeout_s", None)
         prev_state = getattr(self._local, "write_timeout_state", None)
         state = _WriteTimeoutState()
-        self._local.write_timeout_s = max(0.0, float(seconds))
+        # Inherit tighter bound when nested inside a stricter outer block
+        effective = max(0.0, float(seconds))
+        if prev_timeout is not None:
+            effective = min(effective, float(prev_timeout))
+        self._local.write_timeout_s = effective
         self._local.write_timeout_state = state
         try:
             yield state
         finally:
+            if prev_state is not None:
+                prev_state.deferred += state.deferred
+                if state.wedged:
+                    prev_state.wedged = True
             self._local.write_timeout_s = prev_timeout
             self._local.write_timeout_state = prev_state
-
-    def _routed_execute(self, sql: str, params: Any = ()) -> _RoutedCursor:
         self._check_txn_generation()
         job = self._enqueue_job("stmt", sql, params)
         return self._wait_job(job, what=f"statement {sql[:60]!r}")
