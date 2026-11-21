@@ -8,6 +8,8 @@ notification must not mask a failed (or successful) backup.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 from ..core.logging_setup import get_logger
@@ -17,7 +19,16 @@ __all__ = [
     "report_backup_failure",
     "report_drill",
     "report_queued",
+    "clear_backup_failure_streak",
 ]
+
+#: Durable streak marker: written beside the backup generations.
+#: One JSON file, one error class at a time — the marker is the
+#: memory that turns "page every run" into "page once per streak".
+FAILURE_STREAK_FILE = ".backup_failure_streak.json"
+#: A streak older than this pages again — a stale page is worse than
+#: a repeated one.
+STREAK_REPAGE_DAYS = 7
 
 _log = get_logger(__name__)
 
@@ -100,10 +111,96 @@ def report_backup_result(
                     alert_hints={"notice": True, "subject": backup_id})
 
 
+def _read_failure_marker(state_dir: str | Path) -> dict[str, Any] | None:
+    """Read the streak marker; None when absent or unreadable."""
+    try:
+        raw = (Path(state_dir) / FAILURE_STREAK_FILE).read_text(
+            encoding="utf-8")
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+
+
+def _write_failure_marker(state_dir: str | Path,
+                          marker: dict[str, Any]) -> None:
+    """Write the streak marker; never raises."""
+    try:
+        path = Path(state_dir) / FAILURE_STREAK_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(marker, indent=2), encoding="utf-8")
+    except OSError:
+        _log.warning("could not write backup failure streak marker",
+                     exc_info=True)
+
+
+def clear_backup_failure_streak(state_dir: str | Path | None) -> None:
+    """Clear the streak marker after a successful backup run.
+
+    A success ends the streak, so the NEXT failure pages again.
+    Never raises; a missing marker is already clear.
+    """
+    if state_dir is None:
+        return
+    try:
+        (Path(state_dir) / FAILURE_STREAK_FILE).unlink(missing_ok=True)
+    except OSError:
+        _log.warning("could not clear backup failure streak marker",
+                     exc_info=True)
+
+
 def report_backup_failure(
-    target: Any, backup_id: str, error: Exception
+    target: Any, backup_id: str, error: Exception, *,
+    state_dir: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Report a failed backup run — critical, bypasses quiet gates."""
+    """Report a failed backup run — critical, bypasses quiet gates.
+
+    With ``state_dir`` given, a failure pages ONCE PER STREAK: the
+    first failure of a streak pages and the marker is written; later
+    failures with the same error class stay silent and only bump the
+    marker's ``repeats`` count; a different error class pages again
+    (a new problem); a failure more than ``STREAK_REPAGE_DAYS`` after
+    the last page pages again.  Without a state dir the old behaviour
+    holds (page every call) so one-off reporting sites are unchanged.
+    A backup that fails every morning used to page every run — the
+    owner woke to a fresh critical alert for a failure he already
+    knew about (2026-11-21).
+    """
+    from datetime import UTC, datetime
+
+    error_key = type(error).__name__
+    if state_dir is not None:
+        now = datetime.now(UTC)
+        marker = _read_failure_marker(state_dir)
+        last_paged = None
+        if (marker is not None and marker.get("error") == error_key
+                and marker.get("last_paged_at")):
+            try:
+                last_paged = datetime.fromisoformat(
+                    marker["last_paged_at"])
+            except ValueError:
+                last_paged = None
+        if last_paged is not None \
+                and (now - last_paged).days < STREAK_REPAGE_DAYS:
+            marker["repeats"] = int(marker.get("repeats", 0)) + 1
+            marker["last_failed_at"] = now.isoformat()
+            marker["backup_id"] = backup_id
+            _write_failure_marker(state_dir, marker)
+            return {"ok": False, "paged": False, "reason": "same-streak",
+                    "backup_id": backup_id}
+        _write_failure_marker(state_dir, {
+            "error": error_key,
+            "backup_id": backup_id,
+            "first_failed_at": (
+                marker.get("first_failed_at")
+                if marker is not None
+                and marker.get("error") == error_key
+                and marker.get("first_failed_at")
+                else now.isoformat()),
+            "last_paged_at": now.isoformat(),
+            "repeats": 0,
+            "message": str(error)[:500],
+        })
     title = f"BACKUP FAILED: {backup_id}"
     body = (
         f"Backup {backup_id} failed: {type(error).__name__}: {error}. "

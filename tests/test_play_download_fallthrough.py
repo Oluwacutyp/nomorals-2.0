@@ -22,6 +22,7 @@ Rules under test:
 """
 
 import logging
+import time
 from types import SimpleNamespace
 from unittest import mock
 
@@ -113,8 +114,16 @@ def _item(kind, path, title):
 def _collect_play_job(chat_key, title, timeout=10.0):
     from nomorals.core.jobs import shared_registry
 
-    snaps = shared_registry().list(
-        labels={"owner": "play", "chat": chat_key, "title": title})
+    # Poll: the ack-first play job is registered under the raw query
+    # and relabelled to the resolved title once the worker resolves
+    # (2026-11-21 wedge), so the label may not match yet at call time.
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        snaps = shared_registry().list(
+            labels={"owner": "play", "chat": chat_key, "title": title})
+        if snaps:
+            break
+        time.sleep(0.05)
     assert snaps, f"no play job for {chat_key}/{title}"
     job = shared_registry().collect(snaps[-1]["id"], timeout=timeout)
     assert job is not None and job.done(), \

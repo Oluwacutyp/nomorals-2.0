@@ -58,7 +58,14 @@ class _Reasoner:
 
 
 class _Sched:
-    """Minimal stand-in for agents.scheduler.Scheduler (digest pattern)."""
+    """Minimal stand-in for agents.scheduler.Scheduler (digest pattern).
+
+    Mirrors the real Scheduler.add signature, including
+    ``overlap_policy`` (scheduler.py) — the watch-loop ensure
+    registers overlap skip and reconciles persisted rows via
+    ``set_overlap_policy``, so a fake without those would fail the
+    registration instead of testing it.
+    """
 
     def __init__(self):
         self.jobs = []
@@ -66,11 +73,18 @@ class _Sched:
     def list_jobs(self):
         return list(self.jobs)
 
-    def add(self, name, spec, kind, payload, routine=False):
-        job = {"name": name, "spec": spec, "kind": kind,
-               "payload": payload, "routine": routine}
+    def add(self, name, spec, kind, payload, routine=False,
+            overlap_policy="concurrent"):
+        job = {"id": f"job-{len(self.jobs)}", "name": name, "spec": spec,
+               "kind": kind, "payload": payload, "routine": routine,
+               "overlap_policy": overlap_policy}
         self.jobs.append(job)
         return job
+
+    def set_overlap_policy(self, job_id, policy):
+        for job in self.jobs:
+            if job.get("id") == job_id:
+                job["overlap_policy"] = policy
 
     def remove(self, job_id):
         self.jobs = [j for j in self.jobs if j.get("id") != job_id]

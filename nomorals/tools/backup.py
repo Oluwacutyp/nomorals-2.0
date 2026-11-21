@@ -78,13 +78,20 @@ def _report_failure_best_effort(context: Any, backup_id: str,
     """Attempt a notifier report for a tick that never got a coordinator.
 
     Best effort only — reporting never raises, and a failed report must
-    not mask the failure it reports.
+    not mask the failure it reports.  The streak marker lives beside
+    the backup generations (``settings.backup_dir``) so a setup failure
+    that pages every morning pages once per streak instead.
     """
     try:
         from ..agents.notifier import Notifier
         from ..backup.report import report_backup_failure
 
-        report_backup_failure(Notifier(context), backup_id, error)
+        state_dir = None
+        settings = getattr(context, "settings", None)
+        if settings is not None:
+            state_dir = getattr(settings, "backup_dir", None)
+        report_backup_failure(Notifier(context), backup_id, error,
+                              state_dir=state_dir)
     except Exception:  # noqa: BLE001 - reporting never raises
         _log.warning("backup failure report failed", exc_info=True)
 

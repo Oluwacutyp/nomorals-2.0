@@ -30,6 +30,7 @@ yt-dlp/cookies handling, SoundCloud/YouTube failures:
   once inside play_youtube).
 """
 
+import time
 from types import SimpleNamespace
 from unittest import mock
 
@@ -287,8 +288,17 @@ def _wait_play_job(chat_key: str = "telegram:12345",
     found by its labels (the ack carries no job id anymore)."""
     from nomorals.core.jobs import shared_registry
 
-    snaps = shared_registry().list(
-        labels={"owner": "play", "chat": chat_key, "title": title})
+    # Poll: the ack-first play job is registered under the raw query
+    # and relabelled to the resolved title once the worker resolves
+    # (2026-11-21 wedge), so the label may not match yet at call time.
+    deadline = time.time() + timeout
+    snaps = []
+    while time.time() < deadline:
+        snaps = shared_registry().list(
+            labels={"owner": "play", "chat": chat_key, "title": title})
+        if snaps:
+            break
+        time.sleep(0.05)
     assert snaps, f"no play job for {chat_key}/{title}"
     job = shared_registry().collect(snaps[-1]["id"], timeout=timeout)
     assert job is not None and job.done(), \
@@ -509,10 +519,17 @@ def test_control_play_not_found_uses_short_cookies_hint():
     with mock.patch("nomorals.media.resolver.SourceResolver", FakeResolver), \
             mock.patch("nomorals.media.playback.PlaybackEngine"):
         out = rt._control_play("some obscure song xyz", "telegram:12345")
-    assert "couldn't find" in out
-    assert "/cookies" in out
-    assert BOT_COOKIE_HELP not in out
-    assert "--cookies-from-browser chrome" not in out
+    # Ack-first (2026-11-21 wedge): the resolve now runs on the play
+    # job behind the ack — the return is the ack (""), and the honest
+    # failure line lands as the ack's edit, shortened to the /cookies
+    # pointer for a phone screen.
+    assert out == ""
+    _wait_play_job("telegram:12345", "some obscure song xyz")
+    edited = "\n".join(_edit_texts(rt))
+    assert "couldn't find" in edited
+    assert "/cookies" in edited
+    assert BOT_COOKIE_HELP not in edited
+    assert "--cookies-from-browser chrome" not in edited
 
 
 # ── BUG #11: NL "play X" passes chat_key + honors the music gate ────────

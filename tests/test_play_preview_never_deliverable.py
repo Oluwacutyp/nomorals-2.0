@@ -233,6 +233,17 @@ def _followup_texts(rt):
             if len(c.args) > 2]
 
 
+def _edit_texts(rt):
+    """Texts the ack was edited to (the mock adapter's edit verbs)."""
+    adapter = rt.gateway._adapter_for.return_value
+    texts = []
+    for c in adapter.edit_message.call_args_list:
+        texts.append(str(c.args[2]) if len(c.args) > 2 else "")
+    for c in adapter.edit_progress.call_args_list:
+        texts.append(str(c.args[2]) if len(c.args) > 2 else "")
+    return texts
+
+
 def _preview_resolution():
     return ResolvedAudio(
         ok=True, path_or_url=ITUNES_PAGE, title="FEAR", artist="NF",
@@ -255,7 +266,12 @@ def _engine(queue_rows):
 # ── previews-only world: honest absence, zero download jobs ──────────
 
 
-def test_previews_only_world_no_job_no_download():
+def test_previews_only_world_no_download_honest_line_via_ack():
+    # Renamed 2026-11-21 (wedge): the chat play now ALWAYS goes
+    # through the play job behind the ack, so "no job" is no longer
+    # the contract.  What the contract still pins: no DOWNLOAD is
+    # ever attempted for a preview-grade candidate, and the honest
+    # absence line reaches the user as the ack's edit.
     PickCache.clear()
     rt = _handler()
     chat = _chat("99001")
@@ -269,10 +285,12 @@ def test_previews_only_world_no_job_no_download():
         SR.return_value.search_candidates_detailed.return_value = ([], [
             "youtube-search — no results", "itunes-search — ok (1)"])
         reply = rt._control_play("fear by nf", "telegram:99001")
-    # The honest absence line, synchronously — no background job was
-    # queued for a preview-grade candidate.
-    assert "only as a 30-second preview" in reply
-    assert "No source has the full track" in reply
+    assert reply == ""
+    _wait_play_job("telegram:99001")
+    edited = "\n".join(_edit_texts(rt))
+    assert "only as a 30-second preview" in edited
+    assert "No source has the full track" in edited
+    engine.download.assert_not_called()
     assert "downloading in the background" not in reply
     engine.download.assert_not_called()
     rt.gateway.send_file.assert_not_called()

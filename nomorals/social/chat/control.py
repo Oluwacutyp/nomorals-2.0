@@ -491,7 +491,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "prefs": (0, None),      # /prefs list|show <domain>|like <domain> | axis:value ...|dislike <domain> | axis:value ...|rank <domain> | <label>=axis:value,... | ...|signals [domain] [n]|learn (owner-only, learned taste — audit gap R1-18)
     "presence": (0, None),   # /presence watch <contact> [status|online|join ...] | unwatch <contact> [status|online|join ...] | list | status (owner-only, presence watch — census §6 #4)
     "publicface": (0, None),  # /publicface list|draft <pack> | <title> | <content>|approve <id>|unpublish <id>|remove <id>|show <id> (owner-only, publishing gate)
-    "backup": (0, 1),        # /backup status | verify — read-only backup health (runs need the vault, stay scheduled)
+    "backup": (0, 2),        # /backup status | verify | key [show] — backup health + key setup (key verbs are owner-only via caller_may_run)
     # expansion wave
     "game": (0, 12),         # /game [list|<name>|quit|leaderboard|stats|shop|balance]
     # math class — standalone game command (wired handler, not engine game)
@@ -1197,7 +1197,7 @@ _HELP_TEXT = "\n".join(
         "  /ghealth [name] [refresh] — WhatsApp group health: churn, growth, topics, rhythm, silent members (admins)",
         "  /publicface list | draft <pack> | <title> | <content> | approve <id> | unpublish <id> | remove <id> | show <id>",
         "  /subscriptions [list | upcoming [days] | used <merchant> [YYYY-MM-DD] | cancel <merchant>]   detected subscriptions, renewals, unused flags, draft cancel notes",
-        "  /backup status | verify                backup health (read-only; runs need the vault, stay scheduled)",
+        "  /backup status | verify | key [show]  backup health; key generates the vault backup key (shown once, keep the offline copy) or shows the stored one",
         "  — expansion —",
         "  /game [list|<name>|quit]                43 games (DM + group): /game list",
         "  /hangman /mafia /rpg /trivia /spy /wordchain /duel\n"
@@ -6012,7 +6012,7 @@ LIST_ONELINERS: dict[str, str] = {
     "ghealth": "WhatsApp group health (admins): /ghealth [name] [refresh] — churn, growth, topics, activity rhythm and silent members from the records already kept",
     "digest": "WhatsApp group digests (admins): /digest [group] [policy <always|only-when-mentioned|never>] — what needs you: mentions, decisions, resolved threads from the recorded log",
     "publicface": "public face — owner-approved publishing gate: /publicface list | draft <pack> | <title> | <content> | approve <id> | unpublish <id> | remove <id> | show <id>",
-    "backup": "backup health (read-only): /backup status | verify — generations, manifest, DB integrity",
+    "backup": "backup health: /backup status | verify | key [show] — generations, manifest, DB integrity; key generates the vault backup key (shown once) or shows the stored one",
     "alert": "price/money alerts: /alert add|list|remove|check|snooze|sync-bills",
     "balances": "unified money view across rails: /balances [rail…]",
     "goal": "money goals: /goal add|list|done|snooze|remove",

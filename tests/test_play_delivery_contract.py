@@ -22,6 +22,7 @@ network), mirroring tests/test_play_download_fallthrough.py.
 
 import logging
 import re
+import time
 from types import SimpleNamespace
 from unittest import mock
 
@@ -60,8 +61,17 @@ def _wait_play_job(chat_key: str, title: str, timeout: float = 10.0):
     found by their labels."""
     from nomorals.core.jobs import shared_registry
 
-    snaps = shared_registry().list(
-        labels={"owner": "play", "chat": chat_key, "title": title})
+    # Poll: the ack-first play job is registered under the raw query
+    # and relabelled to the resolved title once the worker resolves
+    # (2026-11-21 wedge), so the label may not match yet at call time.
+    deadline = time.time() + timeout
+    snaps = []
+    while time.time() < deadline:
+        snaps = shared_registry().list(
+            labels={"owner": "play", "chat": chat_key, "title": title})
+        if snaps:
+            break
+        time.sleep(0.05)
     assert snaps, f"no play job for {chat_key}/{title}"
     job = shared_registry().collect(snaps[-1]["id"], timeout=timeout)
     assert job is not None and job.done(), \
@@ -315,8 +325,14 @@ def test_nothing_found_anywhere_reports_not_found():
                        return_value=engine):
         SR.return_value.resolve.return_value = res
         out = rt._control_play("some nonexistent song zzq", chat.key)
-    assert "couldn't find" in out
-    assert "soundcloud-search" in out
+    # Ack-first (2026-11-21 wedge): the resolve now runs on the play
+    # job behind the ack — the return is the ack (""), and the honest
+    # failure line lands as the ack's edit.  No file is ever sent.
+    assert out == ""
+    _wait_play_job(chat.key, "some nonexistent song zzq")
+    edited = "\n".join(_edit_texts(rt))
+    assert "couldn't find" in edited
+    assert "soundcloud-search" in edited
     rt.gateway.send_file.assert_not_called()
 
 

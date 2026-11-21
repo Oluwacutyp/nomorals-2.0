@@ -3607,13 +3607,16 @@ class RuntimeReachMixin:
 
     # ── backups: /backup ──────────────────────────────────────────────
     def _control_backup(self, tail: str, *, chat_key: str = "") -> str:
-        """Backup health: /backup status | verify.
+        """Backup health: /backup status | verify | key | key show.
 
-        Read-only. A full backup run needs a vault-configured
-        :class:`BackupCoordinator` (the encryption key lives in the vault,
-        never in chat), so runs stay with the scheduled backup job —
-        chat reports health and verifies what exists. The full restore
-        drill likewise needs the vault key and is not runnable from chat.
+        status/verify are read-only health.  ``key`` generates the
+        vault backup key the daily job needs and prints it ONCE for
+        the offline copy; ``key show`` prints the stored key for that
+        same copy.  The key is never stored anywhere but the vault and
+        the owner's offline copy — lose it and the backup is
+        unrecoverable, there is no reset.  A full backup run still
+        needs a vault-configured :class:`BackupCoordinator`, so runs
+        stay with the scheduled backup job.
         """
         from ...backup.manifest import (
             MANIFEST_NAME,
@@ -3622,11 +3625,16 @@ class RuntimeReachMixin:
         )
         from ...backup.verify import verify_database_file
 
-        verb = (tail or "").strip().split(None, 1)[0].lower() \
-            if (tail or "").strip() else "status"
+        parts = (tail or "").strip().split(None, 1)
+        verb = parts[0].lower() if parts else "status"
+        rest = parts[1] if len(parts) > 1 else ""
+        if verb == "key":
+            return self._control_backup_key(rest)
         if verb not in ("status", "verify"):
             return ("usage: /backup status — generations + latest manifest + DB integrity\n"
-                    "       /backup verify — integrity check + manifest file check")
+                    "       /backup verify — integrity check + manifest file check\n"
+                    "       /backup key — generate the vault backup key (shown ONCE, keep the offline copy)\n"
+                    "       /backup key show — print the stored key for the offline copy")
         backup_dir = self.context.settings.backup_dir
         gens: list[str] = []
         if backup_dir.is_dir():
@@ -3683,3 +3691,57 @@ class RuntimeReachMixin:
         else:
             lines.append("no backup generations to verify yet.")
         return "\n".join(lines)
+
+    def _control_backup_key(self, rest: str) -> str:
+        """Generate or show the vault backup key — /backup key [show].
+
+        The daily backup job fails without this key (2026-11-21: the
+        job paged every morning with ``BackupKeyError`` and the setup
+        path was unreachable from chat — the failure named Python
+        functions, not a command).  ``/backup key`` generates the key
+        on this box and stores it in the vault, printing the base64
+        ONCE for the offline copy.  It REFUSES when a key already
+        exists — rotating would orphan every existing generation.
+        ``/backup key show`` prints the stored key for that same
+        offline copy.  The key itself is never logged; the reply is
+        the owner's only copy of it.  Owner-only via the /backup
+        gating (caller_may_run) — the verb inherits it.
+        """
+        import base64
+
+        from ...accounts.vault import open_vault
+        from ...backup.errors import KEY_LOSS_WARNING, BackupKeyError
+        from ...backup.protect import (
+            generate_backup_key,
+            load_backup_key,
+            store_backup_key,
+        )
+
+        words = (rest or "").strip().split(None, 1)
+        show = bool(words) and words[0].lower() == "show"
+        vault = open_vault(self.context.db, context=self.context,
+                           actor="backup")
+        if show:
+            try:
+                key = load_backup_key(vault)
+            except BackupKeyError as exc:
+                return (f"no backup key in the vault ({exc}). Run "
+                        "/backup key to generate one.")
+            return ("stored backup key (base64) — keep the offline copy:\n"
+                    f"{base64.b64encode(key).decode('ascii')}\n"
+                    f"{KEY_LOSS_WARNING}")
+        try:
+            load_backup_key(vault)
+        except BackupKeyError:
+            pass  # absent — generate below
+        else:
+            return ("a backup key is already stored in the vault — "
+                    "refusing to generate a second one. Rotating would "
+                    "orphan every existing generation. Use /backup key "
+                    "show to print the stored key for your offline copy.")
+        key = generate_backup_key()
+        store_backup_key(vault, key)
+        return ("backup key generated and stored in the vault.\n"
+                "key (base64, shown ONCE — copy it now):\n"
+                f"{base64.b64encode(key).decode('ascii')}\n"
+                f"{KEY_LOSS_WARNING}")

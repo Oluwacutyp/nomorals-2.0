@@ -38,6 +38,7 @@ from __future__ import annotations
 import ast
 import importlib
 import re
+import time
 from pathlib import Path
 
 #: Modules with three or more silent-swallow sites get a finding.
@@ -193,14 +194,50 @@ def _tool_module_line(root: Path, name: str) -> int:
     return 1
 
 
+class SurveyFindings(list):
+    """A survey result that is also its own budget receipt.
+
+    A plain ``list`` subclass, so every caller that treats the
+    survey as a list keeps working.  ``partial`` is True when the
+    read+parse pass stopped on its deadline before covering the
+    whole tree (``surveyed_files`` of ``total_files``); a partial
+    survey's findings are real, just incomplete — the tick files
+    them and says so in its run record instead of pretending the
+    tree was fully covered.
+    """
+
+    def __init__(self, items: list[dict] | None = None, *,
+                 partial: bool = False, surveyed_files: int = 0,
+                 total_files: int = 0, seconds: float = 0.0) -> None:
+        super().__init__(items or [])
+        self.partial = partial
+        self.surveyed_files = surveyed_files
+        self.total_files = total_files
+        self.seconds = seconds
+
+
 def survey_repo(root: str | Path, *,
-                tool_modules: list[str] | None = None) -> list[dict]:
+                tool_modules: list[str] | None = None,
+                deadline_s: float | None = None) -> SurveyFindings:
     """Survey *root* and return ranked-ready findings.
 
     *root* is the repo root (the directory holding ``nomorals/``).
     Findings are dicts with ``id`` (stable), ``kind``, ``path``,
     ``line``, ``organ``, ``evidence`` and ``count``.
+
+    ``deadline_s`` bounds the read+parse pass: the survey stops
+    starting new files once the budget is spent and returns what it
+    found, flagged ``partial`` on the returned list (a plain ``list``
+    subclass, so every existing caller keeps working).  A survey with
+    no budget is how a scheduled tick wedged past the scheduler's
+    300s wall (2026-11-21: the live survey reads ~2,900 files and
+    the wall fired mid-walk in ``Path.open``) — callers that run
+    inside a capped job MUST pass one.
     """
+    started = time.monotonic()
+    deadline = (started + float(deadline_s)
+                if deadline_s is not None and float(deadline_s) > 0
+                else None)
     root = Path(root)
     pkg_root = root / "nomorals"
     files = sorted(p for p in pkg_root.rglob("*.py")
@@ -209,12 +246,16 @@ def survey_repo(root: str | Path, *,
     importers: dict[str, set[str]] = {}
     dotted_refs: set[str] = set()
     per_file: dict[Path, dict] = {}
+    surveyed = 0
     for path in files:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
         dotted = _dotted_name(root, path)
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
+        surveyed += 1
         dotted_refs.update(_DOTTED_REF_RE.findall(text))
         try:
             tree = ast.parse(text, filename=str(path))
@@ -235,7 +276,10 @@ def survey_repo(root: str | Path, *,
                 swallows += 1
         per_file[path] = {"dotted": dotted, "stubs": stubs,
                           "swallows": swallows, "entry": entry}
-    findings: list[dict] = []
+    findings: SurveyFindings = SurveyFindings(
+        [], partial=(surveyed < len(files)),
+        surveyed_files=surveyed, total_files=len(files),
+        seconds=round(time.monotonic() - started, 1))
     for path in files:
         info = per_file.get(path)
         if info is None:
@@ -322,6 +366,7 @@ def survey_repo(root: str | Path, *,
                              "the runtime"),
                 "count": 1,
             })
+    findings.seconds = round(time.monotonic() - started, 1)
     return findings
 
 

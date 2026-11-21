@@ -18,6 +18,7 @@ single tick for cron.
 from __future__ import annotations
 
 import contextlib
+import os
 import time
 from typing import Any
 
@@ -30,8 +31,27 @@ WATCH_LOOP_TOOL = "__watch_loop_tick__"
 #: only; the scheduler tool runs one tick per job fire.
 WATCH_LOOP_SPEC = "every 5m"
 
+#: Tick wall budget (seconds): the whole sweep must finish inside the
+#: scheduler's 300s job wall.  A tick with no budget wedged past the
+#: wall on 2026-11-21 (300s in a Condition wait) and the abandoned
+#: worker kept running behind the next tick.  Partial beats wedged:
+#: the tick returns what it finished and says so.
+DEFAULT_TICK_BUDGET_S = 240.0
+
+
+def watch_tick_budget() -> float:
+    """Tick wall budget in seconds from NM_WATCH_TICK_BUDGET_S."""
+    try:
+        value = float(os.environ.get("NM_WATCH_TICK_BUDGET_S", "") or 0)
+    except ValueError:
+        value = 0.0
+    if value <= 0:
+        return DEFAULT_TICK_BUDGET_S
+    return min(290.0, max(60.0, value))
+
 __all__ = ["WatchLoop", "WATCH_LOOP_JOB", "WATCH_LOOP_TOOL",
-           "WATCH_LOOP_SPEC", "ensure_watch_loop_job"]
+           "WATCH_LOOP_SPEC", "ensure_watch_loop_job",
+           "watch_tick_budget"]
 
 
 class WatchLoop:
@@ -44,31 +64,57 @@ class WatchLoop:
         self.heal_background = heal_background
         self.ticks = 0
 
-    def tick(self) -> dict[str, Any]:
-        """One sweep of everything the operator would check by hand."""
+    def tick(self, *, deadline_s: float | None = None) -> dict[str, Any]:
+        """One sweep of everything the operator would check by hand.
+
+        ``deadline_s`` bounds the whole sweep (default
+        :func:`watch_tick_budget`): the deadline is checked BETWEEN
+        steps, so a wedged step can still eat the wall — but the tick
+        never STARTS a step it cannot finish, and a partial report
+        (``partial: True``) beats an abandoned worker.  Every step
+        stays best-effort; the deadline is what keeps the tick inside
+        the scheduler's 300s job wall.
+        """
         from .notifier import Notifier
         from .ops_alerts import ops_alerts
         from .reasoning import ReasoningAgent
 
+        budget = (float(deadline_s) if deadline_s is not None
+                  and float(deadline_s) > 0 else watch_tick_budget())
+        deadline = time.monotonic() + budget
+        partial = False
+
+        def _out_of_time() -> bool:
+            return time.monotonic() >= deadline
+
         report = ops_alerts(self.context, heal_background=self.heal_background)
         redelivered = 0
-        try:
-            redelivered = Notifier(self.context).redeliver()
-        except Exception:  # noqa: BLE001 - delivery is best-effort
-            pass
+        if _out_of_time():
+            partial = True
+        else:
+            try:
+                redelivered = Notifier(self.context).redeliver()
+            except Exception:  # noqa: BLE001 - delivery is best-effort
+                pass
         mined = 0
-        try:
-            mined = len(ReasoningAgent(self.context).mine_preventions())
-        except Exception:  # noqa: BLE001 - learning is best-effort
-            pass
+        if _out_of_time():
+            partial = True
+        else:
+            try:
+                mined = len(ReasoningAgent(self.context).mine_preventions())
+            except Exception:  # noqa: BLE001 - learning is best-effort
+                pass
         workspace = ""
-        try:
-            ws = getattr(self.context, "workspace", None)
-            if ws is not None:
-                workspace = ws.summary_line()
-                ws.autoscale_tick()
-        except Exception:  # noqa: BLE001 - the farm report is best-effort
-            pass
+        if _out_of_time():
+            partial = True
+        else:
+            try:
+                ws = getattr(self.context, "workspace", None)
+                if ws is not None:
+                    workspace = ws.summary_line()
+                    ws.autoscale_tick()
+            except Exception:  # noqa: BLE001 - the farm report is best-effort
+                pass
         self.ticks += 1
         return {
             "tick": self.ticks,
@@ -81,6 +127,8 @@ class WatchLoop:
             "mined": mined,
             "pending": report.get("pending", 0),
             "workspace": workspace,
+            "partial": partial,
+            "deadline_s": budget,
         }
 
     @staticmethod
@@ -143,14 +191,38 @@ def ensure_watch_loop_job(scheduler: Any, *,
                 job_spec = (job.get("spec") if isinstance(job, dict)
                             else getattr(job, "spec", None))
                 if job_spec == spec:
+                    _reconcile_overlap_skip(scheduler, job)
                     return job
                 with contextlib.suppress(Exception):
                     job_id = (job.get("id") if isinstance(job, dict)
                               else getattr(job, "id", None))
                     scheduler.remove(job_id)
                 break
-        return scheduler.add(WATCH_LOOP_JOB, spec, "tool",
-                             {"tool": WATCH_LOOP_TOOL, "args": {}},
-                             routine=True)
+        job = scheduler.add(WATCH_LOOP_JOB, spec, "tool",
+                            {"tool": WATCH_LOOP_TOOL, "args": {}},
+                            routine=True, overlap_policy="skip")
+        # add() is idempotent by exact replay: an existing row at the
+        # same spec comes back deduped carrying its OLD policy — the
+        # skip must be reconciled onto persisted rows too (2026-11-19
+        # stall: the news poll kept "concurrent" and stacked a second
+        # ghost behind the first).
+        _reconcile_overlap_skip(scheduler, job)
+        return job
     except Exception:  # noqa: BLE001 - scheduling is best-effort
         return None
+
+
+def _reconcile_overlap_skip(scheduler: Any, job: Any) -> None:
+    """Force a persisted job row onto ``overlap_policy=skip``.
+
+    Best-effort, never raises.  A tick that wedges past the 300s wall
+    must not stack a second worker behind the abandoned first one.
+    """
+    try:
+        row = job if isinstance(job, dict) else None
+        if row is None:
+            return
+        if (row.get("overlap_policy") or "concurrent") != "skip":
+            scheduler.set_overlap_policy(row["id"], "skip")
+    except Exception:  # noqa: BLE001 - reconciliation is best-effort
+        pass

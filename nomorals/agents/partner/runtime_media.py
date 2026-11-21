@@ -916,6 +916,29 @@ class RuntimeMediaMixin:
                         op_id=new_short_id("dl"), title=rest)
                     _play_tracker.set_stage(
                         SEARCHING, note="looking for the track")
+                if action == "play" and chat is not None:
+                    # ACK FIRST (2026-11-21 wedge): the chat path used
+                    # to run resolve() + the full candidate sweep
+                    # SYNCHRONOUSLY before the first ack — two
+                    # sequential full-chain sweeps, 30s HTTP legs and
+                    # 120s yt-dlp legs, no budget — so /play took
+                    # minutes to even get processed.  The ack goes out
+                    # now, on the owner's own words; the resolve +
+                    # sweep + send run on the background worker behind
+                    # it (:meth:`_play_resolve_and_send`), and the ack
+                    # is edited to the outcome.  The pick-list path
+                    # above (vague query) already returned; the add
+                    # action and the CLI path keep the synchronous
+                    # flow below — they need the queue receipt, not a
+                    # download.
+                    return self._play_download_bg(
+                        chat, chat_key, f"⏳ {rest}",
+                        lambda: self._play_resolve_and_send(
+                            engine, search_q, rest, title_q, artist_q,
+                            chat,
+                            sweep=(not _is_urlish and not _is_pathish)),
+                        title=rest, tracker=_play_tracker,
+                        claim_key=claim_key)
                 resolution = SourceResolver(self.context).resolve(search_q)
                 if not resolution.ok:
                     # Step 6: never a dead end — tried + why + hint via
@@ -953,108 +976,11 @@ class RuntimeMediaMixin:
                 out = (f"queued {len(added)} (queue {queue_len}):\n"
                        + "\n".join(f"  - {a.get('title') or a['path']}"
                                    for a in added))
-                # Chat context: SEND the audio file instead of local mpv.
-                # Nobody hears the server's speakers — the user gets the track.
-                # Text query, single track: download fall-through across
-                # ALL candidates.  A search-ok source whose download
-                # fails is a download failure, not success — keep
-                # trying until one both finds AND downloads.  The
-                # helper renders the full tried-list, so don't append
-                # the resolver's partial list here.
-                if (action == "play" and chat is not None
-                        and not _is_urlish and not _is_pathish
-                        and not resolution.extra_tracks):
-                    try:
-                        from ...media.resolver import SourceResolver
-                        cands, detailed = SourceResolver(
-                            self.context).search_candidates_detailed(
-                                search_q)
-                    except Exception as e:
-                        record_failure("runtime_media.RuntimeMediaMixin._control_play:654", e)
-                        cands, detailed = [], []
-                    fallbacks = [
-                        {"kind": c.kind, "path": c.path_or_url,
-                         "title": c.title or c.path_or_url,
-                         "artist": c.artist or "",
-                         "duration": c.duration or 0.0,
-                         "downloadable": c.downloadable,
-                         "block_reason": str(
-                             getattr(c, "block_reason", "") or ""),
-                         "preview_only": bool(
-                             getattr(c, "preview_only", False))}
-                        for c in (cands or [])]
-                    # The chain winner can carry the raw search query
-                    # as its "title" (the YouTube search strategies do
-                    # this) — the candidate sweep has the SAME track
-                    # with its real metadata; prefer it, so nothing
-                    # downstream ever displays or delivers the query
-                    # text as if it were the track's name.
-                    first_item = dict(added[0])
-                    for c in (cands or []):
-                        if c.kind == first_item.get("kind") \
-                                and c.path_or_url == first_item.get("path"):
-                            cur = str(first_item.get("title") or "")
-                            if c.title and (not cur
-                                            or cur.strip().lower() in (
-                                                search_q.strip().lower(),
-                                                rest.strip().lower())):
-                                first_item["title"] = c.title
-                            if c.artist and not first_item.get("artist"):
-                                first_item["artist"] = c.artist
-                            break
-                    # The chain verdict rides onto the first item: a
-                    # found-but-blocked resolution (protected streams,
-                    # metadata — or a PREVIEW) must not be attempted
-                    # as if it were downloadable.
-                    first_item["downloadable"] = resolution.downloadable
-                    first_item["block_reason"] = str(
-                        getattr(resolution, "block_reason", "") or "")
-                    first_item["preview_only"] = bool(
-                        getattr(resolution, "preview_only", False))
-                    merged = self._merge_search_attempts(
-                        resolution.attempts, detailed)
-                    # ── preview gate ────────────────────────────────
-                    # The best every source has is a 30s preview and
-                    # no full-track candidate exists: do NOT queue a
-                    # download job for a preview-grade candidate.
-                    # Drop the queue row, log the trail, and say the
-                    # honest thing in plain words.
-                    if self._play_is_preview_item(first_item) \
-                            and not any(
-                                fb.get("downloadable") is not False
-                                and not self._play_is_preview_item(fb)
-                                for fb in fallbacks):
-                        self._play_log_tried(merged)
-                        self._drop_matching_queued(engine, first_item)
-                        return self._play_preview_line(first_item)
-                    ack_name = str(first_item.get("title") or "")
-                    if not ack_name or ack_name.strip().lower() in (
-                            search_q.strip().lower(),
-                            rest.strip().lower()):
-                        # The chain winner still carries the raw
-                        # query as its "title" — the ack uses the
-                        # owner's own words, not a queue receipt.
-                        ack_name = rest
-                    return self._play_download_bg(
-                        chat, chat_key, f"⏳ {ack_name}",
-                        lambda: self._play_send_with_fallthrough(
-                            engine, first_item, fallbacks, merged,
-                            chat, match=(title_q, artist_q), query=rest),
-                        title=str(added[0].get("title") or "audio"),
-                        tracker=_play_tracker, claim_key=claim_key)
                 # The tried trail goes to the journal only
                 # (presentation law, 2026-11-05) — attempts record
                 # every strategy in order (failed + the winner), and
                 # the durable copy is the log, never a chat receipt.
                 self._play_log_tried(resolution.attempts)
-                if action == "play" and chat is not None:
-                    play_title = str(added[0].get("title") or "")
-                    return self._play_download_bg(
-                        chat, chat_key, f"⏳ {play_title or 'audio'}",
-                        lambda: self._play_send_in_chat_result(
-                            engine, added[0], chat),
-                        title=play_title, tracker=_play_tracker,
-                        claim_key=claim_key)
                 if action == "play":
                     st = engine.play()
                     if st.get("status") == "playing":
@@ -3231,6 +3157,159 @@ class RuntimeMediaMixin:
         except Exception as exc:  # noqa: BLE001
             return (f"had the file but couldn't send it: {exc} "
                     f"(it's saved on the server at {path})")
+
+    def _play_dl_relabel_current_job(self, title: str) -> None:
+        """Relabel the running play-download job with the resolved title.
+
+        The ack-first branch (2026-11-21 wedge) registers the job
+        under the raw query — the resolved title is unknown until the
+        worker resolves.  The duplicate guard, ``/download cancel``,
+        the harvester and job lookups all key on the title label, so
+        the worker relabels its own job once the resolve lands.
+        Best-effort: never raises, no-op outside a job.
+        """
+        try:
+            from ...core.jobs import current_job
+
+            job = current_job()
+            if job is None:
+                return
+            with job.lock:
+                job.labels["title"] = (title or "")[:80]
+        except Exception:
+            pass
+
+    def _play_resolve_and_send(self, engine: Any, search_q: str,
+                               rest: str, title_q: str, artist_q: str,
+                               chat: Any, *, sweep: bool = True
+                               ) -> tuple[str, bool]:
+        """Background body for a chat /play — resolve + sweep + send.
+
+        Runs on the download job's worker thread, behind the ack the
+        chat thread already sent (:meth:`_control_play`'s ack-first
+        branch).  The resolve + candidate sweep used to run
+        synchronously on the chat thread before the first ack — two
+        sequential full-chain sweeps — so /play took minutes to even
+        get processed (2026-11-21).  Returns ``(text, sent)`` for the
+        ack edit: the delivered item's line, or the honest failure.
+        Never raises.
+        """
+        from ...media.resolver import SourceResolver
+
+        resolution = SourceResolver(self.context).resolve(search_q)
+        if not resolution.ok:
+            # Never a dead end — tried + why + hint via PlayService
+            # (pure formatting, no extra network).
+            try:
+                from ...media.play_service import PlayService
+                detail = PlayService(
+                    self.context).explain_failure(resolution)
+                # explain_failure already includes "hint: ..." —
+                # appending resolution.hint again would print the
+                # hint body twice.
+                hint = ""
+            except Exception as e:
+                record_failure("runtime_media.RuntimeMediaMixin._play_resolve_and_send", e)
+                detail = ("tried: "
+                          + ("; ".join(resolution.attempts)
+                             or "no strategies"))
+                hint = (f"\n{resolution.hint}"
+                        if resolution.hint else "")
+            msg = f"couldn't find {rest[:80]!r} —\n{detail}{hint}"
+            if chat is not None:
+                # Chat users are on phones: the resolver's full
+                # yt-dlp command dump is not actionable there —
+                # shorten to the /cookies pointer.
+                from ...media.cookies import BOT_COOKIE_HELP as _FULL_HELP
+                from ...media.cookies import BOT_COOKIE_SHORT_HELP as _SHORT_HELP
+                msg = msg.replace(_FULL_HELP, _SHORT_HELP)
+            return msg, False
+        # The job was registered under the raw query; the lookups key
+        # on the resolved title — relabel now that it is known.
+        self._play_dl_relabel_current_job(resolution.title or rest)
+        added = []
+        for r in (resolution, *resolution.extra_tracks):
+            added.append(engine._enqueue(
+                r.path_or_url, r.kind, r.title or r.path_or_url,
+                artist=r.artist, duration=r.duration))
+        if not sweep or resolution.extra_tracks:
+            # URL/path, or an album/playlist hit: the first track
+            # goes out the same way the URL/path path sends it — no
+            # candidate sweep (a URL is already the answer).
+            self._play_log_tried(resolution.attempts)
+            return self._play_send_in_chat_result(engine, added[0], chat)
+        # Text query, single track: download fall-through across ALL
+        # candidates.  A search-ok source whose download fails is a
+        # download failure, not success — keep trying until one both
+        # finds AND downloads.  The helper renders the full
+        # tried-list, so don't append the resolver's partial list here.
+        try:
+            cands, detailed = SourceResolver(
+                self.context).search_candidates_detailed(search_q)
+        except Exception as e:
+            record_failure("runtime_media.RuntimeMediaMixin._play_resolve_and_send.sweep", e)
+            cands, detailed = [], []
+        fallbacks = [
+            {"kind": c.kind, "path": c.path_or_url,
+             "title": c.title or c.path_or_url,
+             "artist": c.artist or "",
+             "duration": c.duration or 0.0,
+             "downloadable": c.downloadable,
+             "block_reason": str(
+                 getattr(c, "block_reason", "") or ""),
+             "preview_only": bool(
+                 getattr(c, "preview_only", False))}
+            for c in (cands or [])]
+        # The chain winner can carry the raw search query as its
+        # "title" (the YouTube search strategies do this) — the
+        # candidate sweep has the SAME track with its real metadata;
+        # prefer it, so nothing downstream ever displays or delivers
+        # the query text as if it were the track's name.
+        first_item = dict(added[0])
+        for c in (cands or []):
+            if c.kind == first_item.get("kind") \
+                    and c.path_or_url == first_item.get("path"):
+                cur = str(first_item.get("title") or "")
+                if c.title and (not cur
+                                or cur.strip().lower() in (
+                                    search_q.strip().lower(),
+                                    rest.strip().lower())):
+                    first_item["title"] = c.title
+                if c.artist and not first_item.get("artist"):
+                    first_item["artist"] = c.artist
+                break
+        # The chain verdict rides onto the first item: a
+        # found-but-blocked resolution (protected streams,
+        # metadata — or a PREVIEW) must not be attempted
+        # as if it were downloadable.
+        first_item["downloadable"] = resolution.downloadable
+        first_item["block_reason"] = str(
+            getattr(resolution, "block_reason", "") or "")
+        first_item["preview_only"] = bool(
+            getattr(resolution, "preview_only", False))
+        merged = self._merge_search_attempts(
+            resolution.attempts, detailed)
+        # The sweep may have refined the title (the chain winner can
+        # carry the raw query as its "title") — relabel again so the
+        # job, the cancel verb and the harvester all name the track.
+        self._play_dl_relabel_current_job(
+            str(first_item.get("title") or rest))
+        # ── preview gate ────────────────────────────────────────
+        # The best every source has is a 30s preview and no
+        # full-track candidate exists: do NOT queue a download job
+        # for a preview-grade candidate.  Drop the queue row, log the
+        # trail, and say the honest thing in plain words.
+        if self._play_is_preview_item(first_item) \
+                and not any(
+                    fb.get("downloadable") is not False
+                    and not self._play_is_preview_item(fb)
+                    for fb in fallbacks):
+            self._play_log_tried(merged)
+            self._drop_matching_queued(engine, first_item)
+            return self._play_preview_line(first_item), False
+        return self._play_send_with_fallthrough(
+            engine, first_item, fallbacks, merged,
+            chat, match=(title_q, artist_q), query=rest)
 
     def _play_send_in_chat_result(self, engine: Any, item: dict[str, Any],
                                   chat: Any, *,

@@ -415,13 +415,18 @@ class JobsTests(unittest.TestCase):
         added: list[tuple[str, str, str, dict]] = []
 
         class _Scheduler:
+            # Mirrors the real Scheduler.add signature, including
+            # ``overlap_policy`` (scheduler.py) — the relay ensure
+            # registers overlap skip, so a fake without it would fail
+            # the registration instead of testing it.
             def list_jobs(self) -> list:
                 return []
 
             def add(self, name: str, spec: str, kind: str,
-                    payload: dict) -> dict:
+                    payload: dict, overlap_policy: str = "concurrent"
+                    ) -> dict:
                 added.append((name, spec, kind, payload))
-                return {"name": name}
+                return {"name": name, "overlap_policy": overlap_policy}
 
         job = relay_jobs.ensure_ticket_relay_job(_Scheduler())
         self.assertIsNotNone(job)

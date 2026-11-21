@@ -58,7 +58,29 @@ __all__ = [
     "YT_DLP_HINT",
     "ytdlp_available",
     "ensure_ytdlp",
+    "resolver_budget",
 ]
+
+#: Chain budget (seconds): a resolve or a candidate sweep stops
+#: STARTING new sources once this is spent.  Without it the chat path
+#: ran two sequential full-chain sweeps synchronously before the first
+#: ack — each strategy's HTTP call up to 30s, yt-dlp legs 120s — so
+#: /play took minutes to even get processed (2026-11-21).  The budget
+#: bounds the start of new sources; a source already running finishes
+#: (its own 30s/120s timeout still applies), and the truncation is
+#: recorded in the attempt trail (``ResolvedAudio.truncated``).
+DEFAULT_RESOLVER_BUDGET_S = 60.0
+
+
+def resolver_budget() -> float:
+    """Chain budget in seconds from NM_RESOLVER_BUDGET_S."""
+    try:
+        value = float(os.environ.get("NM_RESOLVER_BUDGET_S", "") or 0)
+    except ValueError:
+        value = 0.0
+    if value <= 0:
+        return DEFAULT_RESOLVER_BUDGET_S
+    return min(280.0, max(10.0, value))
 
 
 #: Install hint, single-sourced from cookies.py (official yt-dlp docs) —
@@ -225,6 +247,10 @@ class ResolvedAudio:
     #: pickable, never deliverable — see sources.PREVIEW_ONLY_SOURCES.
     preview_only: bool = False
     extra_tracks: list["ResolvedAudio"] = field(default_factory=list)
+    #: True when the chain/sweep stopped on its budget before trying
+    #: every source — the result is real, just incomplete.  Callers
+    #: that report "tried everything" must check this first.
+    truncated: bool = False
 
 
 class SourceResolver:
@@ -519,8 +545,14 @@ class SourceResolver:
 
     # ── public API ────────────────────────────────────────────────────
 
-    def resolve(self, query: Any) -> ResolvedAudio:
-        """Resolve anything playable.  Never raises."""
+    def resolve(self, query: Any, *,
+                budget_s: float | None = None) -> ResolvedAudio:
+        """Resolve anything playable.  Never raises.
+
+        ``budget_s`` bounds the whole chain (default
+        :func:`resolver_budget`): no NEW strategy starts once the
+        budget is spent, and the truncation is recorded on the result.
+        """
         result = ResolvedAudio()
         q = query.strip() if isinstance(query, str) else ""
         if not q:
@@ -528,19 +560,23 @@ class SourceResolver:
             result.errors.append("empty query")
             result.hint = "usage: /play <song title, file path, or URL>"
             return result
+        budget = (float(budget_s) if budget_s is not None
+                  and float(budget_s) > 0 else resolver_budget())
+        deadline = time.monotonic() + budget
         try:
             if self._is_url(q):
-                return self._resolve_url(q, result)
+                return self._resolve_url(q, result, deadline=deadline)
             if self._is_path_like(q):
                 self._run_chain(
                     result, [("local-file",
-                              lambda: self._s_local_file(q))])
+                              lambda: self._s_local_file(q))],
+                    deadline=deadline)
                 if result.ok:
                     return result
                 # Not actually a file — fall through to text search,
                 # keeping the attempt log so the report stays truthful.
                 result.ok = False
-            return self._resolve_text(q, result)
+            return self._resolve_text(q, result, deadline=deadline)
         except Exception as exc:  # noqa: BLE001 — resolve() never raises
             result.errors.append(f"resolver crashed: {exc}")
             _log.warning("SourceResolver.resolve crashed on %r: %s",
@@ -561,7 +597,8 @@ class SourceResolver:
         out, _attempts = self.search_candidates_detailed(query, limit=limit)
         return out
 
-    def search_candidates_detailed(self, query: str, limit: int = 8
+    def search_candidates_detailed(self, query: str, limit: int = 8,
+                                   *, budget_s: float | None = None
                                    ) -> tuple[list[ResolvedAudio],
                                               list[str]]:
         """Same candidate sweep as :meth:`search_candidates`, plus the
@@ -579,12 +616,20 @@ class SourceResolver:
         download failed is a *download* failure, not success, and the
         reply must list EVERY source actually tried — not just the
         ones the first-ok chain reached.  Never raises.
+
+        ``budget_s`` bounds the sweep (default
+        :func:`resolver_budget`): no NEW source starts once the budget
+        is spent, and the truncation is recorded as an attempt entry
+        instead of pretending every source was tried.
         """
         out: list[ResolvedAudio] = []
         attempts: list[str] = []
         q = (query or "").strip()
         if not q:
             return out, attempts
+        budget = (float(budget_s) if budget_s is not None
+                  and float(budget_s) > 0 else resolver_budget())
+        deadline = time.monotonic() + budget
         limit = max(1, min(int(limit or 8), 25))
         # MP3.pm first among the remote sources (owner order
         # 2026-11-19 — see MUSIC_SEARCH_SOURCES), regional blogs
@@ -640,6 +685,11 @@ class SourceResolver:
             fns = [(name, fn) for name, fn, _d in items]
         descs = {name: desc for name, _fn, desc in items}
         for name, fn in fns:
+            if time.monotonic() >= deadline:
+                attempts.append(
+                    "chain budget — stopped: deadline reached, "
+                    "later sources not tried")
+                break
             desc = descs.get(name)
             t0 = time.perf_counter()
             try:
@@ -1003,7 +1053,8 @@ class SourceResolver:
     # ── chain machinery ───────────────────────────────────────────────
 
     def _run_chain(self, result: ResolvedAudio,
-                   strategies: list[tuple[str, Callable[[], ResolvedAudio]]]
+                   strategies: list[tuple[str, Callable[[], ResolvedAudio]]],
+                   *, deadline: float | None = None
                    ) -> ResolvedAudio:
         """Try each strategy in order; first DOWNLOADABLE success wins.
 
@@ -1018,9 +1069,20 @@ class SourceResolver:
         non-downloadable hit is returned (found-but-blocked) with the
         full attempt log, so the caller can explain what was found and
         why it can't be delivered instead of "couldn't find".
+
+        ``deadline`` (a ``time.monotonic()`` stamp) stops STARTING new
+        strategies once the budget is spent: the truncation is recorded
+        in the attempt trail and on ``result.truncated`` instead of
+        pretending every source was tried.
         """
         first_blocked: ResolvedAudio | None = None
         for name, fn in strategies:
+            if deadline is not None and time.monotonic() >= deadline:
+                result.truncated = True
+                result.attempts.append(
+                    "chain budget — stopped: deadline reached, "
+                    "later sources not tried")
+                break
             try:
                 out = fn()
             except ResolutionError as exc:
@@ -1114,7 +1176,8 @@ class SourceResolver:
 
     # ── URL path ──────────────────────────────────────────────────────
 
-    def _resolve_url(self, url: str, result: ResolvedAudio) -> ResolvedAudio:
+    def _resolve_url(self, url: str, result: ResolvedAudio, *,
+                     deadline: float | None = None) -> ResolvedAudio:
         low = url.lower()
         if low.startswith("spotify:") or "open.spotify.com" in low \
                 or "play.spotify.com" in low:
@@ -1122,7 +1185,8 @@ class SourceResolver:
             # and honestly, never through extraction.
             out = self._run_chain(
                 result, [("spotify-link",
-                          lambda: self._s_spotify_url(url))])
+                          lambda: self._s_spotify_url(url))],
+                deadline=deadline)
             self._record_url_outcome(url, out)
             return out
         # One uniform chain for every URL.  yt-dlp routes dynamically;
@@ -1133,7 +1197,7 @@ class SourceResolver:
             ("soundcloud-api", lambda: self._s_soundcloud_url(url)),
             ("yt-dlp", lambda: self._s_ytdlp_url(url)),
             ("direct-url", lambda: self._s_direct_url(url)),
-        ])
+        ], deadline=deadline)
         self._record_url_outcome(url, out)
         return out
 
@@ -1162,7 +1226,8 @@ class SourceResolver:
             pass
 
     def _resolve_text(self, query: str,
-                      result: ResolvedAudio) -> ResolvedAudio:
+                      result: ResolvedAudio, *,
+                      deadline: float | None = None) -> ResolvedAudio:
         # MANY sources, in chain order (see MUSIC_SEARCH_SOURCES).
         # Downloadable/full-track sources first; MP3.pm and the
         # MP3Juice mirror first among the remote sources (owner
@@ -1238,7 +1303,7 @@ class SourceResolver:
         # exactly the list above, in this order.
         reg = self._registry()
         if reg is None:
-            return self._run_chain(result, strategies)
+            return self._run_chain(result, strategies, deadline=deadline)
         items: list[tuple[str, Any, Any]] = []
         for name, fn in strategies:
             desc = self._desc_for_strategy(reg, name)
@@ -1252,7 +1317,8 @@ class SourceResolver:
                 desc))
         ordered = self._order_music(reg, items)
         return self._run_chain(
-            result, [(name, fn) for name, fn, _desc in ordered])
+            result, [(name, fn) for name, fn, _desc in ordered],
+            deadline=deadline)
 
     def _s_blog_search(self, query: str, cls_name: str,
                        kind: str) -> ResolvedAudio:

@@ -41,6 +41,7 @@ from .plan import REPO_NAME
 from .policy import prune_github_releases, prune_local, select_keepers
 from .protect import load_backup_key, protect_snapshot
 from .report import (
+    clear_backup_failure_streak,
     report_backup_failure,
     report_backup_result,
 )
@@ -207,11 +208,20 @@ class BackupCoordinator:
         return load_backup_key(self.vault)
 
     def run_backup(self, *, label: str = "", prune: bool = True) -> dict[str, Any]:
-        """Run one full generation. Returns the result dict; never silent."""
+        """Run one full generation. Returns the result dict; never silent.
+
+        The encryption key is checked FIRST, before the snapshot: a
+        run with no key used to take the whole snapshot and only then
+        die on ``BackupKeyError`` (2026-11-21: the daily job did the
+        expensive half of the work every morning and failed anyway).
+        A missing key is a setup state, not a snapshot failure — fail
+        fast, before any work, with the key error naming the fix.
+        """
+        # Fail fast on the precondition: no key, no snapshot.
+        key = self._key()
         snapshot = take_snapshot(self.root, self.work_dir, label=label)
         backup_id = snapshot.backup_id
         try:
-            key = self._key()
             out_dir = Path(self.work_dir) / backup_id / "protected"
             protected = protect_snapshot(snapshot, out_dir, key)
             manifest = build_manifest(
@@ -269,11 +279,13 @@ class BackupCoordinator:
             if prune:
                 self._prune_local()
             report_backup_result(self.notifier, result)
+            clear_backup_failure_streak(self.work_dir)
             return result
         except DiskFullError:
             raise
         except Exception as exc:  # noqa: BLE001 - report, then re-raise typed
-            report_backup_failure(self.notifier, backup_id, exc)
+            report_backup_failure(self.notifier, backup_id, exc,
+                                  state_dir=self.work_dir)
             raise
 
     def _ship_current(

@@ -79,6 +79,37 @@ def arena_dedupe_days() -> int:
     return min(90, value)
 
 
+#: Tick wall budget (seconds): the whole cycle — survey + SOTA +
+#: filing — must finish inside the scheduler's 300s job wall, with
+#: room for the filing and the notify.  A tick with no budget wedged
+#: past the wall on 2026-11-21 (the survey alone reads ~2,900 files).
+DEFAULT_TICK_BUDGET_S = 240.0
+#: Survey share of the tick budget (seconds).
+DEFAULT_SURVEY_BUDGET_S = 120.0
+
+
+def arena_tick_budget() -> float:
+    """Tick wall budget in seconds from NM_ARENA_TICK_BUDGET_S."""
+    try:
+        value = float(os.environ.get("NM_ARENA_TICK_BUDGET_S", "") or 0)
+    except ValueError:
+        value = 0.0
+    if value <= 0:
+        return DEFAULT_TICK_BUDGET_S
+    return min(290.0, max(60.0, value))
+
+
+def arena_survey_budget() -> float:
+    """Survey share of the tick budget, NM_ARENA_SURVEY_BUDGET_S."""
+    try:
+        value = float(os.environ.get("NM_ARENA_SURVEY_BUDGET_S", "") or 0)
+    except ValueError:
+        value = 0.0
+    if value <= 0:
+        return DEFAULT_SURVEY_BUDGET_S
+    return min(240.0, max(10.0, value))
+
+
 def _store_for(context: Any) -> ArenaResearcherStore:
     home = None
     try:
@@ -150,17 +181,25 @@ class ArenaResearcher:
         return loop_gates(self.context)
 
     # ── SOTA mining (existing pipeline, never a second one) ─────────
-    def _mine_sota(self, organs: list[str]) -> tuple[bool, int, dict[str, str]]:
+    def _mine_sota(self, organs: list[str], *,
+                   deadline: float | None = None
+                   ) -> tuple[bool, int, dict[str, str]]:
         """Mine state of the art for *organs* via ResearchPipeline.
 
         Returns (mined_ok, claim_count, organ -> best claim text).
         A pipeline failure degrades to no SOTA, never a failed cycle.
+        ``deadline`` (a ``time.monotonic()`` stamp) stops starting new
+        organs once the tick's budget is spent — one organ's research
+        is unbounded network + model work, and two of them already
+        filled the tick's wall on 2026-11-21.
         """
         from ..research_digest import ResearchPipeline
 
         claims_by_organ: dict[str, str] = {}
         total = 0
         for organ in organs[:self.sota_organs]:
+            if deadline is not None and time.monotonic() >= deadline:
+                break
             try:
                 result = ResearchPipeline.run(
                     f"state of the art in {organ} 2026",
@@ -196,6 +235,10 @@ class ArenaResearcher:
             "sota_mined": False,
             "sota_claims": 0,
             "notified": False,
+            "partial": False,
+            "survey_partial": False,
+            "surveyed_files": 0,
+            "total_files": 0,
             "error": "",
         }
         gates_ok, reason = self._gates()
@@ -204,11 +247,24 @@ class ArenaResearcher:
             record["finished_at"] = time.time()
             self._store.record_run(record)
             return record
+        # The tick's own wall budget: the scheduler abandons the
+        # worker at 300s and the ghost keeps reading while the next
+        # tick starts a second survey.  Survey + SOTA + filing must
+        # finish inside the budget, partial rather than wedged.
+        tick_deadline = time.monotonic() + arena_tick_budget()
         try:
             from ..research_digest import repo_root
 
             root = self.repo_root or repo_root()
-            findings = survey_repo(root)
+            findings = survey_repo(root,
+                                   deadline_s=arena_survey_budget())
+            record["survey_partial"] = bool(
+                getattr(findings, "partial", False))
+            record["partial"] = record["survey_partial"]
+            record["surveyed_files"] = int(
+                getattr(findings, "surveyed_files", 0))
+            record["total_files"] = int(
+                getattr(findings, "total_files", 0))
             findings = [f for f in findings
                         if verify_anchor(root, f["path"], f["line"])]
             ranked = rank_findings(findings)
@@ -219,7 +275,8 @@ class ArenaResearcher:
             for f in ranked:
                 if f.get("organ") not in organs:
                     organs.append(str(f.get("organ") or "general"))
-            sota_ok, sota_count, sota_text = self._mine_sota(organs)
+            sota_ok, sota_count, sota_text = self._mine_sota(
+                organs, deadline=tick_deadline)
             record["sota_mined"] = sota_ok
             record["sota_claims"] = sota_count
             from ..upgrade_queue import UpgradePipeline
@@ -294,6 +351,7 @@ def ensure_arena_researcher_job(context: Any) -> dict[str, Any]:
     except Exception:  # noqa: BLE001 — scheduler table may not exist yet
         have = []
     if have and have[0].get("spec") == want:
+        _reconcile_overlap_skip(sched, have[0])
         return {"name": ARENA_RESEARCHER_JOB, "already_scheduled": True,
                 "job_id": have[0].get("id"), "interval_hours": hours}
     for j in have:  # stale interval -> replace
@@ -304,9 +362,30 @@ def ensure_arena_researcher_job(context: Any) -> dict[str, Any]:
                            exc)
     job = sched.add(ARENA_RESEARCHER_JOB, f"every {hours:g}h", "tool",
                     {"tool": "arena_researcher",
-                     "args": {"action": "tick"}})
+                     "args": {"action": "tick"}},
+                    overlap_policy="skip")
+    # add() is idempotent by exact replay: an existing row at the same
+    # spec comes back deduped, carrying its OLD policy — reconcile it
+    # so the skip lands on persisted rows too, not just fresh ones.
+    _reconcile_overlap_skip(sched, job)
     return {"name": ARENA_RESEARCHER_JOB, "scheduled": True,
             "job_id": job.get("id"), "interval_hours": hours}
+
+
+def _reconcile_overlap_skip(sched: Any, row: dict[str, Any]) -> None:
+    """Force a persisted job row onto ``overlap_policy=skip``.
+
+    ``add()`` only sets the policy on a FRESH row, so a job registered
+    months ago as ``concurrent`` keeps stacking a second worker behind
+    a wedged first one forever (2026-11-19 stall: the news poll kept
+    ``concurrent`` and went 1 → 2 abandoned workers).  Best-effort:
+    never raises — a stale policy is a finding, not a crash.
+    """
+    try:
+        if (row.get("overlap_policy") or "concurrent") != "skip":
+            sched.set_overlap_policy(row["id"], "skip")
+    except Exception:  # noqa: BLE001 - reconciliation is best-effort
+        pass
 
 
 def status(context: Any) -> dict[str, Any]:

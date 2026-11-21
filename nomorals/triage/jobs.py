@@ -37,13 +37,37 @@ def ensure_triage_job(scheduler: Any, *,
                 job_spec = (job.get("spec") if isinstance(job, dict)
                             else getattr(job, "spec", None))
                 if job_spec == spec:
+                    _reconcile_overlap_skip(scheduler, job)
                     return job
                 with contextlib.suppress(Exception):
                     job_id = (job.get("id") if isinstance(job, dict)
                               else getattr(job, "id", None))
                     scheduler.remove(job_id)
                 break
-        return scheduler.add(TRIAGE_JOB, spec, "tool",
-                             {"tool": TRIAGE_SYNC_TOOL, "args": {}})
+        job = scheduler.add(TRIAGE_JOB, spec, "tool",
+                            {"tool": TRIAGE_SYNC_TOOL, "args": {}},
+                            overlap_policy="skip")
+        # add() is idempotent by exact replay: an existing row at the
+        # same spec comes back deduped carrying its OLD policy.
+        _reconcile_overlap_skip(scheduler, job)
+        return job
     except Exception:  # noqa: BLE001 - scheduling is best-effort
         return None
+
+
+def _reconcile_overlap_skip(scheduler: Any, job: Any) -> None:
+    """Force a persisted job row onto ``overlap_policy=skip``.
+
+    Best-effort, never raises.  A sync that wedges past the 300s
+    wall must not stack a second worker behind the abandoned first
+    one (2026-11-19 stall: the news poll kept "concurrent" and went
+    1 → 2 abandoned workers).
+    """
+    try:
+        row = job if isinstance(job, dict) else None
+        if row is None:
+            return
+        if (row.get("overlap_policy") or "concurrent") != "skip":
+            scheduler.set_overlap_policy(row["id"], "skip")
+    except Exception:  # noqa: BLE001 - reconciliation is best-effort
+        pass
