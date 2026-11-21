@@ -646,12 +646,88 @@ def compile_score(score: dict[str, Any], *, n_frames: int = 40,
     # fingertip IK solutions captured at phase end (e ~= 1), keyed by
     # phase id -> {hand: {finger: (state, reached)}} for commit
     fingertip_end: dict[int, dict[str, dict]] = {}
+
+    def _commit_elapsed(t: float, active_now: list[_CompiledPhase],
+                        owned: set[str]) -> None:
+        """Commit phases whose time has elapsed at ``t``.
+
+        Runs BEFORE a frame's keypoints are built from the running
+        state, so a phase that elapsed hands its committed pose to
+        the boundary frame instead of one frame late. This used to
+        run AFTER the frame was appended, so the first frame with
+        t >= t1 rendered the NEXT phase's move from the UNCOMMITTED
+        state: a one-frame snap-back at every phase boundary (the
+        repo's own shadow-box score jumped the wrist ~0.19 at the
+        guard->jab boundary). Never mid-phase; repeat phases don't
+        commit (they oscillate). A phase still ACTIVE (t <= t1, or
+        the last phase holding past t1) is never committed here:
+        committing it would let its own move re-run from the
+        committed state in the same frame and jump the remaining
+        clamped distance in one frame — the post-loop call below
+        handles those, once no more frames render. The fingertip
+        fallback solves against the previous frame's rendered wrist
+        (world space) — the phase ended between frames, so that is
+        the wrist it ended at.
+        """
+        nonlocal root_pos, root_scale
+        active_ids = {id(a) for a in active_now}
+        for pi, ph in enumerate(phases):
+            if (pi in committed or t < ph.t1 - 1e-9
+                    or id(ph) in active_ids or ph.repeat != 1):
+                continue
+            committed.add(pi)
+            for mv in ph.moves:
+                if mv.joint and mv.joint not in owned:
+                    start = joint_pos[mv.joint]
+                    target = np.array(mv.to)
+                    limit = _MAX_TRAVEL.get(mv.joint, 0.3)
+                    d = target - start
+                    dist = float(np.linalg.norm(d))
+                    if dist > limit:
+                        target = start + d / dist * limit
+                    joint_pos[mv.joint] = target
+                elif mv.hand:
+                    hs = hand_state[mv.hand]
+                    if mv.hand_pose:
+                        hs["fingers"] = finger_state_from_pose(mv.hand_pose)
+                    if mv.fingers:
+                        hs["fingers"].update(mv.fingers)
+                    if mv.fingertips:
+                        solved = fingertip_end.get(id(ph), {}).get(mv.hand)
+                        unreached: list[str] = []
+                        if solved is None:
+                            wname = ("r_wrist" if mv.hand == "right"
+                                     else "l_wrist")
+                            spread = (mv.spread if mv.spread is not None
+                                      else hs["spread"])
+                            wrist_w = prev_kp[_BODY_IDX[wname]]
+                            solved = {}
+                            for fname, txy in mv.fingertips.items():
+                                sol = finger_ik(wrist_w, fname,
+                                                np.array(txy), size=0.045,
+                                                spread=spread)
+                                solved[fname] = ((*sol.flex, sol.abduct),
+                                                 sol.reached)
+                        for fname, (state, reached) in solved.items():
+                            hs["fingers"][fname] = state
+                            if not reached:
+                                unreached.append(fname)
+                        if unreached:
+                            notes.append(
+                                f"fingertip(s) {', '.join(unreached)} beyond "
+                                f"reach in '{ph.name}' — clamped to reach")
+                    if mv.spread is not None:
+                        hs["spread"] = mv.spread
+            for rt in ph.roots:
+                mag = math.hypot(*rt.to)
+                rto = rt.to
+                if mag > 0.35:
+                    rto = (rt.to[0] / mag * 0.35, rt.to[1] / mag * 0.35)
+                root_pos = root_pos + np.array(rto)
+                root_scale = root_scale * rt.scale
+
     for i in range(n_frames):
         t = i / max(1, n_frames - 1)
-        kp = b.copy()
-        for name, pos in joint_pos.items():
-            kp[_BODY_IDX[name]] = pos
-
         active = _active(t)
         # foot-plant transitions: capture ankle world pos when planting starts
         spec = _plant_spec(active)
@@ -662,6 +738,26 @@ def compile_score(score: dict[str, Any], *, n_frames: int = 40,
             elif not spec[side]:
                 plant_state[side] = None
         prev_plant_spec = spec
+
+        # IK ownership is derivable now: a planted side owns its knee
+        # and ankle this frame (the pinning below reuses this set).
+        ik_owned: set[str] = set()
+        for side in ("left", "right"):
+            if plant_state[side] is not None:
+                ik_owned.add(_SIDE_J[side][1])
+                ik_owned.add(_SIDE_J[side][2])
+
+        # Commit elapsed phases before this frame's keypoints are
+        # built (see _commit_elapsed): the boundary frame renders
+        # from the committed state.
+        _commit_elapsed(t, active, ik_owned)
+
+        # Build this frame's keypoints from the running state — AFTER
+        # the commit above, so a phase that elapsed hands its committed
+        # pose to the boundary frame instead of one frame late.
+        kp = b.copy()
+        for name, pos in joint_pos.items():
+            kp[_BODY_IDX[name]] = pos
 
         # root motion from active phases (eased relative offsets)
         off = np.zeros(2)
@@ -694,8 +790,8 @@ def compile_score(score: dict[str, Any], *, n_frames: int = 40,
         # foot planting: pin stance ankles, solve knees with two-bone IK.
         # Planted joints are IK-owned: joint moves targeting them are
         # skipped, and running state feeds from the IK solution so the
-        # plant->release handoff stays continuous.
-        ik_owned: set[str] = set()
+        # plant->release handoff stays continuous. (ik_owned was
+        # computed above, before the phase commit.)
         for side in ("left", "right"):
             if plant_state[side] is not None:
                 hip_n, knee_n, ankle_n = _SIDE_J[side]
@@ -705,15 +801,13 @@ def compile_score(score: dict[str, Any], *, n_frames: int = 40,
                                       knee_pole[side])
                 kp[_BODY_IDX[knee_n]] = knee_p
                 kp[_BODY_IDX[ankle_n]] = plant_state[side]
-                ik_owned.add(knee_n)
-                ik_owned.add(ankle_n)
                 joint_pos[knee_n] = _to_pre(knee_p)
                 joint_pos[ankle_n] = _to_pre(plant_state[side])
 
         # joint + hand moves. Running state (joint_pos / hand_state /
-        # root_pos) is committed only when a phase ELAPSES (t >= t1),
-        # never mid-phase — so phases that end between frames still hand
-        # off cleanly. Repeat phases don't commit (they oscillate).
+        # root_pos) was committed above when its phase elapsed, so a
+        # phase's moves start from the previous phase's committed pose.
+        # Repeat phases don't commit (they oscillate).
         for ph in active:
             e, _ = _eased_u(ph, t)
             for mv in ph.moves:
@@ -767,62 +861,14 @@ def compile_score(score: dict[str, Any], *, n_frames: int = 40,
 
         frames.append(kp.copy())
         prev_kp = kp.copy()
-        # commit phase effects once their time has elapsed
-        for pi, ph in enumerate(phases):
-            if pi in committed or t < ph.t1 - 1e-9 or ph.repeat != 1:
-                continue
-            committed.add(pi)
-            for mv in ph.moves:
-                if mv.joint and mv.joint not in ik_owned:
-                    start = joint_pos[mv.joint]
-                    target = np.array(mv.to)
-                    limit = _MAX_TRAVEL.get(mv.joint, 0.3)
-                    d = target - start
-                    dist = float(np.linalg.norm(d))
-                    if dist > limit:
-                        target = start + d / dist * limit
-                    joint_pos[mv.joint] = target
-                elif mv.hand:
-                    hs = hand_state[mv.hand]
-                    if mv.hand_pose:
-                        hs["fingers"] = finger_state_from_pose(mv.hand_pose)
-                    if mv.fingers:
-                        hs["fingers"].update(mv.fingers)
-                    if mv.fingertips:
-                        solved = fingertip_end.get(id(ph), {}).get(mv.hand)
-                        unreached: list[str] = []
-                        if solved is None:
-                            # phase ended between frames: solve against the
-                            # committed wrist in world space
-                            wname = ("r_wrist" if mv.hand == "right"
-                                     else "l_wrist")
-                            spread = (mv.spread if mv.spread is not None
-                                      else hs["spread"])
-                            wrist_w = _to_world(joint_pos[wname])
-                            solved = {}
-                            for fname, txy in mv.fingertips.items():
-                                sol = finger_ik(wrist_w, fname,
-                                                np.array(txy), size=0.045,
-                                                spread=spread)
-                                solved[fname] = ((*sol.flex, sol.abduct),
-                                                 sol.reached)
-                        for fname, (state, reached) in solved.items():
-                            hs["fingers"][fname] = state
-                            if not reached:
-                                unreached.append(fname)
-                        if unreached:
-                            notes.append(
-                                f"fingertip(s) {', '.join(unreached)} beyond "
-                                f"reach in '{ph.name}' — clamped to reach")
-                    if mv.spread is not None:
-                        hs["spread"] = mv.spread
-            for rt in ph.roots:
-                mag = math.hypot(*rt.to)
-                rto = rt.to
-                if mag > 0.35:
-                    rto = (rt.to[0] / mag * 0.35, rt.to[1] / mag * 0.35)
-                root_pos = root_pos + np.array(rto)
-                root_scale = root_scale * rt.scale
+
+    # Final commit: the last phase holds past its t1 (it stays
+    # active), so it never commits inside the loop — but its notes
+    # (e.g. a fingertip "beyond reach") still belong in the record.
+    # Committing now is harmless: no more frames render, so no move
+    # can re-run from the committed state. t=2.0 is past every
+    # phase; active=[] commits everything left.
+    _commit_elapsed(2.0, [], ik_owned)
 
     track = PoseTrack(
         frames=np.stack(frames), fps=fps,

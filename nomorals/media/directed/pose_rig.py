@@ -621,6 +621,31 @@ _LIMB_COLORS = [
 ]
 
 
+def render_pose_frame(kp: np.ndarray, width: int, height: int):
+    """Draw ONE skeleton frame (black bg, colored limbs, white joints).
+
+    The single frame renderer shared by :func:`render_pose_video` and
+    the render-critique loop (``render_critique.py``) — one renderer,
+    not two. ``kp`` is one frame of normalized [0,1] keypoints.
+    """
+    _require_pil()
+    _require_numpy()
+    img = Image.new("RGB", (width, height), (0, 0, 0))
+    d = ImageDraw.Draw(img)
+    pts = (kp * np.array([width, height])).astype(int)
+    for li, (a, b) in enumerate(BODY_LIMBS):
+        d.line([tuple(pts[a]), tuple(pts[b])],
+               fill=_LIMB_COLORS[li % len(_LIMB_COLORS)], width=4)
+    for sl, off in ((R_HAND, N_BODY), (L_HAND, N_BODY + N_HAND)):
+        hp = pts[sl]
+        for a, b in HAND_LIMBS:
+            d.line([tuple(hp[a]), tuple(hp[b])],
+                   fill=(0, 255, 255), width=2)
+    for (x, y) in pts:
+        d.ellipse([x - 3, y - 3, x + 3, y + 3], fill=(255, 255, 255))
+    return img
+
+
 def render_pose_video(track: PoseTrack, out_path: str) -> str:
     """Render the skeleton pose video (black bg, colored limbs)."""
     W, H = track.width, track.height
@@ -628,20 +653,7 @@ def render_pose_video(track: PoseTrack, out_path: str) -> str:
     _require_pil()
     _require_numpy()
     for i, kp in enumerate(track.frames):
-        img = Image.new("RGB", (W, H), (0, 0, 0))
-        d = ImageDraw.Draw(img)
-        pts = (kp * np.array([W, H])).astype(int)
-        for li, (a, b) in enumerate(BODY_LIMBS):
-            d.line([tuple(pts[a]), tuple(pts[b])],
-                   fill=_LIMB_COLORS[li % len(_LIMB_COLORS)], width=4)
-        for sl, off in ((R_HAND, N_BODY), (L_HAND, N_BODY + N_HAND)):
-            hp = pts[sl]
-            for a, b in HAND_LIMBS:
-                d.line([tuple(hp[a]), tuple(hp[b])],
-                       fill=(0, 255, 255), width=2)
-        for (x, y) in pts:
-            d.ellipse([x - 3, y - 3, x + 3, y + 3], fill=(255, 255, 255))
-        img.save(tmp / f"p_{i:04d}.png")
+        render_pose_frame(kp, W, H).save(tmp / f"p_{i:04d}.png")
     subprocess.run(
         ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
          "-framerate", str(track.fps), "-i", str(tmp / "p_%04d.png"),
