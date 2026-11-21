@@ -774,15 +774,15 @@ class WiringTest(unittest.TestCase):
         raise AssertionError(
             f"mocap call failed: {getattr(outcome, 'error', outcome)}")
 
-    def test_tool_count_is_785_after_scene_project(self):
-        # 778 after B.26 shipped the scene_project tool; 779 after B.23 added facemcap. 780 after B.25 added facemesh. 781 after B.27 added vtuber. 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall; 785 after this lane (C.8) added robot.
+    def test_tool_count_is_786_after_scene_project(self):
+        # 778 after B.26 shipped the scene_project tool; 779 after B.23 added facemcap. 780 after B.25 added facemesh. 781 after B.27 added vtuber. 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall; 785 after this lane (C.8) added robot; 786 after this lane (audit N4) added build_swarm.
         # (777 after B.22 shipped the show tool on 147c5b5e;
         # 776 after B.20 shipped cloudcam): no new tool here — the
         # ingest actions ride the existing mocap tool, so the
         # registry count moves past B.22's 777 only by B.26's
         # scene_project.
         registry = self._registry()
-        self.assertEqual(len(registry._tools), 785)
+        self.assertEqual(len(registry._tools), 786)
         self.assertIn("mocap", registry._tools)
         self.assertIn("cloudcam", registry._tools)
 

@@ -18,6 +18,7 @@ chat gateway's ``send``. The loop is wired together in
 from __future__ import annotations
 
 import abc
+import contextlib
 import logging
 import re
 from dataclasses import dataclass, field
@@ -458,6 +459,26 @@ def run_loop(
             mind._record_route(Intent("fastchat", 1.0, route="fastchat", why=why))
         except Exception:  # noqa: BLE001
             pass
+        return reply, ctx
+
+    # build swarm by name: "swarm build ..." / "build swarm ..." in plain
+    # language names the organ, so it routes here without a classifier
+    # call — the same directness as a /swarm build command. Verified by
+    # step 5 like any other build dispatch.
+    from .build_swarm import BuildSwarm, parse_build_swarm_request, render_build_swarm
+    swarm_req = parse_build_swarm_request(text)
+    if swarm_req is not None:
+        with contextlib.suppress(Exception):
+            mind._record_route(Intent("build", 1.0, route="build_swarm",
+                                      why="owner asked for a build swarm"))
+        try:
+            result = BuildSwarm(getattr(mind, "context", None)).run(
+                swarm_req["job"], workers=swarm_req["workers"],
+                language=swarm_req["language"])
+            reply = render_build_swarm(result)
+        except Exception as exc:  # noqa: BLE001 - a crashed swarm is a reply
+            reply = f"build swarm crashed: {exc}"
+        _ok, reply = verify_dispatch("build", reply)
         return reply, ctx
 
     intent = mind.decide(text, live_game=live_game, allow_model=True)

@@ -22,6 +22,14 @@ def _cmd_swarm(args: argparse.Namespace, context: Any) -> int:
 
     action = args.swarm_action
     try:
+        if action == "build":
+            from ...agents.build_swarm import BuildSwarm, render_build_swarm
+
+            swarm = BuildSwarm(context)
+            result = swarm.run(args.job, workers=args.workers,
+                               language=args.lang)
+            _emit(args, result.to_dict(), render_build_swarm(result))
+            return 0 if result.ok else 1
         if action == "roles":
             registry = default_registry()
             payload = {"roles": {

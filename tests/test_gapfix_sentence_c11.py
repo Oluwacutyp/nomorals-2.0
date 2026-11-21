@@ -6,7 +6,7 @@ punctuation runs, ellipsis, em-dash, quotes) and the roadmap kinds
 (currency, percentage, ordinal, date, time, emoji) are pinned on
 top; segmentation pins the abbreviation rules and the ambiguous
 flag; wiring pins the three voice consumers, the CLI and the chat
-verb. No new brain tool: the registry stays at 785.
+verb. No new brain tool: the registry stays at 786.
 """
 
 from __future__ import annotations
@@ -474,13 +474,13 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(_split_sentences(""), [])
         self.assertEqual(_split_sentences("  "), [])
 
-    def test_tool_count_still_785(self):
+    def test_tool_count_still_786(self):
         # No new brain tool in this lane: the sentence surface is
         # `nm sentence` + `/sentence` over the shared engine.
-        # 785 after C.8 added the robot tool.
+        # 785 after C.8 added the robot tool; 786 after this lane (audit N4) added build_swarm.
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 785)
+        self.assertEqual(len(registry._tools), 786)
 
     def test_cli_split(self):
         from nomorals.cmdline.dispatch import main

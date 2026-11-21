@@ -381,7 +381,7 @@ class ToolTests(unittest.TestCase):
             with contextlib.suppress(RobotError):
                 drop_robot(name)
 
-    def test_tool_count_is_785_after_c8_added_robot(self) -> None:
+    def test_tool_count_is_786_after_c8_added_robot(self) -> None:
         # 784 after this lane (C.4) added camwall; 785 after this lane
         # (C.8) added robot.
         from types import SimpleNamespace
@@ -390,7 +390,7 @@ class ToolTests(unittest.TestCase):
 
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 785)
+        self.assertEqual(len(registry._tools), 786)
         self.assertIn("robot", registry._tools)
 
     def test_tool_status_drive_scan_map(self) -> None:

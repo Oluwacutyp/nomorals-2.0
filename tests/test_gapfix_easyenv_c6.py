@@ -556,13 +556,13 @@ class TestChat:
             assert "/env get" in found
 
 
-# -- tool count: this lane adds NO brain tool, so the count stays 785 -------
-# (785 after C.8 added the robot tool; the easyenv lane's 784 pin was
+# -- tool count: this lane adds NO brain tool, so the count stays 786 -------
+# (785 after C.8 added the robot tool; 786 after this lane (audit N4) added build_swarm; the easyenv lane's 784 pin was
 # updated by the parent at the C.9 ship because the C.8 bump missed it.)
 
 
 class TestToolCount:
-    def test_tool_count_still_785(self):
+    def test_tool_count_still_786(self):
         # 782 after C.2 registered the (previously dead) tonal_g2p tool;
         # 783 after C.1 added smarthome; 784 after C.4 added camwall;
         # 785 after C.8 added robot.
@@ -572,4 +572,4 @@ class TestToolCount:
 
         count = len(ToolRegistry(SimpleNamespace()).register_builtins()
                     ._tools)
-        assert count == 785
+        assert count == 786

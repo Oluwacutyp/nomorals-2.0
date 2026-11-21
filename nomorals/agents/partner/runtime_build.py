@@ -27,6 +27,13 @@ class RuntimeBuildMixin:
             if not topic:
                 return "usage: /swarm research <topic> — parallel research swarm"
             return self._control_swarm_research(topic, chat_key=chat_key)
+        # audit N4: /swarm build <job> — the BUILD swarm (parallel
+        # builders in a language rung + a verifier agent that runs
+        # every worker's tests). A tail starting with "build" is the
+        # verb, same as "research" and "board" above.
+        if stripped.lower() == "build" or stripped.lower().startswith("build "):
+            return self._control_swarm_build(stripped[5:].strip(),
+                                             chat_key=chat_key)
         from ..swarm import SwarmAgent
 
         goal, workers = stripped, 3
@@ -36,6 +43,7 @@ class RuntimeBuildMixin:
         if not goal:
             return ("usage: /swarm <goal> [workers 1-5] — parallel devon agents + fusion\n"
                     "        /swarm research <topic> — parallel research swarm\n"
+                    "        /swarm build <job> [in rust|go|python] [with N workers] — build swarm + verifier\n"
                     "        /swarm board [run-id] — watch a swarm's shared board")
         chat = self._ref_from_key(chat_key)
         try:
@@ -103,6 +111,42 @@ class RuntimeBuildMixin:
         text = (f"🔬 swarm: {len(report.findings)} findings, "
                 f"{len(report.angles)} angles, {len(report.sources)} sources, "
                 f"{elapsed:.0f}s\n\n" + report.to_text(3200))
+        return self._send_long_checked(chat.platform, chat, text)
+
+    def _control_swarm_build(self, tail: str, *, chat_key: str) -> str:
+        """audit N4: /swarm build <job> — the build swarm: parallel
+        builders in a language rung, a verifier agent that runs every
+        worker's tests and reviews the diff, one merged report."""
+        from ..build_swarm import (
+            BuildSwarm,
+            parse_build_swarm_request,
+            render_build_swarm,
+        )
+
+        req = parse_build_swarm_request("swarm build " + (tail or "").strip())
+        if req is None:
+            return ("usage: /swarm build <job> [in rust|go|python] "
+                    "[with N workers] — parallel builders + verifier agent")
+        chat = self._ref_from_key(chat_key)
+        try:
+            self.gateway.send(
+                chat.platform, chat,
+                f"🔨 build swarm: {req['job'][:80]}\n{req['workers']} "
+                f"worker(s), {req['language']} rung — this takes a few "
+                f"minutes.")
+        except Exception as exc:  # noqa: BLE001
+            record_failure("runtime_build._control_swarm_build", exc)
+        started = time.time()
+        try:
+            result = BuildSwarm(self.context, brain=self.brain,
+                                gateway=self.gateway).run(
+                req["job"], workers=req["workers"],
+                language=req["language"])
+        except Exception as exc:  # noqa: BLE001
+            return f"build swarm crashed: {exc}"
+        elapsed = time.time() - started
+        text = (f"🔨 build swarm done: {result.summary}, {elapsed:.0f}s\n\n"
+                + render_build_swarm(result))
         return self._send_long_checked(chat.platform, chat, text)
 
     # ── the coding bot ───────────────────────────────────────────────────────

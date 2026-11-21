@@ -92,6 +92,7 @@ TOOL_CATALOG: tuple[tuple[str, str], ...] = (
     ("db_counts", "largest tables + total (no args)"),
     ("speak", "speak text aloud — sends the audio file to the user (args: text)"),
     ("swarm", "parallel devon sub-agents on a goal, fused answer (args: goal, workers)"),
+    ("build_swarm", "multi-worker build swarm: split a build job into single-job workers in python/rust/go, verify each by running its tests, merged report (args: goal, workers, language)"),
     # power layer — backed by the shared tool registry
     ("dns_lookup", "live DNS records for a domain: A/AAAA/NS/MX/TXT/SPF/CAA (args: domain, record)"),
     ("whois_lookup", "domain registration data: registrar, dates, nameservers (args: domain)"),
@@ -2153,6 +2154,27 @@ class DevonAgent:
             return f"swarm: all legs failed — {result.synthesis[:600]}"
         return f"swarm ({sum(1 for l in result.legs if l['ok'])}/{len(result.legs)} legs, " \
                f"{result.seconds:.0f}s): " + result.synthesis[:2500]
+
+    def _tool_build_swarm(self, args: dict[str, Any]) -> str:
+        from .build_swarm import BuildSwarm, render_build_swarm
+
+        goal = str(args.get("goal") or "").strip()
+        if not goal:
+            return "build_swarm needs a 'goal'"
+        workers = 3
+        try:
+            workers = max(1, min(int(args.get("workers") or 3), 5))
+        except (TypeError, ValueError):
+            workers = 3
+        language = str(args.get("language") or "python").strip().lower()
+        try:
+            result = BuildSwarm(self.context, brain=self.brain,
+                                gateway=self.gateway).run(
+                goal, workers=workers, language=language,
+                on_progress=getattr(self, "_on_progress", None))
+        except ValueError as exc:
+            return f"build_swarm: {exc}"
+        return render_build_swarm(result)
 
     # ── helpers ──────────────────────────────────────────────────────────────
 

@@ -123,7 +123,8 @@ def _execute_run(store: WorkflowStore, manager: Any,
         runtime = ScriptRuntime(
             run=record, store=store, manager=manager,
             conversation_log=_conversation_log_from_context(context),
-            repo=_repo_root(), args=record.get("args") or {})
+            repo=_repo_root(), args=record.get("args") or {},
+            context=context)
         runtime.run(record.get("script") or "")
     except Exception as exc:  # noqa: BLE001 - the thread never dies loud
         record_failure(f"workflow:{record['id']}:thread", exc)

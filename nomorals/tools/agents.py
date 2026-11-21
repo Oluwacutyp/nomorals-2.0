@@ -37,6 +37,7 @@ AGENT_TOOL_MODULES = (
     "benchmark",
     "betdesk",
     "bisect",
+    "build_swarm",
     "cipher",
     "cognition",
     "dayrecord",

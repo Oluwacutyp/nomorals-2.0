@@ -161,10 +161,13 @@ class ScriptRuntime:
                  manager: Any, conversation_log: Any = None,
                  repo: Path | str | None = None,
                  args: dict[str, Any] | None = None,
-                 agent_timeout_s: float = 120.0) -> None:
+                 agent_timeout_s: float = 120.0,
+                 context: Any = None) -> None:
         self.record = run
         self.store = store
         self.manager = manager
+        self._context = context if context is not None else getattr(
+            manager, "context", None)
         self._conversation_log = conversation_log
         self._conversation_id = str(run.get("chat_key") or "")
         self._repo = Path(repo) if repo is not None else Path.cwd()
@@ -379,6 +382,30 @@ class ScriptRuntime:
                                 "error": f"{type(exc).__name__}: {exc}"})
         return results
 
+    def swarm_build(self, job: str, workers: int = 3,
+                    language: str = "python") -> dict[str, Any]:
+        """Run a build swarm as a workflow step.
+
+        ``swarm_build(job, workers=3, language="python")`` splits the
+        job into single-job workers in the language rung, verifies
+        every worker by running its tests, and returns the merged
+        report dict (``{ok, summary, legs: [...]}``). A failed run is
+        a dict with ``ok: False`` and an ``error`` — the script
+        decides what to do with it; ``parallel`` isolates it per item.
+        """
+        if self._phase_open is None:
+            self.phase("main")
+        from ...build_swarm import BuildSwarm
+
+        try:
+            result = BuildSwarm(self._context).run(
+                job, workers=workers, language=language)
+            self.store.record_agent_result(
+                self.record["id"], "build_swarm", result.to_dict())
+            return result.to_dict()
+        except Exception as exc:  # noqa: BLE001 - failures are records
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
     def trajectory(self, limit: int = 10,
                    kind: str | None = None) -> list[dict[str, Any]]:
         """Earlier steps of the current conversation (oldest first).
@@ -419,6 +446,7 @@ class ScriptRuntime:
             "agent": self.agent,
             "parallel": self.parallel,
             "pipeline": self.pipeline,
+            "swarm_build": self.swarm_build,
             "trajectory": self.trajectory,
             "args": dict(self._args),
             "CONVERSATION_ID": self._conversation_id,

@@ -237,8 +237,8 @@ def test_health_shape(tmp_path):
 def test_tool_count_stays_778(tmp_path):
     # No new brain tool: the preview rides the existing craftfonts
     # tool (its render action already reached the typography
-    # organ), so the registry count did not move then; 775 after this lane (B.19) added scene_spawn. 776 after this lane (B.20) added cloudcam. 777 after this lane (B.22) added show. 778 after this lane (B.26) added scene_project. 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber. 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall; 785 after this lane (C.8) added robot.
-    assert len(_registry()._tools) == 785
+    # organ), so the registry count did not move then; 775 after this lane (B.19) added scene_spawn. 776 after this lane (B.20) added cloudcam. 777 after this lane (B.22) added show. 778 after this lane (B.26) added scene_project. 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber. 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall; 785 after this lane (C.8) added robot; 786 after this lane (audit N4) added build_swarm.
+    assert len(_registry()._tools) == 786
 
 
 def test_tool_preview_action_renders_png(tmp_path):

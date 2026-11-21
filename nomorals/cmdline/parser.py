@@ -6021,10 +6021,19 @@ def _parser() -> argparse.ArgumentParser:
     swarm = sub.add_parser("swarm", aliases=CLI_ALIASES["swarm"],
         help="Agent swarm: specialist roles, debate, fan-out/fan-in",
         description=("nm swarm run \"<goal>\" [--roles researcher,coder,critic] [--rounds N] [--fanout N]\n"
+                     "nm swarm build \"<job>\" [--workers N] [--lang python|rust|go]\n"
                      "nm swarm roles\n"
                      "nm swarm debate \"<work description>\""),
     )
     swarm_sub = swarm.add_subparsers(dest="swarm_action", required=True)
+    s_build = swarm_sub.add_parser("build", help="run a build job through the multi-worker build swarm (verifier runs every worker's tests)")
+    s_build.add_argument("job", help="build job to execute")
+    s_build.add_argument("--workers", type=int, default=3,
+                         help="parallel builders (1-5)")
+    s_build.add_argument("--lang", default="python",
+                         choices=["python", "rust", "go"],
+                         help="language rung for the workers")
+    s_build.add_argument("--json", action="store_true", help="Output as JSON")
     s_run = swarm_sub.add_parser("run", help="run a goal through the full swarm")
     s_run.add_argument("goal", help="goal to execute")
     s_run.add_argument("--roles", default="researcher,coder,critic",
