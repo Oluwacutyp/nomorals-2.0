@@ -1001,7 +1001,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     # wave 72 systems: media, execution, archives, builders
     "music": (0, None),      # /music <topic> [style] | styles | song [slug] | bed | full | voices
     "distribute": (0, 1),   # /distribute [song.wav] | legal
-    "play": (0, None),       # /play <paths…> | status | queue | pause | …
+    "play": (0, None),       # /play <paths…> | status | queue | pause | … | L <artist>
     "download": (1, None),   # /download <url> [audio] — any-URL media downloader
     "tiktok": (1, None),     # /tiktok <url> [audio] — TikTok downloader (watermark-honest routes)
     "ttdl": (1, None),       # alias of /tiktok
@@ -1298,6 +1298,7 @@ _HELP_TEXT = "\n".join(
         "  /play <paths…>                          queue + play audio (mpv when installed)",
         "  /play status | queue | pause | resume | stop | next | prev",
         "  /play seek <s> | volume <n> | remove <n> | clear",
+        "  /play L <artist>                        a random album from the artist — every track sent",
         "  /video <query> [platform]               find videos across the web (ranked)",
         "  /video download <url> [audio]           download it (yt-dlp)",
         "  /video explain <preset> <content>       Manim-class explainer video (narrated)",

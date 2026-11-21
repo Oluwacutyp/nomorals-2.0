@@ -791,6 +791,16 @@ class RuntimeMediaMixin:
                    "pick"}
         parts = tail.split(None, 1)
         first = parts[0].lower() if parts else ""
+        if first in ("l", "album"):
+            # /play L <artist> — a random album from the artist, every
+            # track sent. A verb on /play, not a new command.
+            try:
+                return self._control_play_album(
+                    parts[1].strip() if len(parts) > 1 else "",
+                    chat_key, owner_key=owner_key,
+                    claim_key=claim_key)
+            except Exception as exc:  # noqa: BLE001
+                return f"play error: {exc}"
         if first in actions:
             action, rest = first, (parts[1] if len(parts) > 1 else "")
         else:
@@ -1111,6 +1121,231 @@ class RuntimeMediaMixin:
                     f"volume: {st['volume']}")
         except Exception as exc:  # noqa: BLE001
             return f"play error: {exc}"
+
+    def _control_play_album(self, artist: str, chat_key: str = "", *,
+                            owner_key: str = "", claim_key: str = "") -> str:
+        """``/play L <artist>`` — pick a RANDOM album from the artist,
+        download every track in it, send them in album order.
+
+        Chat: one background job behind one ack (the same
+        :meth:`_play_download_bg` seam a single /play uses) — the
+        album search + pick + per-track send all run on the worker
+        thread, and the ack is edited to the final summary (album,
+        how many tracks landed, which are missing and why). CLI (no
+        chat_key): synchronous — resolve each track, queue it, play.
+        Never raises.
+        """
+        from ...core.ids import new_short_id
+        from ...core.progress_events import SEARCHING, ProgressTracker
+        from ...media.play_album import (
+            find_album_for_artist,
+            format_album_summary,
+        )
+        from ...media.playback import PlaybackEngine
+
+        artist = (artist or "").strip()
+        if not artist:
+            return ("usage: /play L <artist> — pick a random album "
+                    "from the artist and send every track in it.")
+        chat = self._ref_from_key(chat_key) if chat_key else None
+        try:
+            engine = PlaybackEngine(self.context)
+        except Exception as exc:  # noqa: BLE001
+            return f"play error: {exc}"
+        if chat is None:
+            # CLI: queue the whole album, then play it.
+            result = find_album_for_artist(artist)
+            if result.error or result.album is None:
+                return result.error or f"no albums found for {artist!r}."
+            delivered: list[str] = []
+            missing: list[tuple[str, str]] = []
+            for track in result.tracks:
+                _t, sent = self._play_album_track_cli(
+                    engine, result.album.artist, track.title)
+                if sent:
+                    delivered.append(track.title)
+                else:
+                    missing.append((track.title, _t))
+            summary = format_album_summary(
+                result.album, delivered, missing)
+            if delivered:
+                try:
+                    st = engine.play()
+                    if st.get("status") == "playing":
+                        summary += (f"\n▶ playing "
+                                    f"“{st.get('current', '')}” "
+                                    f"[{st.get('backend')}]")
+                    else:
+                        summary += (f"\nstatus: {st.get('status')} "
+                                    f"{st.get('error') or st.get('hint', '')}")
+                except Exception as exc:  # noqa: BLE001
+                    summary += f"\nplay error: {exc}"
+            return summary
+        tracker = ProgressTracker(op_id=new_short_id("dl"), title=artist)
+        tracker.set_stage(SEARCHING, note="finding a random album")
+        return self._play_download_bg(
+            chat, chat_key, f"⏳ {artist} — finding a random album…",
+            lambda: self._play_album_send(engine, artist, chat),
+            title=f"album: {artist}", tracker=tracker,
+            claim_key=claim_key)
+
+    def _play_album_send(self, engine: Any, artist: str,
+                         chat: Any) -> tuple[str, bool]:
+        """Background body for /play L: find the album, send every
+        track in album order through the same fall-through a single
+        /play uses per track. Returns (summary, any_sent) — the ack
+        is edited to the summary. Never raises."""
+        from ...media.play_album import (
+            find_album_for_artist,
+            format_album_summary,
+        )
+
+        try:
+            result = find_album_for_artist(artist)
+        except Exception as exc:  # noqa: BLE001 - find never raises,
+            # belt and braces: the ack must land as an honest line
+            return f"couldn't pick an album for {artist!r}: {exc}", False
+        if result.error or result.album is None:
+            return (result.error or f"no albums found for {artist!r}.",
+                    False)
+        album = result.album
+        delivered: list[str] = []
+        missing: list[tuple[str, str]] = []
+        for track in result.tracks:
+            text, sent = self._play_album_track(
+                engine, album.artist, track.title, chat)
+            if sent:
+                delivered.append(track.title)
+            else:
+                missing.append((track.title, text))
+        return format_album_summary(album, delivered, missing), \
+            bool(delivered)
+
+    def _play_album_track(self, engine: Any, artist: str, title: str,
+                          chat: Any) -> tuple[str, bool]:
+        """Send ONE album track through the single-/play fall-through:
+        resolve → candidate sweep → fall-through send with a
+        (title, artist) match gate. Returns (text, sent); the text is
+        the delivered line on success, a short failure reason on
+        failure. Never raises."""
+        from ...media.picklist import search_query_for
+        from ...media.resolver import SourceResolver
+
+        search_q = search_query_for(title, artist) \
+            or f"{artist} {title}"
+        try:
+            from ...media.source_registry import EkitiLexicon
+            search_q = EkitiLexicon().normalize_query(
+                search_q)["search"] or search_q
+        except Exception as e:  # noqa: BLE001
+            record_failure("runtime_media.RuntimeMediaMixin"
+                           "._play_album_track:lexicon", e)
+        try:
+            resolution = SourceResolver(self.context).resolve(search_q)
+        except Exception as exc:  # noqa: BLE001 - resolve never
+            # raises, belt and braces
+            return f"couldn't find {title!r}: {exc}", False
+        if not resolution.ok:
+            self._play_log_tried(resolution.attempts)
+            return f"couldn't find {title!r}", False
+        try:
+            cands, detailed = SourceResolver(
+                self.context).search_candidates_detailed(search_q)
+        except Exception as e:  # noqa: BLE001
+            record_failure("runtime_media.RuntimeMediaMixin"
+                           "._play_album_track:candidates", e)
+            cands, detailed = [], []
+        fallbacks = [
+            {"kind": c.kind, "path": c.path_or_url,
+             "title": c.title or c.path_or_url,
+             "artist": c.artist or "",
+             "duration": c.duration or 0.0,
+             "downloadable": c.downloadable,
+             "block_reason": str(
+                 getattr(c, "block_reason", "") or ""),
+             "preview_only": bool(
+                 getattr(c, "preview_only", False))}
+            for c in (cands or [])]
+        first_item = dict(engine._enqueue(
+            resolution.path_or_url, resolution.kind,
+            resolution.title or resolution.path_or_url,
+            artist=resolution.artist, duration=resolution.duration))
+        # The chain winner can carry the raw search query as its
+        # "title" — the candidate sweep has the SAME track with its
+        # real metadata; prefer it (same fix as single /play).
+        for c in (cands or []):
+            if c.kind == first_item.get("kind") \
+                    and c.path_or_url == first_item.get("path"):
+                cur = str(first_item.get("title") or "")
+                if c.title and (not cur
+                                or cur.strip().lower() in (
+                                    search_q.strip().lower(),
+                                    f"{title} {artist}".strip().lower())):
+                    first_item["title"] = c.title
+                if c.artist and not first_item.get("artist"):
+                    first_item["artist"] = c.artist
+                break
+        first_item["downloadable"] = resolution.downloadable
+        first_item["block_reason"] = str(
+            getattr(resolution, "block_reason", "") or "")
+        first_item["preview_only"] = bool(
+            getattr(resolution, "preview_only", False))
+        merged = self._merge_search_attempts(
+            resolution.attempts, detailed)
+        # Preview gate (same law as single /play): the best every
+        # source has is a 30s preview and no full-track candidate
+        # exists — drop the queue row and name the miss, never send
+        # a preview as the track.
+        if self._play_is_preview_item(first_item) \
+                and not any(
+                    fb.get("downloadable") is not False
+                    and not self._play_is_preview_item(fb)
+                    for fb in fallbacks):
+            self._play_log_tried(merged)
+            self._drop_matching_queued(engine, first_item)
+            return f"only a 30s preview exists for {title!r}", False
+        text, sent = self._play_send_with_fallthrough(
+            engine, first_item, fallbacks, merged, chat,
+            match=(title, artist), query=f"{artist} {title}")
+        if sent:
+            return text, True
+        # The fall-through's failure text is multi-line; the album
+        # summary carries the first line, truncated there.
+        first_line = (text or "").strip().splitlines()
+        return (first_line[0][:120] if first_line
+                else f"couldn't download {title!r}"), False
+
+    def _play_album_track_cli(self, engine: Any, artist: str,
+                              title: str) -> tuple[str, bool]:
+        """CLI half of one album track: resolve + enqueue, no send.
+        Returns (reason, queued). Never raises."""
+        from ...media.picklist import search_query_for
+        from ...media.resolver import SourceResolver
+
+        search_q = search_query_for(title, artist) \
+            or f"{artist} {title}"
+        try:
+            from ...media.source_registry import EkitiLexicon
+            search_q = EkitiLexicon().normalize_query(
+                search_q)["search"] or search_q
+        except Exception as e:  # noqa: BLE001
+            record_failure("runtime_media.RuntimeMediaMixin"
+                           "._play_album_track_cli:lexicon", e)
+        try:
+            resolution = SourceResolver(self.context).resolve(search_q)
+        except Exception as exc:  # noqa: BLE001
+            return f"couldn't find {title!r}: {exc}", False
+        if not resolution.ok:
+            return f"couldn't find {title!r}", False
+        try:
+            engine._enqueue(
+                resolution.path_or_url, resolution.kind,
+                resolution.title or resolution.path_or_url,
+                artist=resolution.artist,
+                duration=resolution.duration)
+        except Exception as exc:  # noqa: BLE001
+            return f"couldn't queue {title!r}: {exc}", False
+        return "", True
 
     def _play_pick(self, rest: str, chat_key: str = "") -> str:
         """`/play pick <token> <n>` — download+send pick-list choice n.
