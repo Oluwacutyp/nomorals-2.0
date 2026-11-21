@@ -20,11 +20,12 @@ from __future__ import annotations
 import os
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
 from .rank import DEFAULT_MAX_PROPOSALS, finding_to_ticket, rank_findings
 from .store import ArenaResearcherStore, default_arena_researcher_path
-from .survey import survey_repo, verify_anchor
+from .survey import SURVEY_CACHE_FILENAME, survey_repo, verify_anchor
 
 #: Durable scheduler job name (also the schedule key).
 ARENA_RESEARCHER_JOB = "arena researcher"
@@ -117,6 +118,19 @@ def _store_for(context: Any) -> ArenaResearcherStore:
     except Exception:
         home = None
     return ArenaResearcherStore(path=default_arena_researcher_path(home))
+
+
+def _survey_cache_for(context: Any) -> Path | None:
+    """Survey-cache path for *context*'s home, or None with no home.
+
+    The cache is what makes the survey complete in seconds on a warm
+    tree (unchanged files are never re-parsed) — the tick's budget
+    stays only as a tripwire for a cold cache or a wedged SOTA step.
+    """
+    store = _store_for(context)
+    if store.path is None:
+        return None
+    return store.path.parent / SURVEY_CACHE_FILENAME
 
 
 def _recent_proposal_keys(context: Any, days: int) -> set[str]:
@@ -250,14 +264,20 @@ class ArenaResearcher:
         # The tick's own wall budget: the scheduler abandons the
         # worker at 300s and the ghost keeps reading while the next
         # tick starts a second survey.  Survey + SOTA + filing must
-        # finish inside the budget, partial rather than wedged.
+        # finish inside the budget, partial rather than wedged — but
+        # the budget is only a TRIPWIRE now: the survey completes
+        # because the cache makes it seconds on a warm tree (see
+        # survey.py), and the SOTA step stops starting new organs
+        # once the deadline passes.
         tick_deadline = time.monotonic() + arena_tick_budget()
         try:
             from ..research_digest import repo_root
 
             root = self.repo_root or repo_root()
             findings = survey_repo(root,
-                                   deadline_s=arena_survey_budget())
+                                   deadline_s=arena_survey_budget(),
+                                   cache_path=_survey_cache_for(
+                                       self.context))
             record["survey_partial"] = bool(
                 getattr(findings, "partial", False))
             record["partial"] = record["survey_partial"]
@@ -480,7 +500,8 @@ def register(registry: Any) -> None:
             from ..research_digest import repo_root
 
             root = repo_root()
-            findings = [f for f in survey_repo(root)
+            findings = [f for f in survey_repo(
+                root, cache_path=_survey_cache_for(context))
                         if verify_anchor(root, f["path"], f["line"])]
             return {"ok": True, "findings": rank_findings(findings)}
         if verb == "ensure":

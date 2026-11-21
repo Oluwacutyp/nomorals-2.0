@@ -206,7 +206,11 @@ def _cmd_arena_research(args: argparse.Namespace, context: Any) -> int:
         from ...agents.research_digest import repo_root
 
         root = repo_root()
-        findings = [f for f in armod.survey_repo(root)
+        # the same warm cache the tick uses: a manual survey is 1s,
+        # not a 45s full re-parse
+        home = getattr(getattr(context, "settings", None), "home", None)
+        findings = [f for f in armod.survey_repo(
+            root, cache_path=armod.default_survey_cache_path(home))
                     if armod.verify_anchor(root, f["path"], f["line"])]
         ranked = armod.rank_findings(findings)
         lines = [f"arena survey: {len(ranked)} finding(s)"]

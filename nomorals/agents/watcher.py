@@ -35,8 +35,22 @@ WATCH_LOOP_SPEC = "every 5m"
 #: scheduler's 300s job wall.  A tick with no budget wedged past the
 #: wall on 2026-11-21 (300s in a Condition wait) and the abandoned
 #: worker kept running behind the next tick.  Partial beats wedged:
-#: the tick returns what it finished and says so.
+#: the tick returns what it finished and says so.  The budget stays
+#: as a tripwire; the tick completes because of the write bound below,
+#: not because of the budget.
 DEFAULT_TICK_BUDGET_S = 240.0
+
+#: Tick write-wait bound (seconds): how long the tick waits for any
+#: ONE writer-actor write.  A healthy writer applies a write in
+#: milliseconds, so 0.5s is ~100x headroom, not a limit on the work —
+#: it only stops a wedged writer (a transaction held open by another
+#: thread, reaped only after 300s) from stalling the tick 30s per
+#: write.  Every write that times out is counted in the report as
+#: ``writes_deferred`` and retried on the next tick — every write the
+#: tick makes is idempotent bookkeeping (cooldown markers re-derived,
+#: mining idempotent, notifications re-derived from findings,
+#: delivery retried).  See :meth:`Database.write_timeout`.
+WATCH_WRITE_TIMEOUT_S = 0.5
 
 
 def watch_tick_budget() -> float:
@@ -50,8 +64,8 @@ def watch_tick_budget() -> float:
     return min(290.0, max(60.0, value))
 
 __all__ = ["WatchLoop", "WATCH_LOOP_JOB", "WATCH_LOOP_TOOL",
-           "WATCH_LOOP_SPEC", "ensure_watch_loop_job",
-           "watch_tick_budget"]
+           "WATCH_LOOP_SPEC", "WATCH_WRITE_TIMEOUT_S",
+           "ensure_watch_loop_job", "watch_tick_budget"]
 
 
 class WatchLoop:
@@ -74,14 +88,34 @@ class WatchLoop:
         (``partial: True``) beats an abandoned worker.  Every step
         stays best-effort; the deadline is what keeps the tick inside
         the scheduler's 300s job wall.
+
+        The sweep itself runs inside :const:`WATCH_WRITE_TIMEOUT_S`:
+        the tick's writes are idempotent bookkeeping, so a wedged
+        writer costs it 0.5s per write instead of 30s — the tick
+        completes and the deferred writes land on the next tick.  The
+        count is in the report as ``writes_deferred``.
         """
+        budget = (float(deadline_s) if deadline_s is not None
+                  and float(deadline_s) > 0 else watch_tick_budget())
+        deadline = time.monotonic() + budget
+        db = getattr(self.context, "db", None)
+        write_timeout = (getattr(db, "write_timeout", None)
+                         if db is not None else None)
+        if write_timeout is None:
+            report = self._sweep(deadline, budget)
+            report["writes_deferred"] = 0
+            return report
+        with db.write_timeout(WATCH_WRITE_TIMEOUT_S) as wt_state:
+            report = self._sweep(deadline, budget)
+            report["writes_deferred"] = wt_state.deferred
+            return report
+
+    def _sweep(self, deadline: float, budget: float) -> dict[str, Any]:
+        """The four steps of one tick (see :meth:`tick`)."""
         from .notifier import Notifier
         from .ops_alerts import ops_alerts
         from .reasoning import ReasoningAgent
 
-        budget = (float(deadline_s) if deadline_s is not None
-                  and float(deadline_s) > 0 else watch_tick_budget())
-        deadline = time.monotonic() + budget
         partial = False
 
         def _out_of_time() -> bool:

@@ -114,6 +114,27 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {key: row[key] for key in row.keys()}
 
 
+class _WriteTimeoutState:
+    """Per-sweep write-wait accounting for :meth:`Database.write_timeout`.
+
+    ``deferred`` counts the writes that timed out inside the block —
+    the caller reports it, so a deferred write is visible, never
+    silent. A timed-out write is cancelled on the writer (it never
+    applies late); the caller retries it on its next pass, which is
+    only sound for idempotent bookkeeping — never for a write whose
+    effect must land exactly once, right now.
+
+    ``wedged`` is set on the first timeout in the block: later waits
+    in the same block fail fast (counted, same error) instead of
+    burning another full wait re-proving a writer that is already
+    known wedged. The next block starts un-wedged and re-probes.
+    """
+
+    def __init__(self) -> None:
+        self.deferred = 0
+        self.wedged = False
+
+
 class Database:
     """Thread-safe SQLite database with migrations, WAL, and metrics.
 
@@ -565,9 +586,11 @@ class Database:
             if actor is not None:
                 actor.note_generation_bump(self._writer_generation, reason)
 
-    def _holder_timeout_error(self, what: str) -> StorageError:
+    def _holder_timeout_error(self, what: str,
+                              timeout: float | None = None) -> StorageError:
         """The bounded-acquire error, naming the holder like c5bebb95."""
-
+        waited = (timeout if timeout is not None
+                  else _WRITE_LOCK_TIMEOUT_S)
         actor = self._writer_actor
         work = actor.current_work() if actor is not None else None
         if work is not None:
@@ -575,11 +598,11 @@ class Database:
             held = float(work.get("held_s") or 0.0)
             return StorageError(
                 f"database write lock held by thread {who} for {held:.1f}s "
-                f"(>{_WRITE_LOCK_TIMEOUT_S:g}s wait) — a previous job may "
-                f"have been abandoned mid-transaction")
+                f"(>{waited:g}s wait) — a previous job may have been "
+                "abandoned mid-transaction")
         return StorageError(
             f"database write for {what} timed out after "
-            f"{_WRITE_LOCK_TIMEOUT_S:g}s (writer actor did not respond)")
+            f"{waited:g}s (writer actor did not respond)")
 
     def _convert_execute_error(self, exc: BaseException) -> BaseException:
         """Map a raw error delivered by the actor onto the public types."""
@@ -610,17 +633,65 @@ class Database:
         ``timeout`` defaults to the module constant, resolved at CALL
         time (never as a def-time default) so a patched
         ``_WRITE_LOCK_TIMEOUT_S`` — the dbstall suite patches it to 0.5
-        — actually shortens the wait.
+        — actually shortens the wait.  A thread inside
+        :meth:`write_timeout` uses that block's shorter bound instead,
+        and the timeout is counted on the block's state.
         """
 
         if timeout is None:
-            timeout = _WRITE_LOCK_TIMEOUT_S
+            timeout = getattr(self._local, "write_timeout_s", None)
+            if timeout is None:
+                timeout = _WRITE_LOCK_TIMEOUT_S
+        state = getattr(self._local, "write_timeout_state", None)
+        if state is not None and state.wedged:
+            # The writer is already proven wedged for this block — do
+            # not burn another full wait re-proving it. The queued job
+            # is cancelled (the actor skips cancelled jobs), so the
+            # write never applies late; the next block re-probes.
+            job.cancelled = True
+            state.deferred += 1
+            raise self._holder_timeout_error(what, timeout)
         if not job.event.wait(timeout):
             job.cancelled = True
-            raise self._holder_timeout_error(what)
+            if state is not None:
+                state.deferred += 1
+                state.wedged = True
+            raise self._holder_timeout_error(what, timeout)
         if job.error is not None:
             raise self._convert_execute_error(job.error)
         return job.result
+
+    @contextmanager
+    def write_timeout(self, seconds: float) -> Iterator[_WriteTimeoutState]:
+        """Bound how long THIS thread waits for a writer-actor write.
+
+        A thread-scoped override of ``_WRITE_LOCK_TIMEOUT_S`` for one
+        block: every :meth:`_wait_job` inside the block waits at most
+        ``seconds`` for the writer instead of 30s, and every write that
+        times out is counted on the yielded state (``state.deferred``).
+
+        This is for sweeps whose writes are idempotent bookkeeping that
+        the next pass re-derives — a resident tick that must complete
+        even while another thread holds a write transaction open. It is
+        NOT a cap on the work: the sweep still runs every step; only
+        the wait for a wedged writer is bounded, and the deferral is
+        counted and reported. After the first timeout in the block,
+        later waits fail fast (same error, counted) instead of burning
+        another full wait re-proving a writer already known wedged.
+        Never use it around a write whose effect must land exactly
+        once, right now (a timed-out write is cancelled and never
+        applies late).
+        """
+        prev_timeout = getattr(self._local, "write_timeout_s", None)
+        prev_state = getattr(self._local, "write_timeout_state", None)
+        state = _WriteTimeoutState()
+        self._local.write_timeout_s = max(0.0, float(seconds))
+        self._local.write_timeout_state = state
+        try:
+            yield state
+        finally:
+            self._local.write_timeout_s = prev_timeout
+            self._local.write_timeout_state = prev_state
 
     def _routed_execute(self, sql: str, params: Any = ()) -> _RoutedCursor:
         self._check_txn_generation()

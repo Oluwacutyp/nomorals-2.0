@@ -37,6 +37,8 @@ from __future__ import annotations
 
 import ast
 import importlib
+import json
+import os
 import re
 import time
 from pathlib import Path
@@ -51,6 +53,70 @@ ENTRY_POINT_PACKAGES = {"api", "builders", "cmdline"}
 #: A dotted ``nomorals....`` reference anywhere in a file's text keeps
 #: a module alive (covers string-form dynamic references).
 _DOTTED_REF_RE = re.compile(r"nomorals(?:\.[A-Za-z0-9_]+)+")
+
+#: Survey-cache format version. Bumped when the cached per-file shape
+#: changes; a cache written by another version is ignored, never read.
+CACHE_VERSION = 1
+
+#: Default survey-cache filename under ``<home>/data/`` (beside the
+#: arena store's ``arena_researcher.json``).
+SURVEY_CACHE_FILENAME = "arena_survey_cache.json"
+
+
+def default_survey_cache_path(home: str | Path | None) -> Path | None:
+    """Default survey-cache path for *home*, or None with no home."""
+    if not home:
+        return None
+    return Path(home) / "data" / SURVEY_CACHE_FILENAME
+
+
+def _load_survey_cache(path: str | Path,
+                       root: Path) -> dict[str, dict]:
+    """Cached per-file parse results, or {} when there is no usable one.
+
+    A cache is usable only when its version matches and it was written
+    for this same repo root. A missing, corrupt, or stale cache is not
+    an error — the survey just re-parses everything this run.
+    """
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict) or raw.get("version") != CACHE_VERSION:
+        return {}
+    if str(raw.get("root") or "") != str(root):
+        return {}
+    files = raw.get("files")
+    if not isinstance(files, dict):
+        return {}
+    kept: dict[str, dict] = {}
+    for rel, entry in files.items():
+        if not isinstance(entry, dict):
+            continue
+        if not {"size", "mtime_ns", "dotted", "imports", "refs",
+                "stubs", "swallows", "entry"} <= set(entry):
+            continue
+        kept[str(rel)] = entry
+    return kept
+
+
+def _save_survey_cache(path: str | Path, root: Path,
+                       entries: dict[str, dict]) -> None:
+    """Persist the per-file cache atomically (tmp+replace).
+
+    Best-effort like the arena store: a cache that cannot be written is
+    a missed optimisation, never a failed survey.
+    """
+    try:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(
+            {"version": CACHE_VERSION, "root": str(root),
+             "files": entries}, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
 
 
 def _is_stub_body(body: list[ast.stmt]) -> bool:
@@ -218,7 +284,8 @@ class SurveyFindings(list):
 
 def survey_repo(root: str | Path, *,
                 tool_modules: list[str] | None = None,
-                deadline_s: float | None = None) -> SurveyFindings:
+                deadline_s: float | None = None,
+                cache_path: str | Path | None = None) -> SurveyFindings:
     """Survey *root* and return ranked-ready findings.
 
     *root* is the repo root (the directory holding ``nomorals/``).
@@ -228,11 +295,23 @@ def survey_repo(root: str | Path, *,
     ``deadline_s`` bounds the read+parse pass: the survey stops
     starting new files once the budget is spent and returns what it
     found, flagged ``partial`` on the returned list (a plain ``list``
-    subclass, so every existing caller keeps working).  A survey with
-    no budget is how a scheduled tick wedged past the scheduler's
-    300s wall (2026-11-21: the live survey reads ~2,900 files and
-    the wall fired mid-walk in ``Path.open``) — callers that run
-    inside a capped job MUST pass one.
+    subclass, so every existing caller keeps working).  It is a
+    TRIPWIRE, not the reason the survey completes: a survey with no
+    budget is how a scheduled tick wedged past the scheduler's 300s
+    wall (2026-11-21: the live survey reads ~2,900 files and the wall
+    fired mid-walk in ``Path.open``) — callers that run inside a
+    capped job MUST pass one.
+
+    ``cache_path`` is what makes the survey actually COMPLETE instead
+    of merely stopping on time: per-file parse results (imports,
+    stubs, swallow count, dotted refs, entry flag) are cached keyed
+    by ``(path, size, mtime_ns)`` — the same fingerprint every build
+    tool uses — so a warm survey only ``stat``s unchanged files and
+    re-parses exactly the files that changed. The cross-file
+    aggregation still runs over the whole tree every run, from the
+    cached per-file data in memory. A missing, corrupt, or
+    root-mismatched cache is ignored, never fatal; without a cache
+    path the survey behaves exactly as before (full re-parse).
     """
     started = time.monotonic()
     deadline = (started + float(deadline_s)
@@ -247,35 +326,81 @@ def survey_repo(root: str | Path, *,
     dotted_refs: set[str] = set()
     per_file: dict[Path, dict] = {}
     surveyed = 0
+    cache: dict[str, dict] = (
+        _load_survey_cache(cache_path, root)
+        if cache_path is not None else {})
+    cache_dirty = False
     for path in files:
         if deadline is not None and time.monotonic() >= deadline:
             break
+        rel = str(path.relative_to(root))
         dotted = _dotted_name(root, path)
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        surveyed += 1
-        dotted_refs.update(_DOTTED_REF_RE.findall(text))
-        try:
-            tree = ast.parse(text, filename=str(path))
-        except SyntaxError:
-            continue
-        imported = _collect_imports(tree, dotted)
-        for name in imported:
+        entry: dict | None = None
+        if cache_path is not None:
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            cached = cache.get(rel)
+            if (cached is not None
+                    and cached.get("size") == st.st_size
+                    and cached.get("mtime_ns") == st.st_mtime_ns
+                    and cached.get("dotted") == dotted):
+                entry = cached
+        if entry is None:
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            surveyed += 1
+            refs = _DOTTED_REF_RE.findall(text)
+            dotted_refs.update(refs)
+            try:
+                tree = ast.parse(text, filename=str(path))
+            except SyntaxError:
+                continue
+            imported = _collect_imports(tree, dotted)
+            stubs: list[dict] = []
+            swallows = 0
+            is_entry = _is_entry_module(tree)
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                        and not _is_abstract(node) \
+                        and _is_stub_body(node.body):
+                    stubs.append({"name": node.name, "line": node.lineno})
+                elif isinstance(node, ast.ExceptHandler) \
+                        and _is_silent_handler(node):
+                    swallows += 1
+            entry = {"dotted": dotted,
+                     "imports": sorted(imported),
+                     "refs": sorted(refs),
+                     "stubs": stubs, "swallows": swallows,
+                     "entry": is_entry}
+            if cache_path is not None:
+                try:
+                    st = path.stat()
+                except OSError:
+                    st = None
+                if st is not None:
+                    cache[rel] = {"size": st.st_size,
+                                  "mtime_ns": st.st_mtime_ns, **entry}
+                    cache_dirty = True
+        else:
+            surveyed += 1
+            dotted_refs.update(entry.get("refs") or [])
+        for name in entry.get("imports") or []:
             importers.setdefault(name, set()).add(dotted)
-        stubs: list[dict] = []
-        swallows = 0
-        entry = _is_entry_module(tree)
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
-                    and not _is_abstract(node) \
-                    and _is_stub_body(node.body):
-                stubs.append({"name": node.name, "line": node.lineno})
-            elif isinstance(node, ast.ExceptHandler) and _is_silent_handler(node):
-                swallows += 1
-        per_file[path] = {"dotted": dotted, "stubs": stubs,
-                          "swallows": swallows, "entry": entry}
+        per_file[path] = {"dotted": dotted,
+                          "stubs": entry.get("stubs") or [],
+                          "swallows": entry.get("swallows") or 0,
+                          "entry": bool(entry.get("entry"))}
+    if cache_path is not None:
+        known = {str(p.relative_to(root)) for p in files}
+        for rel in [r for r in cache if r not in known]:
+            del cache[rel]
+            cache_dirty = True
+        if cache_dirty:
+            _save_survey_cache(cache_path, root, cache)
     findings: SurveyFindings = SurveyFindings(
         [], partial=(surveyed < len(files)),
         surveyed_files=surveyed, total_files=len(files),

@@ -658,7 +658,21 @@ def _profile_name(context: Any) -> str:
 
 
 class Scheduler:
-    """Owns the schedule_jobs table and the tick loop."""
+    """Owns the schedule_jobs table and the tick loop.
+
+    Concurrency shape (2026-11-21, wedge real fix): the tick
+    dispatches due jobs onto a bounded worker pool (``max_concurrent``
+    threads, 2 on EC2) and waits for every dispatched job — so a slow
+    job delays the tick's return but never blocks another job's
+    execution: the pool runs them concurrently, and the fast job
+    finishes while the slow one is still running. There is no shared
+    queue to replace. The serialisation that used to wedge the queue
+    was the single-writer DB actor, not this pool: a job holding a
+    write transaction stalled every other job's writes. Jobs that
+    must complete under a wedged writer bound their own write waits
+    (see :meth:`Database.write_timeout`) instead of relying on the
+    scheduler to save them.
+    """
 
     def __init__(self, context: Any, *, gateway: Any = None,
                  tick_seconds: float = 20.0, max_concurrent: int | None = None,

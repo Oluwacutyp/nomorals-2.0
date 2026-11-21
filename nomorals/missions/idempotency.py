@@ -166,17 +166,48 @@ class IdempotencyStore:
 
     def __init__(self, db: Any) -> None:
         self.db = db
-        # execute_statements is the transaction-safe multi-statement runner
-        # (Database.execute only accepts a single statement).
-        self.db.execute_statements(_SCHEMA)
-        # Additive columns for pre-sweep databases: guarded ALTERs, never
-        # a migration — a missing column is simply added.
-        for column, ddl in _EXTRA_COLUMNS:
-            try:
-                self.db.execute(
-                    f"ALTER TABLE idempotency_keys ADD COLUMN {column} {ddl}")
-            except Exception:  # noqa: BLE001 - column already there
-                pass
+        # Read-first schema ensure: the table + columns are created
+        # once and then never re-written. A plain SELECT (a read on
+        # the caller's connection, never the writer actor) tells us
+        # whether the schema is already there; only a missing table or
+        # column issues a write. Constructing a store used to issue
+        # CREATE TABLE + ALTER TABLE writes on EVERY construction — so
+        # a wedged writer killed any caller that only wanted to READ:
+        # the watch tick's ops scan died on the schema write before
+        # reading one mission (2026-11-21: tick burned one full write
+        # wait and reported findings=0).
+        if not self._schema_ready():
+            # execute_statements is the transaction-safe multi-statement runner
+            # (Database.execute only accepts a single statement).
+            self.db.execute_statements(_SCHEMA)
+            # Additive columns for pre-sweep databases: guarded ALTERs, never
+            # a migration — a missing column is simply added.
+            for column, ddl in _EXTRA_COLUMNS:
+                try:
+                    self.db.execute(
+                        f"ALTER TABLE idempotency_keys ADD COLUMN {column} {ddl}")
+                except Exception:  # noqa: BLE001 - column already there
+                    pass
+
+    def _schema_ready(self) -> bool:
+        """True when the idempotency table + all additive columns exist.
+
+        Read-only: both statements are SELECTs, so on a file-backed
+        database they run directly on the caller's connection and never
+        touch the writer actor. A failed check means "not ready" —
+        the caller then issues the schema writes as before.
+        """
+        try:
+            rows = self.db.query(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name='idempotency_keys'")
+            if not rows:
+                return False
+            cols = self.db.query("PRAGMA table_info(idempotency_keys)")
+            have = {str(r["name"]) for r in cols}
+            return all(col in have for col, _ in _EXTRA_COLUMNS)
+        except Exception:  # noqa: BLE001 - a failed check means "not ready"
+            return False
 
     def _expired(self, record: dict[str, Any]) -> bool:
         """True when the record's TTL has passed (Stripe's 24h rule, but

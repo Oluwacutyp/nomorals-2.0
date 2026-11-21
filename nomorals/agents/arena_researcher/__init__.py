@@ -22,7 +22,7 @@ from .loop import (
 )
 from .rank import finding_to_ticket, rank_findings
 from .store import ArenaResearcherStore, default_arena_researcher_path
-from .survey import survey_repo, verify_anchor
+from .survey import default_survey_cache_path, survey_repo, verify_anchor
 
 __all__ = [
     "ARENA_RESEARCHER_JOB",
@@ -33,6 +33,7 @@ __all__ = [
     "arena_hours",
     "arena_max_proposals",
     "default_arena_researcher_path",
+    "default_survey_cache_path",
     "ensure_arena_researcher_job",
     "finding_to_ticket",
     "rank_findings",
