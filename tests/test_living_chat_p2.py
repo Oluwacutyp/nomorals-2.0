@@ -155,17 +155,25 @@ class TestRenderForms(unittest.TestCase):
         self.assertIn("1 — Platforms", out.text)
         self.assertIn("2 — Status", out.text)
 
-    def test_declared_style_and_icon_are_dropped_not_emitted(self) -> None:
+    def test_declared_style_and_icon_are_honored_not_dropped(self) -> None:
+        # Animated-emoji lane: Bot API 9.4 honors both fields on
+        # telegram-bot — resolution names them honored, and the
+        # card carries the Action through as rich_keyboard so the
+        # adapter can emit them (the legacy tuple keyboard stays
+        # exactly two items per row).
         from nomorals.social.chat.action_schema import resolve_action
         action = Action(label="Go", data="status", style="primary",
                         icon_custom_emoji_id="123")
         resolved = resolve_action(action, "telegram-bot")
-        self.assertIn("style", resolved.dropped)
-        self.assertIn("icon_custom_emoji_id", resolved.dropped)
+        self.assertIn("style", resolved.honored)
+        self.assertIn("icon_custom_emoji_id", resolved.honored)
+        self.assertEqual(resolved.dropped, ())
         out = render_card(_card(actions=(action,)), "telegram-bot")
         for row in out.keyboard:
             for pair in row:
                 self.assertEqual(len(pair), 2)
+        self.assertEqual(len(out.rich_keyboard), 1)
+        self.assertIs(out.rich_keyboard[0][0], action)
 
     def test_update_form_matches_platform_limit_evidence(self) -> None:
         from nomorals.social.chat.platform_limits import for_platform

@@ -628,11 +628,7 @@ class Database:
 
     def _wait_job(self, job: _WriteJob, *, what: str,
                   timeout: float | None = None) -> Any:
-        """Wait for a job, converting its outcome (or a timeout) loudly.
-
-   # nomorals/storage/db.py:633-708 (Upgraded _wait_job + write_timeout)
-    def _wait_job(self, job: _WriteJob, *, what: str,
-                  timeout: float | None = None) -> Any:
+        """Wait for a job, converting its outcome (or a timeout) loudly."""
         if timeout is None:
             timeout = getattr(self._local, "write_timeout_s", None)
         if timeout is None:
@@ -682,6 +678,8 @@ class Database:
                     prev_state.wedged = True
             self._local.write_timeout_s = prev_timeout
             self._local.write_timeout_state = prev_state
+
+    def _routed_execute(self, sql: str, params: Any = ()) -> _RoutedCursor:
         self._check_txn_generation()
         job = self._enqueue_job("stmt", sql, params)
         return self._wait_job(job, what=f"statement {sql[:60]!r}")

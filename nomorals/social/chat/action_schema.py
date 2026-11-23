@@ -9,28 +9,48 @@ carries the full description:
   every render and every surface;
 * **intent** — callback / url / copy / choose / navigate / upload /
   refresh, declared rather than inferred from the payload's shape;
-* **style** and **icon_custom_emoji_id** — Telegram's February-2026
-  button fields, carried in the schema so surfaces can DECLARE
-  them, with per-platform support resolved honestly (below);
+* **style** and **icon_custom_emoji_id** — Telegram's Bot API 9.4
+  (2026-02-09) button fields, carried in the schema and HONORED
+  on the Bot API surfaces: ``style`` colors the button
+  (``primary`` blue / ``success`` green / ``danger`` red) and
+  ``icon_custom_emoji_id`` shows a custom emoji before the
+  button text. Both are gated the same way custom emoji in
+  message text are — the bot owner has Telegram Premium, or the
+  bot bought Fragment usernames — and the adapter retries a
+  refused send with plain buttons instead of eating the message;
 * **fallback_label** — the accessibility / fallback text used when
   the action degrades to a numbered list or a text line;
 * **target / operation_id / revision** — the object and operation
   the action belongs to, for stateful cards.
 
-Platform support is EVIDENCE, not aspiration. The deployed
-Telegram adapters (Bot API ``_button_json``, Telethon
-``Button.inline``/``Button.url``) serialize only ``text`` +
-``url``/``callback_data``: neither ``style`` nor
-``icon_custom_emoji_id`` is emitted anywhere, so both are recorded
-**unsupported** here — an action may declare them, resolution
-names them as dropped, and nothing pretends they reached the
-user. The WhatsApp bridges (Go ``messages.go`` cmdSend, Node
+Platform support is EVIDENCE, not aspiration. The Bot API
+adapter (``TelegramBotAdapter._button_json``) serializes
+``style`` + ``icon_custom_emoji_id`` onto callback AND url
+buttons, so both are recorded **native** on ``telegram-bot`` /
+``telegram-personal``; the in-text weaver carries registered
+glyphs as ``custom_emoji`` entities through the same send path.
+The Telethon adapter (MTProto ``Button.inline`` / ``Button.url``)
+has no style or custom-emoji icon field, so both stay
+**unsupported** there — resolution names them as dropped. The
+WhatsApp bridges (Go ``messages.go`` cmdSend, Node
 ``whatsapp-bridge.mjs`` cmdSend) render callback actions as
 quick-reply / list interactive messages and re-enter taps as
 commands; they have no URL-button or per-button style/icon form,
 so a URL action resolves to a text line there. Platforms with no
 button concept resolve callback actions to the numbered fallback
 — a peer path with real handlers, not a degraded afterthought.
+
+An ``icon_custom_emoji_id`` is only ever sent when it names a
+custom emoji Devon may actually use: ``resolve_action`` takes
+the ids her registry holds (``known_custom_emoji_ids``) and
+drops an id that is not among them by name — a bad id fails the
+whole ``sendMessage``, so it is never sent blind. The sets
+themselves attach through the existing expression path:
+``/customemoji import <pack name>`` reads a whole readable pack
+(any bot may READ a sticker set, even though SENDING its
+custom emoji is eligibility-gated) and ``/customemoji add`` /
+``ref`` curate entries by hand; created art registers in her
+own packs through ``create_or_extend_custom_emoji_pack``.
 
 Legacy tuples keep working everywhere: :func:`Action.to_legacy`
 lowers an action to the ``(label, data)`` pair the existing
@@ -42,12 +62,14 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
+from typing import Any
 
 from .tgbot_buttons import check_callback_data
 
 __all__ = [
     "INTENTS",
     "CALLBACK_INTENTS",
+    "BUTTON_STYLES",
     "FIELD_SUPPORT",
     "SUPPORT_NOTES",
     "Action",
@@ -64,6 +86,19 @@ INTENTS = ("callback", "url", "copy", "choose", "navigate",
 CALLBACK_INTENTS = ("callback", "choose", "navigate", "upload",
                     "refresh")
 
+#: The Bot API 9.4 button styles — the closed set. Anything else
+#: is not a style Telegram knows, so the schema refuses it at
+#: construction instead of letting it fail a live send.
+BUTTON_STYLES = ("primary", "success", "danger")
+
+
+def _is_custom_emoji_id(value: str) -> bool:
+    """A plausible Bot API custom-emoji id: the decimal form of
+    the int64 Telegram hands back from ``getStickerSet`` /
+    ``getCustomEmojiStickers`` (``"5368324170671202286"``)."""
+    value = str(value or "")
+    return bool(value) and value.isdigit() and len(value) <= 19
+
 #: Field support per platform: "native" (the field reaches the
 #: user), "fallback" (the action still works through the fallback
 #: form), "unsupported" (declared but NOT honored — resolution
@@ -71,11 +106,11 @@ CALLBACK_INTENTS = ("callback", "choose", "navigate", "upload",
 FIELD_SUPPORT: dict[str, dict[str, str]] = {
     "telegram-bot": {
         "callback": "native", "url": "native", "copy": "unsupported",
-        "style": "unsupported", "icon_custom_emoji_id": "unsupported",
+        "style": "native", "icon_custom_emoji_id": "native",
     },
     "telegram-personal": {
         "callback": "native", "url": "native", "copy": "unsupported",
-        "style": "unsupported", "icon_custom_emoji_id": "unsupported",
+        "style": "native", "icon_custom_emoji_id": "native",
     },
     "telegram": {
         "callback": "native", "url": "native", "copy": "unsupported",
@@ -111,14 +146,20 @@ FIELD_SUPPORT: dict[str, dict[str, str]] = {
 #: evidence, so a future reader can re-verify instead of trusting.
 SUPPORT_NOTES: dict[str, str] = {
     "telegram-bot": (
-        "TelegramBotAdapter._button_json emits only text + url / "
-        "callback_data; style and icon_custom_emoji_id (Bot API, "
-        "Feb 2026) are not serialized by the deployed adapter."),
+        "TelegramBotAdapter._button_json emits style and "
+        "icon_custom_emoji_id (Bot API 9.4, 2026-02-09) on "
+        "callback and url buttons; the in-text weaver carries "
+        "registered glyphs as custom_emoji entities. Both are "
+        "gated on the bot owner having Telegram Premium or the "
+        "bot having bought Fragment usernames — a refusal "
+        "retries the send plain, never eats it."),
     "telegram-personal": (
         "Same Bot API adapter as telegram-bot (second bot)."),
     "telegram": (
         "Telethon adapter builds Button.inline / Button.url only; "
-        "no style or custom-emoji icon field is emitted."),
+        "MTProto buttons carry no style or custom-emoji icon "
+        "field, so both stay unsupported here even though the "
+        "Bot API surfaces honor them."),
     "whatsapp": (
         "Both bridges (Go messages.go cmdSend, Node "
         "whatsapp-bridge.mjs cmdSend) render the first buttons as "
@@ -174,6 +215,15 @@ class Action:
                 and not self.url.startswith(("http://", "https://")):
             raise ValueError(
                 f"url action {self.label!r} needs an http(s) url")
+        if self.style and self.style not in BUTTON_STYLES:
+            raise ValueError(
+                f"unknown button style {self.style!r} — the Bot API "
+                f"knows {', '.join(BUTTON_STYLES)}")
+        if self.icon_custom_emoji_id \
+                and not _is_custom_emoji_id(self.icon_custom_emoji_id):
+            raise ValueError(
+                "icon_custom_emoji_id must be Telegram's decimal id "
+                f"form, got {self.icon_custom_emoji_id!r}")
         if not self.id:
             payload = self.url if self.intent == "url" else self.data
             object.__setattr__(
@@ -207,24 +257,53 @@ class ResolvedAction:
     note: str = ""
 
 
-def resolve_action(action: Action, platform: str) -> ResolvedAction:
-    """Resolve an action against a platform's real support."""
+def resolve_action(action: Action, platform: str,
+                   known_custom_emoji_ids: Any = None
+                   ) -> ResolvedAction:
+    """Resolve an action against a platform's real support.
+
+    ``known_custom_emoji_ids`` is the set of custom-emoji ids
+    Devon's registry actually holds (her packs + imports — see
+    the module docstring). When it is given, an
+    ``icon_custom_emoji_id`` outside it is dropped by name as
+    unverified: a bad id fails the whole ``sendMessage``, so it
+    is never sent blind. When it is not given, a declared icon
+    is honored as declared and the adapter's send-time retry
+    ladder is the guard.
+    """
     plat = str(platform or "")
     support = FIELD_SUPPORT.get(plat) or {
         "callback": "fallback", "url": "fallback", "copy": "fallback",
         "style": "unsupported", "icon_custom_emoji_id": "unsupported",
     }
     note = SUPPORT_NOTES.get(plat, "unknown platform: fallback forms only")
+    known = None
+    if known_custom_emoji_ids is not None:
+        known = {str(i) for i in known_custom_emoji_ids if str(i)}
+    style_ok = bool(action.style) \
+        and support["style"] != "unsupported"
+    icon_ok = bool(action.icon_custom_emoji_id) \
+        and support["icon_custom_emoji_id"] != "unsupported"
+    if icon_ok and known is not None \
+            and action.icon_custom_emoji_id not in known:
+        icon_ok = False
+        note = (f"{note} icon_custom_emoji_id "
+                f"{action.icon_custom_emoji_id!r} is not one of the "
+                "custom emoji ids Devon holds (unverified — never "
+                "sent blind, a bad id fails the whole send).")
     dropped: list[str] = []
-    if action.style and support["style"] == "unsupported":
+    if action.style and not style_ok:
         dropped.append("style")
-    if action.icon_custom_emoji_id \
-            and support["icon_custom_emoji_id"] == "unsupported":
+    if action.icon_custom_emoji_id and not icon_ok:
         dropped.append("icon_custom_emoji_id")
+    rich: tuple[str, ...] = (
+        (("style",) if style_ok else ())
+        + (("icon_custom_emoji_id",) if icon_ok else ()))
 
     if plat in _TELEGRAM_PLATFORMS:
         if action.intent == "url":
-            return ResolvedAction("inline", ("label", "url", "intent"),
+            return ResolvedAction("inline",
+                                  ("label", "url", "intent") + rich,
                                   tuple(dropped), note)
         if action.intent == "copy":
             return ResolvedAction(
@@ -232,7 +311,8 @@ def resolve_action(action: Action, platform: str) -> ResolvedAction:
                 tuple(dropped + ["copy"]),
                 "no copy_text button is emitted by the adapter; "
                 "the text itself carries the content")
-        return ResolvedAction("inline", ("label", "data", "intent"),
+        return ResolvedAction("inline",
+                              ("label", "data", "intent") + rich,
                               tuple(dropped), note)
     if plat == "whatsapp":
         if action.intent in ("url", "copy"):

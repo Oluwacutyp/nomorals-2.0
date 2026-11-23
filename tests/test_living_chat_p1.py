@@ -12,10 +12,10 @@ Four contracts, pinned at the real seams:
 2. **Rich action schema** — :mod:`nomorals.social.chat.action_schema`
    actions carry stable identity, intent, style and an optional
    native custom-emoji icon; per-platform resolution names what is
-   honored and what is dropped (Telegram's Feb-2026 ``style`` /
-   ``icon_custom_emoji_id`` button fields are NOT serialized by the
-   deployed adapter, so the schema records them unsupported rather
-   than emitting fields nothing honors).
+   honored and what is dropped (Telegram's Bot API 9.4 ``style`` /
+   ``icon_custom_emoji_id`` button fields ARE serialized by the
+   Bot API adapter, so the schema records them native there and
+   unsupported where no button field exists for them).
 3. **Surface manifest drift** — the checked-in manifest
    (:mod:`nomorals.social.chat.surface_manifest`) is compared
    SET-BASED against the live registries (hub screens, adaptive
@@ -236,27 +236,32 @@ class TestActionSchema:
         assert ("Retry", "tour") in flat
         assert ("Help", "help") in flat
 
-    def test_telegram_resolution_names_dropped_fields(self):
+    def test_telegram_resolution_honors_style_and_icon(self):
+        # Animated-emoji lane: Bot API 9.4 honors both fields on
+        # the Bot API surfaces — they reach the user, not the drop
+        # list. (The old "unsupported" reading died with the
+        # adapter's _button_json emitting them.)
         a = Action(label="Go", intent="callback", data="help",
                    style="primary", icon_custom_emoji_id="12345")
         res = resolve_action(a, "telegram-bot")
         assert res.form == "inline"
-        assert "style" in res.dropped
-        assert "icon_custom_emoji_id" in res.dropped
+        assert "style" in res.honored
+        assert "icon_custom_emoji_id" in res.honored
+        assert res.dropped == ()
 
     def test_telegram_field_support_is_honest(self):
-        # The deployed Bot API adapter serializes only text/url/
-        # callback_data (telegram.TelegramBotAdapter._button_json):
-        # the Feb-2026 fields are recorded unsupported, never emitted.
-        assert FIELD_SUPPORT["telegram-bot"]["style"] == "unsupported"
+        # The Bot API adapter serializes style + icon_custom_emoji_id
+        # (telegram.TelegramBotAdapter._button_json): both are
+        # recorded native, and the serializer emits them.
+        assert FIELD_SUPPORT["telegram-bot"]["style"] == "native"
         assert (FIELD_SUPPORT["telegram-bot"]["icon_custom_emoji_id"]
-                == "unsupported")
+                == "native")
         import inspect
 
         from nomorals.social.chat import telegram
         src = inspect.getsource(telegram.TelegramBotAdapter._button_json)
-        assert "icon_custom_emoji_id" not in src
-        assert '"style"' not in src
+        assert "icon_custom_emoji_id" in src
+        assert '"style"' in src
 
     def test_whatsapp_url_resolves_to_text_line(self):
         a = Action(label="Rules", intent="url",

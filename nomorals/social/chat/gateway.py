@@ -136,6 +136,40 @@ def _present_outbound(platform: str, text: str,
         return text, parse_mode
 
 
+def _normalize_buttons(
+        buttons: list | None) -> list | None:
+    """Lower rich ``Action`` items in button rows to JSON-safe
+    dicts (``{label, data, style?, icon_custom_emoji_id?}``) so
+    the durable outbox's JSON round-trip and every adapter see
+    the same button. Legacy ``(label, data)`` pairs pass through
+    untouched — this changes nothing for existing callers. The
+    adapter rebuilds the identical button from either form (see
+    ``TelegramBotAdapter._button_from_item``)."""
+    if buttons is None:
+        return None
+    out: list = []
+    for row in buttons or []:
+        orow: list = []
+        for item in row or []:
+            if hasattr(item, "to_legacy"):
+                label, data = item.to_legacy()
+                entry: dict[str, Any] = {"label": str(label),
+                                         "data": str(data)}
+                style = str(getattr(item, "style", "") or "")
+                icon = str(getattr(item, "icon_custom_emoji_id", "")
+                           or "")
+                if style:
+                    entry["style"] = style
+                if icon:
+                    entry["icon_custom_emoji_id"] = icon
+                orow.append(entry)
+            else:
+                orow.append(item)
+        if orow:
+            out.append(orow)
+    return out or None
+
+
 def present_outbound(platform: str, text: str,
                      parse_mode: str = "") -> tuple[str, str]:
     """Present ``text`` for ``platform`` at the send boundary — the
@@ -1306,7 +1340,11 @@ class ChatGateway:
 
         ``buttons`` is ``[[(label, callback_data), ...], ...]`` — rendered
         as an inline keyboard by adapters whose platform supports it
-        (TelegramBotAdapter); stripped elsewhere. ``reply_keyboard`` is
+        (TelegramBotAdapter); stripped elsewhere. Rows may also carry
+        rich ``Action`` items (``style`` / ``icon_custom_emoji_id``):
+        they are normalized to JSON-safe dicts here, so the durable
+        outbox and the adapters see the same button.
+        ``reply_keyboard`` is
         ``[[text, ...], ...]`` — a persistent bottom keyboard, rendered
         by the Telegram adapters, stripped elsewhere. When both are
         passed, ``reply_keyboard`` wins.
@@ -1362,6 +1400,12 @@ class ChatGateway:
         # parse modes and non-HTML platforms pass through untouched.
         text, parse_mode = _present_outbound(chat.platform, text,
                                              parse_mode)
+
+        # Rich Action items become JSON-safe dicts here, before
+        # either branch: the durable outbox round-trips buttons
+        # through JSON, and the direct path's adapters rebuild
+        # the identical button from the dict form.
+        buttons = _normalize_buttons(buttons)
 
         use_durable = durable if durable is not None else self.durable_outbox
         if use_durable and self.outbox is not None:

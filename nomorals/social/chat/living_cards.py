@@ -432,12 +432,21 @@ class RenderedCard:
     quick-reply or list) / numbered (the numbered fallback —
     ``keyboard`` is empty and the actions ride as numbered lines
     in ``text``) / text (no actions to render).
+
+    ``keyboard`` is the legacy ``(label, data)`` lowering every
+    transport already speaks. ``rich_keyboard`` carries the same
+    rows as the ``Action`` objects themselves — but ONLY when at
+    least one action declares a field the legacy pair cannot
+    carry (``style`` / ``icon_custom_emoji_id`` honored on that
+    platform); it is empty otherwise, and transports that only
+    know tuples keep using ``keyboard`` untouched.
     """
 
     text: str
     keyboard: list[list[tuple[str, str]]] = field(
         default_factory=list)
     form: str = "text"
+    rich_keyboard: list[list[Action]] = field(default_factory=list)
 
 
 def _theme_text(card: Card, *, phase_lines: list[str] | None = None,
@@ -521,7 +530,10 @@ def render_card(card: Card, platform: str) -> RenderedCard:
     probe = resolve_action(card.actions[0], plat)
     if probe.form in ("inline", "interactive"):
         rows: list[list[tuple[str, str]]] = []
+        rich_rows: list[list[Action]] = []
         row: list[tuple[str, str]] = []
+        rich_row: list[Action] = []
+        saw_rich = False
         for index, action in enumerate(card.actions, 1):
             resolved = resolve_action(action, plat)
             if resolved.form not in ("inline", "interactive"):
@@ -538,13 +550,22 @@ def render_card(card: Card, platform: str) -> RenderedCard:
             row.append((label,
                         f"cardtap {card.card_id} {card.revision} "
                         f"{index}"))
+            rich_row.append(action)
+            if "style" in resolved.honored \
+                    or "icon_custom_emoji_id" in resolved.honored:
+                saw_rich = True
             if len(row) == 2:  # the house grid: two per row
                 rows.append(row)
                 row = []
+                rich_rows.append(rich_row)
+                rich_row = []
         if row:
             rows.append(row)
+        if rich_row:
+            rich_rows.append(rich_row)
         return RenderedCard(text=text, keyboard=rows,
-                            form=probe.form)
+                            form=probe.form,
+                            rich_keyboard=rich_rows if saw_rich else [])
     # The numbered fallback is a peer path, not a degraded one.
     lines = [text] if text else []
     for index, action in enumerate(card.actions, 1):
@@ -691,7 +712,7 @@ class CardHost:
         try:
             ok, message_id = self._send(
                 card.platform, chat, text,
-                rendered.keyboard or None,
+                rendered.rich_keyboard or rendered.keyboard or None,
                 **_mode_kwargs(self._send, parse_mode))
         except Exception as exc:  # noqa: BLE001 - degrade, never die
             _log.debug("card publish failed for %s: %s",
@@ -748,7 +769,7 @@ class CardHost:
             try:
                 delivered = bool(self._edit(
                     chat, card.message_id, text,
-                    rendered.keyboard or None,
+                    rendered.rich_keyboard or rendered.keyboard or None,
                     **_mode_kwargs(self._edit, parse_mode)))
             except Exception as exc:  # noqa: BLE001
                 _log.debug("card edit failed for %s: %s",
@@ -758,7 +779,7 @@ class CardHost:
             try:
                 ok, message_id = self._send(
                     card.platform, chat, text,
-                    rendered.keyboard or None,
+                    rendered.rich_keyboard or rendered.keyboard or None,
                     **_mode_kwargs(self._send, parse_mode))
             except Exception as exc:  # noqa: BLE001
                 _log.debug("card send failed for %s: %s",

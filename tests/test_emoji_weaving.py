@@ -224,8 +224,11 @@ def test_send_with_an_empty_registry_is_plain():
 def test_markup_sends_keep_their_parse_path():
     adapter = _wired(_bot())
     calls = _send_rig(adapter)
-    out = adapter.send(_chat(), "<b>paid 💰</b>",
-                       parse_mode="HTML")
+    # No registered glyph in this chunk: the markup send keeps its
+    # parse path exactly as before. (A registered glyph DOES weave
+    # now — see test_gapfix_animoji's HTML weave test — so this
+    # pin uses glyph-free markup.)
+    out = adapter.send(_chat(), "<b>paid</b>", parse_mode="HTML")
     assert out.ok and len(calls) == 1
     assert "entities" not in calls[0]
     assert calls[0]["parse_mode"] == "HTML"

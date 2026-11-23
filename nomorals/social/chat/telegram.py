@@ -32,12 +32,14 @@ import json
 import os
 import re
 import time
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
 from ...core.errors import ValidationError
 from ...core.logging_setup import get_logger
 from ...core.text import safe_filename
+from .action_schema import BUTTON_STYLES
 from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, IncomingHandler, MediaRef, SendResult, contact_shape_error, location_shape_error, search_shape_error
 from .platform_limits import for_platform
 from .failures import record_failure
@@ -62,7 +64,165 @@ def _is_entity_parse_error(exc: BaseException) -> bool:
             or "parse entities" in s
             or "entity offset" in s)
 
+
+def _utf16_len(text: str) -> int:
+    """Length in UTF-16 code units — the Bot API's entity offset
+    unit. An astral glyph (most emoji) is TWO units; counting code
+    points instead is the classic broken offset."""
+    return len(str(text).encode("utf-16-le")) // 2
+
+
+def _is_custom_emoji_refusal(exc: BaseException) -> bool:
+    """True when the API refused over the custom emoji themselves
+    (the eligibility gate: owner Premium / Fragment usernames) —
+    the refusal text names custom emoji, the button icon field,
+    or the button style. The send ladder retries past exactly
+    this, never past any other failure."""
+    s = str(exc or "").lower()
+    return ("custom_emoji" in s or "custom emoji" in s
+            or "icon_custom_emoji" in s or "button style" in s)
+
+
+def _keyboard_has_rich(markup: dict[str, Any]) -> bool:
+    """True when an inline-keyboard markup carries a rich field
+    (``style`` / ``icon_custom_emoji_id``) on any button."""
+    if not isinstance(markup, dict):
+        return False
+    rows = markup.get("inline_keyboard") or []
+    return any("style" in button or "icon_custom_emoji_id" in button
+               for row in rows for button in row)
+
+
+def _plain_keyboard(markup: dict[str, Any]) -> dict[str, Any]:
+    """The same inline keyboard with every rich field stripped —
+    the twin a refused rich send retries with."""
+    rows = [[{key: value for key, value in button.items()
+              if key not in ("style", "icon_custom_emoji_id")}
+             for button in row]
+            for row in (markup.get("inline_keyboard") or [])]
+    return {"inline_keyboard": rows}
+
+
+#: Bot API HTML tags the gateway can emit, mapped to the entity
+#: type they become when a chunk is converted to the entities
+#: form (see :func:`telegram_html_to_entities`). Tags Telegram
+#: HTML does not know are dropped with their inner text kept.
+_HTML_ENTITY_TAGS = {
+    "b": "bold", "strong": "bold",
+    "i": "italic", "em": "italic",
+    "u": "underline", "ins": "underline",
+    "s": "strikethrough", "strike": "strikethrough",
+    "del": "strikethrough",
+    "code": "code", "pre": "pre",
+    "tg-spoiler": "spoiler", "blockquote": "blockquote",
+}
+
+
+class _HTMLToEntitiesParser(HTMLParser):
+    """One pass over a Bot API HTML chunk: plain text + entities.
+
+    Offsets/lengths are UTF-16 code units (the Bot API's unit).
+    An unclosed tag runs to the end of the chunk; a stray end tag
+    is ignored; unknown tags are dropped with their inner text
+    kept. ``<br>`` is a newline. Never raises on malformed input
+    — a chunk that will not parse cleanly is what the plain
+    fallback is for.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.plain: list[str] = []
+        self.entities: list[dict[str, Any]] = []
+        self._open: list[tuple[str, int, dict[str, Any]]] = []
+
+    def _pos(self) -> int:
+        return _utf16_len("".join(self.plain))
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        if tag == "br":
+            self.plain.append("\n")
+            return
+        if tag == "a":
+            href = ""
+            for name, value in attrs:
+                if name == "href" and value:
+                    href = str(value)
+            if href:
+                self._open.append(
+                    ("text_link", self._pos(), {"url": href}))
+            return
+        kind = _HTML_ENTITY_TAGS.get(tag)
+        if kind is None:
+            return
+        extra: dict[str, Any] = {}
+        if kind == "pre":
+            for name, value in attrs:
+                if name == "language" and value:
+                    extra["language"] = str(value)
+        self._open.append((kind, self._pos(), extra))
+
+    def handle_startendtag(self, tag: str, attrs: list) -> None:
+        if tag == "br":
+            self.plain.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        self.plain.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        kind = "text_link" if tag == "a" \
+            else _HTML_ENTITY_TAGS.get(tag)
+        if kind is None:
+            return
+        for j in range(len(self._open) - 1, -1, -1):
+            if self._open[j][0] == kind:
+                _, start, extra = self._open.pop(j)
+                length = self._pos() - start
+                if length > 0:
+                    entity = {"type": kind, "offset": start,
+                              "length": length}
+                    entity.update(extra)
+                    self.entities.append(entity)
+                return
+
+    def close(self) -> None:
+        super().close()
+        end = self._pos()
+        for kind, start, extra in self._open:
+            if end > start:
+                entity = {"type": kind, "offset": start,
+                          "length": end - start}
+                entity.update(extra)
+                self.entities.append(entity)
+        self._open = []
+
+
+def telegram_html_to_entities(
+        text: str) -> tuple[str, list[dict[str, Any]]]:
+    """A Bot API HTML chunk -> ``(plain text, entities)``.
+
+    The entities form is what a send carries INSTEAD of
+    ``parse_mode``: the Bot API takes one or the other, never
+    both. The weaver merges custom-emoji entities into the list
+    this returns, so an HTML reply animates exactly like a plain
+    one. Pure: same input, same output, no I/O.
+    """
+    parser = _HTMLToEntitiesParser()
+    try:
+        parser.feed(str(text or ""))
+        parser.close()
+    except Exception as exc:  # noqa: BLE001 - malformed HTML degrades
+        record_failure("telegram.html_to_entities", exc)
+        from .platforms import strip_html
+
+        return strip_html(text), []
+    entities = sorted(parser.entities,
+                      key=lambda e: (int(e["offset"]), int(e["length"]),
+                                     str(e["type"])))
+    return "".join(parser.plain), entities
+
+
 __all__ = ["TelegramAdapter", "TelegramBotAdapter",
+           "telegram_html_to_entities",
            "SLOWMODE_ALLOWED_S"]
 
 #: The slow-mode delays Telegram accepts (TDLib doc for the same
@@ -6710,16 +6870,70 @@ class TelegramBotAdapter(ChatAdapter):
                        hashlib.sha256).hexdigest()[:16]
         return f"{data}|{sig}"
 
-    def _button_json(self, label: str, data: str) -> dict[str, Any]:
+    def _button_json(self, label: str, data: str, *,
+                     style: str = "",
+                     icon_custom_emoji_id: str = "") -> dict[str, Any]:
         """One inline-keyboard button.  A payload that is a URL
         renders as Telegram's native URL button (the closest
         equivalent of an HTML link — e.g. a group's rules page);
-        anything else is a signed callback button."""
+        anything else is a signed callback button.
+
+        ``style`` (Bot API 9.4: primary / success / danger) colors
+        the button and ``icon_custom_emoji_id`` shows a custom
+        emoji before its text — on callback AND url buttons alike.
+        Both are eligibility-gated (owner Premium / Fragment
+        usernames): an unknown style or a malformed id is DROPPED
+        here with a debug line, never allowed to fail the send,
+        and a live refusal retries the message with a plain
+        keyboard (see :meth:`send`).
+        """
         data = str(data or "")
         if data.startswith(("http://", "https://")):
-            return {"text": str(label), "url": data}
-        return {"text": str(label),
-                "callback_data": self._sign_callback(data)}
+            button: dict[str, Any] = {"text": str(label), "url": data}
+        else:
+            button = {"text": str(label),
+                      "callback_data": self._sign_callback(data)}
+        style = str(style or "")
+        if style:
+            if style in BUTTON_STYLES:
+                button["style"] = style
+            else:
+                _log.debug("telegram-bot: dropping unknown button "
+                           "style %r", style)
+        icon = str(icon_custom_emoji_id or "")
+        if icon:
+            if icon.isdigit() and len(icon) <= 19:
+                button["icon_custom_emoji_id"] = icon
+            else:
+                _log.debug("telegram-bot: dropping malformed "
+                           "icon_custom_emoji_id %r", icon)
+        return button
+
+    def _button_from_item(self, item: Any) -> dict[str, Any]:
+        """One inline-keyboard button from a legacy ``(label, data)``
+        pair, a gateway-normalized ``{label, data, style,
+        icon_custom_emoji_id}`` dict, or a rich ``Action`` — the
+        same button either way. An Action's ``emoji`` cue prefixes
+        its label, exactly as ``render_card``'s tuple path does."""
+        if isinstance(item, dict):
+            return self._button_json(
+                str(item.get("label", "")), str(item.get("data", "")),
+                style=str(item.get("style", "") or ""),
+                icon_custom_emoji_id=str(
+                    item.get("icon_custom_emoji_id", "") or ""))
+        if hasattr(item, "to_legacy"):
+            label, data = item.to_legacy()
+            label = str(label)
+            emoji = str(getattr(item, "emoji", "") or "")
+            if emoji and emoji not in label:
+                label = f"{emoji} {label}"
+            return self._button_json(
+                label, data,
+                style=str(getattr(item, "style", "") or ""),
+                icon_custom_emoji_id=str(
+                    getattr(item, "icon_custom_emoji_id", "") or ""))
+        label, data = item
+        return self._button_json(str(label), str(data))
 
     def _verify_callback(self, signed: str) -> str | None:
         """Verify signature, return the original data or None."""
@@ -7181,19 +7395,71 @@ class TelegramBotAdapter(ChatAdapter):
         }
         if parse_mode in ("HTML", "Markdown", "MarkdownV2"):
             params["parse_mode"] = parse_mode
+        markup: dict[str, Any] | None = None
+        plain_markup: dict[str, Any] | None = None
         if resolved:
             keyboard = []
             for row in resolved:
                 krow = []
-                for label, data in row:
-                    krow.append(self._button_json(label, data))
+                for item in row:
+                    krow.append(self._button_from_item(item))
                 keyboard.append(krow)
-            params["reply_markup"] = {"inline_keyboard": keyboard}
-        try:
-            return self._api("editMessageText", **params)
-        except Exception as exc:  # noqa: BLE001 - edit is best-effort
-            _log.debug("telegram-bot: edit_message failed: %s", exc)
-            return None
+            markup = {"inline_keyboard": keyboard}
+            if _keyboard_has_rich(markup):
+                plain_markup = _plain_keyboard(markup)
+        # An edit weaves exactly like a send (same helper, same
+        # HTML -> entities conversion) and retries past a custom
+        # emoji refusal the same way — entities first, then the
+        # original form, then the plain keyboard. Best-effort as
+        # ever: any failure returns None and the caller sends new.
+        weave_text, weave_entities, _weave_mode = (
+            self._weave_chunk_entities(
+                chat, str(params["text"]), parse_mode))
+        attempts: list[tuple[str, str | None, str,
+                             dict[str, Any] | None]] = []
+        if weave_entities:
+            attempts.append((weave_text, weave_entities, "", markup))
+            attempts.append((str(params["text"]), None, parse_mode,
+                             markup))
+        else:
+            attempts.append((str(params["text"]), None, parse_mode,
+                             markup))
+        if plain_markup is not None:
+            attempts.append((str(params["text"]), None, parse_mode,
+                             plain_markup))
+        woven_exc: Exception | None = None
+        for ai, (atext, aentities, amode,
+                 amarkup) in enumerate(attempts):
+            aparams = dict(params)
+            if amode:
+                aparams["parse_mode"] = amode
+            else:
+                aparams.pop("parse_mode", None)
+            aparams["text"] = atext
+            if aentities:
+                aparams["entities"] = aentities
+            if amarkup:
+                aparams["reply_markup"] = amarkup
+            try:
+                result = self._api("editMessageText", **aparams)
+                if woven_exc is not None and ai == 1:
+                    # The original-form edit landed, so the
+                    # entities were the refusal — record it once
+                    # for the send path too.
+                    self._note_weave_refusal(chat, woven_exc)
+                return result
+            except Exception as exc:  # noqa: BLE001 - next variant
+                if aentities is not None \
+                        and _is_custom_emoji_refusal(exc):
+                    woven_exc = exc
+                    continue
+                if amarkup is not None and plain_markup is not None \
+                        and amarkup is not plain_markup \
+                        and _is_custom_emoji_refusal(exc):
+                    continue
+                _log.debug("telegram-bot: edit_message failed: %s", exc)
+                return None
+        return None
 
     def _public_rich_buttons(self, text: str,
                              fresh_origin: str) -> Any:
@@ -7381,9 +7647,18 @@ class TelegramBotAdapter(ChatAdapter):
                     keyboard = []
                     for row in resolved:
                         krow = []
-                        for label, data in row:
-                            krow.append(self._button_json(label, data))
+                        for item in row:
+                            krow.append(self._button_from_item(item))
                         keyboard.append(krow)
+            # A rich inline keyboard (style/icon on some button)
+            # carries its plain twin: if Telegram refuses the rich
+            # fields, the chunk retries with the plain keyboard
+            # instead of eating the message.
+            plain_keyboard: dict[str, Any] | None = None
+            if keyboard and reply_keyboard is None:
+                markup = {"inline_keyboard": keyboard}
+                if _keyboard_has_rich(markup):
+                    plain_keyboard = _plain_keyboard(markup)
             chunks = _chunk_text(text, self.MAX_TEXT)
             plain_fallback = False
             for i, chunk in enumerate(chunks):
@@ -7411,45 +7686,111 @@ class TelegramBotAdapter(ChatAdapter):
                         params["reply_markup"] = keyboard
                     else:
                         params["reply_markup"] = {"inline_keyboard": keyboard}
-                # ── in-text custom-emoji weaving (F4) ──
-                # Plain chunks (no parse_mode — markup sends
-                # keep their parse path untouched) offer
-                # themselves to the weaver first: registered
-                # glyphs ride as custom_emoji entities so her
-                # text animates mid-sentence.  A refusal over
-                # eligibility is journaled once per scope and
-                # the chunk resends plain right here; a
-                # parse-class failure of the woven entities is
-                # journaled and also resends plain, WITHOUT
-                # the refusal state; anything else raises into
-                # the ordinary classification below.  The
-                # message always lands.
-                weave_entities = None
-                if not parse_mode and not plain_fallback:
-                    weave_entities = self._weave_chunk_entities(
-                        chat, chunk)
+                # ── in-text custom-emoji weaving (F4, extended) ──
+                # Plain chunks weave as before. HTML chunks convert
+                # to plain text + entities first (the Bot API takes
+                # entities INSTEAD of parse_mode), so registered
+                # glyphs animate in the replies that actually go
+                # out — the gateway renders most replies as HTML,
+                # which used to leave the weaver with nothing to
+                # do. HTML with no registered glyph keeps its parse
+                # path byte-identical. The send runs a ladder of
+                # variants: woven entities + rich keyboard, then
+                # the chunk's original form, then the plain
+                # keyboard. A refusal over eligibility steps down
+                # the ladder and is journaled once per scope ONLY
+                # when the original form lands — that is the proof
+                # the entities (not the keyboard) were refused;
+                # a parse-class failure resends plain WITHOUT the
+                # refusal state; anything else raises into the
+                # ordinary classification below. The message
+                # always lands.
                 try:
+                    weave_text, weave_entities, _weave_mode = (
+                            chunk, None, parse_mode)
+                    if not plain_fallback:
+                        weave_text, weave_entities, _weave_mode = (
+                            self._weave_chunk_entities(
+                                chat, chunk, parse_mode))
+                    variants: list[tuple[
+                        str, str | None, str | None,
+                        dict[str, Any] | None]] = []
                     if weave_entities:
+                        variants.append((weave_text, weave_entities, "",
+                                         params.get("reply_markup")))
+                        variants.append((chunk, None, None,
+                                         params.get("reply_markup")))
+                    else:
+                        variants.append((chunk, None, None,
+                                         params.get("reply_markup")))
+                    if plain_keyboard is not None:
+                        variants.append((chunk, None, None, plain_keyboard))
+                    result = None
+                    woven_exc: Exception | None = None
+                    last_exc: Exception | None = None
+                    landed_vi = -1
+                    for vi, (vtext, ventities, vmode,
+                             vmarkup) in enumerate(variants):
+                        vparams = dict(params)
+                        if vmode == "":
+                            vparams.pop("parse_mode", None)
+                        if vmarkup is None:
+                            vparams.pop("reply_markup", None)
+                        else:
+                            vparams["reply_markup"] = vmarkup
+                        vkwargs: dict[str, Any] = {"text": vtext}
+                        if ventities:
+                            vkwargs["entities"] = ventities
                         try:
-                            result = self._api(
-                                "sendMessage", text=chunk,
-                                entities=weave_entities, **params)
-                        except Exception as exc:  # noqa: BLE001
-                            if self._note_weave_refusal(chat, exc):
-                                result = self._api(
-                                    "sendMessage", text=chunk,
-                                    **params)
-                            elif _is_entity_parse_error(exc):
+                            result = self._api("sendMessage", **vkwargs,
+                                               **vparams)
+                            landed_vi = vi
+                            break
+                        except Exception as exc:  # noqa: BLE001 - ladder
+                            last_exc = exc
+                            if _is_entity_parse_error(exc):
                                 record_failure(
                                     "telegram.weave.entities", exc)
-                                result = self._api(
-                                    "sendMessage", text=chunk,
-                                    **params)
-                            else:
-                                raise
-                    else:
-                        result = self._api("sendMessage", text=chunk,
-                                           **params)
+                                if parse_mode:
+                                    # HTML chunk: the outer handler
+                                    # strips and resends plain, for
+                                    # this chunk and the rest of the
+                                    # message.
+                                    raise
+                                # Plain chunk: the next variant IS the
+                                # plain resend (same text, no entities).
+                                continue
+                            if ventities is not None \
+                                    and _is_custom_emoji_refusal(exc):
+                                # The woven attempt died over custom
+                                # emoji. The next variant (original
+                                # form, no entities) proves whether
+                                # the entities or the keyboard were
+                                # at fault — the refusal is only
+                                # recorded when it lands there.
+                                woven_exc = exc
+                                continue
+                            if vmarkup is not None \
+                                    and plain_keyboard is not None \
+                                    and vmarkup is not plain_keyboard \
+                                    and _is_custom_emoji_refusal(exc):
+                                # A rich keyboard died over custom
+                                # emoji — the plain twin is the next
+                                # variant.
+                                record_failure(
+                                    "telegram.button.custom_emoji", exc)
+                                continue
+                            raise
+                    if result is None:
+                        if last_exc is not None:
+                            raise last_exc
+                        raise RuntimeError(
+                            "no send variant produced a result")
+                    if woven_exc is not None and landed_vi == 1:
+                        # The original-form variant landed, so the
+                        # entities were the refusal: journal once and
+                        # stop weaving for this scope this boot.
+                        self._note_weave_refusal(chat, woven_exc)
                 except Exception as exc:  # noqa: BLE001 - classified below
                     if not (parse_mode and not plain_fallback
                             and _is_entity_parse_error(exc)):
@@ -7506,8 +7847,7 @@ class TelegramBotAdapter(ChatAdapter):
             return None
         keyboard = []
         for row in buttons:
-            krow = [self._button_json(str(label), str(data))
-                    for label, data in row]
+            krow = [self._button_from_item(item) for item in row]
             if krow:
                 keyboard.append(krow)
         return {"inline_keyboard": keyboard} if keyboard else None
@@ -7662,31 +8002,51 @@ class TelegramBotAdapter(ChatAdapter):
         """The refusal scope of one send: its chat type."""
         return str(getattr(chat, "kind", "") or "dm")
 
-    def _weave_chunk_entities(self, chat: ChatRef,
-                              chunk: str) -> str | None:
-        """The ``entities`` JSON for one outgoing chunk, or
-        None when nothing should ride it: weaving refused in
-        this scope, no provider wired, an empty registry, or
-        no registered glyph in the chunk."""
+    def _weave_chunk_entities(
+            self, chat: ChatRef, chunk: str, parse_mode: str = ""
+            ) -> tuple[str, str | None, str]:
+        """The woven form of one outgoing chunk.
+
+        Returns ``(text, entities_json, parse_mode)``: plain chunks
+        keep their text and gain ``entities``; HTML chunks convert
+        to plain text + entities first (the Bot API takes entities
+        INSTEAD of parse_mode) and drop the mode — the gateway
+        renders most replies as HTML, so without this the weaver
+        never saw the texts that actually go out. Any OTHER parse
+        mode (Markdown / MarkdownV2 — the reputation card still
+        sends Markdown) keeps its parse path untouched: converting
+        it to entities would print its markup literally. A chunk
+        with no registered glyph, no provider wired, or a refused
+        scope comes back unchanged (``entities_json`` None).
+        """
         if self._weave_scope(chat) in self._weave_refused:
-            return None
+            return chunk, None, parse_mode
         provider = self.custom_emoji_weave_source
         if provider is None:
-            return None
+            return chunk, None, parse_mode
         try:
             glyph_map = provider() or {}
         except Exception as exc:  # noqa: BLE001 - plain text wins
             record_failure("telegram.weave.provider", exc)
-            return None
+            return chunk, None, parse_mode
         if not glyph_map:
-            return None
+            return chunk, None, parse_mode
         from .expression import weave_custom_emoji_entities
 
+        if parse_mode == "HTML":
+            plain, html_entities = telegram_html_to_entities(chunk)
+            entities, woven = weave_custom_emoji_entities(
+                plain, html_entities, glyph_map)
+            if not woven:
+                return chunk, None, parse_mode
+            return plain, json.dumps(entities, ensure_ascii=False), ""
+        if parse_mode:
+            return chunk, None, parse_mode
         entities, woven = weave_custom_emoji_entities(
             chunk, (), glyph_map)
         if not woven:
-            return None
-        return json.dumps(entities, ensure_ascii=False)
+            return chunk, None, parse_mode
+        return chunk, json.dumps(entities, ensure_ascii=False), ""
 
     def _note_weave_refusal(self, chat: ChatRef,
                             exc: BaseException) -> bool:
@@ -8677,8 +9037,7 @@ class TelegramBotAdapter(ChatAdapter):
         if buttons:
             keyboard = []
             for row in buttons:
-                krow = [self._button_json(label, data)
-                        for label, data in row]
+                krow = [self._button_from_item(item) for item in row]
                 if krow:
                     keyboard.append(krow)
             if keyboard:
