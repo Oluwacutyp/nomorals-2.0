@@ -478,15 +478,13 @@ class RuntimeSearchMixin:
                 try:
                     reader = StoryReader(self.context)
                     slug = reader.resolve_slug(parts[1])
-                    svc = self._reader_service()
-                    session = svc.session_for(
+                    live = self._live_reader()
+                    session = live.service.session_for(
                         f"chat:{chat_key}", f"story:{slug}")
-                    view = svc.contents_view(
+                    return live.contents_for(
                         manifest_from_story(reader, slug),
                         current_segment_id=(
-                            session.segment_id if session else ""))
-                    return svc.render_contents_text(
-                        view,
+                            session.segment_id if session else ""),
                         open_hint=f"open one: /books read {slug} "
                                   "<chapter> (an unheld chapter is "
                                   "fetched on read)")
@@ -499,35 +497,29 @@ class RuntimeSearchMixin:
                 # n/p = next/prev page, c = contents, j<row> = jump
                 # to a contents row, u = switch to the newer
                 # revision).  Stale tokens answer stale, in words,
-                # and never move the reader.
+                # and never move the reader.  The shared live reader
+                # owns the actuation; this desk keeps only the
+                # story's own page render.
                 from ...books.manifest import story_content_resolver
                 from ...books.reader import StoryReader
                 if len(parts) < 3:
                     return "usage: /books go <token> <n|p|c|jN|u>"
-                svc = self._reader_service()
-                session = svc.session_by_token(parts[1])
-                if session is None:
-                    return ("that reading control has expired — "
-                            "/books read <slug> opens the story again")
-                if not session.document_id.startswith("story:"):
-                    return ("that reading control belongs to a "
-                            "different document")
-                slug = session.document_id[len("story:"):]
                 try:
                     reader = StoryReader(self.context)
-                    result = svc.act(
-                        parts[1], parts[2],
-                        story_content_resolver(reader))
+                    result = self._live_reader().read(
+                        parts[1], parts[2], surface="books",
+                        story_resolver=story_content_resolver(reader))
                 except Exception as exc:  # noqa: BLE001 - chat surface
                     return f"read failed: {exc}"
                 if result.status != "ok":
-                    return result.note
+                    # LiveReadResult carries the engine's note as
+                    # text, not as .note — the stale/unknown/note
+                    # words are byte-identical to the hand-rolled
+                    # path's result.note.
+                    return result.text
+                slug = result.session.document_id[len("story:"):]
                 if result.contents is not None:
-                    return svc.render_contents_text(
-                        result.contents,
-                        open_hint=f"open one: /books read {slug} "
-                                  "<chapter> (an unheld chapter is "
-                                  "fetched on read)")
+                    return result.text
                 return self._story_part_render(result.view, slug)
 
             if verb == "continue":
@@ -730,24 +722,34 @@ class RuntimeSearchMixin:
         except Exception as exc:  # noqa: BLE001 - the reply still goes out
             record_failure("runtime_search._ensure_story_engine", exc)
 
+    def _live_reader(self):
+        """The shared live reader (Doc 16 residual), bound to this
+        runtime's context — one reader over the output router's
+        store, so a session opened by a routed send and a session
+        actuated by ``/read go`` or ``/books go`` are the same
+        session, not two in-memory copies of one store file."""
+        from ...social.chat.live_reader import LiveReader
+
+        return LiveReader.for_context(self.context)
+
     def _reader_service(self):
         """The generalized long-document reader (Doc 16 P2), bound
         to this runtime's context — per-reader reading sessions over
-        P1 manifests, persisted under the workspace."""
-        from ...social.chat.reader_service import ReaderService
+        P1 manifests, persisted under the workspace.  Via the shared
+        live reader, so the books desk and the ``/read`` desk
+        actuate one service."""
+        return self._live_reader().service
 
-        return ReaderService.for_context(self.context)
-
-    def _ensure_read_renditions(self, router) -> None:
-        """Install the EPUB rendition renderer on the output router
-        (idempotent): the EPUB export generator lives in books, a
-        layer above the router's social layer, so the router takes
-        it injected — and this surface owns /read, so it does the
-        installing, the same way :meth:`_ensure_story_engine`
-        stands the story engine up for the books verbs."""
+    def _ensure_read_renditions(self, live) -> None:
+        """Install the EPUB rendition renderer on the live reader's
+        router (idempotent): the EPUB export generator lives in
+        books, a layer above the router's social layer, so the
+        renderer arrives injected — and this surface owns /read, so
+        it does the installing, the same way
+        :meth:`_ensure_story_engine` stands the story engine up
+        for the books verbs."""
         try:
-            if getattr(router, "epub_renderer", None) is None:
-                router.epub_renderer = _read_epub_bytes
+            live.install_epub_renderer(_read_epub_bytes)
         except Exception as exc:  # noqa: BLE001 - the reply still goes out
             record_failure("runtime_search._ensure_read_renditions", exc)
 
@@ -759,21 +761,20 @@ class RuntimeSearchMixin:
         reading token (the reader's own grammar), ``get`` delivers
         the branded HTML, PDF or EPUB edition or the raw original
         as a file.  Owner-only by absence from PUBLIC_COMMANDS,
-        exactly like /cases.
+        exactly like /cases.  The desk itself is thin: the shared
+        live reader (``social.chat.live_reader``) owns the token
+        actuation, the file actions and the reopen/list renders.
         """
-        from ...social.chat.output_router import OutputRouter
-
         parts = (tail or "").strip().split()
         verb = parts[0].lower() if parts else "list"
         try:
-            router = OutputRouter.for_context(self.context)
+            live = self._live_reader()
         except Exception as exc:  # noqa: BLE001 - chat surface
             record_failure("runtime_search._control_read.router", exc)
             return ("reading is unavailable right now — the output "
                     "store failed to open")
-        self._ensure_read_renditions(router)
+        self._ensure_read_renditions(live)
         reader_key = f"chat:{chat_key}"
-        svc = router.reader
         try:
             if verb == "go":
                 # /read go <token> <verb> — the reader's callback
@@ -782,24 +783,7 @@ class RuntimeSearchMixin:
                 # controls answer in reverse there.
                 if len(parts) < 3:
                     return "usage: /read go <token> <n|p|c|jN|u>"
-                session = svc.session_by_token(parts[1])
-                if session is None:
-                    return ("that reading control has expired — "
-                            "/read lists what this chat has open")
-                if not session.document_id.startswith("text:"):
-                    return ("that reading control belongs to a "
-                            "different document — story controls "
-                            "answer to /books go")
-                result = svc.act(parts[1], parts[2],
-                                 router.resolver())
-                if result.status != "ok":
-                    return result.note
-                if result.contents is not None:
-                    return svc.render_contents_text(
-                        result.contents,
-                        open_hint=f"open one: /read go "
-                                  f"{session.token} j<line number>")
-                return svc.render_text(result.view)
+                return live.read(parts[1], parts[2]).text
             if verb == "get":
                 # /read get <token> <html|pdf|epub|txt> — the file
                 # actions: the branded editions (HTML from the
@@ -811,44 +795,23 @@ class RuntimeSearchMixin:
                             "html", "pdf", "epub", "txt"):
                     return ("usage: /read get <token> "
                             "<html|pdf|epub|txt>")
-                session = svc.session_by_token(parts[1])
-                if session is None:
-                    return ("that file control has expired — /read "
-                            "lists what this chat has open")
-                if not session.document_id.startswith("text:"):
-                    return ("that file control belongs to a "
-                            "different document")
                 fmt = parts[2].lower()
                 try:
-                    found = router.file_for(session.document_id, fmt)
+                    result = live.file_for(parts[1], fmt)
                 except Exception as exc:  # noqa: BLE001 - chat surface
                     record_failure(
                         "runtime_search._control_read.rendition", exc)
                     from ...core.errors import redact_secrets
                     return (f"the {fmt} edition could not be built "
                             f"— {redact_secrets(str(exc))}")
-                if found is None:
-                    return ("that output is no longer in the store "
-                            "— nothing to send")
-                path, name = found
+                if result.kind != "file":
+                    return result.text
+                path, name, caption = result.file
                 chat = self._ref_from_key(chat_key)
-                caption = {
-                    "html": (
-                        "🌐 the branded HTML edition — complete, "
-                        "with its completeness stated on the cover"),
-                    "pdf": (
-                        "📕 the branded PDF edition — the designed "
-                        "watermark on every page, its completeness "
-                        "stated in the front matter"),
-                    "epub": (
-                        "📗 the branded EPUB edition — its "
-                        "completeness stated on the title page"),
-                    "txt": "⬇ the original output, byte for byte",
-                }[fmt]
-                result = self.gateway.send_file(
+                sent = self.gateway.send_file(
                     chat.platform, chat, str(path), caption=caption,
                     name=name)
-                if not getattr(result, "ok", False):
+                if not getattr(sent, "ok", False):
                     return ("⚠️ the file send failed — the gateway "
                             "rejected it; the output itself is "
                             "still in the reader")
@@ -856,36 +819,13 @@ class RuntimeSearchMixin:
             if verb == "open":
                 # /read open <n> — reopen a routed output from the
                 # list, at the reader's current page for it.
-                rows = router.recent(reader_key)
-                if len(parts) < 2 or not parts[1].isdigit() or \
-                        not 1 <= int(parts[1]) <= len(rows):
+                if len(parts) < 2 or not parts[1].isdigit():
                     return ("usage: /read open <n> — n from the "
                             "/read list")
-                row = rows[int(parts[1]) - 1]
-                session = svc.session_for(
-                    reader_key, row.get("document_id", ""))
-                if session is None:
-                    return ("that output's reading session is "
-                            "gone — its text is still in the store")
-                view = svc.view(session.session_id,
-                                router.resolver())
-                return svc.render_text(view)
+                return live.open_recent(
+                    reader_key, int(parts[1])).text
             # bare / /read list — this chat's routed outputs.
-            rows = router.recent(reader_key)
-            if not rows:
-                return ("no routed long outputs in this chat yet — "
-                        "when a report or result runs long, it "
-                        "lands here with reading controls instead "
-                        "of a wall of chunks")
-            lines = ["📚 routed outputs in this chat (newest first):"]
-            for i, row in enumerate(rows, start=1):
-                title = row.get("title") or "long output"
-                chars = row.get("chars", 0)
-                lines.append(
-                    f"{i}. {title} — {chars:,} chars "
-                    f"· {row.get('route', '')}")
-                lines.append(f"   open: /read open {i}")
-            return "\n".join(lines)
+            return live.list_text(reader_key)
         except Exception as exc:  # noqa: BLE001 - chat surface
             record_failure("runtime_search._control_read", exc)
             return f"read failed: {exc}"

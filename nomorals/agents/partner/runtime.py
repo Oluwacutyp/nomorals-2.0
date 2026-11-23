@@ -13231,10 +13231,11 @@ class PartnerRuntime(
         used to vanish silently, leaving the owner with no reply at all.
 
         Doc 16 P4: before the chunk dump, the output goes through
-        the output router (social/chat/output_router.py) — medium
-        and long outputs arrive as a reader introduction with
-        working controls (and, for the longest, HTML/raw file
-        actions), and exact content lands as the raw original.
+        the shared live reader (social/chat/live_reader.py), which
+        owns the output router's reader sessions — medium and long
+        outputs arrive as a reader introduction with working
+        controls (and, for the longest, HTML/raw file actions),
+        and exact content lands as the raw original.
         Short outputs keep the exact legacy chunk path, and ANY
         router-side failure falls back to it: the routed path is an
         upgrade, never a new way to lose a reply.  ``intent="inline"``
@@ -13267,11 +13268,11 @@ class PartnerRuntime(
         bare runtime, a store error, a failed send).  Never raises.
         """
         try:
-            from ...social.chat.output_router import OutputRouter
+            from ...social.chat.live_reader import LiveReader
 
-            router = OutputRouter.for_context(self.context)
+            live = LiveReader.for_context(self.context)
             chat_key = str(getattr(chat, "key", "") or platform)
-            plan = router.plan(
+            plan = live.open_text(
                 text, platform=platform, reader_key=f"chat:{chat_key}",
                 limit=limit, kind=kind, title=title)
             _log.info(
