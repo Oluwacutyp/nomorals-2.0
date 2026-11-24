@@ -2003,6 +2003,46 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
                 self.end_headers()
                 self.wfile.write(raw)
                 return
+            if method == "GET" and parsed.path == "/signals":
+                # Bet desk signal page (HTML redesign, lane 127):
+                # the desk's live signal calls rendered for a
+                # browser — the same special-HTML precedent as /pair
+                # (HTML cannot ride the JSON dispatch). Bearer-gated
+                # AFTER principal resolution, riding Capability
+                # .DB_READ like the betdesk tool itself, so the owner
+                # reads it in both modes (owner token, or the local
+                # default grant in no-token mode) and anyone without
+                # a read grant gets a 403. A broken desk is a 503,
+                # never a page that lies about the record.
+                try:
+                    _require_capability(principal, Capability.DB_READ)
+                except CapabilityDenied as exc:
+                    self._send_error(403, str(exc) or "capability denied",
+                                     extra={"kind": "CapabilityDenied"})
+                    return
+                from ..agents.betdesk.page import signal_page_for_context
+                try:
+                    page = signal_page_for_context(server.context)
+                except Exception:  # noqa: BLE001 - a broken desk is a 503
+                    _log.exception("signals page render failed")
+                    self._send_error(503, "signals page unavailable")
+                    return
+                raw = page.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type",
+                                 "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(raw)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Security-Policy", CSP)
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("X-Frame-Options", "DENY")
+                request_id = getattr(self, "_request_id", "")
+                if request_id:
+                    self.send_header("X-Request-ID", request_id)
+                self.end_headers()
+                self.wfile.write(raw)
+                return
             if method == "GET" and parsed.path.startswith("/studio/photo/"):
                 # Studio photo editor (PhotoCraft port, lane 76): the
                 # page for one open photo document, served as plain
