@@ -407,22 +407,31 @@ def test_single_account_replies_are_the_shipped_bytes(tmp_path):
     assert reply == (f"there are 2 captures — pick 1–2:\n"
                      f"{listing}")
     reply = rt._chatops_viewonce("viewonce", "bogus", _msg())
+    # The usage string names the /viewonce today form (vault
+    # fix 2026-11-23) — the pin follows the shipped string.
     assert reply == ("usage: /viewonce · /viewonce N · "
-                     "/viewonce list · or reply to the "
-                     "view-once message with /viewonce")
+                     "/viewonce list · /viewonce today · or "
+                     "reply to the view-once message with "
+                     "/viewonce")
 
 
 def test_single_account_empty_vault_is_the_shipped_bytes(
         tmp_path):
     rt, svc, sent = _single(tmp_path)
     reply = rt._chatops_viewonce("viewonce", "", _msg())
+    # The pin's old bytes predated two shipped fixes and were
+    # already failing on the repaired base: the 2026-11-12
+    # diagnostic appends the arrival note (zero trace rows
+    # here), and the turn-on pointer is suppressed when the
+    # toggle is ON — the old bytes told the owner to turn on a
+    # toggle that was ON and said nothing about arrivals.
     assert reply == (
         "no view-once captures yet — when the view_once "
         "toggle is on, view-once media sent to your personal "
         "accounts is kept in your vault before it vanishes, "
         "and /viewonce shows it back. Right now: "
-        f"{A_ID}: capture ON. Turn it on with /pair toggle "
-        "ACCOUNT view_once on.")
+        f"{A_ID}: capture ON. No view-once arrival has ever "
+        "been observed on this account (zero trace rows).")
     rows = _reveals(svc)
     assert len(rows) == 1
     assert rows[0]["outcome"] == "empty"

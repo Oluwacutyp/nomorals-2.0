@@ -9,6 +9,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -142,6 +143,8 @@ func (b *bridge) handleCommand(cc *clientConn, req request) {
 		b.cmdSearch(cc, id, req)
 	case "read":
 		b.cmdRead(ctx, cc, id, req)
+	case "redownload":
+		b.cmdRedownload(ctx, cc, id, req)
 	case "presence":
 		b.cmdPresence(ctx, cc, id, req)
 	case "status_view":
@@ -589,6 +592,19 @@ func (b *bridge) mediaLock(name string) *sync.Mutex {
 	return m.(*sync.Mutex)
 }
 
+// mediaDownloader is the one whatsmeow call downloadMediaOf
+// makes: fetch + decrypt a message's media bytes. The live
+// bridge wires the real client; tests substitute a scripted
+// stub so the arrival/redownload paths run without a session.
+type mediaDownloader interface {
+	Download(ctx context.Context, msg whatsmeow.DownloadableMessage) ([]byte, error)
+}
+
+// errNoDownloader is the download failure a bridge with no
+// client wired reports: the arrival still journals its miss
+// instead of the handler panicking on a nil client.
+var errNoDownloader = errors.New("bridge client not connected")
+
 // downloadMediaOf downloads the media carried by one message proto
 // (a live message, or the quoted message inside a reply's
 // contextInfo — the bytes are addressed the same way) into the
@@ -623,15 +639,26 @@ func (b *bridge) downloadMediaOf(ctx context.Context, msg *waE2E.Message, idStr 
 			return row
 		}
 	}
-	data, err := b.cli.Download(ctx, dl)
+	var data []byte
+	var err error
+	if b.dl == nil {
+		// No downloader wired (a bridge with no client yet):
+		// report the failure instead of panicking on a nil
+		// client — the arrival still journals its miss.
+		err = errNoDownloader
+	} else {
+		data, err = b.dl.Download(ctx, dl)
+	}
 	if err != nil {
 		// The media ARRIVED but its bytes could not be fetched:
 		// emit the entry with an empty path so the payload carries
 		// the trace (media arrived, unseen) instead of looking like
 		// no media at all. The Python side stamps pathless entries
-		// media_unavailable.
+		// media_unavailable. The error string rides along
+		// (download_error) so the miss journal names the reason.
 		logf("media download failed: %v", err)
-		return map[string]any{"path": "", "mime": mime, "kind": kind}
+		return map[string]any{"path": "", "mime": mime, "kind": kind,
+			"download_error": err.Error()}
 	}
 	p := filepath.Join(b.mediaDir, name)
 	// Write to a sibling temp and rename into place: a reader
@@ -642,7 +669,8 @@ func (b *bridge) downloadMediaOf(ctx context.Context, msg *waE2E.Message, idStr 
 	tmp := p + ".part"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		logf("media write failed: %v", err)
-		return map[string]any{"path": "", "mime": mime, "kind": kind}
+		return map[string]any{"path": "", "mime": mime, "kind": kind,
+			"download_error": err.Error()}
 	}
 	if err := os.Rename(tmp, p); err != nil {
 		os.Remove(tmp)
@@ -650,7 +678,8 @@ func (b *bridge) downloadMediaOf(ctx context.Context, msg *waE2E.Message, idStr 
 			return map[string]any{"path": p, "mime": mime, "kind": kind}
 		}
 		logf("media write failed: %v", err)
-		return map[string]any{"path": "", "mime": mime, "kind": kind}
+		return map[string]any{"path": "", "mime": mime, "kind": kind,
+			"download_error": err.Error()}
 	}
 	return map[string]any{"path": p, "mime": mime, "kind": kind}
 }
@@ -808,7 +837,20 @@ func (b *bridge) onMessage(v *events.Message) {
 		if loc := locationOf(msg); loc != nil {
 			out["location"] = loc
 		}
+		// The owner's own view-once (sent from another device)
+		// is captured exactly like anyone else's: download now,
+		// at arrival, before the bytes can vanish — the
+		// own-message path used to stamp view_once and never
+		// fetch, so a view-once he sent himself was never in
+		// the vault.  The proto is cached too, so a failed
+		// arrival download can be retried by redownload.
+		if m := b.downloadInbound(ctx, msg, string(v.Info.ID)); m != nil {
+			out["media"] = []map[string]any{m}
+		}
 		b.stampQuoted(ctx, out, msg)
+		if v.Info.ID != "" {
+			b.cacheMessage(string(v.Info.ID), msg, sender)
+		}
 		b.remember(chat, &remembered{
 			incoming: false, text: out["text"].(string),
 			id: v.Info.ID, chatJID: chat, senderJID: sender, tsMs: tsMs,
@@ -1835,6 +1877,41 @@ func (b *bridge) cmdRead(ctx context.Context, cc *clientConn, id string, req req
 		}
 	}
 	b.reply(cc, id, map[string]any{"ok": true})
+}
+
+// cmdRedownload re-runs the arrival download for one cached
+// message id. The Python side calls it once, within minutes of
+// the arrival, when a view-once arrival's download failed — the
+// message proto is already retained in msgCache (cacheMessage,
+// 2000-entry cap), so no new download primitive is involved:
+// the same cli.Download + dedup + tmp+rename as the arrival
+// path. It can only succeed while the CDN copy lives — a
+// consumed view-once fails here exactly as it would have at
+// arrival, and the failure comes back named, never faked.
+// It never marks anything read: a redownload is a fetch, not a
+// view, and must not consume the media server-side.
+func (b *bridge) cmdRedownload(ctx context.Context, cc *clientConn, id string, req request) {
+	mid := strings.TrimSpace(req.str("message_id"))
+	if mid == "" {
+		b.reply(cc, id, map[string]any{"ok": false,
+			"error": "redownload: message_id required"})
+		return
+	}
+	b.memMu.Lock()
+	cached := b.msgCache[mid]
+	b.memMu.Unlock()
+	if cached == nil || cached.msg == nil {
+		b.reply(cc, id, map[string]any{"ok": false,
+			"error": "message not in cache: " + mid})
+		return
+	}
+	row := b.downloadMediaOf(ctx, cached.msg, mid)
+	if row == nil {
+		b.reply(cc, id, map[string]any{"ok": false,
+			"error": "message carries no downloadable media"})
+		return
+	}
+	b.reply(cc, id, map[string]any{"ok": true, "media": row})
 }
 
 // cmdPresence asserts the account's global presence (§15

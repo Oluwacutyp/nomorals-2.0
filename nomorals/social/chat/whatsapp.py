@@ -1630,6 +1630,27 @@ class WhatsAppAdapter(ChatAdapter):
             with self._responses_lock:
                 self._responses.pop(req_id, None)
 
+    def redownload_message(self, message_id: str, *,
+                           timeout: float = 25.0) -> dict[str, Any]:
+        """Ask the bridge to re-run the arrival download for one
+        cached message id (the ``redownload`` command). The
+        Python side calls this once, within minutes of a
+        view-once arrival whose download failed — it can only
+        succeed while the CDN copy lives. Never raises: a
+        bridge-down / timeout / refusal comes back as
+        ``{"ok": False, "error": ...}`` so the caller can treat
+        it as best-effort. An older bridge answers
+        ``unknown cmd`` the same way."""
+        mid = str(message_id or "").strip()
+        if not mid:
+            return {"ok": False, "error": "redownload: message_id required"}
+        try:
+            return self._send_cmd(
+                {"cmd": "redownload", "message_id": mid},
+                timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 - total, never raises
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
     def _reader_loop(self, handler: IncomingHandler) -> None:
         sock = self._sock
         if sock is None:
@@ -1921,6 +1942,35 @@ class WhatsAppAdapter(ChatAdapter):
                 msg.meta["reply_to"] = str(obj.get("reply_to"))
             # The sender IS the owner — flag it for group recognition.
             msg.meta["from_owner"] = True
+            if obj.get("view_once"):
+                # View-once the owner sent from another device:
+                # the bridge downloads it at arrival (like
+                # anyone else's) and this is the only seam that
+                # can carry it into the personal surface — the
+                # persist-only message used to drop the media
+                # entirely.  Scoped to view-once only: ordinary
+                # own sends keep the old media-less shape.
+                msg.media = [
+                    MediaRef(path=str(m.get("path") or ""),
+                             mime=str(m.get("mime") or ""),
+                             kind=str(m.get("kind") or "file"),
+                             is_voice=str(m.get("kind") or "")
+                             == "voice")
+                    for m in (obj.get("media") or [])
+                    if m.get("path")
+                ]
+                msg.meta["view_once"] = True
+                if not msg.media:
+                    msg.meta["view_once_media_missing"] = True
+                    _own_err = next(
+                        (str(m.get("download_error") or "")
+                         for m in (obj.get("media") or [])
+                         if isinstance(m, dict)
+                         and not m.get("path")
+                         and m.get("download_error")),
+                        "")
+                    if _own_err:
+                        msg.meta["view_once_download_error"] = _own_err
             _wa_stamp_quoted(msg, obj)
             # Stamped for the record; the echo stays
             # persist-only (incoming=False), so the runtime's
@@ -2027,9 +2077,17 @@ class WhatsAppAdapter(ChatAdapter):
                 msg.meta["status_media_missing"] = True
                 msg.meta["media_unavailable"] = [
                     {"kind": str(m.get("kind") or "file"),
-                     "reason": "download_failed"}
+                     "reason": str(m.get("download_error")
+                                   or "download_failed")}
                     for m in _status_missed
                 ]
+                if obj.get("view_once"):
+                    # A view-once status whose download failed:
+                    # the bridge's failure string rides along so
+                    # the miss journal names the reason.
+                    msg.meta["view_once_download_error"] = str(
+                        msg.meta["media_unavailable"][0].get("reason")
+                        or "download_failed")
             self._deliver(handler, msg)
         elif kind in ("revoke", "edit"):
             # Evidentiary feeds (defense brief §2.1), pass-through:
@@ -2145,7 +2203,8 @@ class WhatsAppAdapter(ChatAdapter):
             # meta["media_unavailable"]).
             _wa_missed = [
                 {"kind": str(m.get("kind") or "file"),
-                 "reason": "download_failed"}
+                 "reason": str(m.get("download_error")
+                               or "download_failed")}
                 for m in (obj.get("media") or [])
                 if isinstance(m, dict) and not m.get("path")
             ]
@@ -2199,6 +2258,14 @@ class WhatsAppAdapter(ChatAdapter):
                     # the personal surface journals the miss
                     # instead of the message passing silently.
                     wa_msg.meta["view_once_media_missing"] = True
+                    if _wa_missed:
+                        # The bridge's own failure string rides
+                        # along so the miss journal names the
+                        # reason instead of a bare "download
+                        # failed".
+                        wa_msg.meta["view_once_download_error"] = str(
+                            _wa_missed[0].get("reason")
+                            or "download_failed")
             self._deliver(handler, wa_msg)
 
     # ── lifecycle ────────────────────────────────────────────────────────────

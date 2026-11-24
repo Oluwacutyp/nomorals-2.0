@@ -2117,6 +2117,19 @@ class RuntimeProvisionMixin:
                  for m in (getattr(message, "media", None) or [])
                  if getattr(m, "path", "")]
         ts = float(getattr(message, "ts", 0.0) or now)
+        # One redownload attempt for a view-once arrival whose
+        # media never landed (the bridge's download failed at
+        # arrival): best-effort, failure-isolated — a failed
+        # retry never breaks intake, and the miss is journaled
+        # by observe_message either way. Plain messages only
+        # (status/delete/call_offer carry their own flags).
+        media_missing = bool(meta.get("view_once_media_missing"))
+        if (not service and meta.get("view_once") and media_missing
+                and not media and platform == "whatsapp"):
+            recovered = self._viewonce_redownload(message)
+            if recovered is not None:
+                media = list(media) + [recovered]
+                media_missing = False
         if service == "call_offer":
             # Chat & privacy wave: a call ringing his WhatsApp
             # account.  The personal organ rejects it when his
@@ -2142,6 +2155,7 @@ class RuntimeProvisionMixin:
                               or ""),
                 media_missing=bool(
                     meta.get("status_media_missing")),
+                view_once=bool(meta.get("view_once")),
                 ts=ts)
             # Presence watch (census §6 #4): the same post, the
             # same source id — the organ dedupes replays, so the
@@ -2179,6 +2193,35 @@ class RuntimeProvisionMixin:
             # conversation pipeline untouched.
             self._antitag_observe(message, personal, platform,
                                   chat_key=chat_key, ts=ts)
+            # A view-once in a group is captured like a DM's:
+            # the bridge already downloaded it, the vault is
+            # the same store — the old shape dropped it here
+            # before the personal organ ever saw it. The
+            # antitag sensor above still ran; the group gate
+            # for delete/edit observation is untouched, and
+            # this call observes the arrival only — it never
+            # replies, and the message flows on as before.
+            if meta.get("view_once") and (
+                    getattr(message, "incoming", False)
+                    or meta.get("own_message")):
+                personal.observe_message(
+                    platform, chat_key=chat_key,
+                    counterpart_id=counterpart,
+                    sender_id=str(getattr(message, "sender_id", "")
+                                  or ""),
+                    sender_name=str(getattr(message, "sender", "")
+                                    or ""),
+                    message_id=str(getattr(message, "message_id", "")
+                                   or ""),
+                    text=str(getattr(message, "text", "") or ""),
+                    media=media,
+                    view_once=True,
+                    ttl_seconds=int(meta.get("ttl_seconds") or 0),
+                    media_missing=media_missing,
+                    download_error=str(
+                        meta.get("view_once_download_error") or ""),
+                    incoming=bool(getattr(message, "incoming", False)),
+                    ts=ts)
             return False
         if kind != "dm":
             return False
@@ -2208,11 +2251,43 @@ class RuntimeProvisionMixin:
                 media=media,
                 view_once=bool(meta.get("view_once")),
                 ttl_seconds=int(meta.get("ttl_seconds") or 0),
-                media_missing=bool(
-                    meta.get("view_once_media_missing")),
+                media_missing=media_missing,
+                download_error=str(meta.get("view_once_download_error")
+                                   or ""),
                 incoming=bool(getattr(message, "incoming", False)),
                 ts=ts)
         return False
+
+    def _viewonce_redownload(self, message: Any) -> dict[str, Any] | None:
+        """One bridge redownload for a view-once arrival whose
+        media never landed. Returns the recovered media row
+        (``{"path", "kind"}``) or None. Best-effort and
+        failure-isolated: any failure returns None and the
+        arrival journals its miss — intake never breaks on it.
+        The file lives in the bridge media cache, so the
+        personal organ copies it into the vault exactly like a
+        normal arrival; durability comes from that copy."""
+        try:
+            adapter = self._adapter_for("whatsapp")
+            if adapter is None:
+                return None
+            redownload = getattr(adapter, "redownload_message", None)
+            if not callable(redownload):
+                return None
+            message_id = str(getattr(message, "message_id", "") or "")
+            if not message_id:
+                return None
+            reply = redownload(message_id)
+            if not isinstance(reply, dict) or not reply.get("ok"):
+                return None
+            row = reply.get("media") or {}
+            path = str(row.get("path") or "")
+            if not path:
+                return None
+            return {"path": path,
+                    "kind": str(row.get("kind") or "file")}
+        except Exception:  # noqa: BLE001 - best-effort, never breaks intake
+            return None
 
     def _antitag_observe(self, message: Any, personal: Any,
                          platform: str, *, chat_key: str,

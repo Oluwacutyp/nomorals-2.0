@@ -75,6 +75,11 @@ DM_CACHE_PER_CHAT = 100        # messages kept per conversation
 DM_CACHE_CHATS = 200           # conversations kept per account
 SAVED_PER_ACCOUNT = 500        # saved status/view-once items
 SAVED_MAX_BYTES = 512 * 1024 * 1024
+#: Days a saved status/view-once item is kept (Septorch's vault
+#: keeps a week; the owner asked for the same window): the
+#: retention rule in _prune_account, alongside the count/bytes
+#: caps, which stay as a backstop.
+SAVED_MAX_AGE_DAYS = 7
 ORIGINALS_PER_ACCOUNT = 500    # DM originals held for delete/edit recovery
 ORIGINALS_MAX_BYTES = 512 * 1024 * 1024
 #: The WhatsApp bridges' inbound-media download cache bound
@@ -293,28 +298,34 @@ class PersonalVault:
             _append_jsonl(self.journal_path, entry)
         return entry
 
-    def _prune_account(self, account_id: str) -> None:
-        """Enforce the per-account count + byte caps, oldest first.
+    def _prune_account(self, account_id: str,
+                       now: float | None = None) -> None:
+        """Enforce the per-account count + byte caps, oldest first,
+        and the 7-day retention rule: anything older than
+        SAVED_MAX_AGE_DAYS is pruned first, then the count/bytes
+        caps still apply as a backstop.
 
         Only rows whose file still exists count: the journal is
         append-only, so a pruned item's original entry stays in it
         forever — counting ghosts would make every later pass
-        delete real files to satisfy a cap already met."""
+        delete real files to satisfy a cap already met.  Each
+        pruned file journals one ``pruned`` row naming the policy
+        that took it (``age`` for the retention window, ``cap``
+        for the count/bytes caps)."""
+        now = float(now if now is not None else time.time())
         rows = [r for r in _read_jsonl(self.journal_path, tail=100000)
                 if r.get("account") == account_id and r.get("path")
                 and Path(str(r["path"])).exists()]
         rows.sort(key=lambda r: float(r.get("ts") or 0))
         total = sum(int(r.get("bytes") or 0) for r in rows)
-        while rows and (len(rows) > self.saved_per_account
-                        or total > self.saved_max_bytes):
-            victim = rows.pop(0)
-            total -= int(victim.get("bytes") or 0)
+
+        def _drop(victim: dict[str, Any], policy: str) -> None:
             try:
                 Path(str(victim["path"])).unlink(missing_ok=True)
             except OSError as exc:
                 record_failure("personal._prune_account", exc)
             _append_jsonl(self.journal_path, {
-                "ts": time.time(), "kind": "pruned",
+                "ts": now, "kind": "pruned",
                 "account": account_id,
                 "platform": victim.get("platform", ""),
                 "counterpart_id": victim.get("counterpart_id", ""),
@@ -322,8 +333,35 @@ class PersonalVault:
                 "media_kind": victim.get("media_kind", ""),
                 "source_id": victim.get("source_id", ""),
                 "path": "", "bytes": 0,
-                "note": f"cap prune of {victim.get('kind')} item "
-                        f"from {victim.get('ts')}"})
+                "note": f"{policy} prune of {victim.get('kind')} "
+                        f"item from {victim.get('ts')}"})
+
+        # The retention window first: a week-old capture goes
+        # even when the caps are nowhere near full.  Age is the
+        # vault file's mtime — when the vault RECEIVED it — not
+        # the row's ts: a replayed or backfilled arrival carries
+        # an old message timestamp but landed in the vault just
+        # now, and pruning it at save time would delete a capture
+        # the owner has not had a week to look at.  (The row's
+        # ts stays the display time and the caps' ordering key.)
+        cutoff = now - SAVED_MAX_AGE_DAYS * 86400.0
+        aged = []
+        for r in rows:
+            try:
+                mtime = Path(str(r["path"])).stat().st_mtime
+            except OSError:
+                continue
+            if mtime < cutoff:
+                aged.append(r)
+        for victim in aged:
+            rows.remove(victim)
+            total -= int(victim.get("bytes") or 0)
+            _drop(victim, "age (7-day retention)")
+        while rows and (len(rows) > self.saved_per_account
+                        or total > self.saved_max_bytes):
+            victim = rows.pop(0)
+            total -= int(victim.get("bytes") or 0)
+            _drop(victim, "cap")
 
     def journal(self, account_id: str = "",
                 kind: str = "") -> list[dict[str, Any]]:
@@ -813,6 +851,7 @@ class PersonalSurfaces:
                         media: list[dict[str, Any]] | None = None,
                         view_once: bool = False, ttl_seconds: int = 0,
                         media_missing: bool = False,
+                        download_error: str = "",
                         incoming: bool = True,
                         account_id: str = "",
                         ts: float = 0.0) -> list[dict[str, Any]]:
@@ -822,7 +861,10 @@ class PersonalSurfaces:
         self-destruct.  ``media_missing`` is the adapter saying
         the ephemeral media could not be downloaded in time —
         the miss is journaled, exactly like a vanished file.
-        Returns the vault entries written."""
+        ``download_error`` is the bridge's own failure string
+        when it has one, so the miss names the reason instead
+        of a bare "download failed".  Returns the vault entries
+        written."""
         rec = self.resolve_event_account(platform, account_id)
         out: list[dict[str, Any]] = []
         media = media or []
@@ -935,7 +977,8 @@ class PersonalSurfaces:
                 # media never made it to disk (expired file
                 # reference, a failed download) — the same honest
                 # miss as a vanished file, journaled instead of
-                # silently dropped.
+                # silently dropped.  The bridge's failure string
+                # names the reason when it has one.
                 missed_any = True
                 _append_jsonl(self.vault.journal_path, {
                     "ts": ts, "kind": "view_once_missed",
@@ -944,8 +987,10 @@ class PersonalSurfaces:
                     "poster_name": sender_name,
                     "media_kind": "", "source_id": message_id,
                     "path": "", "bytes": 0,
-                    "note": "media could not be downloaded before "
-                            "it expired"})
+                    "note": ("download failed: " + download_error
+                             if download_error
+                             else "media could not be downloaded "
+                                  "before it expired")})
             if not vo_toggle:
                 vo_outcome = "skipped_toggle_off"
             elif saved_any:
@@ -970,6 +1015,7 @@ class PersonalSurfaces:
                     "view_once_toggle": vo_toggle,
                     "media_present": bool(media),
                     "media_missing": bool(media_missing),
+                    "download_error": download_error,
                     "outcome": vo_outcome,
                     "note": "view-once arrival — capture "
                             f"{'on' if vo_toggle else 'OFF'}; "
@@ -1065,6 +1111,7 @@ class PersonalSurfaces:
                             media: list[dict[str, Any]] | None = None,
                             source_id: str = "",
                             media_missing: bool = False,
+                            view_once: bool = False,
                             account_id: str = "",
                             ts: float = 0.0,
                             sweep: bool = False
@@ -1092,7 +1139,12 @@ class PersonalSurfaces:
         the adapter saying the post carried media its download
         failed on: when saving is on, the miss is journaled
         (``status_missed``, once per post) instead of the post
-        vanishing from the record entirely.
+        vanishing from the record entirely.  ``view_once`` is the
+        adapter saying the post is a view-once status: it saves
+        with kind ``"view_once"`` (so /viewonce finds it) and
+        the arrival ledger carries the flag — the view/react
+        verbs below are untouched, a view-once status is
+        viewed/reacted exactly like any other.
 
         Coverage (2026-11-08 truth fix): the FIRST thing an
         observed post does is enter the arrival ledger
@@ -1138,6 +1190,7 @@ class PersonalSurfaces:
                               for m in (media or [])
                               if m.get("path")],
                     "media_missing": bool(media_missing),
+                    "view_once": bool(view_once),
                     "note": "status post observed — the funnel's "
                             "arrival record"}
                 _append_jsonl(self.vault.journal_path, arrival)
@@ -1336,6 +1389,9 @@ class PersonalSurfaces:
         if source_id and dedupe_key in self._seen_status:
             return out
         media = media or []
+        # A view-once status saves as view-once, so /viewonce
+        # finds it — the vault kind is the retrieval key.
+        save_kind = "view_once" if view_once else "status"
         if media:
             for m in media:
                 path = str(m.get("path") or "")
@@ -1343,7 +1399,7 @@ class PersonalSurfaces:
                     continue
                 try:
                     out.append(self.vault.save_media(
-                        rec.id, "status", path, platform=platform,
+                        rec.id, save_kind, path, platform=platform,
                         counterpart_id=poster_id,
                         poster_name=poster_name,
                         media_kind=str(m.get("kind") or ""),
@@ -1352,7 +1408,7 @@ class PersonalSurfaces:
                     continue
         elif text:
             out.append(self.vault.save_text(
-                rec.id, "status", text, platform=platform,
+                rec.id, save_kind, text, platform=platform,
                 counterpart_id=poster_id, poster_name=poster_name,
                 source_id=source_id, ts=ts))
         if source_id and out:

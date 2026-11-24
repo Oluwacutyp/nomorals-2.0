@@ -114,7 +114,11 @@ func logf(format string, args ...any) {
 }
 
 type bridge struct {
-	cli       *whatsmeow.Client
+	cli *whatsmeow.Client
+	// dl performs media downloads (whatsmeow's Download). An
+	// interface so tests can drive downloadMediaOf without a
+	// live session; the live bridge wires the real client.
+	dl        mediaDownloader
 	container *sqlstore.Container
 
 	port     int
@@ -325,6 +329,7 @@ func main() {
 	cli := whatsmeow.NewClient(device, waLog.Noop)
 	cli.QRClientType = whatsmeow.PairClientChrome
 	b.cli = cli
+	b.dl = cli
 	cli.AddEventHandler(b.handleEvent)
 
 	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", b.port))

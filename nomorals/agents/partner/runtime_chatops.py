@@ -119,6 +119,60 @@ def _scoped_reply_target(entries: list, message: Any,
     return None
 
 
+def _reply_fallback_target(entries: list, message: Any,
+                           account_id: str = "") -> dict | None:
+    """The fallback when a reply names no capture exactly: the
+    newest capture in THIS conversation from the hour before
+    the reply.  Same scope as _scoped_reply_target (platform,
+    account, digit-folded counterpart; the self-chat exception
+    is unbound) — never another chat's capture — and only a
+    capture whose file is still in the vault, so the fallback
+    never lands on a record with nothing to show.  A reply
+    with no usable timestamp cannot bound the window, so it
+    gets no fallback: the caller answers the honest miss."""
+    from pathlib import Path
+
+    chat = getattr(message, "chat", None)
+    platform = str(getattr(chat, "platform", "") or "")
+    scope = {_digits(v) for v in (
+        getattr(chat, "peer", ""), getattr(chat, "chat_id", ""),
+        getattr(message, "sender_id", ""))}
+    scope.discard("")
+    meta = getattr(message, "meta", None)
+    self_chat = bool(isinstance(meta, dict) and meta.get("self_chat"))
+    reply_ts = float(getattr(message, "ts", 0.0) or 0.0)
+    if not reply_ts:
+        return None
+
+    def _account_ok(row: dict) -> bool:
+        return not account_id \
+            or str(row.get("account") or "") == account_id
+
+    def _platform_ok(row: dict) -> bool:
+        return not platform \
+            or str(row.get("platform") or "") == platform
+
+    # Entries arrive newest-first; the first in-window,
+    # in-scope, still-present capture is the newest.
+    for row in entries:
+        if not (_platform_ok(row) and _account_ok(row)):
+            continue
+        if not self_chat \
+                and _digits(row.get("counterpart_id")) not in scope:
+            continue
+        try:
+            ts = float(row.get("ts") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not (reply_ts - 3600.0 <= ts <= reply_ts):
+            continue
+        path = str(row.get("path") or "")
+        if not path or not Path(path).exists():
+            continue
+        return row
+    return None
+
+
 class RuntimeChatOpsMixin:
     """Chat & privacy commands for PartnerRuntime."""
 
@@ -861,8 +915,11 @@ class RuntimeChatOpsMixin:
 
         Forms: bare → the newest capture + the recent list;
         ``n`` → the nth newest; ``list`` → the list only;
+        ``today`` → the last-24-hours list, newest first;
         as a reply → the capture whose source message is the
-        replied-to one.  Owner-only by the control gate like
+        replied-to one, falling back (and saying so) to the
+        newest capture in this chat from the hour before the
+        reply when the reply names no capture exactly.  Owner-only by the control gate like
         every chatop; reading his own vault back to his own
         chat is not an act on the account, so no surface stop
         applies — but an empty vault answers honestly, naming
@@ -921,6 +978,7 @@ class RuntimeChatOpsMixin:
         # ── the tail's tokens (any order — /pair journal) ──
         index: int | None = None
         want_list = False
+        want_today = False
         selector = None
         bad_tail = False
         for tok in tail.split():
@@ -929,6 +987,12 @@ class RuntimeChatOpsMixin:
                     bad_tail = True
                     break
                 want_list = True
+                continue
+            if tok.lower() == "today":
+                if want_today:
+                    bad_tail = True
+                    break
+                want_today = True
                 continue
             digits = tok.lstrip("-")
             if digits.isdigit() and len(digits) <= 3:
@@ -945,8 +1009,8 @@ class RuntimeChatOpsMixin:
                 bad_tail = True
                 break
         usage = ("usage: /viewonce · /viewonce N · "
-                 "/viewonce list · or reply to the "
-                 "view-once message with /viewonce")
+                 "/viewonce list · /viewonce today · or reply "
+                 "to the view-once message with /viewonce")
         if multi:
             usage += (" · /viewonce ACCOUNT [N|list] names "
                       "the account (its number or id)")
@@ -958,6 +1022,7 @@ class RuntimeChatOpsMixin:
             bad_tail = False
             index = None
             want_list = False
+            want_today = False
             if selector is None:
                 for tok in tail.split():
                     selector = _find(tok)
@@ -1086,6 +1151,7 @@ class RuntimeChatOpsMixin:
 
         form = ("reply" if reply_to else
                 "index" if index is not None else
+                "today" if want_today else
                 "list" if want_list else "bare")
 
         if not entries:
@@ -1189,6 +1255,27 @@ class RuntimeChatOpsMixin:
                 account_id=(resolved.id if resolved is not None
                             else ""))
             if target is None:
+                # The reply named no capture exactly (the
+                # quoted message's id is gone from the vault,
+                # or the reply sits on a different message than
+                # the capture): fall back to the newest capture
+                # in THIS conversation from the hour before the
+                # reply — same scope, never another chat's —
+                # and SAY it fell back.  No fallback, no
+                # capture: the honest miss below.
+                target = _reply_fallback_target(
+                    entries, message,
+                    account_id=(resolved.id if resolved is not None
+                                else ""))
+                if target is not None:
+                    form = "reply_fallback"
+                    note = ("\n(fell back: that reply didn't "
+                            "point at a capture exactly, so this "
+                            "is the newest capture from this chat "
+                            "in the hour before your reply — "
+                            "reply to the view-once itself for "
+                            "the exact one.)")
+            if target is None:
                 _note_reveal("miss", "reply")
                 if multi:
                     return (
@@ -1226,6 +1313,43 @@ class RuntimeChatOpsMixin:
                         f"{'s' if len(entries) != 1 else ''} — "
                         f"pick 1–{len(entries)}:\n{listing}{more}")
             target = entries[index - 1]
+        elif want_today:
+            # Last-24-hours list, newest first: the day's
+            # captures without opening one.  An empty day says
+            # so honestly and names how many older captures the
+            # vault still holds, instead of reading as "none
+            # ever".
+            now = time.time()
+            today = [r for r in entries
+                     if float(r.get("ts") or 0) >= now - 86400.0]
+            if not today:
+                _note_reveal("empty", "today")
+                if multi:
+                    return (f"no view-once captures in the last "
+                            f"24 hours on {label} — the vault "
+                            f"still holds {len(entries)} older "
+                            f"capture"
+                            f"{'s' if len(entries) != 1 else ''}. "
+                            f"/viewonce list shows them all."
+                            + _others())
+                return (f"no view-once captures in the last 24 "
+                        f"hours — the vault still holds "
+                        f"{len(entries)} older capture"
+                        f"{'s' if len(entries) != 1 else ''}. "
+                        f"/viewonce list shows them all.")
+            listing_today = "\n".join(
+                _line(i + 1, r) for i, r in enumerate(today[:10]))
+            more_today = (f"\n  …and {len(today) - 10} older today"
+                          f" (in /pair saved)" if len(today) > 10
+                          else "")
+            if multi:
+                return (f"👁️ view-once captures in the last 24 "
+                        f"hours on {label} (newest first) — "
+                        f"/viewonce N opens one:\n{listing_today}"
+                        f"{more_today}" + _others())
+            return (f"👁️ view-once captures in the last 24 hours "
+                    f"(newest first) — /viewonce N opens one:\n"
+                    f"{listing_today}{more_today}")
         elif want_list:
             if multi:
                 return (f"👁️ view-once captures on {label} "
