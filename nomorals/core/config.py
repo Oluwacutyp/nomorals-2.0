@@ -320,7 +320,10 @@ class MCPServerEntry:
 
     A server is a spawn command (stdio) or an endpoint URL (http).
     ``enabled`` is per-server and defaults to False: nothing connects
-    unless the operator enables it in config. ``env`` names
+    unless the operator enables it in config. ``transport`` empty means
+    not set: an override of a shipped default inherits that server's
+    transport, and a brand-new server defaults to stdio at the client.
+    ``env`` names
     environment variables passed to the spawned server (values come
     from the process environment / vault at spawn time — never from
     the config file itself, so no token ever lands in a TOML).
@@ -329,7 +332,13 @@ class MCPServerEntry:
     command: str = ""
     args: list[str] = field(default_factory=list)
     env: list[str] = field(default_factory=list)
-    transport: str = "stdio"  # stdio | http
+    #: Empty = not set: an override of a shipped default inherits that
+    #: server's transport, and a brand-new server defaults to stdio at
+    #: the client (see MCPServerConfig.merge). Never "stdio" by default
+    #: here: a defaulted "stdio" would overwrite a shipped HTTP
+    #: server's transport on merge (graphify/sato-hub/ceki could not be
+    #: enabled from config at all — it raised "stdio needs a command").
+    transport: str = ""
     url: str = ""
     enabled: bool = False
     timeout_s: float = 0.0  # 0 = the mcp.default_timeout_s
@@ -381,7 +390,7 @@ class MCPSettings:
                 command=str(entry.get("command") or ""),
                 args=[str(a) for a in (entry.get("args") or [])],
                 env=[str(e) for e in (entry.get("env") or [])],
-                transport=str(entry.get("transport") or "stdio"),
+                transport=str(entry.get("transport") or ""),
                 url=str(entry.get("url") or ""),
                 enabled=bool(entry.get("enabled", False)),
                 timeout_s=float(entry.get("timeout_s") or 0.0),

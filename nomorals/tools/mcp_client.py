@@ -114,6 +114,9 @@ class MCPServerConfig:
     server (values come from the process environment / vault at spawn
     time — the config only names them). ``notes`` is human text shown
     by /mcp status (e.g. "needs the Blender add-on running").
+    ``transport`` is "stdio" or "http" on a resolved config; the empty
+    string means unset and only ever appears on a config override
+    (from_dict / MCPServerEntry), where merge() inherits the default.
     """
 
     name: str
@@ -163,7 +166,12 @@ class MCPServerConfig:
             command=str(raw.get("command") or ""),
             args=[str(a) for a in (raw.get("args") or [])],
             env=[str(e) for e in (raw.get("env") or [])],
-            transport=str(raw.get("transport") or "stdio"),
+            # Empty transport = not set (an override inherits the
+            # default's transport in merge(); a brand-new server gets
+            # stdio in effective_mcp_servers). Never default to
+            # "stdio" here: that would overwrite a shipped HTTP
+            # server's transport on merge.
+            transport=str(raw.get("transport") or ""),
             url=str(raw.get("url") or ""),
             enabled=bool(raw.get("enabled", False)),
             timeout_s=float(raw.get("timeout_s") or 0.0),
@@ -175,14 +183,17 @@ class MCPServerConfig:
 
         Only set fields win: a non-empty command/args/env/url/notes,
         an explicit transport, an explicit enabled, a non-zero
-        timeout. An override that sets nothing changes nothing.
+        timeout. An override that sets nothing changes nothing — in
+        particular an override that leaves transport empty inherits
+        this default's transport (an ``{enabled: true}`` override must
+        never flip a shipped HTTP server to stdio).
         """
         return MCPServerConfig(
             name=self.name,
             command=override.command or self.command,
             args=list(override.args) if override.args else list(self.args),
             env=list(override.env) if override.env else list(self.env),
-            transport=override.transport,
+            transport=override.transport or self.transport,
             url=override.url or self.url,
             enabled=override.enabled,
             timeout_s=override.timeout_s or self.timeout_s,
@@ -207,6 +218,29 @@ class MCPServerConfig:
 #:   blender   — uvx mcp-for-blender (stdio; the MCP for Blender
 #:               add-on must be installed and its server started in
 #:               Blender — `uvx mcp-for-blender install-addon`).
+#:   since-cutoff — uvx since-cutoff@latest mcp (stdio; read-only,
+#:               no key: what changed in pinned Python APIs since the
+#:               model's training cutoff).
+#:   bestax    — npx -y bestax-mcp (stdio; Bulma React component
+#:               props, examples and skills).
+#:   upload-post — npx -y @upload-post/mcp (stdio; needs
+#:               UPLOAD_POST_API_KEY in the environment; social
+#:               publishing across TikTok, YouTube, Instagram,
+#:               LinkedIn, Facebook, Threads, Pinterest, Reddit,
+#:               Bluesky, X, WordPress and more).
+#:   humanpages — npx -y humanpages (stdio; hire real humans for
+#:               tasks agents cannot do — registers as an agent on
+#:               first use; a hire costs money only when the owner
+#:               approves one).
+#:   sato-hub  — hosted Streamable HTTP https://satohub.ai/api/mcp
+#:               (keyless; scored index of onchain-agent tooling +
+#:               preflight checks, 41 of 47 tools read-only).
+#:   ceki      — hosted Streamable HTTP https://api.ceki.me/mcp/agent
+#:               (rents real residential Chrome browsers, per-minute
+#:               crypto billing; public tools need no key, authed
+#:               tools need an X-Agent-Key header — config cannot yet
+#:               pass HTTP headers, so only the public tools are
+#:               reachable from a config-enabled server).
 DEFAULT_MCP_SERVERS: dict[str, MCPServerConfig] = {
     "context7": MCPServerConfig(
         name="context7",
@@ -247,6 +281,53 @@ DEFAULT_MCP_SERVERS: dict[str, MCPServerConfig] = {
         args=["mcp-for-blender"],
         notes="Needs the MCP for Blender add-on installed and its "
               "server started in Blender.",
+    ),
+    "since-cutoff": MCPServerConfig(
+        name="since-cutoff",
+        command="uvx",
+        args=["since-cutoff@latest", "mcp"],
+        notes="What changed in pinned Python APIs since the model's "
+              "training cutoff. Read-only, no key, no model calls.",
+    ),
+    "bestax": MCPServerConfig(
+        name="bestax",
+        command="npx",
+        args=["-y", "bestax-mcp"],
+        notes="Bulma React component props, examples and skills.",
+    ),
+    "upload-post": MCPServerConfig(
+        name="upload-post",
+        command="npx",
+        args=["-y", "@upload-post/mcp"],
+        env=["UPLOAD_POST_API_KEY"],
+        notes="Needs UPLOAD_POST_API_KEY in the environment. Social "
+              "publishing across TikTok, YouTube, Instagram, "
+              "LinkedIn, Facebook, Threads, Pinterest, Reddit, "
+              "Bluesky, X, WordPress and more.",
+    ),
+    "humanpages": MCPServerConfig(
+        name="humanpages",
+        command="npx",
+        args=["-y", "humanpages"],
+        notes="Hire real humans for tasks agents cannot do. Registers "
+              "as an agent on first use; a hire costs money only "
+              "when the owner approves one.",
+    ),
+    "sato-hub": MCPServerConfig(
+        name="sato-hub",
+        transport="http",
+        url="https://satohub.ai/api/mcp",
+        notes="Keyless scored index of onchain-agent tooling + "
+              "preflight checks. 41 of 47 tools read-only.",
+    ),
+    "ceki": MCPServerConfig(
+        name="ceki",
+        transport="http",
+        url="https://api.ceki.me/mcp/agent",
+        notes="Rents real residential Chrome browsers (per-minute "
+              "crypto billing). Public tools need no key; authed "
+              "tools need an X-Agent-Key header, which config cannot "
+              "pass yet — authed use needs an ACP-declared server.",
     ),
 }
 
@@ -296,7 +377,9 @@ def effective_mcp_servers(settings: Any) -> dict[str, MCPServerConfig]:
                 command=str(fields.get("command") or ""),
                 args=[str(a) for a in (fields.get("args") or [])],
                 env=[str(e) for e in (fields.get("env") or [])],
-                transport=str(fields.get("transport") or "stdio"),
+                # Empty = not set (MCPServerEntry.transport defaults to
+                # ""); merge() inherits the default's transport.
+                transport=str(fields.get("transport") or ""),
                 url=str(fields.get("url") or ""),
                 enabled=bool(fields.get("enabled", False)),
                 timeout_s=float(fields.get("timeout_s") or 0.0),
@@ -304,6 +387,10 @@ def effective_mcp_servers(settings: Any) -> dict[str, MCPServerConfig]:
         if name in out:
             out[name] = out[name].merge(override)
         else:
+            # A brand-new server with no transport defaults to stdio
+            # (the old from_dict default, preserved for new names only).
+            if not override.transport:
+                override.transport = "stdio"
             out[name] = override
     for cfg in out.values():
         cfg.validate()
@@ -1091,12 +1178,17 @@ def register(registry: Any) -> None:
         "mcp_call",
         description=(
             "Call a tool on an enabled external MCP server (Context7, "
-            "GitHub, Playwright, Serena, Graphify, Blender, or any "
-            "server added under mcp.servers in config). Use when the "
-            "task needs a capability Devon does not have herself — "
-            "library docs, repo operations, browser control, semantic "
-            "code search, a code graph, or a live Blender session. "
-            "Servers are opt-in: a disabled server refuses honestly."
+            "GitHub, Playwright, Serena, Graphify, Blender, "
+            "since-cutoff, bestax, Upload-Post, Human Pages, Sato Hub, "
+            "Ceki, or any server added under mcp.servers in config). "
+            "Use when the task needs a capability Devon does not have "
+            "herself — library docs, repo operations, browser control, "
+            "semantic code search, a code graph, a live Blender "
+            "session, stale-API checks for pinned Python deps, "
+            "Bulma component docs, social publishing, hiring a human, "
+            "preflighting an MCP server, or a real residential "
+            "browser. Servers are opt-in: a disabled server refuses "
+            "honestly."
         ),
         capability=Capability.NET_OUT,
         parameters={

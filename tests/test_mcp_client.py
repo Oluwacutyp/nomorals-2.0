@@ -155,21 +155,25 @@ def _settings_with_fake(script: str, mode: str = "good", *,
 
 
 class MCPClientDefaultsTests(unittest.TestCase):
-    def test_six_known_servers_all_disabled_by_default(self):
+    def test_twelve_known_servers_all_disabled_by_default(self):
         self.assertEqual(
             set(mc.DEFAULT_MCP_SERVERS),
             {"context7", "github", "playwright", "serena", "graphify",
-             "blender"})
+             "blender", "since-cutoff", "bestax", "upload-post",
+             "humanpages", "sato-hub", "ceki"})
         for cfg in mc.DEFAULT_MCP_SERVERS.values():
             self.assertFalse(cfg.enabled, cfg.name)
 
-    def test_graphify_is_http_the_rest_stdio(self):
-        self.assertEqual(mc.DEFAULT_MCP_SERVERS["graphify"].transport,
-                         "http")
-        self.assertEqual(mc.DEFAULT_MCP_SERVERS["graphify"].url,
-                         "https://api.graphify.com/mcp")
+    def test_http_servers_and_stdio_servers(self):
+        for name, url in (("graphify", "https://api.graphify.com/mcp"),
+                          ("sato-hub", "https://satohub.ai/api/mcp"),
+                          ("ceki", "https://api.ceki.me/mcp/agent")):
+            self.assertEqual(mc.DEFAULT_MCP_SERVERS[name].transport,
+                             "http", name)
+            self.assertEqual(mc.DEFAULT_MCP_SERVERS[name].url, url)
         for name in ("context7", "github", "playwright", "serena",
-                     "blender"):
+                     "blender", "since-cutoff", "bestax", "upload-post",
+                     "humanpages"):
             self.assertEqual(
                 mc.DEFAULT_MCP_SERVERS[name].transport, "stdio", name)
 
@@ -568,7 +572,8 @@ class MCPCommandTests(unittest.TestCase):
     def test_control_list(self):
         text = mc.control_mcp("list", Settings())
         for name in ("context7", "github", "playwright", "serena",
-                     "graphify", "blender"):
+                     "graphify", "blender", "since-cutoff", "bestax",
+                     "upload-post", "humanpages", "sato-hub", "ceki"):
             self.assertIn(name, text)
 
     def test_control_tools_and_call(self):
