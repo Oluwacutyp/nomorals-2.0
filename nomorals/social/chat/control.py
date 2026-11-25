@@ -397,7 +397,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "grill-me": (0, None),  # /grill-me [plans | commitments | runs] — an honest roast from the owner's own records: saved plans, the commitment ledger, live delegation runs. Every line names a real record. Owner-only.
     "computer": (0, None),  # /computer [status|open|close|view|watch|unwatch|takeover|handback|stop|resume] — Devon's own desktop: persistent sessions she drives herself; owner watch (live stream) + takeover; sticky owner stop. Owner-only.
     "doctor": (0, 0),  # /doctor — system health: registry + config + stores + adapters + providers (owner-only)
-    "museum": (0, 2),  # /museum | /museum send <id> — the Museum census over every system (audit R3-73, owner-only)
+    "museum": (0, None),  # /museum | /museum send <id> | /museum search <words> | /museum zip <id> | /museum unzip <id> | /museum attach <slug> <id> [note] | /museum cite <slug> — the Museum census over every system (audit R3-73, owner-only)
     "analytics": (0, None),  # /analytics [status | tables | query "<select sql>" | export <table> [csv|parquet] | export query "<select sql>" [csv|parquet]] — analytical queries + exports over the live store (R3-59; owner-only)
     "airports": (0, 1),  # /airports [status | refresh] — the airport→country table: rows, last refresh, next run, refresh on demand (airport refresh 0bd2bd1f; owner-only)
     "flight": (0, None),  # /flight <flight> | /flight watch <flight> [destination] [expect-epoch] | /flight unwatch <flight> | /flight watches | /flight area <IATA | lat_min lon_min lat_max lon_max> — live flight tracking from the open ADS-B feeds: position, altitude, speed, heading, ETA + a track map she draws, plus watches that ping on landing/diversion/delay (FlightRadar24 build-new; owner-only)
@@ -448,6 +448,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     # BookForge: write a real book → PDF → send when done
     "book": (0, None),       # /book <topic> [chapters] | status | list | build <slug> | send <slug> <p> <c>
     "books": (0, None),      # alias of /book — /books read <url|slug> | continue <slug> [n] | sources
+    "library": (0, None),    # /library | shelf <class> | class <slug> <class> | search <words> | send <slug> | cite <slug> — the grand organized library (gapfix74, owner-only)
     "novel": (0, None),      # /novel follow <url|title> | list | read <slug> [ch] | continue <slug> [n]
     # WisdomKeeper: esoteric corpus Q&A, history timeline, guided practice
     "wisdom": (0, None),     # /wisdom ask <q> | practice list|<id>|stop | timeline [t] | compare <t> | status
@@ -1110,6 +1111,7 @@ _HELP_TEXT = "\n".join(
         "  /book bible <slug>                      auto-built story bible",
         "  /book continue <slug> [n]               keep the story going in its voice",
         "  /books read <url|slug> [n] | part <slug> | contents <slug> | continue <slug> [n] | sources | library",
+        "  /library | shelf <class> | class <slug> <class> | search <words> | send <slug> | cite <slug>",
         "  — fiction studio (genre engines, novel|serial) —",
         "  /book fiction <premise> --genre <g> --mode <novel|serial>",
         "  /book fiction-write <slug>              next chapter (validated)",
@@ -2398,8 +2400,8 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "doctor": {"what": "system health — the Telegram twin of nm doctor: registry (every command dispatched + documented), config (ignored keys must be 0), stores (chat-modes + style-overrides + database), adapters (running state + real error), providers (LLM chain keys present). Each check passes or fails with the real cause. Owner-only.",
              "usage": "/doctor", "example": "/doctor",
              "related": "/status /chatmode"},
-    "museum": {"what": "the Museum census over every system — ApkForge builds, library books/digests/sources, characters' learned state, TrendOps renders — as browsable cards (id/title/kind/shelf/path/sendable). Read-only: the same census the brain's museum_census tool returns, on demand instead of volunteered. A failing shelf reports a named error and never kills the other shelves. /museum <shelf> shows only that shelf's cards — same card lines, filtered; an unknown shelf name is refused in words naming the shelves that hold cards. /museum send <id> delivers one sendable card back to this chat through the file-send path (exact id or unique prefix); exhibit-only cards — digests, sources — are refused in words, never shipped as their store file. Owner-only.",
-             "usage": "/museum | /museum <shelf> | /museum send <id>", "example": "/museum library-books   ·   /museum send library-book:<slug>",
+    "museum": {"what": "the Museum census over every system — ApkForge builds, library books/digests/sources, characters' learned state, TrendOps renders, downloaded files (wavs, downloaded music, archives), the museum's own zips and unpacks — as browsable cards (id/title/kind/shelf/path/sendable). Read-only: the same census the brain's museum_census tool returns, on demand instead of volunteered. A failing shelf reports a named error and never kills the other shelves. /museum <shelf> shows only that shelf's cards — same card lines, filtered; an unknown shelf name is refused in words naming the shelves that hold cards. /museum send <id> delivers one sendable card back to this chat through the file-send path (exact id or unique prefix); exhibit-only cards — digests, sources — are refused in words, never shipped as their store file. /museum search <words> finds a card by a human name, kind, or date — never only by a long id. /museum zip <id> packs a card into the museum store; /museum unzip <id> unpacks a zip card there. /museum attach <slug> <id> [note] makes the artifact a book's companion; /museum cite <slug> lists what a book cites. Owner-only.",
+             "usage": "/museum | /museum <shelf> | /museum search <words> | /museum send <id> | /museum zip <id> | /museum unzip <id> | /museum attach <slug> <id> [note] | /museum cite <slug> | /museum companions <slug>", "example": "/museum library-books   ·   /museum send library-book:<slug>   ·   /museum search golden-hour",
              "related": "/apk /books"},
     "analytics": {"what": "analytical queries + exports over the live store — the chat twin of `nm analytics` (audit R3-59): /analytics shows the backend + stats, /analytics tables lists every live table with row counts, /analytics query runs a read-only query (SELECT/WITH only, 100 rows shown), /analytics export writes a whole table or a query's rows to a file under <home>/exports/ and sends it back to this chat (CSV on any backend; Parquet needs DuckDB and refuses honestly on the SQLite passthrough, naming the backend — never a CSV with a .parquet name). A query export is capped at 1000 rows and says so when the cap bites. Read-only throughout — nothing here writes the store. Owner-only.",
              "usage": "/analytics | /analytics tables | /analytics query \"<select sql>\" | /analytics export <table> [csv|parquet] | /analytics export query \"<select sql>\" [csv|parquet]", "example": "/analytics   ·   /analytics tables   ·   /analytics query \"SELECT kind, COUNT(*) AS n FROM memories GROUP BY kind\"   ·   /analytics export memories   ·   /analytics export query \"SELECT * FROM memories\" parquet",
@@ -2688,6 +2690,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "usage": "/books read <url|slug> [n] | /books part <slug> [back] | /books contents <slug> | /books export <slug> [pdf|epub|html] | /books continue <slug> [n] | /books sources | /books library",
              "example": "/books read https://www.gutenberg.org/ebooks/84",
              "related": "/book /novel"},
+    "library": {"what": "The grand organized library: every book on a class shelf — fiction, novel, story, poetry, any class, each shelf a place per book — under one central library. Bare /library shows the central view; /library shelf <class> shows one class shelf; /library class <slug> <class> puts a book on its shelf; /library search <words> searches the museum and the library in one query; /library send <slug> builds the book's real PDF and sends it here; /library cite <slug> lists the museum artifacts the book cites. The same museum_library tool the brain uses. Owner-only.",
+             "usage": "/library | /library shelf <class> | /library class <slug> <class> | /library search <words> | /library send <slug> | /library cite <slug>",
+             "example": "/library shelf fantasy   ·   /library send dragon-codex",
+             "related": "/museum /books"},
     "novel": {"what": "Story reader + continuer: follow webnovels (freewebnovel, pandanovel, "
                       "more), read chapters with progress tracking, and continue any story "
                       "past its ending in the story's own voice (story bible auto-built).",
@@ -5376,7 +5382,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("her day — state & control",
      ["status", "ping", "platforms", "mood", "stage", "model", "providers", "say", "power",
       "proposals", "approve", "deny", "start", "stop", "quit",
-      "mode", "agent", "chatmode", "style", "stylepin", "doctor", "museum", "analytics", "airports", "flight", "burn", "share", "arena-research", "profile", "mind",
+      "mode", "agent", "chatmode", "style", "stylepin", "doctor", "museum", "library", "analytics", "airports", "flight", "burn", "share", "arena-research", "profile", "mind",
       "spend", "budget", "spending", "mandate", "balances", "goal",
       "goals", "careers", "recruit", "ticket", "triage", "ideas", "insights", "subscriptions", "recurring", "trade", "import", "alert", "cost", "heal", "tour", "pulse"]),
     ("search & research",
@@ -5592,6 +5598,7 @@ LIST_ONELINERS: dict[str, str] = {
     "structure": "turn an objective into a structured mission brief",
     "book": "BookForge: write a real book → PDF → send",
     "books": "story reader + continuer: /books read <url|slug> | part <slug> | contents <slug> | export <slug> [pdf|epub|html] | continue <slug> [n] | sources",
+    "library": "the grand organized library: class shelves under one central library, sendable as a book — /library shelf <class> | class <slug> <class> | send <slug>",
     "decode": "identify + decode anything: /decode <data|file|hash>",
     "investigate": "one-pass investigation: decode → crack → OSINT → knowledge graph",
     "cookies": "cookie state: YouTube download cookies + browser session bundles (/cookies import|status|clear)",

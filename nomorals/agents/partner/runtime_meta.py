@@ -295,7 +295,16 @@ class RuntimeMetaMixin:
         refused in words — never the store file behind it — and the
         file goes back to the chat the command came from. The
         census-time ``sendable`` is a fact about then; the send
-        re-checks the file exists now, in case it raced away."""
+        re-checks the file exists now, in case it raced away.
+
+        The gapfix74 verbs ride the same ``museum_library`` tool the
+        brain uses: ``/museum search <words>`` finds a card by a
+        human name, kind, or date; ``/museum zip <id>`` packs a card
+        into the museum store and ``/museum unzip <id>`` unpacks a
+        zip card there; ``/museum attach <slug> <id> [note]`` makes
+        the artifact a book's companion, ``/museum companions <slug>``
+        lists them, ``/museum cite <slug>`` lists what a book cites.
+        """
         words = (tail or "").split()
         if not words:
             outcome = self.context.tools.call("museum_census")
@@ -304,7 +313,96 @@ class RuntimeMetaMixin:
                         f"{getattr(outcome.error, 'message', outcome.error)}")
             value = outcome.value or {}
             return str(value.get("card_text") or "museum is empty")
-        if words[0].lower() != "send":
+        verb = words[0].lower()
+        if verb == "search":
+            if len(words) < 2:
+                return ("usage: /museum search <words> — find artifacts "
+                        "by name, kind, or date")
+            outcome = self.context.tools.call(
+                "museum_library", action="search",
+                query=" ".join(words[1:]))
+            if not outcome.ok:
+                return ("museum search failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            return str((outcome.value or {}).get("card_text")
+                       or "no match")
+        if verb == "zip":
+            if len(words) < 2:
+                return ("usage: /museum zip <id> — pack one card into "
+                        "the museum store")
+            outcome = self.context.tools.call(
+                "museum_library", action="zip", ref=words[1])
+            if not outcome.ok:
+                return ("museum zip failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            value = outcome.value or {}
+            return (f"zipped {value.get('title')} [{value.get('card')}] — "
+                    f"{value.get('files')} file(s) → {value.get('zip')}")
+        if verb == "unzip":
+            if len(words) < 2:
+                return ("usage: /museum unzip <id> — unpack a zip card "
+                        "into the museum store")
+            outcome = self.context.tools.call(
+                "museum_library", action="unzip", ref=words[1])
+            if not outcome.ok:
+                return ("museum unzip failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            value = outcome.value or {}
+            skipped = int(value.get("skipped_count") or 0)
+            text = (f"unzipped {value.get('card')} — "
+                    f"{value.get('files')} file(s) → "
+                    f"{value.get('destination')}")
+            if skipped:
+                text += f" ({skipped} unsafe member(s) skipped)"
+            return text
+        if verb == "attach":
+            if len(words) < 3:
+                return ("usage: /museum attach <book slug> <artifact id> "
+                        "[note]")
+            outcome = self.context.tools.call(
+                "museum_library", action="companion", verb="attach",
+                slug=words[1], ref=words[2],
+                note=" ".join(words[3:]))
+            if not outcome.ok:
+                return ("museum attach failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            value = outcome.value or {}
+            text = (f"attached {value.get('artifact')} to "
+                    f"{value.get('book')}")
+            if value.get("note"):
+                text += f" — {value.get('note')}"
+            return text
+        if verb == "companions":
+            if len(words) < 2:
+                return "usage: /museum companions <book slug>"
+            outcome = self.context.tools.call(
+                "museum_library", action="companion", verb="list",
+                slug=words[1])
+            if not outcome.ok:
+                return ("museum companions failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            comps = (outcome.value or {}).get("companions") or []
+            if not comps:
+                return f"{words[1]} has no companion artifacts yet"
+            lines = [f"companions of {words[1]}:"]
+            for comp in comps:
+                card = comp.get("card") or {}
+                mark = ("missing from the museum" if comp.get("missing")
+                        else card.get("title", comp.get("artifact")))
+                lines.append(f"  {comp.get('artifact')} — {mark}"
+                             + (f" — {comp['note']}"
+                                if comp.get("note") else ""))
+            return "\n".join(lines)
+        if verb == "cite":
+            if len(words) < 2:
+                return "usage: /museum cite <book slug>"
+            outcome = self.context.tools.call(
+                "museum_library", action="cite", slug=words[1])
+            if not outcome.ok:
+                return ("museum cite failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            return self._cite_text(words[1], outcome.value or {})
+        if verb != "send":
             if len(words) > 1:
                 return ("usage: /museum <shelf> — one shelf name, or "
                         "/museum send <id> to send one card")
@@ -354,6 +452,111 @@ class RuntimeMetaMixin:
         name = os.path.basename(str(value.get("path") or path))
         return (f"📎 sent {card.get('title')} [{card.get('id')}] — "
                 f"{name} ({size_kb} KB)")
+
+    @staticmethod
+    def _cite_text(slug: str, value: dict[str, Any]) -> str:
+        """What a book cites, from a live ``cite`` result — shared by
+        /museum cite and /library cite so the two can never disagree."""
+        arts = value.get("artifacts") or []
+        missing = value.get("missing") or []
+        if not arts and not missing:
+            return f"{slug} cites no artifacts yet"
+        lines = [f"{slug} cites:"]
+        for card in arts:
+            lines.append(f"  [{card.get('id')}] {card.get('title')} — "
+                         f"{card.get('kind')}")
+        for ref in missing:
+            lines.append(f"  {ref} — missing from the museum")
+        return "\n".join(lines)
+
+    def _control_library(self, tail: str, message: Any = None) -> str:
+        """The /library reply: the grand organized library — every
+        class a shelf, every shelf a place per book — through the
+        same ``museum_library`` tool the brain uses, so chat and the
+        brain answer from the same central view. Bare ``/library``
+        shows the central library; ``shelf <class>`` one class shelf;
+        ``class <slug> <class>`` puts a book on its shelf; ``search``
+        is the unified museum+library search; ``send <slug>`` builds
+        the book's real PDF and sends it to this chat; ``cite`` lists
+        the museum artifacts the book cites. A tool failure is an
+        honest refusal in words, never silence and never a fake
+        shelf."""
+        words = (tail or "").split()
+        if not words:
+            outcome = self.context.tools.call(
+                "museum_library", action="shelves")
+            if not outcome.ok:
+                return ("library failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            return str((outcome.value or {}).get("card_text")
+                       or "library is empty")
+        verb = words[0].lower()
+        if verb == "shelf":
+            if len(words) < 2:
+                return "usage: /library shelf <class> — one class shelf"
+            outcome = self.context.tools.call(
+                "museum_library", action="shelf", class_name=words[1])
+            if not outcome.ok:
+                return ("library shelf failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            return str((outcome.value or {}).get("card_text") or "")
+        if verb == "class":
+            if len(words) < 3:
+                return ("usage: /library class <book slug> <class>")
+            outcome = self.context.tools.call(
+                "museum_library", action="classify", slug=words[1],
+                class_name=words[2])
+            if not outcome.ok:
+                return ("library classify failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            value = outcome.value or {}
+            return (f"{value.get('slug')} is on the "
+                    f"{value.get('class')} shelf")
+        if verb == "search":
+            if len(words) < 2:
+                return "usage: /library search <words>"
+            outcome = self.context.tools.call(
+                "museum_library", action="search",
+                query=" ".join(words[1:]))
+            if not outcome.ok:
+                return ("library search failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            return str((outcome.value or {}).get("card_text")
+                       or "no match")
+        if verb == "send":
+            if len(words) < 2:
+                return ("usage: /library send <slug> — build the "
+                        "book's PDF and send it here")
+            if message is None:
+                return ("send needs a live chat — run /library send "
+                        "from a chat, not the console")
+            outcome = self.context.tools.call(
+                "museum_library", action="export", slug=words[1])
+            if not outcome.ok:
+                return ("library export failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            value = outcome.value or {}
+            path = str(value.get("pdf") or "")
+            chat = message.chat
+            result = self.gateway.send_file(
+                chat.platform, chat, path,
+                caption=(f"📕 {value.get('title')} — "
+                         f"{value.get('chapters')} chapters"))
+            if not getattr(result, "ok", False):
+                return (f"📕 exported but the file send did not go "
+                        f"through — it is saved at {path}")
+            return f"📄 {os.path.basename(path)} sent above."
+        if verb == "cite":
+            if len(words) < 2:
+                return "usage: /library cite <book slug>"
+            outcome = self.context.tools.call(
+                "museum_library", action="cite", slug=words[1])
+            if not outcome.ok:
+                return ("library cite failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            return self._cite_text(words[1], outcome.value or {})
+        return ("usage: /library [shelf <class> | class <slug> <class> | "
+                "search <words> | send <slug> | cite <slug>]")
 
     def _control_analytics(self, tail: str, message: Any = None) -> str:
         """The /analytics reply: analytical queries + exports over the

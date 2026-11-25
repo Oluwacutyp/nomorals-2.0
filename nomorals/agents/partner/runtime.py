@@ -10357,6 +10357,8 @@ class PartnerRuntime(
             return self._control_digest(command.tail, message)
         if kind == "museum":
             return self._control_museum(command.tail, message)
+        if kind == "library":
+            return self._control_library(command.tail, message)
         if kind == "analytics":
             return self._control_analytics(command.tail, message)
         if kind == "airports":

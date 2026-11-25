@@ -66,14 +66,19 @@ class MuseumSendRegistrationTest(unittest.TestCase):
         assert bare is not None
         self.assertEqual(bare.kind, "museum")
         self.assertEqual(bare.tail, "")
-        # Three words still exceed the arity: bare + send <id> only.
-        too_long = parse_control("/museum a b c")
-        self.assertIsNotNone(too_long)
-        assert too_long is not None
-        self.assertEqual(too_long.kind, "error")
+        # gapfix74 widened the arity (0, None): search/attach/cite
+        # need multi-word tails, so three words parse as a museum
+        # command now — the handler refuses the unknown shelf in
+        # words instead of the parser refusing the arity.
+        three = parse_control("/museum a b c")
+        self.assertIsNotNone(three)
+        assert three is not None
+        self.assertEqual(three.kind, "museum")
+        self.assertEqual(three.tail, "a b c")
 
     def test_registry_unchanged_shape(self) -> None:
-        self.assertEqual(CONTROL_COMMANDS["museum"], (0, 2))
+        # gapfix74: arity (0, None) for the search/attach/cite verbs.
+        self.assertEqual(CONTROL_COMMANDS["museum"], (0, None))
         self.assertIn("/museum send", COMMAND_DETAILS["museum"]["usage"])
         self.assertIn("/museum send",
                       COMMAND_DETAILS["museum"]["example"])

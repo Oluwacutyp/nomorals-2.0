@@ -3701,6 +3701,126 @@ class Library:
                           "progress_percent": prog["percent"]})
         return {"collection": name, "books": books}
 
+    # ── classes: one shelf per class ──────────────────────────────────
+    # A class is a collection named "class:<name>" — the same real
+    # collections store the shelves ride, zero schema change. A book
+    # holds its place on its class shelf; the central library is the
+    # grand view over all of them. Class names are open (fiction,
+    # novel, story, poetry, …), never a closed list.
+
+    _CLASS_PREFIX = "class:"
+
+    @staticmethod
+    def _clean_class(name: str) -> str:
+        cleaned = re.sub(r"[^a-z0-9]+", "-",
+                         (name or "").strip().lower()).strip("-")[:40]
+        if not cleaned:
+            raise LibraryError(
+                "class name is required — letters, numbers, dashes")
+        return cleaned
+
+    def classify(self, slug: str, class_name: str) -> dict[str, Any]:
+        """Put a book on its class shelf (creating the shelf)."""
+        self.load(slug)  # fail fast on unknown books
+        name = self._clean_class(class_name)
+        collection = f"{self._CLASS_PREFIX}{name}"
+        self.create_collection(collection)
+        self.add_to_collection(collection, slug)
+        return {"slug": slug, "class": name, "collection": collection}
+
+    def declassify(self, slug: str, class_name: str) -> dict[str, Any]:
+        """Take a book off its class shelf (the shelf stays)."""
+        self.load(slug)
+        name = self._clean_class(class_name)
+        collection = f"{self._CLASS_PREFIX}{name}"
+        self.remove_from_collection(collection, slug)
+        return {"slug": slug, "class": name, "removed": True}
+
+    def book_classes(self, slug: str) -> list[str]:
+        """Every class a book sits on."""
+        self.load(slug)
+        out = []
+        for coll in self.list_collections():
+            name = coll.get("name", "")
+            if not name.startswith(self._CLASS_PREFIX):
+                continue
+            try:
+                slugs = [b["slug"] for b in self.shelf(name)["books"]]
+            except LibraryError:
+                continue
+            if slug in slugs:
+                out.append(name[len(self._CLASS_PREFIX):])
+        return sorted(out)
+
+    def classes(self) -> list[dict[str, Any]]:
+        """Every class shelf, with its book count."""
+        return [{"class": c["name"][len(self._CLASS_PREFIX):],
+                 "books": c["books"],
+                 "collection": c["name"]}
+                for c in self.list_collections()
+                if c["name"].startswith(self._CLASS_PREFIX)]
+
+    def class_shelf(self, class_name: str) -> dict[str, Any]:
+        """Every book on one class shelf, with progress + rating."""
+        name = self._clean_class(class_name)
+        collection = f"{self._CLASS_PREFIX}{name}"
+        view = self.shelf(collection)  # raises on an unknown shelf
+        return {"class": name, "collection": collection,
+                "books": view["books"]}
+
+    def central_library(self) -> dict[str, Any]:
+        """The grand view: every class shelf, every other shelf, and
+        the books no class has claimed yet."""
+        classes = self.classes()
+        classed: set[str] = set()
+        for entry in classes:
+            view = self.shelf(entry["collection"])
+            entry["books_list"] = view["books"]
+            classed.update(b["slug"] for b in view["books"])
+        shelves = [{"name": c["name"], "books": c["books"]}
+                   for c in self.list_collections()
+                   if not c["name"].startswith(self._CLASS_PREFIX)]
+        books = self.list_books()
+        unclassified = [b for b in books if b["slug"] not in classed]
+        return {"classes": classes, "shelves": shelves,
+                "unclassified": unclassified,
+                "total_books": len(books),
+                "total_words": sum(int(b.get("words") or 0)
+                                   for b in books)}
+
+    def export_book_pdf(self, slug: str,
+                        page_size: str = "A4") -> dict[str, Any]:
+        """Sendable as a book: the ingested book's chapters, built
+        into a real PDF through the existing PDF maker
+        (``core.pdf.render_pdf`` — headings, chapter breaks, TOC
+        with true page numbers). The file lands beside the book, so
+        the museum's library-book card can send it. A book with no
+        readable chapters refuses honestly — no empty book ships."""
+        meta = self.load(slug)
+        chapters, _extras = self._read_book_chapters(slug)
+        bodies = [(title, body) for title, body in chapters
+                  if body.strip()]
+        if not bodies:
+            raise LibraryError(
+                f"no readable chapters in {slug!r} — nothing to "
+                "build a book from")
+        text = f"# {meta.get('title', slug)}\n\n"
+        for title, body in bodies:
+            text += f"# {title}\n\n{body}\n\n"
+        from ..core.pdf import render_pdf
+
+        data = render_pdf(
+            text, title=str(meta.get("title", slug)),
+            page_size=page_size if page_size in ("A4", "Letter") else "A4",
+            headings=True, chapter_break=True, toc=True,
+            metadata={"title": str(meta.get("title", slug)),
+                      "author": str(meta.get("author", "") or "")})
+        out_path = self.book_dir(slug) / f"{slug}.pdf"
+        out_path.write_bytes(data)
+        return {"slug": slug, "title": meta.get("title", ""),
+                "pdf": str(out_path), "pdf_bytes": len(data),
+                "chapters": len(bodies)}
+
     # ── tags ──────────────────────────────────────────────────────────
     @staticmethod
     def _clean_tags(tags: list[str] | str) -> list[str]:

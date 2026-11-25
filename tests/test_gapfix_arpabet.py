@@ -373,7 +373,7 @@ class TestG2pWiring:
 
 
 class TestWiring:
-    def test_tool_count_still_786(self):
+    def test_tool_count_still_787(self):
         from types import SimpleNamespace
 
         from nomorals.tools.registry import ToolRegistry
@@ -382,8 +382,8 @@ class TestWiring:
         registry.register_builtins()
         # No new tool in this lane: the tiers ride the existing
         # tonal_g2p tool, the nm g2p CLI and the /g2p chat verb.
-        # 785 after C.8 added the robot tool; 786 after this lane (audit N4) added build_swarm.
-        assert len(registry._tools) == 786
+        # 785 after C.8 added the robot tool; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library.
+        assert len(registry._tools) == 787
         assert "tonal_g2p" in registry._tools
 
     def test_tool_tonal_g2p_arpabet_action_names_tier(self):

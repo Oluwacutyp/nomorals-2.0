@@ -45,9 +45,10 @@ _BOOK_TEXT = (
 
 class MuseumShelfRegistrationTest(unittest.TestCase):
     def test_registered_shape(self) -> None:
-        # Bare (0) + one-word shelf (1) + send <id> (2): the (0, 2)
-        # arity already admits all three forms, no change needed.
-        self.assertEqual(CONTROL_COMMANDS["museum"], (0, 2))
+        # gapfix74 widened the arity to (0, None): bare + one-word
+        # shelf + send <id> still parse, and so do the multi-word
+        # search/attach/cite verbs.
+        self.assertEqual(CONTROL_COMMANDS["museum"], (0, None))
         usage = COMMAND_DETAILS["museum"]["usage"]
         self.assertIn("/museum <shelf>", usage)
         self.assertIn("/museum send <id>", usage)
@@ -73,11 +74,12 @@ class MuseumShelfRegistrationTest(unittest.TestCase):
         assert cmd is not None
         self.assertEqual(cmd.kind, "museum")
         self.assertEqual(cmd.tail, "library-books")
-        # Three words still exceed the arity.
+        # gapfix74 widened the arity (0, None) for search/attach/cite:
+        # three words parse as a museum command now.
         extra = parse_control("/museum a b c")
         self.assertIsNotNone(extra)
         assert extra is not None
-        self.assertEqual(extra.kind, "error")
+        self.assertEqual(extra.kind, "museum")
 
 
 class MuseumShelfCommandTest(unittest.TestCase):

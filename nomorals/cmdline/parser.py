@@ -5666,6 +5666,9 @@ def _parser() -> argparse.ArgumentParser:
         help="the Museum census: every system as sendable cards",
         description=("nm museum [census|<shelf>]\\n"
                      "nm museum find <id>\\n"
+                     "nm museum search <words>\\n"
+                     "nm museum zip <id> | unzip <id>\\n"
+                     "nm museum attach <slug> <id> [note] | companions <slug> | cite <slug>\\n"
                      "nm museum send <id> — refused: sending needs a "
                      "live chat\\n"
                      "The same census as chat /museum, over the same "
@@ -5673,7 +5676,7 @@ def _parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     museum_p.add_argument("museum_action", nargs="?", default=None,
-                          help="census, a shelf name, find, or send")
+                          help="census, a shelf name, find, search, zip, unzip, attach, companions, cite, or send")
     museum_p.add_argument("museum_rest", nargs="*", default=[],
                           help="action arguments (card id)")
     museum_p.add_argument("--json", action="store_true",
@@ -6130,7 +6133,8 @@ def _parser() -> argparse.ArgumentParser:
                        choices=["list", "ingest", "search", "read", "drop",
                                 "resume", "progress", "bookmark", "note",
                                 "shelf", "tag", "rate", "continue", "sources",
-                                "serial", "novel", "cache"],
+                                "serial", "novel", "cache", "class",
+                                "classes", "central", "export"],
                        help="Action to perform (last five are reader actions)")
     books.add_argument("target", nargs="?", default="",
                        help="book slug / file path / query / collection name, per action")
@@ -6179,6 +6183,8 @@ def _parser() -> argparse.ArgumentParser:
                        help="serial: status")
     books.add_argument("--import", dest="import_", action="store_true",
                        help="cache: import a cache zip (target = zip path)")
+    books.add_argument("--class", dest="book_class", default="",
+                       help="class: the book class (fiction, novel, …)")
     books.add_argument("--path", default="",
                        help="cache: export destination path")
     hub = sub.add_parser("hub", aliases=CLI_ALIASES["hub"], help="MediaHub: one-call media orchestrator (song/video/podcast)")

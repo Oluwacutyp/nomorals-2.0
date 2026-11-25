@@ -315,6 +315,19 @@ class RuntimeSearchMixin:
                              "/books continue <slug> [n] continues in its voice")
                 return "\n".join(lines)
 
+            if verb == "library":
+                # /books library — the central library view (gapfix74):
+                # the help text always advertised it, but the verb fell
+                # through to the write-a-book path. Same museum_library
+                # tool /library uses, so the two can never disagree.
+                outcome = self.context.tools.call(
+                    "museum_library", action="shelves")
+                if not outcome.ok:
+                    return ("library failed: "
+                            f"{getattr(outcome.error, 'message', outcome.error)}")
+                return str((outcome.value or {}).get("card_text")
+                           or "library is empty")
+
             if verb == "export":
                 # /books export <slug> [pdf|epub|html] — export a
                 # FOLLOWED story from its locally held chapters

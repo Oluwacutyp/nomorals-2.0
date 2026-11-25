@@ -562,7 +562,7 @@ class TestChat:
 
 
 class TestToolCount:
-    def test_tool_count_still_786(self):
+    def test_tool_count_still_787(self):
         # 782 after C.2 registered the (previously dead) tonal_g2p tool;
         # 783 after C.1 added smarthome; 784 after C.4 added camwall;
         # 785 after C.8 added robot.
@@ -572,4 +572,4 @@ class TestToolCount:
 
         count = len(ToolRegistry(SimpleNamespace()).register_builtins()
                     ._tools)
-        assert count == 786
+        assert count == 787

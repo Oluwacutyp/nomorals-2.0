@@ -368,6 +368,44 @@ def _cmd_books(args: argparse.Namespace, context: Any) -> int:
                              f"({out['files']} files)")
             return 0
 
+        if action == "class":
+            slug = need("a book slug")
+            class_name = (getattr(args, "book_class", "") or "").strip()
+            if not class_name:
+                print("books class needs --class <name> — "
+                      "nm books class <slug> --class fiction",
+                      file=sys.stderr)
+                return 2
+            out = lib.classify(slug, class_name)
+            _emit(args, out,
+                  f"{slug} is on the {out['class']} shelf")
+            return 0
+
+        if action == "classes":
+            classes = lib.classes()
+            lines = [f"  {c['class']:<24} {c['books']} book(s)"
+                     for c in classes]
+            _emit(args, {"classes": classes},
+                  "classes:\n" + "\n".join(lines)
+                  if lines else "no classes yet — "
+                  "nm books class <slug> --class <name>")
+            return 0
+
+        if action == "central":
+            from ...books.tools import _render_central
+
+            view = lib.central_library()
+            _emit(args, view, _render_central(view))
+            return 0
+
+        if action == "export":
+            slug = need("a book slug")
+            out = lib.export_book_pdf(slug)
+            _emit(args, out,
+                  f"exported {slug} → {out['pdf']} "
+                  f"({out['pdf_bytes']} bytes, {out['chapters']} chapters)")
+            return 0
+
         print(f"books: unknown action {action}", file=sys.stderr)
         return 2
     except LibraryError as exc:

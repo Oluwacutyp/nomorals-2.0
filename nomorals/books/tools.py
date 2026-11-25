@@ -67,9 +67,70 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from ..core.policy import Capability
+
+__all__ = ["register"]
+
+
+def _render_unified(query: str, museum_cards: list[dict[str, Any]],
+                    library_books: list[dict[str, Any]],
+                    library_hits: list[dict[str, Any]]) -> str:
+    """One search, both houses: museum cards, library books, and
+    library passages in one readable reply."""
+    lines = [f"🔎 {query!r} — {len(museum_cards)} artifact(s), "
+             f"{len(library_books)} book(s), "
+             f"{len(library_hits)} passage(s)"]
+    for card in museum_cards:
+        sendable = ("sendable" if card.get("sendable")
+                    else "exhibit only")
+        lines.append(f"  [{card['id']}] {card['title']} — "
+                     f"{card['kind']} · {sendable}")
+    for book in library_books:
+        lines.append(f"  📕 {book['slug']} — "
+                     f"{book.get('title', '')} "
+                     f"({book.get('chapters', 0)} chapters)")
+    for hit in library_hits:
+        lines.append(f"  📖 [{hit.get('book_slug', '')}] "
+                     f"{hit.get('book', '')} — "
+                     f"{hit.get('chapter', '')}: "
+                     f"{str(hit.get('passage', ''))[:120]}")
+    return "\n".join(lines)
+
+
+def _render_central(view: dict[str, Any]) -> str:
+    """The central library as readable text — shared by the
+    ``museum_library`` tool and the ``nm books central`` console."""
+    lines = [f"📚 **Central Library** — "
+             f"{view.get('total_books', 0)} book(s), "
+             f"{view.get('total_words', 0)} words"]
+    for entry in view.get("classes") or []:
+        lines.append(f"  shelf {entry['class']} "
+                     f"({entry.get('books', 0)}):")
+        for book in entry.get("books_list") or []:
+            lines.append(f"    {book['slug']} — "
+                         f"{book.get('title', '')} "
+                         f"({book.get('words', 0)}w)")
+    for shelf in view.get("shelves") or []:
+        lines.append(f"  shelf {shelf['name']} "
+                     f"({shelf.get('books', 0)} book(s))")
+    uncl = view.get("unclassified") or []
+    lines.append(f"  unclassified ({len(uncl)}):")
+    for book in uncl:
+        lines.append(f"    {book['slug']} — {book.get('title', '')}")
+    return "\n".join(lines)
+
+
+def _render_class_shelf(view: dict[str, Any]) -> str:
+    lines = [f"📚 shelf {view['class']} "
+             f"({len(view.get('books') or [])} book(s)):"]
+    for book in view.get("books") or []:
+        lines.append(f"  {book['slug']} — {book.get('title', '')} "
+                     f"({'★' * int(book.get('rating') or 0) or '·'} "
+                     f"{book.get('progress_percent', 0)}%)")
+    return "\n".join(lines)
 
 __all__ = ["register"]
 
@@ -1984,6 +2045,30 @@ def register(registry: Any) -> None:
         raise ValueError(
             f"unknown vectors action {action!r} — status | backfill")
 
+    def _museum_roots() -> dict[str, str]:
+        """The Museum's roots, resolved the same way at every
+        construction site (this tool, the console twin): the
+        downloads root off the home, the archives dir off the
+        workspace, the museum store off the home."""
+        settings = getattr(context, "settings", None)
+        resolve = getattr(settings, "resolve", None)
+        if callable(resolve):
+            downloads = str(resolve("data/downloads"))
+            museum_root = str(resolve("museum"))
+            archives = str(Path(
+                getattr(settings, "workspace_dir", "") or
+                resolve("workspace")) / "archives")
+        else:
+            home = Path(getattr(settings, "home", "") or "~").expanduser()
+            downloads = str(home / "data" / "downloads")
+            museum_root = str(home / "museum")
+            workspace = getattr(settings, "workspace_dir", None)
+            archives = str((Path(workspace) if workspace else
+                            home / "workspace") / "archives")
+        return {"downloads_root": downloads,
+                "archives_root": archives,
+                "museum_root": museum_root}
+
     def _museum(apk_root: str = "") -> Any:
         """The one Museum construction site: every museum tool builds
         from the same roots, so the census and the find can never
@@ -1995,17 +2080,23 @@ def register(registry: Any) -> None:
         from ..museum import Museum
 
         root = apk_root.strip() or str(apkforge_dir(context))
+        roots = _museum_roots()
         return Museum(apk_root=root, library=_library(),
                       char_store=CharacterStore(),
                       learn_store=LearnStore(),
-                      trendops_root=_trendops_root)
+                      trendops_root=_trendops_root,
+                      downloads_root=roots["downloads_root"],
+                      archives_root=roots["archives_root"],
+                      museum_root=roots["museum_root"])
 
     @registry.register(
         "museum_census",
         description=(
             "The Museum: one browsable census over every system — "
             "ApkForge builds, library books/digests/sources, characters' "
-            "learned state, TrendOps renders — as cards (id/title/kind/"
+            "learned state, TrendOps renders, downloaded files (wavs, "
+            "downloaded music, archives — the downloads shelves), and "
+            "the museum's own zips and unpacks — as cards (id/title/kind/"
             "shelf/path/hash/size/provenance/tags/sendable). Non-file "
             "exhibits are exhibit-only, never sendable. A failing shelf "
             "reports a named error and never kills the other shelves. "
@@ -2061,3 +2152,105 @@ def register(registry: Any) -> None:
     )
     def museum_find(ref: str, apk_root: str = "") -> dict[str, Any]:
         return {"card": _museum(apk_root).find(ref)}
+
+    @registry.register(
+        "museum_library",
+        description=(
+            "The Museum + Library, interacting: one search reaches "
+            "both houses; a museum artifact zips/unzips on demand; a "
+            "book takes an artifact as a companion and cites it; "
+            "books sit on class shelves under one central library. "
+            "Actions: search (one query over museum cards, library "
+            "books, and library passages), find (one card by id or "
+            "unique prefix), zip / unzip (a card, into/out of the "
+            "museum store), companion (attach/detach/list an artifact "
+            "on a book), cite (a book's companion artifacts, resolved "
+            "live), shelves (the central library view), shelf (one "
+            "class shelf), classify (put a book on a class shelf), "
+            "export (build a book's PDF)."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "action": "str — search | find | zip | unzip | companion | "
+                      "cite | shelves | shelf | classify | export",
+            "query": "str (for search) — words from a title, kind, or date",
+            "kind": "str (optional, for search) — exact card kind",
+            "date": "str (optional, for search) — YYYY-MM-DD",
+            "top": "int (optional, 8) — library passage hits",
+            "ref": "str (for find/zip/unzip, companion attach/detach) — "
+                   "card id or unique id prefix",
+            "slug": "str (for companion/cite/classify/export) — book slug",
+            "verb": "str (for companion) — attach | detach | list",
+            "note": "str (optional, for companion attach)",
+            "class_name": "str (for shelf/classify) — the book class",
+        },
+    )
+    def museum_library(action: str, *, query: str = "", kind: str = "",
+                       date: str = "", top: int = 8, ref: str = "",
+                       slug: str = "", verb: str = "", note: str = "",
+                       class_name: str = "") -> dict[str, Any]:
+        museum = _museum()
+        lib = _library()
+        act = (action or "").strip().lower()
+        if act == "search":
+            q = (query or "").strip()
+            if not q and not kind.strip() and not date.strip():
+                raise ValueError(
+                    "search needs words, a kind, or a date — "
+                    "museum_library search <words>")
+            found = museum.search(q, kind=kind, date=date)
+            books = [b for b in lib.list_books()
+                     if not q or q.lower() in
+                     f"{b.get('slug', '')} {b.get('title', '')} "
+                     f"{' '.join(b.get('tags') or [])}".lower()]
+            hits: list[dict[str, Any]] = []
+            search_note = ""
+            if q:
+                try:
+                    hits = [h.to_dict() for h in
+                            lib.search(q, top=max(1, int(top)))]
+                except Exception as exc:  # noqa: BLE001 — a failing passage lane never kills the museum half
+                    search_note = (f"library passage search failed: "
+                                   f"{exc}")
+            text = _render_unified(q or kind or date,
+                                   found["artifacts"], books, hits)
+            return {"query": q, "kind": kind, "date": date,
+                    "museum_cards": found["artifacts"],
+                    "library_books": books, "library_hits": hits,
+                    "count": len(found["artifacts"]) + len(books),
+                    "card_text": text + (f"\n{search_note}"
+                                         if search_note else "")}
+        if act == "find":
+            return {"card": museum.find(ref)}
+        if act == "zip":
+            return museum.zip_card(ref)
+        if act == "unzip":
+            return museum.unzip_card(ref)
+        if act == "companion":
+            v = (verb or "").strip().lower()
+            if v == "attach":
+                return museum.attach_companion(slug, ref, note=note)
+            if v == "detach":
+                return museum.detach_companion(slug, ref)
+            if v == "list":
+                return {"book": slug,
+                        "companions": museum.companions_for_book(slug)}
+            raise ValueError(
+                f"unknown companion verb {verb!r} — "
+                "attach | detach | list")
+        if act == "cite":
+            return museum.cite(slug)
+        if act == "shelves":
+            view = lib.central_library()
+            return {**view, "card_text": _render_central(view)}
+        if act == "shelf":
+            view = lib.class_shelf(class_name)
+            return {**view, "card_text": _render_class_shelf(view)}
+        if act == "classify":
+            return lib.classify(slug, class_name)
+        if act == "export":
+            return lib.export_book_pdf(slug)
+        raise ValueError(
+            f"unknown museum_library action {action!r} — search | "
+            "find | zip | unzip | companion | cite | shelves | "
+            "shelf | classify | export")

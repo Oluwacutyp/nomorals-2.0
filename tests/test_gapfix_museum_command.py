@@ -87,12 +87,13 @@ class MuseumRegistrationTest(unittest.TestCase):
         self.assertIsNotNone(cmd)
         assert cmd is not None
         self.assertEqual(cmd.kind, "museum")
-        # Three words still exceed the arity (bare + send <id> only);
-        # a one-word tail parses and the handler refuses it in words.
+        # gapfix74 widened the arity (0, None) for search/attach/cite:
+        # three words parse as a museum command now, and the handler
+        # refuses the unknown shelf in words.
         extra = parse_control("/museum a b c")
         self.assertIsNotNone(extra)
         assert extra is not None
-        self.assertEqual(extra.kind, "error")
+        self.assertEqual(extra.kind, "museum")
 
     def test_listed_and_in_menu(self) -> None:
         self.assertIn("/museum", list_catalog())

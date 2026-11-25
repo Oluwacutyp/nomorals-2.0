@@ -474,13 +474,13 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(_split_sentences(""), [])
         self.assertEqual(_split_sentences("  "), [])
 
-    def test_tool_count_still_786(self):
+    def test_tool_count_still_787(self):
         # No new brain tool in this lane: the sentence surface is
         # `nm sentence` + `/sentence` over the shared engine.
-        # 785 after C.8 added the robot tool; 786 after this lane (audit N4) added build_swarm.
+        # 785 after C.8 added the robot tool; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library.
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 786)
+        self.assertEqual(len(registry._tools), 787)
 
     def test_cli_split(self):
         from nomorals.cmdline.dispatch import main
