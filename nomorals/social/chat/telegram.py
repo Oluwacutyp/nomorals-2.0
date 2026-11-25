@@ -3235,7 +3235,7 @@ class TelegramAdapter(ChatAdapter):
         return result
 
     def send_media(self, chat: ChatRef, media: MediaRef, *, caption: str = "",
-                   parse_mode: str = "") -> SendResult:
+                   parse_mode: str = "", reply_to: str = "") -> SendResult:
         client = self._client
         if client is None:
             return SendResult(ok=False, platform=self.name, error="not connected")
@@ -3268,6 +3268,11 @@ class TelegramAdapter(ChatAdapter):
             # parser (same accepted spellings as send()).
             if parse_mode in ("html", "HTML", "md", "markdown"):
                 kwargs["parse_mode"] = parse_mode
+            # helpdup: the media quotes the command it answers,
+            # so a sibling surface observes the proof exactly as
+            # it does for a text answer.
+            if reply_to and str(reply_to).isdigit():
+                kwargs["reply_to"] = int(reply_to)
 
             async def _one(cap: str = caption, **overrides: Any) -> Any:
                 call_kwargs = {**kwargs, **overrides}
@@ -8271,6 +8276,7 @@ class TelegramBotAdapter(ChatAdapter):
     def send_media(self, chat: ChatRef, media: MediaRef, *, caption: str = "",
                    parse_mode: str = "",
                    buttons: list[list[tuple[str, str]]] | None = None,
+                   reply_to: str = "",
                    ) -> SendResult:
         started = time.perf_counter()
         path = Path(media.path)
@@ -8316,10 +8322,17 @@ class TelegramBotAdapter(ChatAdapter):
         # and is re-sent by id forever after (§21).
         held_id = str(getattr(media, "file_id", "") or "")
         markup = self._inline_markup(buttons)
+        # helpdup: the media quotes the command it answers, so a
+        # sibling surface observes the proof exactly as it does
+        # for a text answer.
+        _reply_to = int(reply_to) if reply_to and str(
+            reply_to).isdigit() else None
         if held_id:
             try:
                 data: dict[str, Any] = {"chat_id": chat.chat_id,
                                         field: held_id}
+                if _reply_to is not None:
+                    data["reply_to_message_id"] = _reply_to
                 if caption and method not in ("sendSticker",
                                               "sendVideoNote"):
                     cap0 = for_platform("telegram-bot").max_caption
@@ -8350,6 +8363,8 @@ class TelegramBotAdapter(ChatAdapter):
         cap = for_platform("telegram-bot").max_caption
         try:
             data = {"chat_id": chat.chat_id}
+            if _reply_to is not None:
+                data["reply_to_message_id"] = _reply_to
             if caption and method in ("sendSticker", "sendVideoNote"):
                 # Neither form takes a caption field; a video
                 # note's caption follows as text (below), a

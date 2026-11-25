@@ -747,11 +747,15 @@ class ChatAdapter(ABC):
         """
 
     def send_media(self, chat: ChatRef, media: MediaRef, *, caption: str = "",
-                   parse_mode: str = "") -> SendResult:
+                   parse_mode: str = "", reply_to: str = "") -> SendResult:
         # ``parse_mode`` (Formatting F7) is the caption's parse mode,
         # mirroring send(): adapters whose platform formats captions
         # (the Telegram family) apply it — with the plain-text retry
         # on an entity rejection; every other adapter ignores it.
+        # ``reply_to`` (helpdup) is the command this media answers:
+        # adapters that can quote a media send quote it, so a
+        # picture-headed answer is observable by a sibling surface
+        # exactly like a text answer.
         return SendResult(ok=False, platform=self.name, error="media not supported")
 
     def edit_media(self, chat: ChatRef, message_id: str, media: MediaRef,

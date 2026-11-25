@@ -7566,6 +7566,28 @@ class PartnerRuntime(
                         record.get("kind"), record.get("chat_key"),
                         self._claims_are_shared(), ans_stamp)
                     continue
+                # (1b) The same proof, read off the room instead
+                # of the ledger (helpdup): a peer post quoting
+                # this command was observed in this chat — the
+                # primary answered in the room, even when the
+                # shared store is down, the key is unreliable,
+                # or the answer's claim has not landed yet (a
+                # long answer's claim is recorded only after its
+                # last chunk; the first chunk quoting the command
+                # is already proof). The observation memory is
+                # the second proof channel; the sweep must read
+                # it, not only the ledger.
+                if self._already_answered_in_room(
+                        str(record.get("chat_key") or ""),
+                        str(getattr(message, "message_id", "")
+                            or "")):
+                    _log.info(
+                        "deferred /%s in %s already answered "
+                        "in-room — standing down [dupfix6 "
+                        "shared=%s]",
+                        record.get("kind"), record.get("chat_key"),
+                        self._claims_are_shared())
+                    continue
                 # (2) A live claim by another surface — but a
                 # claim is not an answer. Re-arm the deferral to
                 # the claim's expiry (plus one second) and retry
@@ -9306,6 +9328,20 @@ class PartnerRuntime(
         text = str(text or "")
         if not text and not buttons:
             return None
+        # The proof (helpdup): a control reply quotes the command
+        # it answers, on EVERY send path below — the sibling
+        # proves the primary answered by observing a post that
+        # quotes the command (the dupfix6 observation memory
+        # keys on reply_to, and resolve_for_chat resolves the
+        # pending deferral on it), so the proof lands for every
+        # command on every surface, not just the ones whose
+        # answer claim the shared store can prove. One rule for
+        # all commands — no per-command list, no timer, no cap.
+        # The gateway quotes the FIRST chunk of a split answer
+        # (gateway.py), which is the proof: the deferral resolves
+        # on chunk one, before the whole answer has landed and
+        # its claim is recorded.
+        reply_to = str(getattr(message, "message_id", "") or "")
         # Button honesty (register #27, 2026-11-05): copy may claim
         # buttons only when buttons actually ride this send. When
         # the platform cannot take them (limits say so, or none were
@@ -9392,7 +9428,7 @@ class PartnerRuntime(
                         message.chat.platform,
                         _CR(platform=message.chat.platform,
                             chat_id=_uid, kind=_CK.DM),
-                        text, fresh=True)
+                        text, fresh=True, reply_to=reply_to)
                 except Exception:  # noqa: BLE001 - fall to pointer
                     _sent = None
                 if _sent is not None and getattr(_sent, "ok", False):
@@ -9401,7 +9437,7 @@ class PartnerRuntime(
             _pointer = self.gateway.send(
                 message.chat.platform, message.chat,
                 "that's yours alone — check your DMs with me.",
-                fresh=True)
+                fresh=True, reply_to=reply_to)
             self._note_control_answer(message, _pointer)
             return _pointer
         self._typing_for(message.chat, text)
@@ -9420,7 +9456,7 @@ class PartnerRuntime(
         if media is not None:
             sent_media = self._send_reply_media_head(
                 message, media, text, btn_rows or [],
-                parse_mode=parse_mode)
+                parse_mode=parse_mode, reply_to=reply_to)
             if sent_media is not None:
                 if session:
                     _mid = str(getattr(sent_media, "message_id", "")
@@ -9472,7 +9508,7 @@ class PartnerRuntime(
                     return result
                 result = self.gateway.send(
                     message.chat.platform, message.chat, _note,
-                    fresh=True)
+                    fresh=True, reply_to=reply_to)
                 self._register_confirm_live(
                     message, result, text, buttons)
                 self._note_control_answer(message, result)
@@ -9484,6 +9520,10 @@ class PartnerRuntime(
                                    text, buttons=buttons,
                                    parse_mode=parse_mode,
                                    reply_keyboard=reply_keyboard,
+                                   # The proof (helpdup): the answer
+                                   # quotes the command it answers —
+                                   # see the reply_to note above.
+                                   reply_to=reply_to,
                                    # Solicited control reply to a live
                                    # turn: its first dispatch attempt is
                                    # fresh — a send-once guard may hold
@@ -9525,7 +9565,8 @@ class PartnerRuntime(
         return registry
 
     def _send_reply_media_head(self, message, media, text,  # type: ignore[no-untyped-def]
-                               buttons, *, parse_mode=""):
+                               buttons, *, parse_mode="",
+                               reply_to=""):
         """Send a reply's declared media head through the
         surface adapter's native media verb — photo with the
         reply text as caption and the reply's keyboard riding
@@ -9533,7 +9574,11 @@ class PartnerRuntime(
         back to the text send: a caption over the surface's
         caption limit, an adapter without a button-carrying
         media verb, or a failed send all degrade honestly —
-        the reply still lands as text, never lost."""
+        the reply still lands as text, never lost.  ``reply_to``
+        (helpdup) quotes the command the media answers, on
+        adapters whose media verb declares it — the same proof
+        as the text sends, so a picture-headed answer is
+        observable by the sibling too."""
         try:
             from ...social.chat.base import MediaRef
             from ...social.chat.platform_limits import for_platform
@@ -9556,9 +9601,12 @@ class PartnerRuntime(
             ref = MediaRef(path=str(media.get("path") or ""),
                            kind=str(media.get("kind") or "image"),
                            name="menu")
+            _media_kwargs: dict[str, Any] = {}
+            if reply_to and "reply_to" in params:
+                _media_kwargs["reply_to"] = reply_to
             result = fn(message.chat, ref, caption=text,
                         buttons=buttons or None,
-                        parse_mode=parse_mode)
+                        parse_mode=parse_mode, **_media_kwargs)
             if result is not None and getattr(result, "ok", False):
                 return result
             return None
