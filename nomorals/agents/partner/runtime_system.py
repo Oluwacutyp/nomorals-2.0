@@ -681,9 +681,20 @@ class RuntimeSystemMixin:
         if verb == "rotate":
             sub = parts[1].lower() if len(parts) > 1 else "status"
             if sub in {"on", "start"}:
-                strategy = parts[2] if len(parts) > 2 else ""
-                return self._tool_reply("proxy_rotate", chat_key,
-                                        action="start", strategy=strategy)
+                # /proxy rotate start [strategy] [fail-closed] — the
+                # fail-closed flag makes an exhausted pool REFUSE
+                # instead of falling back to direct.
+                rest = parts[2:]
+                strategy = next((t for t in rest
+                                 if t.lower() not in
+                                 {"fail-closed", "fail_closed",
+                                  "failclosed"}), "")
+                closed = any(t.lower() in {"fail-closed", "fail_closed",
+                                           "failclosed"} for t in rest)
+                return self._tool_reply(
+                    "proxy_rotate", chat_key, action="start",
+                    strategy=strategy,
+                    fail_closed="true" if closed else "false")
             if sub in {"off", "stop"}:
                 return self._tool_reply("proxy_rotate", chat_key,
                                         action="stop")

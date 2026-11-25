@@ -5990,7 +5990,8 @@ def _parser() -> argparse.ArgumentParser:
     proxy = sub.add_parser("proxy", aliases=CLI_ALIASES["proxy"],
         help="proxy sources + route receipts: sync the verified source catalogue into the live registry; read the route-decision journal",
         description=("nm proxy sources sync\n"
-                     "nm proxy receipts [--limit N] [--consumer NAME] [--source NAME]"),
+                     "nm proxy receipts [--limit N] [--consumer NAME] [--source NAME]\n"
+                     "nm proxy rotate start|stop|status|next [--strategy S] [--fail-closed]"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     proxy_sub = proxy.add_subparsers(dest="proxy_action", required=True)
@@ -6006,6 +6007,19 @@ def _parser() -> argparse.ArgumentParser:
     p_receipts.add_argument("--source", default="",
                             help="only this source (e.g. proxypool, proxylab)")
     p_receipts.add_argument("--json", action="store_true", help="Output as JSON")
+    p_rotate = proxy_sub.add_parser("rotate", help="proxy rotation into HttpClient: cycle the working pool + the owner's own proxies across requests (round-robin by default, failed proxies cool down then revive); --fail-closed refuses instead of going direct when the pool is exhausted")
+    p_rotate.add_argument("rotate_action", choices=["start", "stop", "status", "next"],
+                          help="start: register the rotation resolver; stop: unregister it; status: pool/healthy/cooldowns; next: rotate immediately")
+    p_rotate.add_argument("--strategy", default="",
+                          choices=["round_robin", "random", "sticky", "least_used"],
+                          help="rotation strategy (default round_robin)")
+    p_rotate.add_argument("--fail-closed", action="store_true",
+                          help="an exhausted pool refuses (ProxyExhaustedError) instead of falling back to direct")
+    p_rotate.add_argument("--cooldown-seconds", type=float, default=300.0,
+                          help="failed-proxy cooldown base in seconds (default 300, doubles per failure)")
+    p_rotate.add_argument("--max-age-hours", type=float, default=24.0,
+                          help="max proxy age in the pool (default 24)")
+    p_rotate.add_argument("--json", action="store_true", help="Output as JSON")
 
     sources = sub.add_parser("sources", aliases=CLI_ALIASES["sources"],
         help="source candidates: the active intake — name a host to verify and grow into the registry; list pending candidates with provenance",

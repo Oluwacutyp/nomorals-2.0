@@ -47,6 +47,7 @@ from typing import Any, Callable
 from urllib.parse import urlparse
 
 from ..core.errors import ToolError
+from ..core.http import ProxyExhaustedError
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability
 from ..storage.kv import KVStore
@@ -1528,11 +1529,19 @@ class DomainAffinityManager:
             return {"domain": domain, **self._data[domain]}
 
     def lookup(self, domain: str,
-               store: "ProxyStore | None" = None) -> str:
+               store: "ProxyStore | None" = None,
+               extra_alive: Any = None) -> str:
         """The bound proxy URL, or ``""``.  A binding is only honored
         when the proxy is still alive, fresh, and out of backoff —
         otherwise it is dropped (with the reason logged) and the
-        caller re-picks."""
+        caller re-picks.
+
+        ``extra_alive`` is a collection of proxy URLs that count as
+        alive even though they are not in the lab store — the owner's
+        own proxies (``ProxyManager.known()``) rotate through the
+        same manager but live outside the store, and without this
+        their affinity bindings would be dropped on every lookup.
+        """
         domain = _domain_of(domain)
         if not domain:
             return ""
@@ -1548,6 +1557,8 @@ class DomainAffinityManager:
                 self._save()
                 return ""
             url = str(entry.get("proxy_url") or "")
+        if extra_alive is not None and url in set(extra_alive):
+            return url
         if store is not None:
             proxy = store.by_url(url)
             if proxy is None or not proxy.alive or proxy.in_backoff \
@@ -2297,6 +2308,11 @@ class ProxyRotationManager:
             "cooldown_seconds": 300,
             "failover_seconds": 60,
             "max_age_hours": 24.0,
+            # Fail-closed: when True, an exhausted pool REFUSES with
+            # ProxyExhaustedError instead of falling back to direct.
+            # False (default) preserves the old counted direct
+            # fallback — rotation stays config-gated and opt-in.
+            "fail_closed": False,
             "index": 0,
             "current": "",
             "usage": {},
@@ -2348,24 +2364,32 @@ class ProxyRotationManager:
     def _resolver(self, target: str = "") -> str:
         """core.http calls this per request (with the target URL when it
         knows it).  Domain affinity wins: a site keeps its sticky proxy;
-        otherwise the strategy picks."""
+        otherwise the strategy picks.
+
+        Fail-closed propagates: when the manager is fail-closed and
+        the pool is exhausted, :meth:`pick` raises
+        :class:`ProxyExhaustedError` and it is NOT swallowed here —
+        core.http turns it into the named refusal instead of a
+        silent direct fallback.
+        """
         if not self.state.get("enabled"):
             return ""
         try:
             lab = self._lab()
             if target:
-                bound = self._affinity().lookup(target, store=lab.store)
+                bound = self._affinity_lookup(target, lab)
                 if bound:
                     self._count_served(bound)
                     self._record_route(
-                        consumer="core_http", route="free",
+                        consumer="core_http", route=self._route_for(bound),
                         source="proxylab", reason_code="affinity_hit",
                         reason="domain affinity pin for "
                                f"{_domain_of(target)}",
                         host=_domain_of(target),
                         proxy_id=_endpoint_of(bound),
                         protocol=urlparse(bound).scheme,
-                        candidates=1, candidate_tiers={"free": 1},
+                        candidates=1,
+                        candidate_tiers={self._route_for(bound): 1},
                         sticky_key=_domain_of(target),
                         selected_by="affinity")
                     return bound
@@ -2373,9 +2397,40 @@ class ProxyRotationManager:
             if chosen and target:
                 self._affinity().bind(target, chosen)
             return chosen
+        except ProxyExhaustedError:
+            raise
         except Exception as exc:  # noqa: BLE001 - routing must never raise
             _log.warning("rotation resolver failed: %s", exc)
             return ""
+
+    def _owner_urls(self) -> list[str]:
+        """The owner's own proxies: settings ``proxy.known``
+        (``NM_PROXY_KNOWN``) + ``NM_PROXY_URL`` + the active proxy —
+        the residential/VPN egress the owner actually scrapes
+        through.  Best-effort: a context without settings simply has
+        none.  These are owner-trusted (tier ``paid``), never free
+        tier, and their credentials (if any) live in env/vault —
+        this returns the URLs only so the pool can route them."""
+        try:
+            from .proxy import ProxyManager
+
+            return ProxyManager(self.context).known()
+        except Exception as exc:  # noqa: BLE001 - no owner proxies
+            record_failure("ProxyRotationManager._owner_urls", exc)
+            return []
+
+    def _route_for(self, proxy_url: str) -> str:
+        """Receipt tier for a proxy URL: owner proxies are trusted
+        (``paid`` — they may carry credentials); lab free-pool
+        proxies are ``free``."""
+        return "paid" if proxy_url in set(self._owner_urls()) else "free"
+
+    def _affinity_lookup(self, target: str, lab: ProxyLab) -> str:
+        """Affinity lookup that also honors owner-proxy bindings:
+        owner proxies are not in the lab store, so a store-backed
+        lookup would drop their bindings — pass them as alive."""
+        return self._affinity().lookup(
+            target, store=lab.store, extra_alive=self._owner_urls())
 
     # -- lab / affinity ---------------------------------------------------------
     def _lab(self) -> "ProxyLab":
@@ -2449,7 +2504,17 @@ class ProxyRotationManager:
 
     # -- pool ------------------------------------------------------------------
     def _pool_urls(self) -> list[str]:
-        """Fresh working proxies (store) + live SSH tunnel SOCKS5 URLs."""
+        """Fresh working proxies (store) + the owner's own proxies +
+        live SSH tunnel SOCKS5 URLs.
+
+        The owner's own proxies (``ProxyManager.known()`` —
+        ``NM_PROXY_KNOWN`` / ``NM_PROXY_URL`` / active) rotate here
+        alongside the lab's free pool: they are the residential/VPN
+        egress the owner actually scrapes through, and before this
+        lane they never reached the HttpClient resolver at all.
+        Order is lab first, owner second, tunnels last; the pick
+        strategies cycle the whole list either way.
+        """
         urls: list[str] = []
         try:
             lab = ProxyLab(self.context)
@@ -2458,6 +2523,7 @@ class ProxyRotationManager:
                 urls.append(p.url)
         except Exception as exc:  # noqa: BLE001
             _log.warning("rotation pool load failed: %s", exc)
+        urls.extend(self._owner_urls())
         try:
             from .ssh_socks import SshSocksManager
 
@@ -2505,7 +2571,15 @@ class ProxyRotationManager:
 
     def pick(self, *, schemes: tuple[str, ...] = (),
              target: str = "", consumer: str = "proxylab") -> str:
-        """The next proxy for this request ('' = direct fallback).
+        """The next proxy for this request.
+
+        Returns ``""`` (direct fallback) only when fail-closed is OFF
+        — the historical behaviour, counted in
+        ``stats.direct_fallbacks`` and journalled.  When fail-closed
+        is ON and no eligible healthy proxy exists, this RAISES
+        :class:`ProxyExhaustedError` instead: an exhausted pool
+        refuses, named, and never silently sends the request direct
+        pretending rotation happened.
 
         ``schemes`` restricts the protocol (protocol-aware routing);
         ``target`` lets domain affinity pin one proxy per site.
@@ -2516,18 +2590,20 @@ class ProxyRotationManager:
         st["stats"]["requests"] += 1
         lab = self._lab()
         if target:
-            bound = self._affinity().lookup(target, store=lab.store)
+            bound = self._affinity_lookup(target, lab)
             if bound:
                 self._count_served(bound)
                 self._record_route(
-                    consumer=consumer, route="free", source="proxylab",
+                    consumer=consumer, route=self._route_for(bound),
+                    source="proxylab",
                     reason_code="affinity_hit",
                     reason="domain affinity pin for "
                            f"{_domain_of(target)}",
                     host=_domain_of(target),
                     proxy_id=_endpoint_of(bound),
                     protocol=urlparse(bound).scheme,
-                    candidates=1, candidate_tiers={"free": 1},
+                    candidates=1,
+                    candidate_tiers={self._route_for(bound): 1},
                     sticky_key=_domain_of(target), selected_by="affinity")
                 return bound
         healthy = self._healthy(self._pool_urls())
@@ -2543,6 +2619,26 @@ class ProxyRotationManager:
         if not ordered:
             st["stats"]["direct_fallbacks"] += 1
             self._save_state()
+            if st.get("fail_closed"):
+                # Named refusal, journalled as route "none" — never a
+                # silent direct fallback that pretends rotation
+                # happened.  Revival is automatic: a cooling proxy
+                # leaves cooldown on its own, and /proxy refresh
+                # rebuilds the pool.
+                self._record_route(
+                    consumer=consumer, route="none", source="proxylab",
+                    reason_code="pool_exhausted_fail_closed",
+                    reason="fail-closed rotation: no eligible healthy "
+                           "proxies — pool empty or every proxy in "
+                           "cooldown; request refused, not sent direct",
+                    host=_domain_of(target) if target else "",
+                    candidates=0, selected_by="pick")
+                raise ProxyExhaustedError(
+                    "proxy rotation is on (fail-closed) but no healthy "
+                    "proxy is available — pool empty or every proxy in "
+                    "cooldown; wait for revival or run /proxy refresh "
+                    "to rebuild the pool",
+                    reason_code="pool_exhausted")
             self._record_route(
                 consumer=consumer, route="direct", source="proxylab",
                 reason_code="pool_empty_direct_fallback",
@@ -2554,8 +2650,22 @@ class ProxyRotationManager:
         strategy = st.get("strategy", "round_robin")
         usage = st["usage"]
         if strategy == "round_robin":
-            st["index"] = (int(st.get("index", 0)) + 1) % len(ordered)
-            chosen = ordered[st["index"]]
+            # Identity-based cycle, NOT a positional index into the
+            # ranked list: the ranking mutates with live latency
+            # feedback (a just-served proxy's decayed latency drops
+            # and it floats to the front), so a positional index
+            # lands on the same proxy 3 times in 4 — proven with
+            # real requests through HttpClient (A,A,A,B over four
+            # picks).  The successor of the last-served proxy in the
+            # CURRENT order always rotates, whatever the ranking
+            # does underneath.
+            current = str(st.get("current", "") or "")
+            if current in ordered:
+                idx = (ordered.index(current) + 1) % len(ordered)
+            else:
+                idx = (int(st.get("index", 0)) + 1) % len(ordered)
+            st["index"] = idx
+            chosen = ordered[idx]
         elif strategy == "random":
             import random
 
@@ -2575,15 +2685,16 @@ class ProxyRotationManager:
         if target:
             self._affinity().bind(target, chosen)
         self._save_state()
+        route = self._route_for(chosen)
         self._record_route(
-            consumer=consumer, route="free", source="proxylab",
+            consumer=consumer, route=route, source="proxylab",
             reason_code=f"strategy:{strategy}",
             reason=f"{strategy} over {len(ordered)} eligible healthy",
             host=_domain_of(target) if target else "",
             proxy_id=_endpoint_of(chosen),
             protocol=urlparse(chosen).scheme,
             candidates=len(ordered),
-            candidate_tiers={"free": len(ordered)},
+            candidate_tiers={route: len(ordered)},
             sticky_key=_domain_of(target) if target else "",
             selected_by="pick")
         return chosen
@@ -2781,7 +2892,12 @@ class ProxyRotationManager:
     def enable(self, *, strategy: str = "round_robin",
                cooldown_seconds: float = 300,
                failover_seconds: float = 60,
-               max_age_hours: float = 24.0) -> dict[str, Any]:
+               max_age_hours: float = 24.0,
+               fail_closed: bool = False) -> dict[str, Any]:
+        """Start rotation.  ``fail_closed``: when True, an exhausted
+        pool refuses requests with ProxyExhaustedError instead of
+        falling back to direct — the honest mode for traffic that
+        must never egress from the owner's IP."""
         strategy = (strategy or "round_robin").strip().lower()
         if strategy not in _STRATEGIES:
             raise ToolError(
@@ -2794,17 +2910,24 @@ class ProxyRotationManager:
             "cooldown_seconds": max(1.0, float(cooldown_seconds or 300)),
             "failover_seconds": max(5.0, float(failover_seconds or 60)),
             "max_age_hours": max(0.5, float(max_age_hours or 24.0)),
+            "fail_closed": bool(fail_closed),
         })
         if not st["stats"].get("since"):
             st["stats"]["since"] = time.time()
         self._register_hooks()
         self._save_state()
         pool = self._pool_urls()
-        note = f"pool has {len(pool)} working proxy(ies)" if pool else (
-            "pool is EMPTY — /proxy refresh first; traffic goes direct "
-            "until proxies are tested in")
+        if pool:
+            note = f"pool has {len(pool)} working proxy(ies)"
+        elif fail_closed:
+            note = ("pool is EMPTY — fail-closed: requests through "
+                    "rotation REFUSE (ProxyExhaustedError) until "
+                    "proxies are tested in (/proxy refresh)")
+        else:
+            note = ("pool is EMPTY — /proxy refresh first; traffic goes "
+                    "direct until proxies are tested in")
         return {"enabled": True, "strategy": strategy, "pool": len(pool),
-                "note": note}
+                "fail_closed": bool(fail_closed), "note": note}
 
     def disable(self) -> dict[str, Any]:
         self.state["enabled"] = False
@@ -2819,30 +2942,50 @@ class ProxyRotationManager:
         now = time.time()
         urls = self._pool_urls()
         healthy = self._healthy(urls)
+        # Status rows are operator-visible: mask any userinfo — an
+        # owner proxy URL can carry a password, and it must never
+        # print in chat, CLI or logs.
+        from .proxy import _mask_proxy_url
+
+        owner = set(self._owner_urls())
         cooling = [
-            {"proxy": u, "seconds_left": max(0, int(float(cool) - now))}
+            {"proxy": _mask_proxy_url(u),
+             "seconds_left": max(0, int(float(cool) - now))}
             for u, cool in sorted(st["cooldown"].items(),
                                   key=lambda kv: -float(kv[1]))
             if float(cool) > now
         ]
         usage = [
-            {"proxy": u, "served": int(v.get("served", 0)),
+            {"proxy": _mask_proxy_url(u),
+             "served": int(v.get("served", 0)),
              "failures": int(v.get("failures", 0))}
             for u, v in sorted(st["usage"].items(),
                                key=lambda kv: -int(kv[1].get("served", 0)))
         ][:15]
+        fail_closed = bool(st.get("fail_closed", False))
+        if not st.get("enabled"):
+            direct_when = "rotation is off"
+        elif fail_closed:
+            direct_when = ("never while rotation is on — an exhausted "
+                           "pool refuses (ProxyExhaustedError) instead "
+                           "of going direct")
+        else:
+            direct_when = ("rotation is on — an exhausted pool falls "
+                           "back to direct (counted in "
+                           "stats.direct_fallbacks)")
         return {
             "enabled": bool(st.get("enabled")),
             "strategy": st.get("strategy", ""),
+            "fail_closed": fail_closed,
             "cooldown_seconds": st.get("cooldown_seconds", 300),
             "pool_size": len(urls),
             "healthy": len(healthy),
+            "owner_proxies": len([u for u in urls if u in owner]),
             "cooling": cooling,
-            "current": st.get("current", ""),
+            "current": _mask_proxy_url(st.get("current", "")),
             "usage": usage,
             "stats": st.get("stats", {}),
-            "direct_routing_when": ("disabled" if st.get("enabled")
-                                    else "rotation is off"),
+            "direct_routing_when": direct_when,
         }
 
 
@@ -3040,7 +3183,10 @@ def register(registry: Any) -> None:
             bound = aff.bind(domain, proxy_url, ttl_hours=ttl)
             return {"bound": True, **bound}
         if action == "lookup":
-            url = aff.lookup(domain, store=lab.store)
+            from .proxy import ProxyManager
+
+            url = aff.lookup(domain, store=lab.store,
+                             extra_alive=ProxyManager(context).known())
             return {"domain": _domain_of(domain), "proxy_url": url,
                     "note": "" if url else
                     "no live binding — use proxy_pick with target= to get "
@@ -3128,6 +3274,8 @@ def register(registry: Any) -> None:
             "start [strategy]: round_robin | random | sticky | least_used, "
             "with failover — a proxy that fails a connection is put on "
             "cooldown and the next request takes the next healthy proxy. "
+            "fail_closed (start): when true, an exhausted pool REFUSES "
+            "with ProxyExhaustedError instead of falling back to direct. "
             "stop: route via the static proxy_set default again. "
             "status: strategy, pool/healthy sizes, cooldowns, per-proxy "
             "served/failed counts. next: rotate immediately."
@@ -3139,11 +3287,13 @@ def register(registry: Any) -> None:
             "cooldown_seconds": "float (start, optional, 300) — failed-proxy cooldown",
             "failover_seconds": "float (start, optional, 60) — sticky failover window",
             "max_age_hours": "float (start, optional, 24) — max proxy age in the pool",
+            "fail_closed": "bool (start, optional, false) — exhausted pool "
+                           "refuses (ProxyExhaustedError) instead of going direct",
         },
     )
     def proxy_rotate(*, action: str = "status", strategy: str = "",
                      cooldown_seconds: str = "", failover_seconds: str = "",
-                     max_age_hours: str = "") -> dict[str, Any]:
+                     max_age_hours: str = "", fail_closed: str = "") -> dict[str, Any]:
         manager = ProxyRotationManager(context)
         action = (action or "status").strip().lower()
         if action == "start":
@@ -3159,10 +3309,13 @@ def register(registry: Any) -> None:
                 age = float(max_age_hours or 24)
             except ValueError:
                 age = 24.0
+            closed = str(fail_closed or "").strip().lower() in {
+                "1", "true", "yes", "on"}
             return manager.enable(strategy=strategy,
                                   cooldown_seconds=cooldown,
                                   failover_seconds=failover,
-                                  max_age_hours=age)
+                                  max_age_hours=age,
+                                  fail_closed=closed)
         if action == "stop":
             return manager.disable()
         if action == "next":

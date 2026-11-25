@@ -78,6 +78,27 @@ class RequestError(ProviderError):
     code = "http.request"
 
 
+class ProxyExhaustedError(RequestError):
+    """Named refusal: a proxy was required but none is available.
+
+    Raised (never a silent direct fallback) when rotation is on in
+    fail-closed mode and the pool is empty or every proxy is cooling
+    down, or when an ``HttpClient(require_proxy=True)`` has no proxy
+    at all — no rotation configured, no explicit proxy, no default.
+    ``reason_code`` names which of the two it was:
+    ``pool_exhausted`` (rotation on, pool dead/empty) or
+    ``no_proxy_configured`` (rotation off, nothing configured).
+    Retryable: a cooling proxy revives on its own, and a refresh
+    rebuilds the pool.
+    """
+
+    code = "http.proxy_exhausted"
+
+    def __init__(self, message: str, *, reason_code: str = "") -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
+
+
 @dataclass
 class HttpResponse:
     status: int
@@ -358,6 +379,7 @@ class HttpClient:
         proxy_url: str = "",
         allow_private_ips: bool = False,
         force_direct: bool = False,
+        require_proxy: bool = False,
     ) -> None:
         self.timeout = timeout
         self._headers: dict[str, str] = {"User-Agent": user_agent,
@@ -379,6 +401,13 @@ class HttpClient:
         #: is cleartext the consent architecture promises never leaves
         #: the computer.
         self.force_direct = force_direct
+        #: When True, a request with no proxy to go through FAILS with
+        #: ProxyExhaustedError instead of going direct — the fail-closed
+        #: half of rotation. Off by default: rotation is config-gated,
+        #: and an unconfigured client goes direct, named as direct.
+        #: A resolver raising ProxyExhaustedError (rotation on,
+        #: fail-closed, pool exhausted) propagates whatever this is.
+        self.require_proxy = require_proxy
         self.stats = {"requests": 0, "errors": 0, "bytes": 0}
         # Verifying TLS context, built once: an explicit SSL_CERT_FILE
         # wins, else certifi's bundle, else the platform default store.
@@ -435,6 +464,14 @@ class HttpClient:
         registered rotation resolver (called WITH the target URL so
         per-domain affinity applies; zero-arg resolvers still work) →
         the process-wide default (``proxy_set``).
+
+        A resolver raising :class:`ProxyExhaustedError` (rotation on,
+        fail-closed, pool exhausted) is NOT swallowed into a direct
+        fallback — the named refusal propagates to the caller.
+        Any other resolver failure still goes direct (a broken
+        resolver must not wedge every request); that path is
+        debug-logged, and a ``require_proxy`` client refuses it
+        explicitly in :meth:`request`.
         """
         if self.force_direct:
             return ""
@@ -447,6 +484,8 @@ class HttpClient:
                     return resolver(target) or ""
                 except TypeError:
                     return resolver() or ""
+            except ProxyExhaustedError:
+                raise
             except Exception:  # noqa: BLE001 - a broken resolver = direct
                 _log.debug("proxy resolver raised; going direct",
                            exc_info=True)
@@ -539,6 +578,23 @@ class HttpClient:
         # process-wide default.  This is what makes proxy_set and
         # proxy_rotate actually route traffic.
         effective_proxy = self._effective_proxy(target)
+        if self.require_proxy and not effective_proxy:
+            # Fail closed, named: never a silent direct fallback that
+            # pretends rotation happened. The reason distinguishes the
+            # two ways to have no proxy — rotation on but the pool is
+            # dead/empty, vs nothing configured at all.
+            if get_proxy_resolver() is not None:
+                raise ProxyExhaustedError(
+                    "proxy required: rotation is on but no healthy "
+                    "proxy is available — pool empty or every proxy "
+                    "in cooldown; wait for revival or run "
+                    "/proxy refresh to rebuild the pool",
+                    reason_code="pool_exhausted")
+            raise ProxyExhaustedError(
+                "proxy required but no proxy is configured — enable "
+                "rotation (/proxy rotate start) or set a proxy first "
+                "(/proxy set <url>); refusing to go direct",
+                reason_code="no_proxy_configured")
 
         destination = Path(stream_to) if stream_to else None
         start_byte = 0

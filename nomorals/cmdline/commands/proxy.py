@@ -10,6 +10,10 @@ second implementation of anything:
 * ``nm proxy receipts`` renders the P2 route-receipt journal
   (:meth:`RouteReceiptJournal.recent`): every route decision the
   authority minted, outcomes folded, in operator text.
+* ``nm proxy rotate start|stop|status|next`` runs the rotation manager
+  over the working pool + the owner's own proxies (round-robin by
+  default; ``--fail-closed`` refuses instead of going direct when the
+  pool is exhausted).
 
 Operator text carries hosts, counts, reasons and times only. The
 journal is credential-free by construction (P2), and the internal
@@ -199,8 +203,78 @@ def _receipts(args: argparse.Namespace, context: Any) -> int:
     return 0
 
 
+def _render_rotation(result: dict[str, Any]) -> str:
+    """Rotation status in operator text (masked — never credentials)."""
+    stats = result.get("stats") or {}
+    lines = [
+        f"proxy rotation: {'on' if result.get('enabled') else 'off'}"
+        f" ({result.get('strategy') or '—'})"
+        + (" — fail-closed" if result.get("fail_closed") else ""),
+        f"  pool: {result.get('pool_size', 0)} "
+        f"({result.get('healthy', 0)} healthy, "
+        f"{result.get('owner_proxies', 0)} owner)",
+        f"  current: {result.get('current') or '—'}",
+    ]
+    cooling = result.get("cooling") or []
+    if cooling:
+        lines.append("  cooling: " + ", ".join(
+            f"{c.get('proxy')} ({c.get('seconds_left')}s)"
+            for c in cooling[:6]))
+    lines.append(f"  requests: {stats.get('requests', 0)} · "
+                 f"failovers: {stats.get('failovers', 0)} · "
+                 f"direct fallbacks: {stats.get('direct_fallbacks', 0)}")
+    lines.append(f"  direct routing: {result.get('direct_routing_when')}")
+    return "\n".join(lines)
+
+
+def _rotate(args: argparse.Namespace, context: Any) -> int:
+    from ...core.http import ProxyExhaustedError
+    from ...tools.proxy import _mask_proxy_url
+    from ...tools.proxylab import ProxyRotationManager
+
+    manager = ProxyRotationManager(context)
+    action = getattr(args, "rotate_action", "status")
+    try:
+        if action == "start":
+            result = manager.enable(
+                strategy=getattr(args, "strategy", "") or "round_robin",
+                cooldown_seconds=float(getattr(args, "cooldown_seconds", 300) or 300),
+                max_age_hours=float(getattr(args, "max_age_hours", 24) or 24),
+                fail_closed=bool(getattr(args, "fail_closed", False)))
+            _emit(args, {"rotation": result},
+                  f"proxy rotation on ({result['strategy']}) — "
+                  f"pool {result['pool']} — {result['note']}")
+            return 0
+        if action == "stop":
+            result = manager.disable()
+            _emit(args, {"rotation": result},
+                  "proxy rotation off — requests route via the static "
+                  "proxy_set default again")
+            return 0
+        if action == "next":
+            if not manager.state.get("enabled"):
+                _emit(args, {"rotated": False},
+                      "rotation is off — nm proxy rotate start first")
+                return 0
+            proxy = manager.next()
+            _emit(args, {"rotated": True,
+                         "proxy": _mask_proxy_url(proxy) if proxy else ""},
+                  f"rotated — next proxy: {_mask_proxy_url(proxy)}"
+                  if proxy else
+                  "rotated — pool empty, requests go direct")
+            return 0
+        result = manager.status()
+        _emit(args, {"rotation": result}, _render_rotation(result))
+        return 0
+    except ProxyExhaustedError as exc:
+        # Named refusal, not a crash: the pool is exhausted and
+        # fail-closed is on — the operator asked for exactly this.
+        print(f"proxy rotation refused: {exc}", file=sys.stderr)
+        return 1
+
+
 def _cmd_proxy(args: argparse.Namespace, context: Any) -> int:
-    """Route ``nm proxy`` — sources sync + route receipts."""
+    """Route ``nm proxy`` — sources sync + route receipts + rotation."""
     action = getattr(args, "proxy_action", "")
     try:
         if action == "sources":
@@ -212,6 +286,8 @@ def _cmd_proxy(args: argparse.Namespace, context: Any) -> int:
             return 2
         if action == "receipts":
             return _receipts(args, context)
+        if action == "rotate":
+            return _rotate(args, context)
     except Exception as exc:  # noqa: BLE001 - CLI last line of defence
         print(f"proxy: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
