@@ -29,6 +29,7 @@ at the owner's reading position.
 
 from __future__ import annotations
 
+import hashlib
 import random
 import re
 from pathlib import Path
@@ -36,7 +37,7 @@ from typing import Any
 
 from ..core.logging_setup import get_logger
 from .bible import (DIGESTION_VERSION, BibleBuilder, StoryBible,
-                    bible_needs_redigest)
+                    _STATE_MARKERS, bible_needs_redigest)
 from .model import count_words, slugify
 from .voiceprint import compare, fingerprint
 from .reader import ReaderError, StoryReader
@@ -650,110 +651,315 @@ class StoryContinuer:
         except Exception as exc:  # noqa: BLE001
             _log.debug("model continuation failed: %s", exc)
         return ""
-
     # -- heuristic composer (the floor) ---------------------------------------
+    #: Voice texture sentences.  Rotated WITHOUT replacement inside one
+    #: chapter: the old composer drew them with replacement, so a
+    #: chapter could repeat "Somewhere, water kept the time nobody
+    #: else would keep" three times and the same mid-beat three times.
+    _TEXTURES = (
+        "The air had the particular weight of evening.",
+        "The air had the particular weight of a held breath.",
+        "The air had the particular weight of the hour before dawn.",
+        "Somewhere, water kept the time nobody else would keep.",
+        "Somewhere, a distant engine kept the time nobody else would keep.",
+        "Somewhere, insects kept the time nobody else would keep.",
+        "Somewhere, a bell kept the time nobody else would keep.",
+        "{name} had learned young that hesitation got people buried.",
+        "{name} had learned young that mercy got people buried.",
+        "{name} had learned young that noise got people buried.",
+    )
+
+    @staticmethod
+    def _closing_facts(last_lines: str, present: list[str]
+                       ) -> tuple[list[str], list[tuple[str, str]]]:
+        """Concrete facts from the closing text: time pressure and held
+        objects.
+
+        Only NARRATIVE sentences (never quoted dialogue) and only short
+        fact phrases — the continuation writes NEW sentences around
+        them; it never echoes the closing lines.  Returns (time nouns,
+        [(holder, object phrase)]): e.g. (["hour"], [("Dren",
+        "a silvered blade")]).
+        """
+        time_nouns: list[str] = []
+        held: list[tuple[str, str]] = []
+        for sent in re.split(r"(?<=[.!?])\s+", last_lines or ""):
+            sent = sent.strip()
+            if not sent or sent[0] in "\"“":
+                continue
+            low = sent.lower()
+            for noun in ("hour", "dawn", "dusk", "midnight"):
+                if re.search(r"\b" + noun + r"\b", low) \
+                        and noun not in time_nouns:
+                    time_nouns.append(noun)
+            m = re.search(r"\bwith\s+(a|an|the)\s+([a-z]+(?:\s+[a-z]+){0,1})\b",
+                          low)
+            if m:
+                holder = next(
+                    (n for n in present
+                     if re.search(r"\b" + re.escape(n) + r"\b", sent)), "")
+                if holder:
+                    obj = f"{m.group(1)} {m.group(2)}"
+                    if (holder, obj) not in held:
+                        held.append((holder, obj))
+        return time_nouns[:2], held[:2]
+
+    @staticmethod
+    def _last_speaker(last_lines: str, present: list[str]) -> str:
+        """Who spoke last at the close — the voice the chapter answers.
+
+        The last on-stage name mentioned in the closing text: in the
+        repro story that is Dren ("One hour left on the third night,"
+        Dren said), the one who issued the ultimatum.
+        """
+        best = ""
+        best_pos = -1
+        for name in present:
+            pos = (last_lines or "").rfind(name)
+            if pos > best_pos:
+                best_pos = pos
+                best = name
+        return best
+
+    @staticmethod
+    def _state_fact(sentence: str, name: str) -> str:
+        """Turn a recorded state sentence into a NEW sentence carrying
+        the same fact forward — never the old sentence echoed.
+
+        The segment is scored: +2 for a state marker, +1 for naming
+        the character, -2 when its subject is a pronoun (They/He/She)
+        — a "They fled" segment belongs to whoever fled, not to a
+        character named later in the sentence.  The winning segment is
+        rebuilt from the character's name on: "Mara stood behind
+        Quinn, bleeding from a cut on her shoulder" -> "Mara was
+        still bleeding from a cut on her shoulder."; "At the north
+        gate ... Quinn lost his left hand to a silvered axe" ->
+        "Quinn had lost his left hand to a silvered axe."; "They fled
+        to the Blackspire chapel, where Dren was said to wait" ->
+        "Dren was said to wait."  Returns "" when no clean rebuild
+        exists — a skipped beat beats broken or misattributed prose.
+        """
+        first = name.split()[0]
+        segments = [s.strip() for s in re.split(r"[,;]", sentence or "")
+                    if s.strip()]
+        best = ""
+        best_score = 0
+        for seg in segments:
+            low = seg.lower()
+            score = 0
+            if any(m in low for m in _STATE_MARKERS):
+                score += 2
+            if re.search(r"\b" + re.escape(first) + r"\b", seg):
+                score += 1
+            if re.match(r"(They|He|She)\s", seg):
+                score -= 2
+            if score > best_score:
+                best_score = score
+                best = seg
+        if not best or best_score <= 0:
+            return ""
+        # rebuild from the character's name on
+        m = re.search(r"\b" + re.escape(first) + r"\b", best)
+        if m is not None:
+            rest = best[m.end():].strip().rstrip(".")
+            if not rest or rest.startswith("'s"):
+                return ""
+            if rest.split()[0].lower() in (
+                    "at", "in", "on", "to", "from", "with", "by", "for",
+                    "through", "into", "after", "before", "under",
+                    "over", "against", "between", "within"):
+                return ""
+            if rest.split()[0].lower() in (
+                    "was", "were", "is", "are", "had", "has", "been"):
+                return f"{name} {rest}."
+            return f"{name} had {rest}."
+        if re.match(r"[a-z]+ing\b", best):
+            return f"{name} was still {best.rstrip('.')}."
+        return ""
+
+    @staticmethod
+    def _thread_first_clause(summary: str) -> str:
+        """The quest's imperative core: "Drink the blood of the
+        Seventh Elder. Time remaining: three nights. Failure: the
+        thirst claims Mara" -> "Drink the blood of the Seventh Elder";
+        "Drink the blood of the Seventh Elder before the third night
+        ends, or the thirst will take Mara instead" -> the same."""
+        first = summary.split(". ")[0]
+        first = first.split(",")[0]
+        first = first.split(" before ")[0]
+        first = first.split("Failure:")[0]
+        first = first.strip().strip(".")
+        return first[:120] if first else summary[:120]
+
+    @staticmethod
+    def _thread_consequence(summary: str) -> str:
+        """The stakes clause: "..., or the thirst will take Mara
+        instead" -> "the thirst will take Mara instead"; "Failure:
+        the thirst claims Mara" -> "the thirst claims Mara"."""
+        if ", or " in summary:
+            return summary.split(", or ", 1)[1].strip().strip('."“”')
+        if "Failure:" in summary:
+            return summary.split("Failure:", 1)[1].strip().strip('."“”')
+        return ""
+
     def _compose_continuation(self, bible: StoryBible, chapter_no: int,
                               tails: list[str], words: int,
                               direction: str, seed_salt: int = 0,
                               scene: dict[str, Any] | None = None) -> str:
-        """Real prose from the bible: advance the hottest open thread,
-        keep the cast in character, land on a hook.  Deterministic per
-        chapter number (seeded) so re-runs are stable; ``seed_salt``
-        varies alternate takes.
+        """Real prose from the bible: the chapter CONTINUES the digest.
 
-        ``scene`` is the final-scene anchor (:meth:`_final_scene_anchor`):
-        who is on stage when the last chapter stopped.  The cold open
-        resumes on the first on-stage character instead of the generic
-        protagonist, so the brain-less floor picks up mid-flow like the
-        model path does.  The anchor's literal closing lines are NOT
-        echoed — repeating them would re-stage the previous chapter's
-        ending, which the anchor's own anti-restart law forbids.
+        Every paragraph carries a fact the digest actually measured —
+        the hottest thread with its deadline and stakes, the on-stage
+        cast's recorded states, the place the story stopped, an object
+        held at the close — so the chapter reads as the next chapter
+        of THIS story, not a new story wearing its names.  The old
+        composer slotted names into fixed templates and never used the
+        scene anchor's content, the character states, or the thread
+        specifics: its chapter 4 of the repro story mentioned neither
+        Dren, nor the chapel, nor the silvered blade, nor the third
+        night, opened "Mara to catch his breath", and repeated the
+        same paragraph three times while padding.  Deterministic per
+        chapter number (seeded with a stable hash, so re-runs are
+        stable across processes too); ``seed_salt`` varies alternate
+        takes.  No beat is ever repeated inside one chapter: textures
+        and padding beats rotate without replacement, and padding
+        stops when the facts run out rather than looping.
         """
-        rng = random.Random(
-            hash((bible.story_slug, chapter_no, seed_salt)) & 0xFFFFFFFF)
+        seed = int.from_bytes(hashlib.md5(
+            f"{bible.story_slug}|{chapter_no}|{seed_salt}".encode("utf-8")
+        ).digest()[:4], "little")
+        rng = random.Random(seed)
         threads = bible.open_threads()
         thread = max(threads, key=lambda t: t.heat) if threads else None
         chars = bible.characters
         protag = next((c for c in chars if c.role == "protagonist"), None)
         if protag is None and chars:
             protag = chars[0]
-        deut = next((c for c in chars
-                     if c is not protag and c.role != "protagonist"), None)
-        p_name = protag.name if protag else "the protagonist"
-        p_desc = (protag.description[:160] + "." if protag and protag.description
-                  else "")
-        d_name = deut.name if deut else None
-
-        beats: list[str] = []
-        # 1. cold open — resume mid-motion from the tail; when the
-        # scene anchor says who is on stage, open on them, not on the
-        # generic protagonist (the anchor's "their" is gender-neutral —
-        # the composer's _possessive cannot know a name's gender)
         present = list((scene or {}).get("present") or [])
-        if present:
-            beats.append(
-                f"The moment did not wait for {present[0]} to catch "
-                f"their breath.")
-        else:
-            beats.append(
-                f"The moment did not wait for {p_name} to catch {self._possessive(p_name)} breath.")
-        # 2. thread pressure
-        if thread:
-            beats.append(
-                f"Every instinct said the same thing: {thread.summary.rstrip('.')}, "
-                f"and time was already running short.")
-        # 3. character beat
-        if d_name:
-            beats.append(
-                f"{d_name} was watching, the way {d_name} always watched — "
-                f"measuring, waiting for the crack to show.")
-        # 4. world texture
-        if bible.world_rules:
-            rule = rng.choice(bible.world_rules)
-            beats.append(f"The old rule held, as it always did: {rule.rstrip('.')}.")
-        # 5. action turn
-        beats.append(
-            f"{p_name} moved before doubt could finish its sentence — "
-            f"{self._action(rng, p_name)}.")
-        # 6. complication
-        beats.append(self._complication(rng, p_name, d_name, thread))
-        # 7. hook ending
-        beats.append(self._hook(rng, p_name, thread))
+        lead = present[0] if present else (
+            protag.name if protag else "the protagonist")
+        by_name = {c.name: c for c in chars}
+        places = sorted(bible.locations, key=lambda x: x.last_seen,
+                        reverse=True)
+        place = places[0].name if places else ""
+        last_lines = (scene or {}).get("last_lines") or ""
+        time_nouns, held = self._closing_facts(last_lines, present)
+        speaker = self._last_speaker(last_lines, present)
+        opponent = ""
+        if speaker and speaker != lead:
+            opponent = speaker
+        elif len(present) > 1:
+            opponent = present[1]
+        textures = list(self._TEXTURES)
+        rng.shuffle(textures)
 
-        if direction:
-            beats.insert(3, direction.rstrip(".") + ".")
+        def _with_texture(para: str) -> str:
+            if textures and rng.random() < 0.5:
+                return para + " " + textures.pop().format(name=lead)
+            return para
+
         paras: list[str] = []
-        for beat in beats:
-            paras.append(self._expand(beat, rng, bible, p_name, d_name))
-        # pad toward the word target with a second movement when very short
+        # 1. cold open — pick up where the story stopped: the lead, the
+        # place, the live task with its deadline and stakes, the time
+        # pressure from the closing scene.
+        place_bit = f" at {place}" if place else ""
+        if thread:
+            open_text = (f"{lead} had not moved{place_bit}. "
+                         f"The task was plain: {thread.summary.rstrip('.')}.")
+        else:
+            open_text = f"{lead} had not moved{place_bit}."
+        if time_nouns:
+            open_text += f" The {time_nouns[0]} was nearly gone."
+        paras.append(_with_texture(open_text))
+        # 2. state beats — the on-stage cast as they ARE now.
+        for name in present[:3]:
+            char = by_name.get(name)
+            if char is None or not char.state:
+                continue
+            fact = self._state_fact(char.state, name)
+            if fact:
+                paras.append(_with_texture(fact))
+        # 3. held objects — what the closing scene put in someone's hands.
+        for holder, obj in held:
+            paras.append(_with_texture(f"{holder} still had {obj}."))
+        # 4. dialogue — the thread spoken aloud by the one who issued
+        # the ultimatum at the close, else by the lead.
+        if thread:
+            clause = self._thread_first_clause(thread.summary)
+            who = (speaker or lead).split()[0]
+            line = clause[0].upper() + clause[1:] if clause else clause
+            paras.append(f"\"{line}.\" — {who}")
+        # 5. action turn — the lead closes on the opposing force.
+        if opponent:
+            paras.append(_with_texture(
+                f"{lead} closed the distance to {opponent}."))
+        else:
+            paras.append(_with_texture(
+                f"{lead} moved before doubt could finish its sentence — "
+                f"{self._action(rng, lead)}."))
+        # 6. complication — the opposing force answers.
+        if opponent and thread:
+            clause = self._thread_first_clause(thread.summary)
+            lowered = clause[0].lower() + clause[1:] if clause else clause
+            paras.append(_with_texture(
+                f"But {opponent} had been waiting — of course {opponent} "
+                f"had been waiting — and {lowered} would not come cheap."))
+        else:
+            paras.append(_with_texture(self._complication(
+                rng, lead, opponent or None, thread)))
+        # 7. hook — end on the stakes.
+        consequence = self._thread_consequence(thread.summary) \
+            if thread else ""
+        if consequence:
+            paras.append(f"One way or another, {consequence}.")
+        else:
+            paras.append(_with_texture(self._hook(rng, lead, thread)))
+        if direction:
+            paras.insert(3, direction.rstrip(".") + ".")
+        # pad toward the word target with unused fact-beats, never repeats
         text = "\n\n".join(paras)
-        while count_words(text) < words * 0.5:
-            paras.append(self._expand(self._mid_beat(rng, p_name, d_name, thread),
-                                      rng, bible, p_name, d_name))
-            text = "\n\n".join(paras)
-            if len(paras) > 14:
+        padding: list[str] = []
+        for other in threads[1:3]:
+            padding.append(
+                f"{lead} had not forgotten: {other.summary.rstrip('.')}.")
+        for rule in bible.world_rules[:2]:
+            padding.append(
+                f"The old rule held, as it always did: {rule.rstrip('.')}.")
+        for entry in bible.lore:
+            if entry.kind == "rule" and entry.text:
+                if any(entry.text[:60].lower()
+                       in r.lower() or r[:60].lower()
+                       in entry.text.lower()
+                       for r in bible.world_rules):
+                    continue
+                padding.append(
+                    "The old rule held, as it always did: "
+                    f"{entry.text.rstrip('.')[:200]}.")
                 break
+        for beat in padding:
+            if count_words(text) >= words * 0.5:
+                break
+            text = text + "\n\n" + _with_texture(beat)
         return text
-
-    @staticmethod
-    def _possessive(name: str) -> str:
-        return "their" if " " in name else "his"
 
     @staticmethod
     def _action(rng: random.Random, p_name: str) -> str:
         return rng.choice([
-            f"across the broken ground toward the sound",
-            f"hand closing around the hilt of {p_name.split()[0].lower()}'s blade",
-            f"into the dark with nothing but momentum and spite",
-            f"toward the light, because standing still had stopped being an option",
-            f"with the old precision, every step a decision",
+            "across the broken ground toward the sound",
+            "hand closing around the hilt of their blade",
+            "into the dark with nothing but momentum and spite",
+            "toward the light, because standing still had stopped being an option",
+            "with the old precision, every step a decision",
         ])
 
-    @staticmethod
-    def _complication(rng: random.Random, p_name: str, d_name: str | None,
-                      thread: Any) -> str:
+    def _complication(self, rng: random.Random, p_name: str,
+                      d_name: str | None, thread: Any) -> str:
         who = d_name or "the shadows"
-        goal = thread.summary.rstrip(".") if thread else "what had to be done"
+        if thread is not None:
+            clause = self._thread_first_clause(thread.summary)
+            goal = clause[0].lower() + clause[1:] if clause else clause
+        else:
+            goal = "what had to be done"
         return rng.choice([
             f"But {who} had been waiting — of course {who} had been waiting — "
             f"and {goal} would not come cheap.",
@@ -763,49 +969,17 @@ class StoryContinuer:
             f"teeth, and {goal} hanging in the balance.",
         ])
 
-    @staticmethod
-    def _hook(rng: random.Random, p_name: str, thread: Any) -> str:
-        goal = thread.summary.rstrip(".") if thread else "the truth"
+    def _hook(self, rng: random.Random, p_name: str, thread: Any) -> str:
+        if thread is not None:
+            clause = self._thread_first_clause(thread.summary)
+            goal = clause[0].lower() + clause[1:] if clause else clause
+        else:
+            goal = "the truth"
         return rng.choice([
             f"And in the distance, something answered — a sound {p_name} "
-            f"recognized, and wished {p_name.split()[0].lower()} did not.",
+            f"recognized, and wished they did not.",
             f"{p_name} smiled then, the thin dangerous smile of someone who "
             f"has just realized {goal} was never the real prize.",
             f"The chapter of hesitation was over. What came next would not "
             f"ask permission.",
         ])
-
-    @staticmethod
-    def _mid_beat(rng: random.Random, p_name: str, d_name: str | None,
-                  thread: Any) -> str:
-        goal = thread.summary.rstrip(".") if thread else "the task"
-        partner = f" {d_name} kept pace without a word." if d_name else ""
-        return rng.choice([
-            f"They covered ground in silence, {p_name} turning over {goal} "
-            f"like a stone with something moving underneath it.{partner}",
-            f"Somewhere behind them the world went on arguing with itself. "
-            f"Ahead, {goal} waited, patient as weather.{partner}",
-            f"{p_name} checked {p_name.split()[0].lower()}'s reserves — "
-            f"strength, nerve, options — and found all three thinner than "
-            f"honesty allowed.{partner}",
-        ])
-
-    def _expand(self, beat: str, rng: random.Random, bible: StoryBible,
-                p_name: str, d_name: str | None) -> str:
-        """Grow one beat into a full paragraph with voice texture."""
-        textures = [
-            f"The air had the particular weight of {rng.choice(['evening', 'the hour before dawn', 'a held breath'])}.",
-            f"Somewhere, {rng.choice(['a bell', 'water', 'a distant engine', 'insects'])} kept the time nobody else would keep.",
-            f"{p_name} had learned young that {rng.choice(['hesitation', 'mercy', 'noise'])} got people buried.",
-        ]
-        para = beat + " " + rng.choice(textures)
-        if bible.tone and "dialogue-driven" in bible.tone and rng.random() < 0.5:
-            speaker = d_name or p_name
-            line = rng.choice([
-                "“We don't have long.”",
-                "“Then we stop asking for more time.”",
-                "“You feel that too, don't you.”",
-                "“Stay close. Whatever happens next, stay close.”",
-            ])
-            para += f"\n\n{line} — {speaker.split()[0]}"
-        return para

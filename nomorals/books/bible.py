@@ -747,9 +747,164 @@ _GOAL_PATTERNS = (
 _GOAL_RES = [re.compile(p) for p in _GOAL_PATTERNS]
 
 
-def _mine_threads(chapters: list[tuple[int, str, str]]) -> list[PlotThread]:
+#: System-quest notifications: "[Quest: Drink the blood of the
+#: Seventh Elder. Time remaining: three nights. Failure: the thirst
+#: claims Mara.]" — the story's central engine, stated by the System
+#: itself.  A quest thread is the hottest thread by construction.
+_QUEST_BRACKET_RE = re.compile(
+    r"\[(?:System\s+)?(?:Quest|Mission|Objective)\s*:\s*([^\]]{8,300})\]")
+
+#: Imperative goal verbs — a quest spoken as an order ("Drink the
+#: blood of the Seventh Elder before the third night ends, or the
+#: thirst will take me instead").  Only a sentence-STARTING
+#: imperative counts: "I will open the gate" is a goal statement,
+#: not an imperative, and must not be mined twice.
+_IMPERATIVE_VERBS = (
+    "Drink", "Find", "Kill", "Save", "Protect", "Reach", "Take",
+    "Bring", "Destroy", "Defeat", "Escape", "Leave", "Return", "Seek",
+    "Claim", "Free", "Stop", "Hunt", "Guard", "Recover", "Deliver",
+    "Open", "Close", "Cross", "Enter", "Burn", "Follow",
+)
+_IMPERATIVE_START_RE = re.compile(
+    r"^[\u201c\"']?\s*(" + "|".join(_IMPERATIVE_VERBS) + r")\b")
+
+#: dialogue-attribution verbs, shared by the speaker resolver.
+_ATTRIBUTION_VERBS = (
+    "said", "asked", "replied", "whispered", "shouted", "muttered",
+    "vowed", "promised", "swore", "declared", "warned", "answered",
+    "growled", "laughed", "sighed", "exclaimed", "demanded",
+    "snarled", "hissed", "yelled", "murmured",
+)
+
+
+def _resolve_speaker_pronouns(summary: str, text: str, pos: int,
+                              names: list[str]) -> str:
+    """Resolve "me"/"my" in a mined goal/quest to its speaker.
+
+    A quest is usually spoken TO the protagonist BY someone else
+    ("Drink the blood of the Seventh Elder before the third night
+    ends, or the thirst will take me instead" — spoken by Mara, so
+    "me" is Mara, not Quinn).  The nearest dialogue attribution
+    around the match names the speaker; only a mined character name
+    is accepted.  "I" is left alone — resolving it would break verb
+    agreement ("what I am" -> "what Quinn is").
+    """
+    if not names or (" me " not in f" {summary} "
+                     and " my " not in f" {summary} "):
+        return summary
+    start = max(0, pos - 200)
+    window = text[start:pos + 400]
+    ref = pos - start
+    verb_alt = "|".join(_ATTRIBUTION_VERBS)
+    best: tuple[int, str] | None = None
+    for pat in (
+            rf"([A-Z][a-z]+(?: [A-Z][a-z]+)?)\s+(?:{verb_alt})\b",
+            rf"(?:{verb_alt})\s+([A-Z][a-z]+(?: [A-Z][a-z]+)?)\b"):
+        for m in re.finditer(pat, window):
+            name = m.group(1)
+            if name in names:
+                dist = abs(m.start() - ref)
+                if best is None or dist < best[0]:
+                    best = (dist, name)
+    if best is None:
+        return summary
+    name = best[1]
+    out = re.sub(r"\bme\b", name, summary)
+    out = re.sub(r"\bmy\b", f"{name}'s", out)
+    return out
+
+
+def _thread_key(summary: str) -> str:
+    return " ".join(sorted(set(
+        w.lower() for w in re.findall(r"[a-z]{4,}", summary))))[:80]
+
+
+def _add_quest_thread(found: dict[str, PlotThread], summary: str,
+                      number: int, heat: float) -> None:
+    """Add a quest thread, merging into a near-duplicate.
+
+    The same quest is usually stated twice — once by the System
+    ("[Quest: Drink the blood of the Seventh Elder...]") and once
+    spoken ("Drink the blood of the Seventh Elder before the third
+    night ends, or the thirst will take Mara instead").  A word-set
+    overlap of half or more means the same quest: keep the hotter
+    summary, bump the heat, move last_seen.  Otherwise a new thread.
+    """
+    words = set(re.findall(r"[a-z]{4,}", summary.lower()))
+    if not words:
+        return
+    best: PlotThread | None = None
+    best_ratio = 0.0
+    for thread in found.values():
+        other = set(re.findall(r"[a-z]{4,}", thread.summary.lower()))
+        if not other:
+            continue
+        ratio = len(words & other) / min(len(words), len(other))
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best = thread
+    if best is not None and best_ratio >= 0.5:
+        best.last_seen = max(best.last_seen, number)
+        best.heat += 1.0
+        # the same quest stated twice: keep the fuller wording (the
+        # spoken form carries the deadline and the stakes in one
+        # sentence; the bracket form carries the System's wording)
+        if len(summary) > len(best.summary):
+            best.summary = summary[:220]
+        return
+    key = _thread_key(summary)
+    if key in found:
+        found[key].last_seen = number
+        found[key].heat += 1.0
+        return
+    found[key] = PlotThread(
+        id=f"t{len(found) + 1}", summary=summary[:220],
+        introduced=number, last_seen=number, heat=heat)
+
+
+def _mine_threads(chapters: list[tuple[int, str, str]],
+                  names: list[str] | None = None) -> list[PlotThread]:
     found: dict[str, PlotThread] = {}
+    known = list(names or [])
     for number, _title, text in chapters:
+        # 1. System-quest notifications — the story's engine, hottest
+        # by construction; mined first so a spoken restatement merges
+        # into them rather than doubling the quest.
+        for m in _QUEST_BRACKET_RE.finditer(text):
+            quest = re.sub(r"\s+", " ", m.group(1)).strip(" .")
+            if len(quest) >= 10:
+                _add_quest_thread(found, quest, number, 5.0)
+        # 2. imperative quests — an order with a deadline or a
+        # consequence, naming someone or something ("Drink the blood
+        # of the Seventh Elder before the third night ends, or the
+        # thirst will take me instead").
+        for sent in _sentences(text):
+            # the sentence splitter does not break after a closing
+            # quote (..." instead." "I must...), so a quoted quest
+            # would swallow the next sentence whole: cut at the first
+            # closing-quote sentence boundary first.
+            sent = re.split(r"(?<=[.!?][\"”])\s+", sent, maxsplit=1)[0]
+            if not _IMPERATIVE_START_RE.match(sent):
+                continue
+            low = sent.lower()
+            if "before" not in low and ", or" not in low:
+                continue
+            named = any(_mentions(sent, n) for n in known) or bool(
+                re.search(r"\b[A-Z][a-z]{2,}\s+[A-Z][a-z]{2,}\b", sent))
+            if not named:
+                continue
+            goal = re.sub(r"\s+", " ", sent).strip(' ."“”')
+            goal = re.sub(
+                r',?\s*"?\s*(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?|[a-z]+)'
+                r"\s+(?:said|asked|replied|whispered|shouted|muttered|"
+                r"vowed|promised|swore|declared|warned|answered)\.?$",
+                "", goal).strip(' ."“”')
+            if len(goal) < 10:
+                continue
+            pos = text.find(sent)
+            if pos >= 0:
+                goal = _resolve_speaker_pronouns(goal, text, pos, known)
+            _add_quest_thread(found, goal, number, 3.0)
         for pat in _GOAL_PATTERNS:
             for m in re.finditer(pat, text):
                 goal = re.sub(r"\s+", " ", m.group(1)).strip(" .")
@@ -759,8 +914,9 @@ def _mine_threads(chapters: list[tuple[int, str, str]]) -> list[PlotThread]:
                     r"\s+(?:said|asked|replied|whispered|shouted|muttered|"
                     r"vowed|promised|swore|declared|warned|answered)\.?$",
                     "", goal).strip(" .")
-                key = " ".join(sorted(set(
-                    w.lower() for w in re.findall(r"[a-z]{4,}", goal))))[:80]
+                goal = _resolve_speaker_pronouns(
+                    goal, text, m.start(), known)
+                key = _thread_key(goal)
                 if not key or len(goal) < 10:
                     continue
                 thread = found.get(key)
@@ -824,7 +980,7 @@ def _mine_rules(chapters: list[tuple[int, str, str]]) -> list[str]:
 
 _STATE_MARKERS = (
     "injur", "wound", "scar", "crush", "broken", "bleed", "dead",
-    "died", "alive", "captur", "fled", "escap", "arriv", "reach",
+    "died", "alive", "captur", "fled", "escap", "arriv",
     "carries", "carrying", "wield", "holding", "took the", "took a",
     "gained", "lost his", "lost her", "lost the", "became", "blind",
     "deaf", "poison", "curs", "exil", "banish", "missing", "now stood",
@@ -853,6 +1009,32 @@ def _mentions(sentence: str, name: str) -> bool:
                for f in _name_forms(name))
 
 
+#: state verbs whose affected party is their OBJECT — the name that
+#: follows the verb, not the actor before it.  "The Vigil captured
+#: Mara" is Mara's state, not the Vigil's (the Vigil is a mined
+#: character name, so a purely positional rule hands the capture to
+#: the captor); "The trap crushed Quinn's left hand" is Quinn's.
+#: Every other marker keeps the subject rule (first named character
+#: in the sentence): "Mara stood behind Quinn, bleeding" is Mara's.
+_STATE_OBJECT_MARKERS = (
+    "captur", "crush", "wound", "injur", "poison", "curs",
+    "exil", "banish", "blind", "deaf",
+)
+
+
+#: possession verbs whose OBJECT is a thing worth tracking too —
+#: "Quinn took the Ember Key" is Quinn's state AND the Ember Key's
+#: (the item is a mined character in its own right, and its
+#: progression is how the bible records that the Key changed hands).
+#: The actor still takes the sentence as his state; the held thing
+#: takes it as well, so a timeline fact about an item is never lost
+#: when the sentence's subject is its holder.
+_STATE_POSSESSION_MARKERS = (
+    "took the", "took a", "gained", "carries", "carrying",
+    "wield", "holding",
+)
+
+
 def _mine_character_states(
         chapters: list[tuple[int, str, str]],
         names: list[str]) -> dict[str, tuple[str, int, bool]]:
@@ -862,6 +1044,15 @@ def _mine_character_states(
     with a genuinely state-bearing sentence (injury, possession,
     whereabouts, status change) appear; a batch that says nothing
     about a character's state leaves their recorded state untouched.
+
+    A state belongs to the character the sentence is ABOUT, not to
+    every name it mentions.  The old rule gave Quinn Mara's
+    bleeding-shoulder sentence (his chapter-3 state) and buried his
+    own lost hand (chapter 2) under it, so the continuer wrote the
+    hero with the wrong body.  For capture/injury verbs the affected
+    party is the verb's object ("The Vigil captured Mara" -> Mara);
+    for the rest it is the sentence's subject, the first named
+    character in it ("Mara stood behind Quinn, bleeding" -> Mara).
     """
     out: dict[str, tuple[str, int, bool]] = {}
     for number, _title, text in chapters:
@@ -871,10 +1062,56 @@ def _mine_character_states(
             if marker is None:
                 continue
             strong = any(m in low for m in _STRONG_STATE_MARKERS)
+            subject: str | None = None
+            subject_pos = len(sent) + 1
+            marker_pos = low.find(marker)
             for name in names:
-                if _mentions(sent, name):
-                    out[name] = (re.sub(r"\s+", " ", sent).strip()[:240],
-                                 number, strong)
+                for form in _name_forms(name):
+                    m = re.search(r"\b" + re.escape(form) + r"\b", sent)
+                    if m is None:
+                        continue
+                    if marker in _STATE_OBJECT_MARKERS:
+                        # affected party: first name AFTER the verb;
+                        # fall back to the first name in the sentence
+                        # when the verb's object is a pronoun
+                        # ("dragged her") or unnamed.
+                        if (m.start() > marker_pos
+                                and m.start() < subject_pos):
+                            subject = name
+                            subject_pos = m.start()
+                    elif m.start() < subject_pos:
+                        subject = name
+                        subject_pos = m.start()
+            if subject is None and marker in _STATE_OBJECT_MARKERS:
+                for name in names:
+                    for form in _name_forms(name):
+                        m = re.search(r"\b" + re.escape(form) + r"\b",
+                                      sent)
+                        if m is not None and m.start() < subject_pos:
+                            subject = name
+                            subject_pos = m.start()
+            if subject is not None:
+                sentence = re.sub(r"\s+", " ", sent).strip()[:240]
+                out[subject] = (sentence, number, strong)
+                if marker in _STATE_POSSESSION_MARKERS:
+                    # the held thing takes the same sentence as its
+                    # state (see above): first name after the verb
+                    # that is not the holder.
+                    held: str | None = None
+                    held_pos = len(sent) + 1
+                    for name in names:
+                        if name == subject:
+                            continue
+                        for form in _name_forms(name):
+                            m = re.search(r"\b" + re.escape(form)
+                                          + r"\b", sent)
+                            if (m is not None
+                                    and m.start() > marker_pos
+                                    and m.start() < held_pos):
+                                held = name
+                                held_pos = m.start()
+                    if held is not None:
+                        out[held] = (sentence, number, strong)
     return out
 
 
@@ -884,13 +1121,39 @@ _LOCATION_PREPS = (
 )
 
 # prepositions match lower- or sentence-initial Capitalized form; the
-# PLACE itself must be Capitalized (case-sensitive classes on purpose)
+# PLACE itself must be Capitalized (case-sensitive classes on purpose),
+# but a trailing lowercase place-noun belongs to the name ("Blackspire
+# chapel", "Ember gate") — without it the continuer could name the
+# place but never the building.
+_PLACE_NOUNS = (
+    "chapel", "gate", "city", "castle", "temple", "tower", "hall",
+    "archive", "library", "bridge", "road", "forest", "mountain",
+    "river", "village", "town", "palace", "cathedral", "shrine",
+    "tavern", "inn", "market", "square", "harbor", "port", "fortress",
+    "keep", "manor", "chamber", "house", "quarter", "district",
+    "street", "garden", "field", "plain", "desert", "island", "coast",
+    "shore", "bay", "lake", "valley", "cave", "tomb", "vault",
+    "cellar", "attic", "room", "hut", "cabin", "cottage", "school",
+    "hospital", "prison", "station",
+)
 _LOCATION_RE = re.compile(
     r"\b(?:" + "|".join(
         re.escape(v) for w in _LOCATION_PREPS
         for v in (w, w.capitalize())) + r")"
     r"\s+(?:the\s+|a\s+|an\s+)?"
-    r"([A-Z][a-z]{2,}(?:[ \t]+[A-Z][a-z]{2,}){0,2})")
+    r"([A-Z][a-z]{2,}(?:[ \t]+[A-Z][a-z]{2,}){0,2}"
+    r"(?:[ \t]+(?:" + "|".join(_PLACE_NOUNS) + r"))?)")
+
+
+#: motion verbs: a place named in a sentence where someone MOVES
+#: toward/into it is a real location even on a single mention
+#: ("They fled to the Blackspire chapel") — the old count>=2 rule
+#: dropped a story's key location when it was named only once.
+_MOTION_WORDS = (
+    "fled", "flee", "escape", "arriv", "enter", "descend", "cross",
+    "return", "came", "went", "climb", "stepped", "walked", "rode",
+    "sailed", "flew", "reach",
+)
 
 
 def _mine_locations(
@@ -900,8 +1163,10 @@ def _mine_locations(
     counts: Counter = Counter()
     latest: dict[str, tuple[str, int]] = {}
     chapters_seen: dict[str, set[int]] = {}
+    motion_seen: set[str] = set()
     for number, _title, text in chapters:
         for sent in _sentences(text):
+            low = sent.lower()
             for m in _LOCATION_RE.finditer(sent):
                 place = m.group(1).strip()
                 words = place.split()
@@ -917,9 +1182,12 @@ def _mine_locations(
                 chapters_seen.setdefault(place, set()).add(number)
                 latest[place] = (re.sub(r"\s+", " ", sent).strip()[:200],
                                  number)
+                if any(w in low for w in _MOTION_WORDS):
+                    motion_seen.add(place)
     out = []
     for place, count in counts.most_common(24):
-        if count < 2 and len(chapters_seen.get(place, set())) < 2:
+        if (count < 2 and len(chapters_seen.get(place, set())) < 2
+                and place not in motion_seen):
             continue
         note, seen = latest[place]
         out.append(BibleLocation(name=place, note=note, last_seen=seen))
@@ -1225,7 +1493,8 @@ class BibleBuilder:
                     existing.description += " " + c.description[:200]
             else:
                 bible.characters.append(c)
-        threads = _mine_threads(new_chapters)
+        threads = _mine_threads(
+            new_chapters, [c.name for c in bible.characters])
         by_summary = {t.summary[:60].lower(): t for t in bible.threads}
         for t in threads:
             key = t.summary[:60].lower()
@@ -1374,7 +1643,7 @@ class BibleBuilder:
     def _from_heuristics(self, story_slug: str, title: str,
                          chapters: list[tuple[int, str, str]]) -> StoryBible:
         characters = _mine_characters(chapters)
-        threads = _mine_threads(chapters)
+        threads = _mine_threads(chapters, [c.name for c in characters])
         rules = _mine_rules(chapters)
         style = _profile_style(chapters)
         # arc summary: first-sentence sketch of each chapter's thrust
