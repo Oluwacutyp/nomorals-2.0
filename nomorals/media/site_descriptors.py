@@ -127,7 +127,7 @@ class SiteDescriptor:
     ``auth`` is not ``"none"``; also the domains a ``login``-block
     retry consults for an ``auth == "none"`` site).
     ``auth_cookie_names``: the session cookie names that prove a
-    signed-in session (``("auth_token",)`` for SoundCloud) — when
+    signed-in session (``("oauth_token",)`` for SoundCloud) — when
     given, a live cookie of any other name does not count as a
     session.  ``downloadable``: False when the site serves no
     downloads at all.
@@ -346,14 +346,25 @@ SOUNDCLOUD_DESCRIPTOR = SiteDescriptor(
     block_classes=BLOCK_CLASSES,
     auth="none",
     auth_domains=("soundcloud.com",),
-    auth_cookie_names=("auth_token",),
+    # The session cookie is ``oauth_token`` — the cookie SoundCloud's
+    # own web player sets, and the one yt-dlp's SoundCloud extractor
+    # reads from the cookie jar (``SoundcloudBaseIE._real_initialize``,
+    # yt-dlp master).  ``auth_token`` was named here before; no real
+    # browser login sets it, so the B5 estate lookup could never
+    # find a session.
+    auth_cookie_names=("oauth_token",),
     downloadable=True,
     notes="SoundCloud public api-v2: no account; progressive MP3 "
           "preferred, HLS fallback; track_authorization forwarded "
           "on transcoding calls; blocks are preview/drm/region/"
           "login/private and resolve found-but-blocked; a login-"
           "gated track retries the direct stage authenticated "
-          "through the owner's soundcloud.com session (B5)",
+          "through the owner's soundcloud.com session (B5); the "
+          "client_id is resolved through "
+          "media.soundcloud_credentials (env pin → vault-stored "
+          "discovery → live discovery, browser-session fallback "
+          "when the homepage fetch fails) and the owner's "
+          "oauth_token session rides the connector's api-v2 calls",
 )
 
 #: YouTube — the SECOND site descriptor: public video by default,

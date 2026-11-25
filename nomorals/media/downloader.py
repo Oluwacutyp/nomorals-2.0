@@ -252,6 +252,52 @@ _DEAD_LINK_MARKERS = (
     "no longer available",
 )
 
+#: A connector-classified SoundCloud block, as journaled on a stage
+#: log's note (``"soundcloud block: preview"`` — see
+#: :meth:`MediaDownloader._stage_connector`): the class is the
+#: site's own verdict on the track, and the failure report names it
+#: instead of a guessed sentence.
+_SOUNDCLOUD_BLOCK_RE = re.compile(r"soundcloud block: ([a-z]+)")
+
+#: What a SoundCloud block class means, when the stage error itself
+#: does not already say it (fallback cause text for
+#: :meth:`MediaDownloader._finish_failure`).
+_SOUNDCLOUD_BLOCK_CAUSES = {
+    "preview": "SoundCloud only serves a ~30-second preview of "
+               "this track",
+    "drm": "this track's SoundCloud stream is DRM-protected",
+    "region": "SoundCloud blocks this track in this region",
+    "login": "SoundCloud wants a signed-in account for this track",
+    "private": "this track is private or has been removed",
+}
+
+#: The owner action per SoundCloud block class — the exact next
+#: step, never a guess at a credential value.
+_SOUNDCLOUD_BLOCK_HINTS = {
+    "preview": "find the full track on another source — SoundCloud "
+               "only serves a preview of this one",
+    "drm": "play it in SoundCloud's own app — no download rung "
+           "takes DRM-protected streams",
+    "region": "find the same title on another source — SoundCloud "
+              "blocks this track in this region",
+    "login": "sign in to SoundCloud once in Devon's browser, or run "
+             "/cookies import with a SoundCloud export from your own "
+             "browser, then retry",
+    "private": "the track is private or has been removed — find the "
+               "same title on another source",
+}
+
+#: The hint for a SoundCloud bot-block after the whole chain
+#: exhausted: the YouTube cookie help (:data:`BOT_COOKIE_HELP`) is
+#: the wrong guidance for a SoundCloud URL — the client_id was
+#: already refreshed automatically, so what is left is the owner's
+#: own session.
+SOUNDCLOUD_BOT_HINT = (
+    "SoundCloud is still blocking the download after a fresh "
+    "client_id — sign in to SoundCloud once in Devon's browser "
+    "(`nm browser`), or run /cookies import with your own "
+    "browser's SoundCloud cookies, then retry")
+
 #: Text of a LOCAL write failure (yt-dlp's HTTP downloader failing
 #: to open its prepared filename, or the kit's own open): the parent
 #: directory does not exist, the name is too long for the filesystem,
@@ -2442,6 +2488,90 @@ class MediaDownloader:
         descriptor-driven stage resolves it by id."""
         return self._site_connector("soundcloud")
 
+    def _soundcloud_page_fetcher(self) -> Callable[[], str]:
+        """Homepage HTML through the existing persistent browser
+        session — the discovery fallback the SoundCloud connector
+        calls when its plain HTTP fetch of soundcloud.com fails
+        (bot check on this box's IP).
+
+        The session opens the page with the profile's cookies and a
+        real browser fingerprint and returns its HTML, which
+        discovery scans for script tags exactly as it scans the
+        HTTP response.  "" when the session is unavailable or the
+        page does not load — discovery then reports the failure
+        with the manual-pin instruction, as before.  Never raises."""
+        def fetch() -> str:
+            try:
+                session = self._browser_session()
+                if session is None:
+                    return ""
+                opened = session.open("https://soundcloud.com")
+                if not isinstance(opened, dict) or not opened.get("ok"):
+                    return ""
+                html = (session.html(max_chars=2_000_000) or {}).get(
+                    "html", "")
+                return str(html or "")
+            except Exception as e:  # a dead fetcher is "" — never raises
+                record_failure("_soundcloud_page_fetcher", e)
+                return ""
+        return fetch
+
+    def _prepare_soundcloud_connector(self, connector: Any,
+                                      desc: Any) -> str:
+        """Arm a SoundCloud connector for this download: the browser
+        page fetcher (the discovery fallback), the resolved
+        client_id (env pin → vault-stored discovery → live
+        discovery, persisted — see
+        :mod:`nomorals.media.soundcloud_credentials`), and the
+        owner's session cookies when the estate holds a live
+        soundcloud.com session (opportunistic: a missing session
+        is not an error here — the connector stage proceeds
+        anonymously and the login-block retry still applies).
+
+        Best-effort throughout: any step that fails leaves the
+        connector exactly as it was and the chain proceeds —
+        preparation never becomes a new way to die.  Returns a
+        short note for the stage log (sources and cookie counts
+        only — never a value)."""
+        notes: list[str] = []
+        try:
+            set_fetcher = getattr(connector, "set_page_fetcher", None)
+            if callable(set_fetcher):
+                set_fetcher(self._soundcloud_page_fetcher())
+                notes.append("browser fallback armed")
+        except Exception as e:  # noqa: BLE001 — prep never breaks the chain
+            record_failure("_prepare_soundcloud.page_fetcher", e)
+        try:
+            from .soundcloud_credentials import (
+                resolve_client_id,
+                vault_store_for,
+            )
+            db = getattr(self.context, "db", None) \
+                if self.context is not None else None
+            client_id, source = resolve_client_id(
+                connector=connector,
+                vault_store=vault_store_for(db, self.context))
+            if client_id:
+                setter = getattr(connector, "set_client_id", None)
+                if callable(setter) and setter(client_id):
+                    notes.append(f"client_id via {source}")
+        except Exception as e:  # noqa: BLE001
+            record_failure("_prepare_soundcloud.client_id", e)
+        try:
+            auth = self._resolve_site_auth(desc, require=True)
+            if auth is not None and getattr(auth, "ok", False) \
+                    and getattr(auth, "cookies", ()):
+                setter = getattr(connector, "set_session_cookies", None)
+                if callable(setter):
+                    count = setter(auth.cookies)
+                    if count:
+                        notes.append(
+                            f"session: {count} cookie(s) "
+                            f"({getattr(auth, 'source', '') or 'estate'})")
+        except Exception as e:  # noqa: BLE001
+            record_failure("_prepare_soundcloud.session", e)
+        return "; ".join(notes)
+
     def _stage_connector(self, report: DownloadReport, url: str,
                          target_dir: Path, audio_only: bool,
                          budget: dict[str, float],
@@ -2485,6 +2615,15 @@ class MediaDownloader:
             return False
         if time.perf_counter() > budget["deadline"]:
             return False
+        # SoundCloud credential prep (audit N3): the browser page
+        # fetcher (discovery fallback), the resolved client_id, and
+        # the owner's session when the estate holds one — before
+        # the connector resolves anything.  Best-effort: a failed
+        # prep leaves the connector as it was.
+        prep_note = ""
+        if desc.connector == "soundcloud":
+            prep_note = self._prepare_soundcloud_connector(
+                connector, desc)
         t0 = time.perf_counter()
         try:
             stream = connector.stream_url(act_url)
@@ -2492,10 +2631,13 @@ class MediaDownloader:
             lat = time.perf_counter() - t0
             kind = classify_failure(exc)
             block = str(getattr(exc, "reason", "") or "")
+            block_note = (f"{desc.site} block: {block}"
+                          if block else "")
+            note = "; ".join(p for p in (block_note, prep_note) if p)
             report.stages.append(StageLog(
                 stage="connector", url=act_url, latency_s=lat,
                 error_class=kind.value, error=_err_text(exc),
-                note=f"{desc.site} block: {block}" if block else ""))
+                note=note))
             self._log_stage("connector", act_url, "", lat, 0, kind,
                             _err_text(exc, 200))
             return False
@@ -3601,7 +3743,40 @@ class MediaDownloader:
         browser_opened = any(
             s.stage == "browser" and "page opened" in (s.note or "")
             for s in report.stages)
-        if "drm-encrypted" in errors or "drm detected" in notes:
+        sc_block = _SOUNDCLOUD_BLOCK_RE.search(notes)
+        is_soundcloud = ("soundcloud.com" in (report.url or "").lower()
+                         or sc_block is not None)
+        if sc_block is not None:
+            # The connector classified the track itself (preview /
+            # drm / region / login / private): that class IS the
+            # cause — the stage error already carries the connector's
+            # own sentence for it, so it leads; the hint is the
+            # exact owner action for the class.  No generic
+            # bot-block or no-media wording may overwrite it.
+            block = sc_block.group(1)
+            cause = next((s.error for s in report.stages
+                          if "soundcloud block:" in (s.note or "")),
+                         "")
+            report.failure = FailureKind.SITE_ERROR
+            report.likely_cause = (
+                (cause or _SOUNDCLOUD_BLOCK_CAUSES.get(
+                    block, f"SoundCloud blocked this track ({block})"))
+                [:300])
+            report.hint = _SOUNDCLOUD_BLOCK_HINTS.get(block, "")
+        elif is_soundcloud and FailureKind.BOT_BLOCK.value in kinds:
+            # A SoundCloud bot-block is not a YouTube bot-block:
+            # the generic cookie help names yt-dlp flags and a
+            # youtube-cookies.txt file the owner does not have.
+            # The client_id was already refreshed automatically
+            # inside the connector stage; what is left is the
+            # owner's own SoundCloud session.
+            report.failure = FailureKind.BOT_BLOCK
+            report.likely_cause = (
+                "SoundCloud is blocking automated downloads (bot "
+                "check / rate limit) on the direct, proxy, and "
+                "browser paths")
+            report.hint = SOUNDCLOUD_BOT_HINT
+        elif "drm-encrypted" in errors or "drm detected" in notes:
             # The rendered player itself proved the stream is
             # DRM-encrypted (license traffic in its network log):
             # that is the cause, stated plainly — no rung downloads

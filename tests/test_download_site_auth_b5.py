@@ -265,7 +265,11 @@ class TestResolver:
             vault_store=store, cookie_estate=estate)
         assert resolver.resolve(
             SOUNDCLOUD_DESCRIPTOR, require=True).status == "missing"
-        estate.upsert([_session_cookie("soundcloud.com")],
+        # The session cookie is oauth_token (SoundCloud's real
+        # session cookie — see the descriptor): an auth_token
+        # cookie is not a login and must not resolve.
+        estate.upsert([_session_cookie("soundcloud.com",
+                                       name="oauth_token")],
                       source="test")
         gets_before = store.gets
         auth = resolver.resolve(SOUNDCLOUD_DESCRIPTOR, require=True)
@@ -565,11 +569,16 @@ class TestDescriptorAuthFields:
         assert SiteDescriptor.from_dict(desc.to_dict()) == desc
 
     def test_soundcloud_descriptor_carries_session_shape(self):
+        # oauth_token is the one cookie SoundCloud's web player
+        # sets and the one yt-dlp's SoundCloud extractor reads from
+        # the cookie jar (SoundcloudBaseIE._real_initialize, yt-dlp
+        # master); auth_token is set by no real browser login, so
+        # the estate lookup could never find a session.
         assert SOUNDCLOUD_DESCRIPTOR.auth == "none"
         assert SOUNDCLOUD_DESCRIPTOR.auth_domains == (
             "soundcloud.com",)
         assert SOUNDCLOUD_DESCRIPTOR.auth_cookie_names == (
-            "auth_token",)
+            "oauth_token",)
 
     def test_youtube_descriptor_carries_session_shape(self):
         assert YOUTUBE_DESCRIPTOR.auth == "none"

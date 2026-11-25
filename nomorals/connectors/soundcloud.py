@@ -7,7 +7,22 @@ needs a ``client_id`` query parameter; this connector obtains one the
 free way — extracted from SoundCloud's own public JavaScript bundles,
 exactly like the web player does. Set ``SOUNDCLOUD_CLIENT_ID`` to pin a
 known-good id and skip discovery. Discovery results are cached in
-memory; a 401 response invalidates the cache and rediscovers once.
+memory; a 401 OR 403 response invalidates the cache and rediscovers
+once (yt-dlp's own SoundCloud extractor retries on both — a
+rate-limited or revoked id can refuse either way). A discovered id
+may also be handed in from outside (:meth:`set_client_id`) — the
+downloader resolves it through
+:mod:`nomorals.media.soundcloud_credentials` (env pin → vault-stored
+id → live discovery) and persists fresh discoveries in the vault, so
+a restart does not re-scrape the homepage on every boot.
+
+Session: a signed-in owner's ``oauth_token`` cookie — the cookie
+SoundCloud's own web player sets and the one yt-dlp's SoundCloud
+extractor reads from the cookie jar (``SoundcloudBaseIE.
+_real_initialize``, yt-dlp master) — can be handed in with
+:meth:`set_session_cookies` and is then sent on api-v2 calls, so
+login-gated tracks resolve when the owner has a session. The
+connector never logs a cookie value, and never logs in itself.
 
 Capabilities:
 * ``search_tracks`` / ``search_playlists`` / ``search_users`` — catalog
@@ -84,6 +99,17 @@ _CLIENT_ID_RE = re.compile(r'client_id\s*[:=]\s*"([a-zA-Z0-9]{32})"')
 
 #: In-memory client_id cache (per process). Env var always wins.
 _client_id_cache: str = ""
+
+#: A client_id is 32 alphanumeric characters (the shape SoundCloud's
+#: own bundles carry, and the shape :func:`_CLIENT_ID_RE` matches).
+_CLIENT_ID_SHAPE = re.compile(r"^[a-zA-Z0-9]{32}$")
+
+#: Statuses that mean the cached client_id died (revoked or
+#: rate-limited): invalidate, rediscover once, then fail fast.
+#: yt-dlp's own SoundCloud extractor retries on both 401 AND 403
+#: (``SoundcloudBaseIE._call_api``, master) — a dead id can refuse
+#: either way, so this connector does the same.
+_STALE_CLIENT_ID_STATUSES = (401, 403)
 
 #: Normalized track kinds the generic ``search`` accepts.
 _SEARCH_KINDS = ("track", "playlist", "user", "album")
@@ -253,6 +279,89 @@ class SoundCloudConnector(Connector):
             "client_id."
         )
 
+    def __init__(self, vault: Any, http: Any = None, *,
+                 page_fetcher: Any = None) -> None:
+        """``page_fetcher`` (optional) is the web-expansion rung for
+        discovery: a zero-argument callable returning the
+        soundcloud.com homepage HTML (or "" when it cannot) — the
+        downloader supplies one that opens the page in the existing
+        persistent browser session, so a homepage fetch that the
+        plain HTTP client cannot make (bot check on this box's IP)
+        still yields the script tags discovery scans.  None means
+        discovery is HTTP-only, as before."""
+        super().__init__(vault, http=http)
+        self._page_fetcher = page_fetcher
+        #: The owner's session cookies for soundcloud.com, by name
+        #: (``oauth_token`` — see :meth:`set_session_cookies`).  Values
+        #: live here in memory only and are never logged.
+        self._session_cookies: dict[str, str] = {}
+
+    def set_page_fetcher(self, page_fetcher: Any) -> None:
+        """Install (or clear, with None) the discovery page fetcher."""
+        self._page_fetcher = page_fetcher
+
+    def set_client_id(self, client_id: str) -> bool:
+        """Install a client_id resolved elsewhere (the downloader's
+        credential resolution: env pin → vault → live discovery).
+        A malformed value is refused (False) and the cache is left
+        untouched — a bad id must never overwrite a working one.
+        The env pin still wins over an installed id at resolve time.
+        """
+        cid = (client_id or "").strip()
+        if not _CLIENT_ID_SHAPE.match(cid):
+            _log.warning("soundcloud: refusing malformed client_id "
+                         "(not 32 alphanumeric characters)")
+            return False
+        global _client_id_cache
+        _client_id_cache = cid
+        return True
+
+    def client_id(self) -> str:
+        """A working client_id (public): env pin, cache, or fresh
+        discovery — the same resolution :meth:`_client_id` performs."""
+        return self._client_id()
+
+    def set_session_cookies(
+            self, cookies: Any) -> int:
+        """Install the owner's soundcloud.com session cookies for
+        api-v2 calls (``oauth_token`` is the session cookie
+        SoundCloud's web player sets — yt-dlp's SoundCloud
+        extractor reads exactly that name from the cookie jar).
+        ``cookies`` is estate-shaped records (``{"name", "value",
+        ...}``) or a name→value mapping.  Returns how many cookies
+        were stored.  Values are never logged; only the count is."""
+        stored: dict[str, str] = {}
+        items: Any = []
+        if isinstance(cookies, dict):
+            items = list(cookies.items())
+        elif cookies:
+            items = list(cookies)
+        for item in items:
+            if isinstance(item, tuple) and len(item) == 2:
+                name, value = str(item[0] or "").strip(), str(item[1] or "")
+            elif isinstance(item, dict):
+                name = str(item.get("name") or "").strip()
+                value = str(item.get("value") or "")
+            else:
+                continue
+            if name and value:
+                stored[name] = value
+        self._session_cookies = stored
+        if stored:
+            _log.info("soundcloud: session cookies installed (%d)",
+                      len(stored))
+        return len(stored)
+
+    def _cookie_header(self) -> dict[str, str]:
+        """``Cookie`` header for api-v2 calls, "" when no session is
+        installed.  Built per call so a session installed after
+        construction still rides the next request."""
+        if not self._session_cookies:
+            return {}
+        return {"Cookie": "; ".join(
+            f"{name}={value}"
+            for name, value in self._session_cookies.items())}
+
     # ── client_id discovery ──────────────────────────────────────
 
     def _client_id(self) -> str:
@@ -272,21 +381,54 @@ class SoundCloudConnector(Connector):
         if not os.environ.get(SOUNDCLOUD_CLIENT_ID_ENV, "").strip():
             _client_id_cache = ""
 
-    def _discover_client_id(self) -> str:
-        """Scrape a client_id from soundcloud.com's JS bundles."""
+    def _homepage_html(self) -> str:
+        """The soundcloud.com homepage HTML, by the route that works.
+
+        The plain HTTP fetch first; when it fails (exception, or a
+        non-OK status — the bot check that kills discovery on some
+        boxes), the injected page fetcher (the rendered browser
+        session) is the second rung.  "" when neither route yields
+        the page.  Never raises — discovery reports the failure
+        with the manual-pin instruction instead."""
+        headers = {"User-Agent": _UA, **self._cookie_header()}
         try:
-            resp = self.http.get(HOMEPAGE, headers={"User-Agent": _UA})
-        except Exception as exc:  # noqa: BLE001 - network layer is opaque
+            resp = self.http.get(HOMEPAGE, headers=headers)
+        except Exception:  # noqa: BLE001 - the fetcher is the fallback
+            resp = None
+        if resp is not None and resp.ok:
+            return str(resp.text or "")
+        fetcher = self._page_fetcher
+        if not callable(fetcher):
+            return ""
+        try:
+            html = fetcher()
+        except Exception as exc:  # noqa: BLE001 - a dead fetcher is ""
+            _log.info("soundcloud: browser page fetch failed: %s", exc)
+            return ""
+        if isinstance(html, dict):
+            html = html.get("html", "")
+        return str(html or "")
+
+    def _discover_client_id(self) -> str:
+        """Scrape a client_id from soundcloud.com's JS bundles.
+
+        The homepage arrives by the route that works (plain HTTP,
+        else the browser session — see :meth:`_homepage_html`); the
+        bundles themselves are fetched over HTTP with the session
+        cookies riding along, so a signed-in session's homepage is
+        less likely to be bot-checked in the first place.  Honest
+        about the source: the id is SoundCloud's own public
+        client_id, embedded in its public JS — discovered, never
+        invented, and refreshed whenever the API refuses it."""
+        html = self._homepage_html()
+        if not html:
             raise SoundCloudError(
-                f"could not reach soundcloud.com to discover a client_id: "
-                f"{exc} — set {SOUNDCLOUD_CLIENT_ID_ENV} manually"
-            ) from exc
-        if not resp.ok:
-            raise SoundCloudError(
-                f"soundcloud.com returned {resp.status} during client_id "
-                f"discovery — set {SOUNDCLOUD_CLIENT_ID_ENV} manually"
+                "could not reach soundcloud.com to discover a client_id "
+                "(both the direct fetch and the browser page fetch "
+                "failed) — set "
+                f"{SOUNDCLOUD_CLIENT_ID_ENV} manually"
             )
-        scripts = _SCRIPT_RE.findall(resp.text)
+        scripts = _SCRIPT_RE.findall(html)
         if not scripts:
             raise SoundCloudError(
                 "soundcloud.com's page layout changed (no script bundles "
@@ -294,9 +436,10 @@ class SoundCloudConnector(Connector):
             )
         # The client_id lives in an app chunk; later bundles are the
         # bigger app chunks, so scan from the end.
+        headers = {"User-Agent": _UA, **self._cookie_header()}
         for src in reversed(scripts[-4:]):
             try:
-                js = self.http.get(src, headers={"User-Agent": _UA})
+                js = self.http.get(src, headers=headers)
             except Exception:  # noqa: BLE001 - try the next bundle
                 continue
             if not js.ok:
@@ -323,22 +466,30 @@ class SoundCloudConnector(Connector):
     ) -> Any:
         """One api-v2 call; errors become SoundCloudError.
 
-        A 401 means the cached client_id died: invalidate, rediscover,
-        and retry once — then fail fast.
+        A 401 or a 403 means the cached client_id died (revoked or
+        rate-limited — either status can carry it, as yt-dlp's own
+        extractor treats them): invalidate, rediscover, and retry
+        once — then fail fast.  A 403 that survives a fresh id is
+        not a dead id — the refusal itself is reported, with the
+        block class the API's own words earn (a per-track region or
+        login refusal is not a credential failure).
         """
         client_id = self._client_id()
         query = dict(params or {})
         query["client_id"] = client_id
         url = f"{API_BASE}{path}"
         try:
-            resp = self.http.get(url, params=query,
-                                 headers={"User-Agent": _UA})
+            resp = self.http.get(
+                url, params=query,
+                headers={"User-Agent": _UA, **self._cookie_header()})
         except Exception as exc:  # noqa: BLE001 - network layer is opaque
             raise SoundCloudError(
                 f"soundcloud request failed: {exc}") from exc
-        if resp.status == 401 and not _retried and not os.environ.get(
-                SOUNDCLOUD_CLIENT_ID_ENV, "").strip():
-            _log.info("soundcloud: client_id rejected (401), rediscovering")
+        if resp.status in _STALE_CLIENT_ID_STATUSES and not _retried \
+                and not os.environ.get(
+                    SOUNDCLOUD_CLIENT_ID_ENV, "").strip():
+            _log.info("soundcloud: client_id rejected (%s), rediscovering",
+                      resp.status)
             self._invalidate_client_id()
             return self._api(path, params, _retried=True)
         if resp.status == 401:
@@ -347,6 +498,18 @@ class SoundCloudConnector(Connector):
                 f"set a fresh {SOUNDCLOUD_CLIENT_ID_ENV} or reconnect to "
                 "rediscover",
                 status_code=401,
+            )
+        if resp.status == 403:
+            reason = classify_block(status=403, text=resp.text[:200])
+            detail = ""
+            if reason:
+                detail = f" — {block_reason_text(reason)}"
+            raise SoundCloudError(
+                f"soundcloud refused this request (403){detail} — the "
+                "client_id was already refreshed once, so this is the "
+                "track's own refusal, not a stale credential",
+                status_code=403,
+                reason=reason,
             )
         if resp.status == 404:
             raise SoundCloudError(
@@ -484,20 +647,41 @@ class SoundCloudConnector(Connector):
         summary = self.summarize_track(full)
         transcodings = ((full.get("media") or {}).get("transcodings")
                         or [])
-        progressive = [t for t in transcodings
+        # Preview honesty (owner audit N3): a transcoding SoundCloud
+        # itself marks ``snipped`` is a ~30 s preview, not the track
+        # — and a SNIP/PREVIEW policy says the same about the track.
+        # Full transcodings win wherever one exists; when only
+        # previews exist the call fails as preview instead of
+        # landing a 30 s clip as the track.  The old shape checked
+        # only ``"/preview/"`` in the resolved URL — true for the
+        # progressive preview, false for the HLS preview, so the
+        # same track landed as success over HLS and raised over
+        # progressive.  The payload's own evidence decides now, on
+        # both protocols; the URL check below stays as backup.
+        policy = str(full.get("policy", ""))
+        full_stream = [t for t in transcodings
+                       if not t.get("snipped")]
+        pool = full_stream or transcodings
+        progressive = [t for t in pool
                        if (t.get("format") or {}).get("protocol")
                        == "progressive"]
-        hls = [t for t in transcodings
+        hls = [t for t in pool
                if (t.get("format") or {}).get("protocol") == "hls"]
         chosen = (progressive or hls or [None])[0]
         if chosen is None:
-            policy = str(full.get("policy", ""))
             reason = classify_block(policy=policy) or BLOCK_PRIVATE
             raise SoundCloudError(
                 f"\"{summary['title']}\" has no playable stream: "
                 f"{block_reason_text(reason)} "
                 f"(policy={policy or 'unknown'})",
                 reason=reason,
+            )
+        if chosen.get("snipped") or policy.upper() in ("PREVIEW", "SNIP"):
+            raise SoundCloudError(
+                f"\"{summary['title']}\" is preview-only on SoundCloud "
+                f"(~30s): {block_reason_text(BLOCK_PREVIEW)}; falling "
+                "back to full-track sources",
+                reason=BLOCK_PREVIEW,
             )
         stream_api_url = str(chosen.get("url", ""))
         if not stream_api_url:
@@ -584,7 +768,9 @@ class SoundCloudConnector(Connector):
             wire += (f"&track_authorization="
                      f"{urllib.parse.quote(track_authorization, safe='')}")
         try:
-            resp = self.http.get(wire, headers={"User-Agent": _UA})
+            resp = self.http.get(
+                wire,
+                headers={"User-Agent": _UA, **self._cookie_header()})
         except Exception as exc:  # noqa: BLE001 - network layer is opaque
             raise SoundCloudError(
                 f"soundcloud stream lookup failed: {exc}") from exc
