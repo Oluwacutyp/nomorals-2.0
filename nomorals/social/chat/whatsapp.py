@@ -99,7 +99,7 @@ from typing import Any
 from ...core.logging_setup import get_logger
 from .base import ChatAdapter, ChatKind, ChatMessage, ChatRef, IncomingHandler, MediaRef, SendResult, catalog_product_shape_error, contact_shape_error, label_assoc_shape_error, label_edit_shape_error, location_shape_error, search_shape_error, status_audience_shape_error
 from .baileys_guard import (
-    BURST_MAX, BURST_WINDOW_S, WARMUP_SCHEDULE, BaileysPacer,
+    BURST_MAX, BURST_WINDOW_S, BaileysPacer,
     WarningDetector)
 from .platform_limits import for_platform
 from .failures import record_failure
@@ -620,7 +620,6 @@ class WhatsAppAdapter(ChatAdapter):
         media_dir: str = "data/media/whatsapp",
         outbox_dir: str = "data/chat/outbox",
         outbox_enabled: bool = True,
-        session_age_days: int | None = None,
     ) -> None:
         super().__init__(media_dir=media_dir)
         self.host = host
@@ -740,7 +739,7 @@ class WhatsAppAdapter(ChatAdapter):
         # Baileys safety guard (audit gap R1-19): warm-up caps +
         # burst refusal + first-warning stop, durable beside the
         # outbox. Loaded last — it only reads the outbox dir.
-        self._guard_load(session_age_days)
+        self._guard_load()
 
     # ── button derivation + form evidence ─────────────────────────
     def _deliver(self, handler: Any, message: Any) -> None:
@@ -978,26 +977,19 @@ class WhatsAppAdapter(ChatAdapter):
         return os.path.join(self._outbox_dir,
                             "whatsapp_baileys_guard.json")
 
-    def _guard_load(self, session_age_days: int | None) -> None:
-        """Restore the durable guard state, or seed it honestly.
+    def _guard_load(self) -> None:
+        """Restore the durable guard state, or start it fresh.
 
-        Age seed, in order: (1) a state file already exists — its
-        first_seen_day stands, never rewound; (2) a supplied
-        session age (from the pairing record) — first_seen_day is
-        today minus that age; (3) no evidence anywhere — assume
-        warmed up (steady cap) and RECORD the assumption. Imposing
-        the day-1 cap (20 sends) on the long-running live account
-        would break Devon outright, and no age evidence is
-        available to the adapter; the burst guard + steady cap +
-        warning stop still protect. A supplied age later replaces
-        an assumed seed — real evidence beats the assumption.
-        A corrupt state file is journaled and starts fresh, never
-        a startup failure."""
+        There is no daily cap anymore (owner order 2026-11-25),
+        so there is no session age to seed and no first-seen day
+        to track — the guard is the burst window plus the warning
+        latch. A state file from an older build may still carry
+        ``first_seen_day`` / ``age_assumed`` and pacer daily
+        fields; they are read past, never honoured. A corrupt
+        state file is journaled and starts fresh, never a startup
+        failure."""
         self._guard_lock = threading.Lock()
         self._guard_last_sent_at = 0.0
-        today = int(time.time() // 86400)
-        self._guard_first_seen_day = today
-        self._guard_age_assumed = False
         data: dict[str, Any] = {}
         try:
             with open(self._guard_store_path(),
@@ -1013,30 +1005,8 @@ class WhatsAppAdapter(ChatAdapter):
             data = {}
         pacer_state = data.get("pacer")
         warning_state = data.get("warning")
-        first_seen = data.get("first_seen_day")
-        if isinstance(first_seen, int) and first_seen > 0:
-            self._guard_first_seen_day = first_seen
-            self._guard_age_assumed = bool(data.get("age_assumed", False))
-        elif session_age_days is not None:
-            self._guard_first_seen_day = (
-                today - max(0, int(session_age_days)))
-            self._guard_age_assumed = False
-        else:
-            self._guard_first_seen_day = today - len(WARMUP_SCHEDULE)
-            self._guard_age_assumed = True
-            _log.info("whatsapp: no session-age evidence for the "
-                      "Baileys guard — assuming a warmed-up session "
-                      "(steady cap %d/day); a pairing-record age "
-                      "replaces this seed when one arrives",
-                      BaileysPacer().daily_cap())
-        if (session_age_days is not None and self._guard_age_assumed):
-            self._guard_first_seen_day = (
-                today - max(0, int(session_age_days)))
-            self._guard_age_assumed = False
-        age = max(0, today - self._guard_first_seen_day)
         self._pacer = BaileysPacer.from_state(
             pacer_state if isinstance(pacer_state, dict) else {})
-        self._pacer.session_age_days = age
         self._warning_detector = WarningDetector.from_state(
             warning_state if isinstance(warning_state, dict) else {})
 
@@ -1049,8 +1019,6 @@ class WhatsAppAdapter(ChatAdapter):
             path = self._guard_store_path()
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             payload = {
-                "first_seen_day": self._guard_first_seen_day,
-                "age_assumed": self._guard_age_assumed,
                 "pacer": self._pacer.state_dict(),
                 "warning": self._warning_detector.state_dict(),
             }
@@ -1062,16 +1030,6 @@ class WhatsAppAdapter(ChatAdapter):
             record_failure(
                 "whatsapp.WhatsAppAdapter._guard_save", exc)
 
-    def _guard_refresh_age(self) -> None:
-        """Grow the pacer's session age from first_seen_day.
-
-        Called with _guard_lock held, before every gate check —
-        the pacer only takes its age at construction, so the
-        adapter refreshes it as days pass."""
-        today = int(time.time() // 86400)
-        self._pacer.session_age_days = max(
-            0, today - self._guard_first_seen_day)
-
     def _guard_refusal(self) -> str:
         """The guard's refusal for this send, or "" when it may go.
 
@@ -1079,10 +1037,10 @@ class WhatsAppAdapter(ChatAdapter):
         burst refusal reads TRANSIENT to send_retry ("slow down,
         try again") — the gateway retries with backoff and the
         message goes out seconds later, safe because the refusal
-        is pre-dispatch so no duplicate can exist. The daily cap
-        and the latched warning read TERMINAL ("disabled") — the
-        gateway fails once, loudly, instead of retrying a send
-        that must not happen today."""
+        is pre-dispatch so no duplicate can exist. The latched
+        warning reads TERMINAL ("disabled") — the gateway fails
+        once, loudly, instead of retrying a send that must not
+        happen. There is no daily cap to refuse on anymore."""
         if not self._warning_detector.may_send():
             return ("Baileys safety guard stopped all sends — a "
                     "WhatsApp warning was latched ("
@@ -1090,13 +1048,9 @@ class WhatsAppAdapter(ChatAdapter):
                        or "unknown warning")
                     + "); sending disabled until the owner clears "
                     "it (/pair guard clear)")
-        self._guard_refresh_age()
         ok, reason = self._pacer.may_send()
         if ok:
             return ""
-        if reason.startswith("daily cap"):
-            return ("Baileys safety guard held this send — "
-                    + reason + "; sending disabled until tomorrow")
         return ("Baileys safety guard held this send — "
                 + reason + "; slow down, try again shortly")
 
@@ -1124,7 +1078,7 @@ class WhatsAppAdapter(ChatAdapter):
 
         Every bridge error text is fed to the warning detector.
         A confirmed send — and an ambiguous one, which may well
-        be live — counts against the cap: under-counting real
+        be live — counts in the burst window: under-counting real
         sends is the unsafe direction. A refused (pre-dispatch)
         or cleanly failed send counts nothing."""
         if not isinstance(response, dict):
@@ -1140,7 +1094,7 @@ class WhatsAppAdapter(ChatAdapter):
     def _guard_flush_delay_s(self) -> float:
         """Human-like spacing for outbox replays (bulk path only).
 
-        Interactive sends get cap+burst only — an 8s sleep per
+        Interactive sends get the burst gate only — an 8s sleep per
         chunk would wreck live replies. The flush runs on a
         daemon thread, so a short sleep there is invisible.
         Returns 0 when idle, else the remaining human delay."""
@@ -1159,13 +1113,8 @@ class WhatsAppAdapter(ChatAdapter):
     def baileys_guard_state(self) -> dict[str, Any]:
         """The guard's live state, for /pair guard and the journal."""
         with self._guard_lock:
-            self._guard_refresh_age()
             det = self._warning_detector
             return {
-                "daily_cap": self._pacer.daily_cap(),
-                "sent_today": self._pacer.sent_today,
-                "session_age_days": self._pacer.session_age_days,
-                "age_assumed": self._guard_age_assumed,
                 "burst_max": BURST_MAX,
                 "burst_window_s": BURST_WINDOW_S,
                 "warning_stopped": det.stopped,
@@ -1174,7 +1123,7 @@ class WhatsAppAdapter(ChatAdapter):
             }
 
     def clear_baileys_warning(self) -> str:
-        """Owner-only: lift the latched warning stop (pacer counts
+        """Owner-only: lift the latched warning stop (burst window
         untouched). The latch is a safety stop, not a punishment —
         clearing it is the owner's call, and the clear is logged."""
         with self._guard_lock:

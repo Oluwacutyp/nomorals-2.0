@@ -104,7 +104,6 @@ def _split_ids(raw: Any) -> set[str]:
 def build_adapter(settings: Any, name: str, *, on_new_member: Any = None,
                   db: Any = None,
                   whatsapp_port: int | None = None,
-                  whatsapp_session_age_days: int | None = None,
                   telegram_session: str | None = None) -> ChatAdapter | None:
     """Build one adapter by name; None when unavailable (missing dependency,
     disabled, or bad credentials). Used both at boot and for hot starts.
@@ -118,14 +117,7 @@ def build_adapter(settings: Any, name: str, *, on_new_member: Any = None,
     ``telegram_session`` overrides the configured session file for
     the telegram adapter — the Telegram live-attach reconcile
     points the conversational adapter at the resolved account's
-    own session file rather than the static config session.
-
-    ``whatsapp_session_age_days`` seeds the Baileys safety guard's
-    warm-up age for the whatsapp adapter — the WhatsApp
-    live-attach reconcile passes the pairing record's age, so a
-    re-link of a long-running account is not treated as a
-    day-1 session. None leaves the adapter's no-evidence seed
-    (assumed warmed up, recorded)."""
+    own session file rather than the static config session."""
     name = name.strip().lower()
     chat = settings.chat
     if name == "local":
@@ -264,7 +256,6 @@ def build_adapter(settings: Any, name: str, *, on_new_member: Any = None,
                 outbox_dir=str(settings.resolve(
                     getattr(chat, "whatsapp_outbox_dir", "")
                     or "data/chat/outbox")),
-                session_age_days=whatsapp_session_age_days,
             )
         except Exception as exc:  # noqa: BLE001
             raise ValueError(f"whatsapp unavailable: {exc}") from exc

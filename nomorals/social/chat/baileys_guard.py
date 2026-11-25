@@ -1,12 +1,13 @@
-"""Baileys safety: pacing, warm-up, first-warning stop, encrypted backup.
+"""Baileys safety: pacing, first-warning stop, encrypted backup.
 
 A personal WhatsApp number over Baileys is a *borrowed* identity:
 WhatsApp bans numbers that behave like bulk senders, and a ban is
 usually permanent for that number. This module is the guard rail:
 
-* **Warm-up.** A fresh session starts at a low daily cap and ramps
-  (``WARMUP_SCHEDULE``: day 1 → 20 sends, then ×2/day up to the steady
-  cap). A brand-new session never cold-blasts.
+* **No daily cap.** There is no daily send limit and no warm-up
+  ramp (owner order 2026-11-25: the daily cap is gone). Volume is
+  not throttled by the day — the burst guard and the warning latch
+  below are the protection.
 * **Pacing.** ``BaileysPacer`` spaces sends with jitter so traffic looks
   human (never a machine-gun burst). ``never_cold_bulk``: the pacer
   refuses a burst (``>burst_max`` sends inside ``burst_window_s``).
@@ -41,8 +42,6 @@ from pathlib import Path
 from typing import Any, Callable
 
 __all__ = [
-    "WARMUP_SCHEDULE",
-    "STEADY_DAILY_CAP",
     "BaileysPacer",
     "WarningDetector",
     "is_warning",
@@ -54,10 +53,6 @@ __all__ = [
     "seal_whatsapp_sessions",
 ]
 
-#: Warm-up: day index (0-based) → max sends that day. Ramps ×2 to steady.
-WARMUP_SCHEDULE: tuple[int, ...] = (20, 40, 80, 160)
-#: Steady-state daily cap once warmed up.
-STEADY_DAILY_CAP = 300
 #: Burst guard: at most this many sends inside the window.
 BURST_MAX = 5
 BURST_WINDOW_S = 60.0
@@ -119,35 +114,22 @@ class WarningDetector:
 
 
 class BaileysPacer:
-    """Warm-up caps + human-like pacing + burst refusal for Baileys."""
+    """Human-like pacing + burst refusal for Baileys.
 
-    def __init__(self, *, session_age_days: int = 0,
-                 clock: Callable[[], float] | None = None,
+    No daily cap: the owner removed it (2026-11-25) — no daily
+    limit, no warm-up ramp. The pacer only refuses a machine-gun
+    burst and spaces sends with jitter; the first-warning latch
+    (``WarningDetector``) is the ban protection.
+    """
+
+    def __init__(self, *, clock: Callable[[], float] | None = None,
                  rng: random.Random | None = None) -> None:
-        self.session_age_days = max(0, int(session_age_days))
         self._clock = clock or time.time
         self._rng = rng or random.Random()
-        self._sent_today = 0
-        self._day = int(self._clock() // 86400)
         self._recent: list[float] = []
 
-    def daily_cap(self) -> int:
-        """Warm-up cap for this session age (ramps to steady)."""
-        if self.session_age_days < len(WARMUP_SCHEDULE):
-            return WARMUP_SCHEDULE[self.session_age_days]
-        return STEADY_DAILY_CAP
-
-    def _roll_day(self) -> None:
-        day = int(self._clock() // 86400)
-        if day != self._day:
-            self._day = day
-            self._sent_today = 0
-
     def may_send(self) -> tuple[bool, str]:
-        """``(ok, reason)`` — False when the daily cap or burst guard trips."""
-        self._roll_day()
-        if self._sent_today >= self.daily_cap():
-            return (False, f"daily cap reached ({self.daily_cap()} sends, warm-up day {self.session_age_days})")
+        """``(ok, reason)`` — False when the burst guard trips."""
         now = self._clock()
         self._recent = [t for t in self._recent if now - t < BURST_WINDOW_S]
         if len(self._recent) >= BURST_MAX:
@@ -160,11 +142,14 @@ class BaileysPacer:
         return max(2.0, base * jitter)
 
     def state_dict(self) -> dict:
-        """Serialisable pacer state (for the adapter's durable store)."""
+        """Serialisable pacer state (for the adapter's durable store).
+
+        Only the burst window survives. A legacy state file may
+        still carry ``session_age_days`` / ``sent_today`` / ``day``
+        — keys written by older builds. They are never written
+        again and are ignored on load, never re-imposed as a cap.
+        """
         return {
-            "session_age_days": self.session_age_days,
-            "sent_today": self._sent_today,
-            "day": self._day,
             "recent": list(self._recent[-BURST_MAX:]),
         }
 
@@ -174,17 +159,14 @@ class BaileysPacer:
 
         Missing or malformed fields fall back to a fresh pacer — a
         corrupt state file must never break the adapter's startup.
-        A stale day is left as-is: ``_roll_day`` resets the count
-        the first time the rebuilt pacer is asked.
+        Legacy daily fields (``session_age_days``, ``sent_today``,
+        ``day``) are accepted and IGNORED: they belonged to the
+        removed daily cap and must never limit a send again.
         """
         if not isinstance(state, dict):
             state = {}
-        pacer = cls(
-            session_age_days=int(state.get("session_age_days") or 0),
-            clock=clock, rng=rng)
+        pacer = cls(clock=clock, rng=rng)
         try:
-            pacer._sent_today = max(0, int(state.get("sent_today") or 0))
-            pacer._day = int(state.get("day") or pacer._day)
             recent = state.get("recent") or []
             pacer._recent = [float(t) for t in recent
                              if isinstance(t, (int, float))]
@@ -193,14 +175,7 @@ class BaileysPacer:
         return pacer
 
     def record_sent(self) -> None:
-        self._roll_day()
-        self._sent_today += 1
         self._recent.append(self._clock())
-
-    @property
-    def sent_today(self) -> int:
-        self._roll_day()
-        return self._sent_today
 
 
 def _fernet_from_password(password: str, salt: bytes):

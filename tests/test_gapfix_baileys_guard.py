@@ -40,34 +40,39 @@ class FakeBridge:
         self._thread.start()
 
     def _serve(self):
-        try:
-            conn, _ = self._srv.accept()
-        except OSError:
-            return
-        buf = b""
-        try:
-            with conn:
-                conn.settimeout(5)
-                while True:
-                    chunk = conn.recv(65536)
-                    if not chunk:
-                        return
-                    buf += chunk
-                    while b"\n" in buf:
-                        line, _, buf = buf.partition(b"\n")
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            obj = json.loads(line.decode("utf-8"))
-                        except json.JSONDecodeError:
-                            continue
-                        self.received.append(obj)
-                        resp = self._respond(obj)
-                        if resp is not None:
-                            conn.sendall((json.dumps(resp) + "\n").encode())
-        except OSError:
-            return
+        # Accept connections in a loop: a rebuilt adapter connects
+        # afresh (see test_guard_state_survives_rebuild), and the
+        # bridge must serve the second connection after the first
+        # one closes.
+        while True:
+            try:
+                conn, _ = self._srv.accept()
+            except OSError:
+                return
+            buf = b""
+            try:
+                with conn:
+                    conn.settimeout(5)
+                    while True:
+                        chunk = conn.recv(65536)
+                        if not chunk:
+                            break
+                        buf += chunk
+                        while b"\n" in buf:
+                            line, _, buf = buf.partition(b"\n")
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                obj = json.loads(line.decode("utf-8"))
+                            except json.JSONDecodeError:
+                                continue
+                            self.received.append(obj)
+                            resp = self._respond(obj)
+                            if resp is not None:
+                                conn.sendall((json.dumps(resp) + "\n").encode())
+            except OSError:
+                continue
 
     def _respond(self, obj):
         handler = self.script.get(obj.get("cmd"))
@@ -112,8 +117,7 @@ class GuardBurstTests(unittest.TestCase):
                 adapter, _ = make_adapter(bridge, tmp)
                 clock = [time.time()]
                 adapter._pacer = BaileysPacer(
-                    session_age_days=10, clock=lambda: clock[0])
-                adapter._guard_first_seen_day = int(clock[0] // 86400) - 10
+                    clock=lambda: clock[0])
                 for i in range(5):
                     result = adapter.send(chat(), f"hello {i}")
                     self.assertTrue(result.ok, result.error)
@@ -133,32 +137,33 @@ class GuardBurstTests(unittest.TestCase):
         finally:
             bridge.close()
 
-    def test_daily_cap_refuses_at_warmup_cap(self):
+    def test_no_daily_cap_sends_past_300_in_one_day(self):
+        # The daily cap is gone (owner order 2026-11-25): 350 sends
+        # inside one day all go out. The old test pinned the
+        # day-1 warm-up cap refusing the 21st send; that contract
+        # is dead — the burst window is cleared between groups so
+        # only the (removed) daily cap could have refused.
         bridge = FakeBridge({"send": {"ok": True}})
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 adapter, _ = make_adapter(bridge, tmp)
                 clock = [time.time()]
                 adapter._pacer = BaileysPacer(
-                    session_age_days=0, clock=lambda: clock[0])
-                adapter._guard_first_seen_day = int(clock[0] // 86400)
-                for i in range(20):
+                    clock=lambda: clock[0])
+                for i in range(350):
                     result = adapter.send(chat(), f"msg {i}")
                     self.assertTrue(result.ok, result.error)
                     if (i + 1) % 5 == 0:
                         clock[0] += 61.0  # clear the burst window
-                refused = adapter.send(chat(), "msg 20")
-                self.assertFalse(refused.ok)
-                self.assertIn("daily cap", refused.error)
-                self.assertIn("disabled until tomorrow", refused.error)
                 sends = [r for r in bridge.received
                          if r.get("cmd") == "send"]
-                self.assertEqual(len(sends), 20)
+                self.assertEqual(len(sends), 350)
         finally:
             bridge.close()
 
     def test_non_message_commands_are_not_counted(self):
-        bridge = FakeBridge({"history": {"ok": True, "messages": []},
+        bridge = FakeBridge({"send": {"ok": True},
+                             "history": {"ok": True, "messages": []},
                              "group_participants": {"ok": True,
                                                     "participants": []}})
         try:
@@ -169,8 +174,16 @@ class GuardBurstTests(unittest.TestCase):
                                    "limit": 5}, timeout=5)
                 adapter._send_cmd({"cmd": "group_participants",
                                    "chat": "12345-678@g.us"}, timeout=5)
+                # Non-message commands leave the burst window empty
+                # (a full burst of 5 sends still goes out) and the
+                # guard state carries no daily-cap keys at all.
                 state = adapter.baileys_guard_state()
-                self.assertEqual(state["sent_today"], 0)
+                for key in ("daily_cap", "sent_today",
+                            "session_age_days", "age_assumed"):
+                    self.assertNotIn(key, state)
+                for i in range(5):
+                    result = adapter.send(chat(), f"hello {i}")
+                    self.assertTrue(result.ok, result.error)
         finally:
             bridge.close()
 
@@ -250,27 +263,22 @@ class GuardWarningTests(unittest.TestCase):
 
 
 class GuardStateTests(unittest.TestCase):
-    def test_no_state_file_seeds_warmed_up(self):
+    def test_no_state_file_has_no_daily_cap(self):
+        # The daily cap is gone (owner order 2026-11-25): a fresh
+        # adapter reports no daily-cap keys at all — the old test
+        # pinned daily_cap == 300 on a warmed-up seed, which no
+        # longer exists as a concept.
         bridge = FakeBridge({"send": {"ok": True}})
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 adapter, _ = make_adapter(bridge, tmp)
                 state = adapter.baileys_guard_state()
-                self.assertEqual(state["daily_cap"], 300)
-                self.assertTrue(state["age_assumed"])
-        finally:
-            bridge.close()
-
-    def test_supplied_age_seeds_warmup(self):
-        bridge = FakeBridge({"send": {"ok": True}})
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                adapter, _ = make_adapter(
-                    bridge, tmp, session_age_days=0)
-                state = adapter.baileys_guard_state()
-                self.assertEqual(state["daily_cap"], 20)
-                self.assertEqual(state["session_age_days"], 0)
-                self.assertFalse(state["age_assumed"])
+                for key in ("daily_cap", "sent_today",
+                            "session_age_days", "age_assumed"):
+                    self.assertNotIn(key, state)
+                self.assertEqual(state["burst_max"], 5)
+                self.assertEqual(state["burst_window_s"], 60.0)
+                self.assertFalse(state["warning_stopped"])
         finally:
             bridge.close()
 
@@ -284,10 +292,23 @@ class GuardStateTests(unittest.TestCase):
                 store = Path(tmp) / "outbox" / "whatsapp_baileys_guard.json"
                 self.assertTrue(store.is_file())
                 saved = json.loads(store.read_text(encoding="utf-8"))
-                self.assertEqual(saved["pacer"]["sent_today"], 2)
+                # The durable pacer state carries no daily fields
+                # anymore — only the burst window survives.
+                for key in ("session_age_days", "sent_today", "day"):
+                    self.assertNotIn(key, saved["pacer"])
+                self.assertIn("recent", saved["pacer"])
+                # The rebuilt adapter inherits the burst window: 3
+                # more rapid sends go out, the 6th is refused.
+                # Close the first adapter's socket so the bridge
+                # serves the rebuild's fresh connection.
+                adapter._sock.close()
                 adapter2, _ = make_adapter(bridge, tmp)
-                state = adapter2.baileys_guard_state()
-                self.assertEqual(state["sent_today"], 2)
+                for i in range(3):
+                    result = adapter2.send(chat(), f"again {i}")
+                    self.assertTrue(result.ok, result.error)
+                refused = adapter2.send(chat(), "again 3")
+                self.assertFalse(refused.ok)
+                self.assertIn("burst guard", refused.error)
         finally:
             bridge.close()
 

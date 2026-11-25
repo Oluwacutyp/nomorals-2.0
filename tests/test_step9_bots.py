@@ -252,11 +252,20 @@ class TestWhatsAppTransportCost(unittest.TestCase):
 
 
 class TestBaileysGuard(unittest.TestCase):
-    def test_warmup_cap_and_burst_guard(self):
+    def test_no_daily_cap_and_burst_guard(self):
+        # The daily cap is gone (owner order 2026-11-25): the old
+        # test pinned daily_cap() == 20 on a day-1 session. Now
+        # 25 sends in one (fake) day all go out — the burst window
+        # cleared between groups — and only a rapid burst refuses.
         from nomorals.social.chat.baileys_guard import BaileysPacer
         clock = [0.0]
-        pacer = BaileysPacer(session_age_days=0, clock=lambda: clock[0])
-        self.assertEqual(pacer.daily_cap(), 20)
+        pacer = BaileysPacer(clock=lambda: clock[0])
+        for _ in range(25):
+            ok, _ = pacer.may_send()
+            self.assertTrue(ok)
+            pacer.record_sent()
+            clock[0] += 13.0  # stay inside the day, clear the burst
+        clock[0] += 61.0  # clear the window before the rapid group
         for _ in range(5):
             ok, _ = pacer.may_send()
             self.assertTrue(ok)
