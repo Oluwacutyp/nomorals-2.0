@@ -159,18 +159,33 @@ def _xlsx_sheet_xml(grid: list[list[str]], shared: list[str],
         + f"<sheetData>{''.join(rows_xml)}</sheetData></worksheet>")
 
 
-def to_xlsx(doc: Document) -> bytes:
+def to_xlsx(doc: Document, *, brand_policy: str = "",
+            brand_text: str = "") -> bytes:
     """Render a Document as .xlsx bytes (stdlib ``zipfile`` only).
 
     One worksheet per table; when the document also carries prose, a
     leading ``Document`` sheet holds the title and one row per section
-    (heading, text) so no content is dropped.  Raises
-    :class:`DocumentError` (``kind="empty"``) for a document with
-    neither sections nor tables.
+    (heading, text) so no content is dropped.  A document export is
+    public-bound: the designed mark rides the workbook as one
+    trailing row on the first sheet (the prose sheet when the
+    document has prose, else the first table sheet) — visible, never
+    interleaved with data, and no new sheet, because OOXML has no
+    page-furniture layer to hide a mark in.  Resolved from the
+    manifest's brand policy exactly as ``to_pdf`` resolves its
+    watermark; an explicit ``brand_policy`` wins over the manifest,
+    ``off`` writes no mark at all, ``custom`` writes ``brand_text``.
+    Raises :class:`DocumentError` (``kind="empty"``) for a document
+    with neither sections nor tables.
     """
     if not doc.sections and not doc.tables:
         raise DocumentError("document has no content to render as xlsx",
                             kind="empty")
+    from ..core.branding import resolve_brand_mark
+    from .manifest import manifest_from_document
+
+    mark = resolve_brand_mark(
+        brand_policy or manifest_from_document(doc).presentation.brand_policy,
+        brand_text)
     sheets: list[tuple[str, list[list[str]]]] = []
     used_names: set[str] = set()
     if doc.sections:
@@ -186,6 +201,8 @@ def to_xlsx(doc: Document) -> bytes:
             + [list(row) for row in table.rows]
         name = _sheet_name(table.name, used_names, f"Sheet {i + 1}")
         sheets.append((name, grid))
+    if mark is not None:
+        sheets[0][1].append([mark.text])
 
     # Shared strings: every string cell, in first-seen order.
     shared: list[str] = []
@@ -324,6 +341,43 @@ def _tx_box(shape_id: int, name: str, *, x: int, y: int, cx: int, cy: int,
         f"{''.join(paras)}</p:txBody></p:sp>")
 
 
+#: The designed mark's geometry, shared with the PDF watermark
+#: (core.pdf) and the HTML edition layer (core.edition): a −28°
+#: diagonal at 15% alpha — the same text, the same angle, the same
+#: opacity the PDF carries.  Rotation is DrawingML 60000ths of a
+#: degree; alpha is thousandths of a percent (15000 = 15%).
+_WM_ROT = -1680000
+_WM_ALPHA = 15000
+_WM_SIZE_PT = 32
+
+
+def _watermark_shape(shape_id: int, text: str) -> str:
+    """One translucent diagonal brand textbox — the slide analogue
+    of the PDF watermark tile.
+
+    Drawn FIRST in a slide's shape tree so the slide's content
+    paints over it, exactly as the PDF draws its mark under the
+    body text.  The text is real text (the slide reader still
+    recovers it), never a picture."""
+    return (
+        f"<p:sp><p:nvSpPr><p:cNvPr id=\"{shape_id}\" name=\"Brand\"/>"
+        "<p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr>"
+        f"<p:spPr><a:xfrm rot=\"{_WM_ROT}\">"
+        f"<a:off x=\"914400\" y=\"2743200\"/>"
+        f"<a:ext cx=\"{_SLIDE_W - 1828800}\" cy=\"1371600\"/></a:xfrm>"
+        "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></p:spPr>"
+        "<p:txBody><a:bodyPr wrap=\"none\" anchor=\"ctr\"/>"
+        "<a:lstStyle/>"
+        f"<a:p><a:pPr algn=\"ctr\"><a:defRPr sz=\"{_WM_SIZE_PT * 100}\"/>"
+        "</a:pPr>"
+        f"<a:r><a:rPr lang=\"en-US\" sz=\"{_WM_SIZE_PT * 100}\">"
+        "<a:solidFill><a:srgbClr val=\"808080\">"
+        f"<a:alpha val=\"{_WM_ALPHA}\"/></a:srgbClr></a:solidFill>"
+        "</a:rPr>"
+        f"<a:t>{_esc(text)}</a:t></a:r></a:p>"
+        "</p:txBody></p:sp>")
+
+
 def _slide_xml(shapes: list[str]) -> str:
     return (
         _XML_DECL
@@ -424,23 +478,41 @@ _PPTX_THEME = (
     + "</a:themeElements></a:theme>")
 
 
-def to_pptx(doc: Document) -> bytes:
+def to_pptx(doc: Document, *, brand_policy: str = "",
+            brand_text: str = "") -> bytes:
     """Render a Document as .pptx bytes (stdlib ``zipfile`` only).
 
     Title slide (when a title exists), one slide per section, one
-    slide per table.  Raises :class:`DocumentError`
-    (``kind="empty"``) for a document with no title, sections, or
-    tables.
+    slide per table.  A document export is public-bound: the
+    designed mark rides EVERY slide as one translucent diagonal
+    brand textbox drawn behind the content (see
+    :func:`_watermark_shape` — same text, angle and opacity as the
+    PDF watermark), resolved from the manifest's brand policy
+    exactly as ``to_pdf`` resolves its watermark; an explicit
+    ``brand_policy`` wins over the manifest, ``off`` writes no mark
+    at all, ``custom`` writes ``brand_text``.  Raises
+    :class:`DocumentError` (``kind="empty"``) for a document with
+    no title, sections, or tables.
     """
     if not doc.title and not doc.sections and not doc.tables:
         raise DocumentError("document has no content to render as pptx",
                             kind="empty")
+    from ..core.branding import resolve_brand_mark
+    from .manifest import manifest_from_document
+
+    mark = resolve_brand_mark(
+        brand_policy or manifest_from_document(doc).presentation.brand_policy,
+        brand_text)
+    # one mark shape per slide, drawn first (behind content); id 4
+    # is free on every slide (1 is the group, 2 the title, 3 the
+    # body/table).
+    wm = [_watermark_shape(4, mark.text)] if mark is not None else []
     slides: list[str] = []
     if doc.title:
         paras = [(doc.title, 40, True)]
         if doc.author:
             paras.append((f"Author: {doc.author}", 20, False))
-        slides.append(_slide_xml([_tx_box(
+        slides.append(_slide_xml(wm + [_tx_box(
             2, "Title", x=457200, y=2743200, cx=_SLIDE_W - 914400,
             cy=1371600, paragraphs=paras)]))
     for section in doc.sections:
@@ -455,7 +527,7 @@ def to_pptx(doc: Document) -> bytes:
                 3, "Body", x=457200, y=1371600, cx=_SLIDE_W - 914400,
                 cy=_SLIDE_H - 1828800,
                 paragraphs=[(ln, 18, False) for ln in lines]))
-        slides.append(_slide_xml(shapes))
+        slides.append(_slide_xml(wm + shapes))
     for table in doc.tables:
         shape = _table_shape(3, table)
         if not shape:
@@ -464,7 +536,7 @@ def to_pptx(doc: Document) -> bytes:
             2, "Title", x=457200, y=228600, cx=_SLIDE_W - 914400,
             cy=914400,
             paragraphs=[(table.name or "Table", 32, True)]), shape]
-        slides.append(_slide_xml(shapes))
+        slides.append(_slide_xml(wm + shapes))
     if not slides:
         raise DocumentError("document has no content to render as pptx",
                             kind="empty")

@@ -34,7 +34,7 @@ Shortfalls, named: markdown loses the two table names (its table block has no ca
 
 Embedded-PDF detail: font `/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf` carries 6253 glyphs; the subset embedded in the corpus PDF carries 75 — subsetting keeps the file small while the text stays exact. (Byte sizes are not printed: the page footer carries a timestamp, so a PDF's exact length is time-dependent at the ±1-byte level and would make this doc lie about being stale.)
 
-XLSX typed-cell census (independent reader, openpyxl data_type): b=3, d=3, n=7, s=34 — `n` numeric, `d` date, `b` boolean, `s` string. Typed writing is real: values a spreadsheet can type are typed, and values that would lose information typed (leading-zero codes, thousands separators) stay strings.
+XLSX typed-cell census (independent reader, openpyxl data_type): b=3, d=3, n=7, s=35 — `n` numeric, `d` date, `b` boolean, `s` string. Typed writing is real: values a spreadsheet can type are typed, and values that would lose information typed (leading-zero codes, thousands separators) stay strings.
 
 The WinAnsi PDF writer cannot represent 11 of the fixture's non-Latin-1 characters (Α ή α θ ν М а в к о с) — they become `?` there; the embedded-font writer carries all of them. That gap is the reason the embedded path exists.
 

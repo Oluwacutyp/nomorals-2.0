@@ -153,11 +153,11 @@ def convert_document(doc: Document, target: str, **kw: Any) -> Any:
     if t == "epub":
         return _to_epub(doc, **kw)
     if t == "docx":
-        return _to_docx(doc)
+        return _to_docx(doc, **kw)
     if t == "xlsx":
-        return _to_xlsx(doc)
+        return _to_xlsx(doc, **kw)
     if t == "pptx":
-        return _to_pptx(doc)
+        return _to_pptx(doc, **kw)
     raise ValueError(
         f"unknown convert target {target!r}; expected one of "
         f"{list(CONVERT_TARGETS)}")

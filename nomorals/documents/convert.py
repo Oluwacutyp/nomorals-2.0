@@ -379,10 +379,20 @@ def to_json(doc: Document, *, indent: int = 2) -> str:
     return doc.to_json(indent=indent) + "\n"
 
 
-def to_docx(doc: Document) -> bytes:
-    """Render a Document as .docx bytes (optional ``python-docx``)."""
+def to_docx(doc: Document, *, brand_policy: str = "",
+            brand_text: str = "") -> bytes:
+    """Render a Document as .docx bytes (optional ``python-docx``).
+
+    A document export is public-bound: the designed mark closes the
+    document as a final brand paragraph (italic, small, grey —
+    furniture, not content), resolved from the manifest's brand
+    policy exactly as :func:`to_pdf` resolves its watermark; an
+    explicit ``brand_policy`` wins over the manifest, ``off``
+    writes no mark at all, ``custom`` writes ``brand_text``.
+    """
     try:
         from docx import Document as DocxDocument
+        from docx.shared import Pt, RGBColor
     except ImportError as exc:
         raise DocumentError(
             "rendering .docx requires the optional 'python-docx' package "
@@ -391,6 +401,12 @@ def to_docx(doc: Document) -> bytes:
     if not doc.title and not doc.sections and not doc.tables:
         raise DocumentError("document has no content to render as docx",
                         kind="empty")
+    from ..core.branding import resolve_brand_mark
+    from .manifest import manifest_from_document
+
+    mark = resolve_brand_mark(
+        brand_policy or manifest_from_document(doc).presentation.brand_policy,
+        brand_text)
     oxml = DocxDocument()
     if doc.title:
         oxml.core_properties.title = doc.title
@@ -423,6 +439,15 @@ def to_docx(doc: Document) -> bytes:
         for i, row in enumerate(grid):
             for j in range(width):
                 oxml_table.cell(i, j).text = row[j] if j < len(row) else ""
+    if mark is not None:
+        # the designed mark, as the document's closing line — a
+        # reader sees it on the page; the round-trip reader takes
+        # it as the last section's trailing line, never as a heading.
+        brand_para = oxml.add_paragraph()
+        run = brand_para.add_run(mark.text)
+        run.italic = True
+        run.font.size = Pt(9)
+        run.font.color.rgb = RGBColor(0x80, 0x80, 0x80)
     buffer = io.BytesIO()
     oxml.save(buffer)
     return buffer.getvalue()
@@ -466,16 +491,36 @@ def _xhtml_page(title: str, body_parts: list[str]) -> bytes:
     return ET.tostring(doc, encoding="utf-8", xml_declaration=True)
 
 
-def to_epub(doc: Document, *, epub_title: str = "") -> bytes:
+def to_epub(doc: Document, *, epub_title: str = "",
+            brand_policy: str = "", brand_text: str = "") -> bytes:
     """Render a Document as EPUB 3 bytes (stdlib ``zipfile`` only).
 
-    One chapter per section, tables appended after the prose.
+    One chapter per section, tables appended after the prose.  A
+    document export is public-bound, so the designed mark rides a
+    title page first in the spine — the document's title over the
+    brand line, the same shape the books EPUB carries (its
+    ``front_note``) — resolved from the manifest's brand policy
+    exactly as :func:`to_pdf` resolves its watermark; an explicit
+    ``brand_policy`` wins over the manifest, ``off`` writes no
+    title page at all, ``custom`` writes ``brand_text``.
     """
     if not doc.title and not doc.sections and not doc.tables:
         raise DocumentError("document has no content to render as epub",
                         kind="empty")
+    from ..core.branding import resolve_brand_mark
+    from .manifest import manifest_from_document
+
+    manifest = manifest_from_document(doc)
+    mark = resolve_brand_mark(
+        brand_policy or manifest.presentation.brand_policy, brand_text)
     title = epub_title or doc.title or "Document"
     chapters: list[tuple[str, bytes]] = []
+    if mark is not None:
+        # the designed mark, on its own page — never woven into a
+        # chapter's bytes, so no content is altered to carry it.
+        chapters.append(("title.xhtml",
+                         _xhtml_page(title, [("h", (1, title)),
+                                             ("p", mark.text)])))
     for i, section in enumerate(doc.sections):
         parts: list[tuple[str, object]] = []
         if section.heading:
@@ -500,10 +545,8 @@ def to_epub(doc: Document, *, epub_title: str = "") -> bytes:
     # the derivative's truth (Doc 16 P5): the OPF records the
     # manifest revision_ref this EPUB was built from plus the
     # declared completeness, so a saved copy is provably tied to one
-    # revision of the document.
-    from .manifest import manifest_from_document
-
-    manifest = manifest_from_document(doc)
+    # revision of the document (the manifest was already derived
+    # above, for the brand resolution).
     comp = manifest.completeness
     comp_total = (comp.declared_total if comp.declared_total is not None
                   else comp.present_count)
