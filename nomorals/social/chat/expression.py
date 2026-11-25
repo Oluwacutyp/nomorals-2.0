@@ -91,7 +91,8 @@ __all__ = [
     "WaifuPicsProvider", "NekosBestProvider",
     "REACTION_GIFS", "REACTION_GIF_COMMANDS",
     "MEDIA_DELIVERED_KINDS", "reaction_caption",
-    "MOMENT_TAGS", "DRY_MOMENTS", "ExpressionService",
+    "MOMENT_TAGS", "ADMIN_MOMENTS", "DRY_MOMENTS",
+    "ExpressionService",
     "REACTION_SETS", "reaction_allowed", "pick_reaction",
     "classify_notice_moment",
 ]
@@ -1151,12 +1152,28 @@ class ExpressionLibrary:
             if score or not (wanted_tags or wanted_moods):
                 scored.append((score, item))
         if not scored:
-            # every candidate was in the room's recent window:
-            # the no-repeat rule yields to having a voice at all
+            # No usable candidate.  Two shapes, one rule: when
+            # some item MATCHES the wanted tags/moods but every
+            # match is in the room's recent window, the no-repeat
+            # rule yields to the best MATCH — never to an
+            # unrelated item; when NOTHING matches at all, this
+            # is a miss, and the caller falls through to its
+            # providers / studio floor.  Returning any item here
+            # is how a mute in an anime-fed library wore a hug
+            # GIF (audit N2).
+            matches: list[tuple[int, dict[str, Any]]] = []
             for item in self.data["items"]:
                 if kind_set and item.get("kind") not in kind_set:
                     continue
-                scored.append((0, item))
+                score = 2 * len(wanted_tags
+                                & set(item.get("tags") or [])) \
+                    + len(wanted_moods
+                          & set(item.get("moods") or []))
+                if score:
+                    matches.append((score, item))
+            if not matches:
+                return None
+            scored = matches
         if not scored:
             return None
         best = max(score for score, _ in scored)
@@ -2032,17 +2049,61 @@ MOMENT_TAGS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
                  ("celebrate",)),
     "estate_milestone": (("house", "keys", "celebration", "estate"),
                          ("celebrate",)),
-    "ban": (("ban", "hammer", "goodbye", "justice"),
-            ("strict",)),
+    "ban": (("ban", "hammer", "justice"),
+            ("ban",)),
     "mute": (("mute", "quiet", "silence", "shush"),
-             ("strict",)),
-    "kick": (("kick", "boot", "goodbye", "out"),
-             ("strict",)),
+             ("mute",)),
+    "kick": (("kick", "boot", "out"),
+             ("kick",)),
     "warn": (("warn", "warning", "careful", "watch out"),
-             ("strict",)),
+             ("warn",)),
+    # The rest of the admin family (audit N2): every enforcement
+    # act has its own moment, so its own visual.  Each moment's
+    # mood IS its name — the old shared ("strict",) mood made
+    # mute/kick/warn/ban render one identical happy face.  The
+    # tag sets are DISJOINT across admin moments on purpose:
+    # pick() scores tag overlap, so a shared word ("goodbye"
+    # on ban+kick, "free" on unmute+unban, "clean" on
+    # reactwipe+purge) would let one act wear its sibling's
+    # visual.  The moment's own name is always its first tag,
+    # so /gif <moment> still finds its visuals.
+    "unmute": (("unmute", "speak", "voice"),
+               ("unmute",)),
+    "unban": (("unban", "return", "welcome back"),
+              ("unban",)),
+    "restrict": (("restrict", "locked", "limited"),
+                 ("restrict",)),
+    "reactwipe": (("reactwipe", "wipe", "reactions", "clean"),
+                  ("reactwipe",)),
+    "rmdeleted": (("rmdeleted", "deleted"),
+                  ("rmdeleted",)),
+    "rminactive": (("rminactive", "inactive"),
+                   ("rminactive",)),
+    "purge": (("purge", "delete", "gone"),
+              ("purge",)),
+    "slowmode": (("slowmode", "slow", "calm"),
+                 ("slowmode",)),
+    "pin": (("pin", "pinned", "bookmark"),
+            ("pin",)),
+    "unpin": (("unpin", "unpinned"),
+              ("unpin",)),
     "celebration": (("celebration", "party", "win"),
                     ("celebrate",)),
 }
+
+#: Enforcement moments (audit N2, owner 2026-11-11): an admin
+#: act's own visual.  Two rules ride this set in ``_fire``:
+#: they bypass the shared celebration cooldown (enforcement is
+#: not ambience — a mute must not queue behind a /gif), and
+#: they pick caption-capable kinds only (animation/gif/image/
+#: video — never a sticker, whose caption the Telegram Bot API
+#: drops, which would lose the reply's words).
+ADMIN_MOMENTS: frozenset[str] = frozenset({
+    "mute", "unmute", "ban", "unban", "kick", "warn", "restrict",
+    "reactwipe", "rmdeleted", "rminactive", "purge", "slowmode",
+    "pin", "unpin"})
+ADMIN_MEDIA_KINDS: frozenset[str] = frozenset(
+    {"animation", "gif", "image", "video"})
 
 #: Moments that NEVER carry media, at any setting.  EMPTY —
 #: and the emptiness is a recorded decision, not an omission.
@@ -2201,11 +2262,25 @@ class ExpressionService:
             from . import emoji_studio
             from .media_convert import image_to_sticker
 
-            mood = (moods[0] if moods else "") or moment
+            # The moment's OWN design when the studio has one
+            # (every admin moment does) — the mood tag is the
+            # fallback, never the first pick: the old order took
+            # the shared "strict" mood for mute/kick/warn/ban and
+            # rendered one happy face for all four (audit N2).
+            default = emoji_studio.mood_design("")
+            if emoji_studio.mood_design(moment) != default:
+                mood = moment
+            else:
+                mood = (moods[0] if moods else "") or moment
             spec = emoji_studio.mood_design(mood)
-            if moment in ("celebration", "quest_complete",
-                          "jackpot", "season_podium", "win",
-                          "welcome", "party"):
+            if moment in ADMIN_MOMENTS or moment in (
+                    "celebration", "quest_complete",
+                    "jackpot", "season_podium", "win",
+                    "welcome", "party"):
+                # An admin moment renders an ANIMATION, not a
+                # sticker: the reply's words ride as its caption,
+                # and the Bot API drops a sticker's caption —
+                # a sticker here would lose the verdict.
                 path = emoji_studio.mood_animation(
                     mood, self.media_dir, name=f"moment_{moment}")
                 kind = "animation"
@@ -2290,12 +2365,15 @@ class ExpressionService:
             return {"sent": False, "moment": moment, "reason": reason}
         tags, moods = MOMENT_TAGS.get(
             moment, MOMENT_TAGS["celebration"])
-        if room and self.clock() - self.library.last_sent(room) \
-                < self.cooldown_s:
+        is_admin = moment in ADMIN_MOMENTS
+        if (not is_admin and room
+                and self.clock() - self.library.last_sent(room)
+                < self.cooldown_s):
             return {"sent": False, "moment": moment,
                     "reason": "cooldown — she just expressed here"}
-        item = self.library.pick(tags, moods, room=room,
-                                 rng=self.rng)
+        item = self.library.pick(
+            tags, moods, room=room, rng=self.rng,
+            kinds=ADMIN_MEDIA_KINDS if is_admin else None)
         if item is None:
             item = self._fetch_from_providers(tags)
         if item is None:
@@ -2330,6 +2408,7 @@ class ExpressionService:
                 str(item.get("id")), platform, captured)
         return {"sent": True, "moment": moment,
                 "item_id": item.get("id"),
+                "kind": str(getattr(ref, "kind", "") or ""),
                 "via": "file_id" if file_id else "upload"}
 
     def _fetch_from_pool(self, words: tuple[str, ...]

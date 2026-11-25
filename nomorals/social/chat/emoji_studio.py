@@ -255,7 +255,7 @@ def _draw_shape(draw, spec: dict[str, Any], box: tuple,
             from PIL import ImageColor
 
             mask = Image.new("L", img.size, 0)
-            md = _Draw(mask)
+            md = _Draw.Draw(mask)
             md.ellipse([cx - s, cy - s, cx + s, cy + s], fill=255)
             md.ellipse([cx - s * 0.25, cy - s * 1.05,
                         cx + s * 1.35, cy + s * 0.55], fill=0)
@@ -304,6 +304,26 @@ def _draw_shape(draw, spec: dict[str, Any], box: tuple,
                       (cx + s * 0.52, cy - s * 0.18),
                       (cx + s * 0.02, cy - s * 0.18)], fill=main,
                      outline=dark)
+    elif shape == "boot":
+        # A kicked-out boot, side profile: shaft, foot, sole.
+        draw.polygon([(cx - s * 0.35, cy - s * 1.0),
+                      (cx + s * 0.15, cy - s * 1.0),
+                      (cx + s * 0.15, cy + s * 0.15),
+                      (cx + s * 0.95, cy + s * 0.45),
+                      (cx + s * 0.95, cy + s * 0.65),
+                      (cx - s * 0.55, cy + s * 0.65),
+                      (cx - s * 0.55, cy - s * 0.35)],
+                     fill=main, outline=dark)
+    elif shape == "warn":
+        # A warning triangle with its exclamation mark.
+        draw.polygon([(cx, cy - s * 1.0),
+                      (cx + s * 0.95, cy + s * 0.65),
+                      (cx - s * 0.95, cy + s * 0.65)],
+                     fill=main, outline=dark)
+        draw.rectangle([cx - s * 0.09, cy - s * 0.45,
+                        cx + s * 0.09, cy + s * 0.15], fill=dark)
+        draw.ellipse([cx - s * 0.11, cy + s * 0.28,
+                      cx + s * 0.11, cy + s * 0.50], fill=dark)
     elif shape == "disc":
         draw.ellipse([cx - s * 0.95, cy - s * 0.95,
                       cx + s * 0.95, cy + s * 0.95], fill=main)
@@ -421,6 +441,30 @@ def _draw_face_features(draw, spec, cx, cy, s, palette,  # type: ignore[no-untyp
                   cx + s * 0.30, cy + s * 0.5],
                  start=20, end=160, fill=ink,
                  width=max(3, int(s * 0.07)))
+    elif face == "shush":
+        # Muted: dot eyes, a straight mouth, one finger held up
+        # over it — the mute visual, never a smile.
+        for dx in (-ex, ex):
+            draw.ellipse([cx + dx - r, cy - ey - r,
+                          cx + dx + r, cy - ey + r], fill=ink)
+        draw.line([cx - s * 0.30, cy + s * 0.34,
+                   cx + s * 0.30, cy + s * 0.34], fill=ink,
+                  width=max(3, int(s * 0.07)))
+        draw.line([cx, cy - s * 0.42, cx, cy + s * 0.22],
+                  fill=ink, width=max(3, int(s * 0.07)))
+    elif face == "stern":
+        # Stern: brows angled down toward the nose, a straight
+        # mouth — the strict visual for enforcement moments.
+        for dx in (-ex, ex):
+            draw.ellipse([cx + dx - r, cy - ey - r,
+                          cx + dx + r, cy - ey + r], fill=ink)
+            sign = -1 if dx < 0 else 1
+            draw.line([cx + dx - sign * r * 1.7, cy - ey - r * 2.0,
+                       cx + dx + sign * r * 1.2, cy - ey - r * 0.6],
+                      fill=ink, width=max(3, int(s * 0.07)))
+        draw.line([cx - s * 0.30, cy + s * 0.34,
+                   cx + s * 0.30, cy + s * 0.34], fill=ink,
+                  width=max(3, int(s * 0.07)))
     else:  # happy + default
         for dx in (-ex, ex):
             draw.ellipse([cx + dx - r, cy - ey - r,
@@ -510,6 +554,26 @@ _MOODS: dict[str, dict[str, Any]] = {
                 "sparkles": True},
     "quest": {"shape": "rocket", "palette": "purple"},
     "ban": {"shape": "bolt", "palette": "red"},
+    # Admin moments (audit N2, owner 2026-11-11): one design per
+    # enforcement act, so a mute never again wears a ban's — or a
+    # celebration's — picture.  Each entry differs from every
+    # other in shape, face or palette, so the studio renders a
+    # different file per moment.
+    "mute": {"shape": "face", "face": "shush", "palette": "night"},
+    "strict": {"shape": "face", "face": "stern", "palette": "red"},
+    "kick": {"shape": "boot", "palette": "orange"},
+    "warn": {"shape": "warn", "palette": "gold"},
+    "unmute": {"shape": "face", "face": "happy", "palette": "green"},
+    "unban": {"shape": "heart", "palette": "teal"},
+    "restrict": {"shape": "bolt", "palette": "blue"},
+    "reactwipe": {"shape": "drop", "palette": "blue"},
+    "rmdeleted": {"shape": "moon", "palette": "mono"},
+    "rminactive": {"shape": "face", "face": "sleepy",
+                   "palette": "blue"},
+    "purge": {"shape": "flame", "palette": "red"},
+    "slowmode": {"shape": "drop", "palette": "teal"},
+    "pin": {"shape": "disc", "palette": "blue"},
+    "unpin": {"shape": "disc", "palette": "mono"},
     "hug": {"shape": "heart", "palette": "pink"},
     "love": {"shape": "heart", "palette": "red"},
     "laugh": {"shape": "face", "face": "laugh", "palette": "gold"},

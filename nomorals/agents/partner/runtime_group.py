@@ -13049,7 +13049,15 @@ class RuntimeGroupMixin:
             lines.append(f"— {finding['label']} skipped: {why}")
         lines.append("kicked, not banned — and every outcome "
                      "is journaled in /glog.")
-        return "\n".join(lines)
+        text = "\n".join(lines)
+        if removed:
+            # An act landed: it carries its visual, captioned.
+            # A scan that removed nobody is a report, not an
+            # act — text only.
+            moment = ("rmdeleted" if which == "deleted"
+                      else "rminactive")
+            return self._admin_reply(message, moment, text)
+        return text
 
     #: How often one group's automatic deleted-account pass may
     #: run: a full member enumeration is an upkeep cost, never a
@@ -13251,6 +13259,31 @@ class RuntimeGroupMixin:
                      "(it needs the manage-tags right).")
         return text
 
+    def _admin_reply(self, message, moment: str,
+                     text: str) -> str:  # type: ignore[no-untyped-def]
+        """One admin act's reply WITH its media (audit N2):
+        the moment's captioned animation IS the reply (the
+        handler returns ""), or the text returns whole with the
+        missing visual named where the media cannot land.  A
+        host with no expression mixin (bare group rigs) gets
+        the plain text — the act itself never depends on the
+        theatre."""
+        theatre = getattr(self, "_admin_theatre", None)
+        if theatre is not None:
+            return theatre(message, moment, text)
+        # No expression mixin on this host — but a bare rig (or
+        # an older caller) may still stub _fire_expression
+        # directly: fire-and-forget the moment the old way and
+        # return the text whole.  The act never depends on the
+        # theatre.
+        fire = getattr(self, "_fire_expression", None)
+        if fire is not None:
+            try:
+                fire(message, moment)
+            except Exception:  # noqa: BLE001 - theatre never eats a verdict
+                _log.debug("admin theatre fire failed", exc_info=True)
+        return str(text or "")
+
     def _control_bansender(self, tail, message, *, unban=False) -> str:  # type: ignore[no-untyped-def]
         """§16 sender-chat ban: ban the CHANNEL identity
         behind a channel post — never the person who owns it.
@@ -13294,10 +13327,14 @@ class RuntimeGroupMixin:
                     "go through — the platform refused it "
                     "(it's in /glog).")
         if unban:
-            return f"📣 {label} may post here again."
-        return (f"🔇 {label} is banned from posting here — "
-                "its owner can't post in this group as any of "
-                "their channels while it stands.")
+            return self._admin_reply(
+                message, "unban",
+                f"📣 {label} may post here again.")
+        return self._admin_reply(
+            message, "ban",
+            f"🔇 {label} is banned from posting here — "
+            "its owner can't post in this group as any of "
+            "their channels while it stands.")
 
     def _control_reactwipe(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         """§16 reaction wipe: deleteAllMessageReactions on
@@ -13328,8 +13365,10 @@ class RuntimeGroupMixin:
                              "reaction_wipe", user_id, call):
             return ("the wipe didn't go through — the "
                     "platform refused it (it's in /glog).")
-        return (f"🧹 wiped {label}'s recent reactions here "
-                "(Telegram clears up to 10,000).")
+        return self._admin_reply(
+            message, "reactwipe",
+            f"🧹 wiped {label}'s recent reactions here "
+            "(Telegram clears up to 10,000).")
 
     def _control_boosters(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         """§16 boost intel: the room's boost board from the
@@ -14007,15 +14046,15 @@ class RuntimeGroupMixin:
             self._settle_ask_card(
                 surface, key, message, pending_ask,
                 f"✅ settled — {label} muted {span}")
-        # A typed mute lands with theatre (§21), like the
-        # rest of her moderation voice — the expression mixin
-        # owns the firing; the getattr guard keeps bare group
-        # rigs (tests) whole.
-        fire = getattr(self, "_fire_expression", None)
-        if fire is not None:
-            fire(message, "mute")
-        return f"🔇 {label} muted {span}" + \
-            (f" — {reason}" if reason else "")
+        # A typed mute lands with theatre (§21): the reply IS
+        # the moment's captioned animation — one message, the
+        # visual carrying the words (audit N2).  The helper
+        # degrades to the bare text, with the reason named,
+        # where the media cannot land.
+        return self._admin_reply(
+            message, "mute",
+            f"🔇 {label} muted {span}"
+            + (f" — {reason}" if reason else ""))
 
     def _control_unmute(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         key, err = self._mod_gate(message)
@@ -14039,7 +14078,8 @@ class RuntimeGroupMixin:
         if not self._mod_run(surface, key, message, "unmute",
                              user_id, call):
             return "the unmute didn't go through — the platform refused it (it's in /glog)."
-        return f"🔊 {label} can speak again."
+        return self._admin_reply(
+            message, "unmute", f"🔊 {label} can speak again.")
 
     # ---- slow mode (DESIGN §4/§16) --------------------------------
     # The Bot API cannot set slow mode — only the MTProto userbot
@@ -14173,13 +14213,15 @@ class RuntimeGroupMixin:
         if not ok:
             return reply
         if not seconds:
-            return "slow mode off — the group is back to full speed."
+            return self._admin_reply(
+                message, "slowmode",
+                "slow mode off — the group is back to full speed.")
         text = (f"🐢 slow mode on — one message every "
                 f"{_duration_text(seconds)}")
         if seconds != requested:
             text += (f" (the closest Telegram allows under "
                      f"{_duration_text(requested)})")
-        return text
+        return self._admin_reply(message, "slowmode", text)
 
     def _control_ban(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         key, err = self._mod_gate(message)
@@ -14214,12 +14256,12 @@ class RuntimeGroupMixin:
         # A TYPED ban lands with the same theatre the automod
         # path fires (§21) — until 2026-11-11 only sensor bans
         # reached the moment, and an admin's own /ban went out
-        # bare.  One act, one voice, whichever path lands it.
-        fire = getattr(self, "_fire_expression", None)
-        if fire is not None:
-            fire(message, "ban")
-        return f"🔨 {label} is banned" + \
-            (f" — {rest}" if rest.strip() else "")
+        # bare.  One act, one voice, whichever path lands it:
+        # the reply IS the moment's captioned animation.
+        return self._admin_reply(
+            message, "ban",
+            f"🔨 {label} is banned"
+            + (f" — {rest}" if rest.strip() else ""))
 
     def _control_unban(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         key, err = self._mod_gate(message)
@@ -14251,7 +14293,9 @@ class RuntimeGroupMixin:
             if ban.active and (ban.scope == "global"
                                or ban.group_id == key):
                 surface.bans.lift(ban.id, by=actor)
-        return f"{label} is unbanned — they can rejoin."
+        return self._admin_reply(
+            message, "unban",
+            f"{label} is unbanned — they can rejoin.")
 
     def _control_kick(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         key, err = self._mod_gate(message)
@@ -14283,13 +14327,13 @@ class RuntimeGroupMixin:
                              user_id, call):
             return "the kick didn't go through — the platform refused it (it's in /glog)."
         # Theatre, same as the rest (§21): a kick is a
-        # moderation act with her voice on it, not a bare line.
-        fire = getattr(self, "_fire_expression", None)
-        if fire is not None:
-            fire(message, "kick")
-        return f"👢 {label} is out" + \
-            (f" — {rest}" if rest.strip() else "") + \
-            " (they can rejoin)."
+        # moderation act with her voice on it, not a bare line —
+        # the reply IS the moment's captioned animation.
+        return self._admin_reply(
+            message, "kick",
+            f"👢 {label} is out"
+            + (f" — {rest}" if rest.strip() else "")
+            + " (they can rejoin).")
 
     def _control_warn(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         key, err = self._mod_gate(message)
@@ -14323,13 +14367,14 @@ class RuntimeGroupMixin:
             # 2026-11-11 — the "warnings stay dry" line was
             # pass-era text, never his order; §21 has her
             # expressive on every surface).  A warn that lands
-            # on a ladder step speaks through the step's own
-            # §31 notice instead — one act, one voice.
-            fire = getattr(self, "_fire_expression", None)
-            if fire is not None:
-                fire(message, "warn")
-            return (f"⚠️ {label} — warning {count}/{denom}"
-                    + (f": {reason}" if reason else ""))
+            # on a ladder step carries the STEP's moment on the
+            # admin reply — the §31 notice still posts beside
+            # it with its Undo; one act, one voice, two records
+            # of the same act.
+            return self._admin_reply(
+                message, "warn",
+                f"⚠️ {label} — warning {count}/{denom}"
+                + (f": {reason}" if reason else ""))
         ok, phrase, paid = self._fire_warn_step(
             surface, key, message, user_id, step)
         is_final = count >= esc.warn_limit and \
@@ -14339,9 +14384,14 @@ class RuntimeGroupMixin:
         else:
             surface.reset_warn_bookkeeping(key, user_id)
         if not ok:
-            return (f"⚠️ {label}: warning {count}/{denom} — "
-                    f"that's the step ({phrase}), but it was "
-                    "refused (see /glog).")
+            # The warn itself landed; only the step's action
+            # was refused — the reply still carries the warn
+            # visual, and the refusal is named in the words.
+            return self._admin_reply(
+                message, "warn",
+                f"⚠️ {label}: warning {count}/{denom} — "
+                f"that's the step ({phrase}), but it was "
+                "refused (see /glog).")
         if is_final:
             tail_note = f" — that's the limit: {phrase}, " \
                         "warns reset."
@@ -14349,7 +14399,13 @@ class RuntimeGroupMixin:
             tail_note = f" — that's the step: {phrase}."
         self._post_warn_notice(surface, key, message, user_id,
                                label, step, count, paid)
-        return f"⚠️ {label}: warning {count}/{denom}{tail_note}"
+        step_moment = {"mute": "mute", "kick": "kick",
+                       "ban": "ban",
+                       "restrict": "restrict"}.get(
+                           str(step.get("action") or ""), "warn")
+        return self._admin_reply(
+            message, step_moment,
+            f"⚠️ {label}: warning {count}/{denom}{tail_note}")
 
     def _fire_warn_step(self, surface, key, message, user_id,  # type: ignore[no-untyped-def]
                         step) -> tuple:
@@ -14536,7 +14592,7 @@ class RuntimeGroupMixin:
         if not self._mod_run(surface, key, message, "pin",
                              target_id, call):
             return "the pin didn't go through — the platform refused it (it's in /glog)."
-        return "📌 pinned."
+        return self._admin_reply(message, "pin", "📌 pinned.")
 
     def _control_unpin(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         key, err = self._mod_gate(message)
@@ -14553,7 +14609,7 @@ class RuntimeGroupMixin:
         if not self._mod_run(surface, key, message, "unpin", "",
                              call):
             return "the unpin didn't go through — the platform refused it (it's in /glog)."
-        return "📌 unpinned."
+        return self._admin_reply(message, "unpin", "📌 unpinned.")
 
     def _control_report(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         """Member-side /report: filed into the held audit log with
@@ -14709,13 +14765,15 @@ class RuntimeGroupMixin:
             for row in surface.audit(key, limit=8)
             if str(row.get("user_id")) == user_id)
         if not landed:
-            return out + " — the report stays open."
+            return (out + " — the report stays open." if out
+                    else "the report stays open.")
         if verb == "ban":
             surface.bans.ban(user_id, reason=reason, group_id=key,
                              banned_by=by)
         surface.decide_report(key, report_id, action="acted",
                               by=by, by_label=by_label)
-        return out + " — report closed."
+        return (out + " — report closed." if out
+                else "report closed.")
 
     def _console_mod_call(self, surface, key, action, user_id, by,
                           call) -> bool:  # type: ignore[no-untyped-def]
@@ -15310,7 +15368,7 @@ class RuntimeGroupMixin:
                 "the delete didn't go through — the platform "
                 "refused it; the attempt is in the group log.",
                 [[("📜 Group log", "glog")]])
-        return "🧹 gone."
+        return self._admin_reply(message, "purge", "🧹 gone.")
 
     # ---- economy commands (P2) --------------------------------------
     def _economy_gate(self, message):  # type: ignore[no-untyped-def]

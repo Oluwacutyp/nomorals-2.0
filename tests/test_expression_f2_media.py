@@ -386,8 +386,8 @@ class _FullAdapter:
         self.calls.append(("unban", user_id))
         return {"ok": True}
 
-    def send_media(self, chat, ref):
-        self.media_sent.append(ref)
+    def send_media(self, chat, ref, caption="", buttons=None):
+        self.media_sent.append((ref, caption))
         return SimpleNamespace(ok=True, message_id="9",
                                media_file_id="F1", error="")
 
@@ -438,14 +438,18 @@ def _full_rig(tmp_path):
 ])
 def test_typed_admin_commands_carry_media(tmp_path, verb, call):
     """Empty library, no keys: the studio floor still puts a
-    sticker/GIF on the action — the owner's exact complaint,
-    closed at the composed seam."""
+    GIF on the action — the owner's exact complaint, closed at
+    the composed seam.  The reply IS the captioned animation
+    (audit N2): one message, the visual carrying the words —
+    the handler returns "" and the caption carries the verdict,
+    so a dropped send can no longer hide behind a bare line."""
     rt, adapter = _full_rig(tmp_path)
     out = call(rt)
-    assert out  # the text reply still lands
+    assert out == "", (verb, out)
     assert len(adapter.media_sent) == 1, verb
-    assert adapter.media_sent[0].kind in ("sticker", "animation",
-                                          "gif")
+    ref, caption = adapter.media_sent[0]
+    assert ref.kind in ("animation", "gif"), (verb, ref.kind)
+    assert caption, verb
 
 
 def test_automod_ban_moment_still_fires(tmp_path):

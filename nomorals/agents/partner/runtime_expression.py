@@ -43,6 +43,13 @@ _CELEBRATIONS = frozenset({
     "quest_complete", "jackpot", "season_podium", "duel_win",
     "estate_milestone", "celebration"})
 
+#: The longest admin reply text that rides a moment's media as
+#: its caption (audit N2): Telegram/WhatsApp captions cap at
+#: 1024, Discord at 2000 — 900 stays whole everywhere, and a
+#: longer verdict keeps its full text as a reply instead of
+#: being truncated to fit a caption.
+_ADMIN_CAPTION_MAX = 900
+
 
 class RuntimeExpressionMixin:
     """Expression moments + commands for PartnerRuntime."""
@@ -296,9 +303,13 @@ class RuntimeExpressionMixin:
             error="this platform path has no media send")
 
     # ---- moments ---------------------------------------------------
-    def _fire_expression(self, message, moment: str) -> dict:  # type: ignore[no-untyped-def]
+    def _fire_expression(self, message, moment: str,
+                         caption: str = "") -> dict:  # type: ignore[no-untyped-def]
         """Fire one expression moment for this message's room.
-        Never raises; the outcome dict says what happened."""
+        Never raises; the outcome dict says what happened.
+        ``caption`` rides the media message itself when the
+        moment lands (the admin-theatre seam) — empty everywhere
+        else, so existing callers are untouched."""
         try:
             surface = self._group_surface()
             key = message.chat.key
@@ -320,7 +331,8 @@ class RuntimeExpressionMixin:
                 str(moment), room=key,
                 platform=str(message.chat.platform or ""),
                 settings=settings.get("expression") or {},
-                send=lambda ref: self._expression_send(message, ref))
+                send=lambda ref: self._expression_send(
+                    message, ref, caption=caption))
             surface._audit(
                 key, "expression", moment=str(moment),
                 sent=bool(out.get("sent")),
@@ -334,6 +346,44 @@ class RuntimeExpressionMixin:
         except Exception:  # noqa: BLE001 - expression never breaks its host
             _log.debug("expression fire failed", exc_info=True)
             return {"sent": False, "reason": "expression unavailable"}
+
+    def _admin_theatre(self, message, moment: str,
+                       text: str) -> str:  # type: ignore[no-untyped-def]
+        """One admin act's reply WITH its media (audit N2,
+        owner 2026-11-11): the moment fires with the reply text
+        as the media's caption, so the group sees ONE message —
+        the visual carrying the words.  Success returns "" (the
+        media WAS the reply, the /gif + reaction contract).  A
+        reply past the caption budget fires uncaptioned and the
+        text returns whole — truncating a verdict to fit a
+        caption would lose the record.  A fire that cannot land
+        returns the text PLUS the honest reason — never a silent
+        bare line.  Never raises; a host with no expression
+        mixin at all returns the text unchanged."""
+        text = str(text or "")
+        try:
+            fire = getattr(self, "_fire_expression", None)
+            if fire is None:
+                return text
+            caption = text if len(text) <= _ADMIN_CAPTION_MAX else ""
+            try:
+                out = fire(message, str(moment), caption=caption)
+            except TypeError:
+                # An older two-argument fire (bare rigs, old
+                # stubs) takes no caption: the media still fires
+                # and the text returns whole beside it — the old
+                # two-message shape, never a lost verdict.
+                out = fire(message, str(moment))
+                return text
+            if not isinstance(out, dict):
+                return text
+            if out.get("sent"):
+                return "" if caption else text
+            reason = str(out.get("reason") or "no media available")
+            return (f"{text}\n(no {moment} visual here: {reason})")
+        except Exception:  # noqa: BLE001 - theatre never eats a verdict
+            _log.debug("admin theatre failed", exc_info=True)
+            return text
 
     def _react_quietly(self, message, context: str) -> None:  # type: ignore[no-untyped-def]
         """A celebration also earns her reaction on the message
