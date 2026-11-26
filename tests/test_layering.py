@@ -67,6 +67,17 @@ LAYERS: dict[str, int] = {
     # browser/ is the Wave K browser service (sessions/tabs/downloads/
     # screenshots as artifacts): wraps tools/browser's BrowserSession, L4.
     "browser": 4,
+    # webgames/ is the owner's browser-automation game driver (Lagos
+    # Life wall play, his 2026-11-24 pushes): it drives Playwright
+    # directly, the HTTP client and the proxy pool. An L4 service
+    # organ beside browser/ — it imports core (L1) downward and
+    # tools.proxy_rotate (L4, same layer); nothing in the repo
+    # imports it. Unmapped it fell to SHARED_LAYER (0), which made
+    # every one of its nomorals imports an upward violation and
+    # failed the owner's 2026-11-25 /update at health:_layering
+    # (9 pairs, none grandfathered). L4 is the lowest layer
+    # satisfying the pin rule (max_imported 4 <= L).
+    "webgames": 4,
     # computer/ is Devon's own desktop organ (persistent sessions, the
     # desktop bridge driver protocol, the perceive→act→verify loop): a
     # service organ at L4 beside browser/; it reaches only downward

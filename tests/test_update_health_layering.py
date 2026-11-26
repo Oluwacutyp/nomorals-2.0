@@ -37,6 +37,14 @@ import test_layering  # noqa: E402
 
 #: The accepted grandfathered pairs at the fix's base (bf9afba):
 #: 13 (importer, target) pairs producing 15 violation lines.
+#: GROWN since bf9afba: ebaf90f2 grandfathered the 3
+#: music_sources.live pairs (registry_bridge precedent — the live
+#: registry-play collaborators wrap the media engine from the
+#: shared layer) without updating this pin, so the live set is now
+#: 16 pairs producing 18 violation lines.  This pin tracks the LIVE
+#: set (no KNOWN_VIOLATIONS entry added or removed here — D2
+#: untouched); when the owner rules on D2 and L16 removes entries,
+#: update this pin in the same change.
 EXPECTED_BASELINE = frozenset({
     ("nomorals.agency.failures", "nomorals.core"),
     ("nomorals.anime.present", "nomorals.social.chat.tgbot_buttons"),
@@ -48,6 +56,9 @@ EXPECTED_BASELINE = frozenset({
     ("nomorals.museum", "nomorals.agents.apkforge.museum"),
     ("nomorals.museum", "nomorals.characters.store"),
     ("nomorals.museum_failures", "nomorals.core"),
+    ("nomorals.music_sources.live", "nomorals.media.download_orchestrator"),
+    ("nomorals.music_sources.live", "nomorals.media.playback"),
+    ("nomorals.music_sources.live", "nomorals.media.resolver"),
     ("nomorals.music_sources.registry_bridge",
      "nomorals.media.source_registry"),
     ("nomorals.music_sources.registry_bridge", "nomorals.storage.kv"),
@@ -83,7 +94,7 @@ class TestHealthLayeringSemantics(unittest.TestCase):
         # differ: [the 15] != []") — the live failure.  Fixed: True.
         ok, detail = _health_layering()()
         self.assertTrue(ok, detail)
-        self.assertIn("15 known grandfathered, 0 new", detail)
+        self.assertIn("18 known grandfathered, 0 new", detail)
 
     def test_health_layering_names_a_new_violation(self) -> None:
         new = ["synthetic.py:9 (L0) imports nomorals.core (L1)"]
