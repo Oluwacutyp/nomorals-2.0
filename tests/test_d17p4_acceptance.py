@@ -42,13 +42,16 @@ from nomorals.tools import proxy_sources
 from nomorals.tools.proxylab_failures import clear_failures
 from nomorals.tools.proxysources import SourceRegistry
 
-EXPECTED_15 = {
+# 12 since the 2026-11-25 retirement (proxynova,
+# proxy-list.download, proxyscrape-site retired; spys-one excluded
+# with them — see RETIRED_SOURCES in proxysources).
+EXPECTED_12 = {
     "proxifly-post", "proxifly-github-all", "proxifly-github-http",
     "proxifly-github-socks4", "proxifly-github-socks5",
     "proxmint-api", "proxmint-github-all", "proxmint-github-socks5",
     "proxmint-github-elite", "proxmint-github-json",
-    "sunny9577-socks5", "proxynova", "proxy-list.download",
-    "geonode-site", "proxyscrape-site",
+    "sunny9577-socks5",
+    "geonode-site",
 }
 DL_PASSWORD = "<redacted>"
 
@@ -86,31 +89,33 @@ def test_doc17_programme_end_to_end(tmp_path):
                                   / "route_receipts.jsonl")
     clear_failures()
 
-    # — 1 · a fresh registry: 101 built-ins, no activation record,
+    # — 1 · a fresh registry: 109 built-ins, no activation record,
     #        the board still tells the not-yet truth.
     registry = SourceRegistry(proxies_dir / "sources.json")
-    assert len(registry.sources()) == 101
+    assert len(registry.sources()) == 109
     assert proxy_sources.activation_state_for_home(home) is None
     assert proxy_line(ctx) == PROXY_DEPENDENCY_LINE
 
-    # — 2 · CLI sync activates: exactly the 15 land, 3 excluded with
+    # — 2 · CLI sync activates: exactly the 12 land, 7 excluded with
     #        reasons, epoch 1 is recorded, the board flips.
     rc, out = _sync(ctx)
     assert rc == 0
     assert "status: activated · epoch 1" in out
-    assert "added: 15 source(s)" in out
-    assert "excluded: 3 — unverified or no URL" in out
-    assert "registry: 101 → 116 sources" in out
+    assert "added: 12 source(s)" in out
+    assert "excluded: 7 — unverified or no URL" in out
+    assert "registry: 109 → 121 sources" in out
     record = proxy_sources.activation_state_for_home(home)
     assert record is not None and record["epoch"] == 1
-    assert set(record["last_run"]["added"]) == EXPECTED_15
+    assert set(record["last_run"]["added"]) == EXPECTED_12
     assert {e["name"] for e in
             record["last_run"]["excluded_unverified"]} == {
-                "hidemy-name", "openproxy.space", "scrappey"}
+                "hidemy-name", "openproxy.space", "scrappey",
+                "proxynova", "proxy-list.download", "proxyscrape-site",
+                "spys-one"}
     registry = SourceRegistry(proxies_dir / "sources.json")
-    assert len(registry.sources()) == 116
+    assert len(registry.sources()) == 121
     board = proxy_line(ctx)
-    assert "epoch 1" in board and "registry holds 116 sources" in board
+    assert "epoch 1" in board and "registry holds 121 sources" in board
 
     # — 3 · a core.http-shaped fetch decision (the rotation
     #        resolver is what core.http calls per request) mints a
@@ -212,7 +217,7 @@ def test_doc17_programme_end_to_end(tmp_path):
     assert record["last_run"]["corrupt_recovery"]["backup"] == \
         backups[0].name
     registry = SourceRegistry(proxies_dir / "sources.json")
-    assert len(registry.sources()) == 116
+    assert len(registry.sources()) == 121
 
     # — 6 · the /proxy status render shows both blocks truthfully:
     #        activation (with the recovery note) + receipts from
@@ -223,7 +228,7 @@ def test_doc17_programme_end_to_end(tmp_path):
     clear_failures()
     text = rt._control_proxy("status")
     assert f"catalogue activation: epoch {record['epoch']}" in text
-    assert "registry holds 116 sources" in text
+    assert "registry holds 121 sources" in text
     assert "a corrupt registry was recovered on the way in" in text
     assert "core_http → free" in text
     assert "strategy:round_robin" in text

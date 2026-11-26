@@ -608,7 +608,8 @@ class ProxyScraper:
 
         Also handles the geonode shape ({ip, port, protocols: [...],
         country: "DE"}) and proxy-free's shape ({ip, port, protocol,
-        country_code: "KR"} inside {"proxies": [...]}).
+        country_code: "KR"} inside {"proxies": [...]}) and pubproxy's
+        shape ({ip, port, type: "socks5"} inside {"data": [...]}).
         """
         out: list[Proxy] = []
         try:
@@ -632,7 +633,7 @@ class ProxyScraper:
             if not _valid_ip(host) and not _valid_hostname(host):
                 continue
             scheme = str(rec.get("protocol") or rec.get("scheme")
-                         or "").strip().lower()
+                         or rec.get("type") or "").strip().lower()
             if not scheme:
                 # geonode-style: "protocols": ["socks4", "http"]
                 protos = rec.get("protocols")
@@ -762,7 +763,18 @@ class ProxyScraper:
                ) -> dict[str, Any]:
         """Scrape free lists. ``on_source`` (optional) fires per
         consumed source result with ``(name, added, error)`` — the
-        hook live progress uses for real per-source milestones."""
+        hook live progress uses for real per-source milestones.
+
+        The cap is fair-share, not first-come: pass 1 gives every
+        yielding source an equal share of ``limit`` new uniques;
+        pass 2 tops the pool up from sources with surplus, in
+        catalog order. The old first-come cap let the first sources
+        fill the whole limit, so every later source reported 0 new
+        candidates even when it had fetched hundreds (2026-11-25:
+        the owner's refresh showed 0 across the tail while the
+        same sources parsed fine standalone). The total still never
+        exceeds ``limit``.
+        """
         wanted = [s.strip().lower() for s in schemes.split(",") if s.strip()]
         wanted = [s for s in wanted if s in SCHEMES] or list(SCHEMES)
         pool = sources or self.sources
@@ -808,43 +820,65 @@ class ProxyScraper:
                     p.source = name
             return name, proxies, ""
 
+        cap = max(1, int(limit))
+        share = max(1, cap // max(1, len(picked)))
+
+        def _bank(name: str, proxies: list[Proxy], room: int) -> int:
+            """Bank up to ``room`` new uniques from one source's
+            fetch into ``seen``; duplicates record provenance."""
+            added = 0
+            for p in proxies:
+                if added >= room or len(seen) >= cap:
+                    break
+                if p.scheme not in wanted:
+                    continue
+                if p.key in seen:
+                    # dedupe keeps the first copy; provenance of
+                    # the duplicate is recorded, not dropped
+                    if p.source and p.source not in (
+                            seen[p.key].also_from or []):
+                        if seen[p.key].source != p.source:
+                            seen[p.key].also_from.append(p.source)
+                    continue
+                seen[p.key] = p
+                added += 1
+            return added
+
         with concurrent.futures.ThreadPoolExecutor(
                 max_workers=self.max_workers) as pool_ex:
-            for name, proxies, error in pool_ex.map(_one, picked):
-                if error and error.startswith("unsupported_kind"):
-                    # not a failure and not a harvest: the source
-                    # was deliberately not fetched, so it lands in
-                    # neither errors nor by_source — the registry
-                    # health accounting in ProxyLab.scrape never
-                    # sees it, and its health record stays clean.
-                    unsupported[name] = error
-                    if on_source is not None:
-                        on_source(name, 0, error)
-                    continue
-                if error:
-                    errors[name] = error
-                    if on_source is not None:
-                        on_source(name, 0, error)
-                    continue
-                added = 0
-                for p in proxies:
-                    if p.scheme not in wanted:
-                        continue
-                    if p.key in seen:
-                        # dedupe keeps the first copy; provenance of
-                        # the duplicate is recorded, not dropped
-                        if p.source and p.source not in (
-                                seen[p.key].also_from or []):
-                            if seen[p.key].source != p.source:
-                                seen[p.key].also_from.append(p.source)
-                        continue
-                    if len(seen) >= max(1, int(limit)):
-                        break
-                    seen[p.key] = p
-                    added += 1
-                by_source[name] = added
+            results = list(pool_ex.map(_one, picked))
+        pending: list[tuple[str, list[Proxy]]] = []
+        for name, proxies, error in results:
+            if error and error.startswith("unsupported_kind"):
+                # not a failure and not a harvest: the source
+                # was deliberately not fetched, so it lands in
+                # neither errors nor by_source — the registry
+                # health accounting in ProxyLab.scrape never
+                # sees it, and its health record stays clean.
+                unsupported[name] = error
                 if on_source is not None:
-                    on_source(name, added, "")
+                    on_source(name, 0, error)
+                continue
+            if error:
+                errors[name] = error
+                if on_source is not None:
+                    on_source(name, 0, error)
+                continue
+            pending.append((name, proxies))
+        # pass 1 — fair share: every yielding source contributes
+        added_by: dict[str, int] = {}
+        for name, proxies in pending:
+            added_by[name] = _bank(name, proxies, share)
+        # pass 2 — top up from sources with surplus, catalog order
+        for name, proxies in pending:
+            if len(seen) >= cap:
+                break
+            added_by[name] = added_by.get(name, 0) + _bank(
+                name, proxies, cap - len(seen))
+        for name, _proxies in pending:
+            by_source[name] = added_by.get(name, 0)
+            if on_source is not None:
+                on_source(name, by_source[name], "")
         return {
             "proxies": list(seen.values()),
             "total": len(seen),

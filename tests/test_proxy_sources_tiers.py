@@ -351,7 +351,10 @@ class TestStalenessAndRefresh(unittest.TestCase):
         out = refresh_sources(registry)
         self.assertIn("proxifly-github-all", out["added"])
         self.assertIn("proxmint-api", out["added"])
-        self.assertIn("proxynova", out["added"])
+        # proxynova retired 2026-11-25 (HTTP 200, 0 rows — the
+        # table obfuscates IP/port cells): verified False, so the
+        # merge skips it instead of adding it.
+        self.assertIn("proxynova", out["skipped_unverified"])
         self.assertIn("hidemy-name", out["skipped_unverified"])
         self.assertIn("scrappey", out["skipped_unverified"])
         # built-ins / references are already present, never re-added

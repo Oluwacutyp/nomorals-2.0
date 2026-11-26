@@ -219,9 +219,11 @@ SOURCES_2026: tuple[dict[str, Any], ...] = (
      "url": "https://www.proxynova.com/proxy-server-list/",
      "kind": "html", "method": "GET",
      "tier": "free", "measured_live_rate": None, "probe_budget": DEFAULT_PROBE_BUDGET,
-     "verified": True,
-     "notes": "HTML table site. ProxyNova obfuscates IP/port cells in-page — the generic HTML "
-              "parser may return 0 rows; a dedicated parse is a follow-up, not a silent skip."},
+     "verified": False,
+     "notes": "RETIRED 2026-11-25: HTTP 200, 0 rows — the table obfuscates IP/port cells in-page, "
+              "so the generic HTML parser cannot read it; a dedicated parse is a follow-up, not a "
+              "silent skip. Kept listed with its URL so the gap stays visible; NEVER fetched until "
+              "a working parse is proven."},
     {"name": "hidemy-name", "url": "", "kind": "html", "method": "GET",
      "tier": "free", "measured_live_rate": None, "probe_budget": 0,
      "verified": False,
@@ -230,22 +232,24 @@ SOURCES_2026: tuple[dict[str, Any], ...] = (
               "is confirmed."},
     {"name": "spys-one", "url": "", "kind": "html", "method": "GET",
      "tier": "free", "measured_live_rate": None, "probe_budget": DEFAULT_PROBE_BUDGET,
-     "verified": True, "notes": "Already in BUILT_IN_SOURCES (spys-http / spys-mixed / spys-socks)."},
+     "verified": False, "notes": "RETIRED 2026-11-25: reference to the retired spys-http / "
+              "spys-mixed / spys-socks built-ins — spys.one answers a Cloudflare challenge page, "
+              "0 rows parsed. Kept listed so the gap stays visible; NEVER fetched."},
     {"name": "proxy-list.download",
      "url": "https://www.proxy-list.download/api/v1/get?type=socks5",
      "kind": "list", "method": "GET",
      "tier": "free", "measured_live_rate": None, "probe_budget": DEFAULT_PROBE_BUDGET,
-     "verified": True,
-     "notes": "API form of the site (type=http|https|socks4|socks5). An earlier pass saw a 502 "
-              "from the site — the API endpoint is kept with a normal budget and the registry "
-              "quarantine handles a repeat failure."},
+     "verified": False,
+     "notes": "RETIRED 2026-11-25: HTTP 502 twice (also 502 in the 2026-10-01 pass). Kept listed "
+              "with its URL so the gap stays visible; NEVER fetched until the site answers again."},
     {"name": "openproxy.space",
      "url": "https://openproxy.space/list",
      "kind": "html", "method": "GET",
      "tier": "free", "measured_live_rate": None, "probe_budget": ZERO_YIELD_PROBE_BUDGET,
      "verified": False,
-     "notes": "UNVERIFIED/STALE — 521 in the 2026-10-01 pass. Kept with near-zero probes; "
-              "a successful fetch re-verifies it, repeated failure quarantines it."},
+     "notes": "UNVERIFIED/STALE — 521 in the 2026-10-01 pass and again twice on 2026-11-25. "
+              "Kept with near-zero probes; a successful fetch re-verifies it, repeated failure "
+              "quarantines it."},
     {"name": "scrappey", "url": "", "kind": "html", "method": "GET",
      "tier": "free", "measured_live_rate": None, "probe_budget": 0,
      "verified": False,
@@ -261,8 +265,10 @@ SOURCES_2026: tuple[dict[str, Any], ...] = (
      "url": "https://proxyscrape.com/free-proxy-list",
      "kind": "html", "method": "GET",
      "tier": "free", "measured_live_rate": None, "probe_budget": DEFAULT_PROBE_BUDGET,
-     "verified": True,
-     "notes": "ProxyScrape's human-readable list page (the API lives under proxyscrape-v4)."},
+     "verified": False,
+     "notes": "RETIRED 2026-11-25: HTTP 200, 0 rows — the page is JS-rendered; the generic HTML "
+              "parser cannot read it. The v4 API (proxyscrape-v4) is the live feed. Kept listed "
+              "so the gap stays visible; NEVER fetched until a working parse is proven."},
 )
 
 SOURCE_BY_NAME: dict[str, dict[str, Any]] = {

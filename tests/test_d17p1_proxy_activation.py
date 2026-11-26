@@ -48,17 +48,20 @@ from nomorals.tools.proxylab import ProxyLab, ProxyScraper
 from nomorals.tools.proxylab_failures import clear_failures, recent_failures
 from nomorals.tools.proxysources import SourceRegistry
 
-#: The evaluation's offline reproduction (doc17-eval §1): the 15
+#: The evaluation's offline reproduction (doc17-eval §1): the 12
 #: verified-with-URL catalogue entries absent from a fresh
 #: registry. Activation must merge exactly these — no more, no
-#: fewer.
-EXPECTED_15 = {
+#: fewer. (15 before the 2026-11-25 retirement: proxynova,
+#: proxy-list.download and proxyscrape-site were retired that day —
+#: 0 rows / 502 / JS-rendered on the live probe — and spys-one moved
+#: to excluded with them; see RETIRED_SOURCES in proxysources.)
+EXPECTED_12 = {
     "proxifly-post", "proxifly-github-all", "proxifly-github-http",
     "proxifly-github-socks4", "proxifly-github-socks5",
     "proxmint-api", "proxmint-github-all", "proxmint-github-socks5",
     "proxmint-github-elite", "proxmint-github-json",
-    "sunny9577-socks5", "proxynova", "proxy-list.download",
-    "geonode-site", "proxyscrape-site",
+    "sunny9577-socks5",
+    "geonode-site",
 }
 
 PROXIFLY_URL = "https://api.proxifly.dev/get-proxy"
@@ -80,22 +83,25 @@ def _ctx(home: Path) -> SimpleNamespace:
 
 def test_activation_merges_exactly_the_15_and_records_the_epoch(tmp_path):
     registry = _registry(tmp_path)
-    assert len(registry.sources()) == 101
+    assert len(registry.sources()) == 109
 
     run = proxy_sources.activate_sources(registry)
 
     assert run["status"] == "activated"
-    assert set(run["added"]) == EXPECTED_15
-    assert run["registry_before"] == 101
-    assert run["registry_after"] == 116
+    assert set(run["added"]) == EXPECTED_12
+    assert run["registry_before"] == 109
+    assert run["registry_after"] == 121
     assert run["epoch"] == 1
-    # every catalogue entry is accounted for: 15 merged + 14
+    # every catalogue entry is accounted for: 12 merged + 13
     # already present (verified entries overlapping the built-ins)
-    # + exactly 3 excluded as unverified/no-URL, each with its
+    # + exactly 7 excluded as unverified/no-URL, each with its
     # reason — merged vs present vs excluded fully explained.
-    assert run["already_present"] == 14
+    # (15/14/3 before the 2026-11-25 retirement; see EXPECTED_12.)
+    assert run["already_present"] == 13
     assert {e["name"] for e in run["excluded_unverified"]} == {
-        "hidemy-name", "openproxy.space", "scrappey"}
+        "hidemy-name", "openproxy.space", "scrappey",
+        "proxynova", "proxy-list.download", "proxyscrape-site",
+        "spys-one"}
     assert all(e["reason"] == "unverified_or_no_url"
                for e in run["excluded_unverified"])
 
@@ -107,7 +113,7 @@ def test_activation_merges_exactly_the_15_and_records_the_epoch(tmp_path):
     assert record["catalog_size"] == 32
     assert record["catalog_version"] == proxy_sources.catalog_version()
     assert record["first_activated_at"] == record["last_run"]["at"]
-    assert set(record["last_run"]["added"]) == EXPECTED_15
+    assert set(record["last_run"]["added"]) == EXPECTED_12
     assert len(record["runs"]) == 1
 
 
@@ -119,11 +125,11 @@ def test_second_activation_is_idempotent_and_advances_the_epoch(tmp_path):
 
     assert run["status"] == "current"
     assert run["added"] == []
-    # 29 of the 32 catalogue entries are now present (the 15
-    # merged + the 14 built-in overlaps); 3 stay excluded.
-    assert run["already_present"] == 29
-    assert run["registry_before"] == 116
-    assert run["registry_after"] == 116
+    # 25 of the 32 catalogue entries are now present (the 12
+    # merged + the 13 built-in overlaps); 7 stay excluded.
+    assert run["already_present"] == 25
+    assert run["registry_before"] == 121
+    assert run["registry_after"] == 121
     assert run["epoch"] == 2
     record = proxy_sources.read_activation_record(registry.path)
     assert record is not None
@@ -140,10 +146,13 @@ def test_method_is_recorded_in_the_registry_and_on_disk(tmp_path):
 
     assert run["methods"] == {"proxifly-post": "POST"}
     assert registry.methods()["proxifly-post"] == "POST"
-    assert registry.methods()["proxynova"] == "GET"
+    # proxynova was the GET example here until its 2026-11-25
+    # retirement (0 rows, obfuscated table); proxmint-api is the
+    # surviving verified GET entry that still merges.
+    assert registry.methods()["proxmint-api"] == "GET"
     on_disk = json.loads(registry.path.read_text(encoding="utf-8"))
     assert on_disk["proxifly-post"]["method"] == "POST"
-    assert on_disk["proxynova"]["method"] == "GET"
+    assert on_disk["proxmint-api"]["method"] == "GET"
 
 
 def test_scraper_fetches_the_post_entry_as_a_post_never_a_get(tmp_path):
@@ -242,7 +251,7 @@ def test_corrupt_registry_is_preserved_recorded_and_rebuilt(tmp_path):
     registry = SourceRegistry(path)
 
     sources = registry.sources()  # the call that used to overwrite
-    assert len(sources) == 101  # built-ins: the registry rebuilt
+    assert len(sources) == 109  # built-ins: the registry rebuilt
 
     backups = sorted(tmp_path.glob("sources.json.corrupt-*.bak"))
     assert len(backups) == 1
@@ -266,7 +275,7 @@ def test_activation_over_a_corrupt_registry_records_the_recovery(tmp_path):
     run = proxy_sources.activate_sources(registry)
 
     assert run["status"] == "activated"
-    assert set(run["added"]) == EXPECTED_15
+    assert set(run["added"]) == EXPECTED_12
     backup = run["corrupt_recovery"]["backup"]
     assert backup
     assert (tmp_path / backup).read_bytes() == b"\x89not json at all"
@@ -298,7 +307,7 @@ def test_held_lock_makes_activation_a_named_skip(tmp_path):
     assert run["reason"] == "activation_in_progress"
     assert run["added"] == []
     # nothing merged, nothing recorded: the skip changed nothing.
-    assert len(registry.sources()) == 101
+    assert len(registry.sources()) == 109
     assert proxy_sources.read_activation_record(registry.path) is None
 
 
@@ -312,7 +321,7 @@ def test_stale_lock_is_stolen_and_activation_proceeds(tmp_path):
     run = proxy_sources.activate_sources(registry)
 
     assert run["status"] == "activated"
-    assert set(run["added"]) == EXPECTED_15
+    assert set(run["added"]) == EXPECTED_12
     assert not lock_path.exists()  # released after the run
 
 
@@ -348,8 +357,8 @@ def test_board_line_before_and_after_activation(tmp_path):
     line = proxy_line(ctx)
     assert "the source catalogue is activated" in line
     assert "epoch 1" in line
-    assert "added 15 source(s)" in line
-    assert "registry holds 116 sources" in line
+    assert "added 12 source(s)" in line
+    assert "registry holds 121 sources" in line
 
     text = render_explore_board(context=ctx, store=ExploreStore())
     assert line in text
@@ -379,8 +388,8 @@ def test_lab_refresh_activates_first_and_reports_it(tmp_path):
     report = lab.refresh(
         on_scrape_source=lambda n, a, e: events.append((n, a, e)))
 
-    assert set(report["activation"]["added"]) == EXPECTED_15
-    assert report["activation"]["registry_after"] == 116
+    assert set(report["activation"]["added"]) == EXPECTED_12
+    assert report["activation"]["registry_after"] == 121
     assert report["scraped"] == 1
     assert events == [("s-ok", 1, "")]
     record = proxy_sources.read_activation_record(lab.registry.path)

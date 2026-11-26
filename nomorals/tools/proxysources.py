@@ -24,6 +24,7 @@ from .proxylab_failures import record_failure
 
 __all__ = [
     "BUILT_IN_SOURCES",
+    "RETIRED_SOURCES",
     "DISCOVERY_SEEDS",
     "SourceRegistry",
     "extract_list_candidates",
@@ -60,14 +61,26 @@ __all__ = [
 #: The catalog is a floor, not a ceiling — proxy_discover learns new
 #: sources from the internet (GitHub search API + aggregator pages)
 #: and they join every future scrape.
+#: 2026-11-25 pass (gapfix147): live-probed every catalog URL from
+#: this box (118 URLs, 108 yielding, 1,054,510 candidates) and
+#: searched the internet for fresh free sources; added hproxy,
+#: relayglass, proxio and pubproxy (see the block at the end of
+#: BUILT_IN_SOURCES) and re-verified ShiftyTR live (already listed).
+#: Retired 5 built-ins — spys x3 (the site answers a Cloudflare
+#: challenge page, 0 rows), thespeedx-https (the file is gone from
+#: TheSpeedX/PROXY-List, 404) and proxyfree-https (the file exists
+#: but is empty, 0 bytes) — and 4 tier entries (proxynova,
+#: proxyscrape-site, proxy-list.download, openproxy.space); see
+#: RETIRED_SOURCES. A retired name is forgotten from existing
+#: registries on load: catalog removal alone would leave the entry
+#: in the registry file, still scraped.
 BUILT_IN_SOURCES: tuple[tuple[str, str, str], ...] = (
     # TheSpeedX — the big community repo (per-protocol files, updated daily)
     ("thespeedx-http",
      "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
      "list"),
-    ("thespeedx-https",
-     "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/https.txt",
-     "list"),
+    # thespeedx-https RETIRED 2026-11-25: the file is gone from
+    # TheSpeedX/PROXY-List (repo holds http/socks4/socks5 only), 404.
     ("thespeedx-socks4",
      "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt",
      "list"),
@@ -127,9 +140,9 @@ BUILT_IN_SOURCES: tuple[tuple[str, str, str], ...] = (
      "list"),
     # html list sites (ip:port cells, separate IP+Port columns, and a
     # per-row type column are all handled)
-    ("spys-http", "https://spys.one/en/http-proxy-list/", "html"),
-    ("spys-mixed", "https://spys.one/en/free-proxy-list/", "html"),
-    ("spys-socks", "https://spys.one/en/socks-proxy-list/", "html"),
+    # spys-http / spys-mixed / spys-socks RETIRED 2026-11-25:
+    # spys.one answers a Cloudflare challenge page (47KB, no table)
+    # — the generic HTML parser harvests 0 rows from all three.
     ("fpl-http", "https://free-proxy-list.net/", "html"),
     ("fpl-ssl", "https://free-proxy-list.net/ssl-proxy.html", "html"),
     # ---- 2026-10-01 expansion: every entry live-verified (fetched +
@@ -206,9 +219,8 @@ BUILT_IN_SOURCES: tuple[tuple[str, str, str], ...] = (
     ("proxyfree-http",
      "https://raw.githubusercontent.com/proxy-free/free-proxy-list/main/http.txt",
      "list"),
-    ("proxyfree-https",
-     "https://raw.githubusercontent.com/proxy-free/free-proxy-list/main/https.txt",
-     "list"),
+    # proxyfree-https RETIRED 2026-11-25: the file exists in the
+    # repo but is empty (HTTP 200, 0 bytes) — nothing to harvest.
     ("proxyfree-socks4",
      "https://raw.githubusercontent.com/proxy-free/free-proxy-list/main/socks4.txt",
      "list"),
@@ -407,7 +419,88 @@ BUILT_IN_SOURCES: tuple[tuple[str, str, str], ...] = (
     ("freeproxyworld-socks5",
      "https://www.freeproxy.world/?type=socks5",
      "html"),
+    # ---- 2026-11-25 expansion (gapfix147): every entry fetched +
+    # parsed live from this box the same day; counts are proxies
+    # parsed from the live response. Four independent providers, all
+    # free, no key, no signup. Only per-protocol files are listed:
+    # hproxy/proxio also publish an all.txt, but its bare ip:port
+    # lines mix protocols and kind "list" would mistag every row
+    # with one scheme — the per-protocol files cover the same pool.
+    # hproxy-com — refreshed several times a day, 7,525 live at
+    # check time; all.txt parsed 20,597 rows the same day.
+    ("hproxy-http",
+     "https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main/http.txt",
+     "list"),
+    ("hproxy-https",
+     "https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main/https.txt",
+     "list"),
+    ("hproxy-socks4",
+     "https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main/socks4.txt",
+     "list"),
+    ("hproxy-socks5",
+     "https://raw.githubusercontent.com/hproxy-com/free-proxy-list/main/socks5.txt",
+     "list"),
+    # relayglass — every proxy re-tested every 5 minutes, files
+    # sorted fastest first; all.txt parsed exactly the 397 rows its
+    # README claims. Small but pre-tested, so high value per row.
+    ("relayglass-http",
+     "https://raw.githubusercontent.com/relayglass/free-proxy-list/main/protocol/http/http.txt",
+     "list"),
+    ("relayglass-https",
+     "https://raw.githubusercontent.com/relayglass/free-proxy-list/main/protocol/https/https.txt",
+     "list"),
+    ("relayglass-socks4",
+     "https://raw.githubusercontent.com/relayglass/free-proxy-list/main/protocol/socks4/socks4.txt",
+     "list"),
+    ("relayglass-socks5",
+     "https://raw.githubusercontent.com/relayglass/free-proxy-list/main/protocol/socks5/socks5.txt",
+     "list"),
+    # proxio-io — mirrored every 20 minutes; https.txt is thin
+    # right now (30 rows vs 7,570 claimed 2026-10-19) but alive.
+    ("proxio-http",
+     "https://raw.githubusercontent.com/proxio-io/proxy-list/main/http.txt",
+     "list"),
+    ("proxio-https",
+     "https://raw.githubusercontent.com/proxio-io/proxy-list/main/https.txt",
+     "list"),
+    ("proxio-socks4",
+     "https://raw.githubusercontent.com/proxio-io/proxy-list/main/socks4.txt",
+     "list"),
+    ("proxio-socks5",
+     "https://raw.githubusercontent.com/proxio-io/proxy-list/main/socks5.txt",
+     "list"),
+    # ShiftyTR was already in the catalog above (live-verified
+    # again 2026-11-25: http 40, https 13, socks4 661, socks5 279)
+    # — the internet search re-found it, it is not added twice.
+    # pubproxy — keyless JSON API, one call returns a few proxies
+    # re-checked minutes ago (limit=20 returned 2 on 2026-11-25);
+    # records carry a "type" field, which parse_json reads.
+    ("pubproxy-json",
+     "http://pubproxy.com/api/proxy?limit=20",
+     "json"),
 )
+
+#: Retired sources: name → why it left the catalog. A retired name
+#: is forgotten from every registry the next time it loads
+#: (SourceRegistry.sources prunes it) — catalog removal alone would
+#: leave the entry in an existing registry file, still scraped on
+#: every refresh. Tier-catalogue retirements live here too, so the
+#: prune covers discovered entries, not just built-ins.
+RETIRED_SOURCES: dict[str, str] = {
+    # built-ins retired 2026-11-25 (live probe, this box)
+    "spys-http": "2026-11-25: spys.one answers a Cloudflare challenge page — 0 rows parsed.",
+    "spys-mixed": "2026-11-25: spys.one answers a Cloudflare challenge page — 0 rows parsed.",
+    "spys-socks": "2026-11-25: spys.one answers a Cloudflare challenge page — 0 rows parsed.",
+    "thespeedx-https": "2026-11-25: file gone from TheSpeedX/PROXY-List (repo holds http/socks4/socks5 only) — HTTP 404.",
+    "proxyfree-https": "2026-11-25: file exists in proxy-free/free-proxy-list but is empty — HTTP 200, 0 bytes.",
+    # tier catalogue retired 2026-11-25 (live probe, this box)
+    "proxynova": "2026-11-25: HTTP 200, 0 rows — the table obfuscates IP/port cells; the generic parser cannot read it.",
+    "proxyscrape-site": "2026-11-25: HTTP 200, 0 rows — JS-rendered page; the v4 API is the live feed.",
+    "proxy-list.download": "2026-11-25: HTTP 502 twice (also 502 in the 2026-10-01 pass).",
+    "openproxy.space": "2026-11-25: HTTP 521 twice (also 521 in the 2026-10-01 pass).",
+    # reference entry for the retired spys built-ins
+    "spys-one": "2026-11-25: reference to the retired spys-http / spys-mixed / spys-socks built-ins.",
+}
 
 #: pages that LIST proxy-list projects / endpoints — the seeds for
 #: internet-wide source discovery.  discovery mines them for new
@@ -651,6 +744,13 @@ class SourceRegistry:
         out: list[tuple[str, str, str]] = []
         for name, url, kind in BUILT_IN_SOURCES:
             self._entry(name, url, kind)
+        # Retired sources are forgotten on load: removing a name
+        # from the catalog alone would leave its entry in this
+        # file, still scraped on every refresh. The reason for each
+        # retirement lives in RETIRED_SOURCES.
+        for name in list(self._data):
+            if name in RETIRED_SOURCES:
+                del self._data[name]
         for name in list(self._data):
             entry = self._data[name]
             if float(entry.get("disabled_until") or 0) > now:

@@ -32,13 +32,16 @@ from nomorals.core.proxy_routing import RouteAuthority, RouteReceiptJournal
 from nomorals.tools import proxy_sources
 from nomorals.tools.proxysources import SourceRegistry
 
-EXPECTED_15 = {
+# 12 since the 2026-11-25 retirement (proxynova,
+# proxy-list.download, proxyscrape-site retired; spys-one excluded
+# with them — see RETIRED_SOURCES in proxysources).
+EXPECTED_12 = {
     "proxifly-post", "proxifly-github-all", "proxifly-github-http",
     "proxifly-github-socks4", "proxifly-github-socks5",
     "proxmint-api", "proxmint-github-all", "proxmint-github-socks5",
     "proxmint-github-elite", "proxmint-github-json",
-    "sunny9577-socks5", "proxynova", "proxy-list.download",
-    "geonode-site", "proxyscrape-site",
+    "sunny9577-socks5",
+    "geonode-site",
 }
 
 
@@ -93,16 +96,16 @@ def test_sync_activates_a_fresh_home_and_reports_the_run(tmp_path):
 
     assert rc == 0
     assert "status: activated · epoch 1" in out
-    assert "added: 15 source(s)" in out
-    assert "already present: 14" in out
-    assert "excluded: 3 — unverified or no URL" in out
-    assert "registry: 101 → 116 sources" in out
+    assert "added: 12 source(s)" in out
+    assert "already present: 13" in out
+    assert "excluded: 7 — unverified or no URL" in out
+    assert "registry: 109 → 121 sources" in out
     assert "+ proxifly-post (POST)" in out
     registry = SourceRegistry(home / "proxies" / "sources.json")
-    assert len(registry.sources()) == 116
+    assert len(registry.sources()) == 121
     record = proxy_sources.read_activation_record(registry.path)
     assert record is not None and record["epoch"] == 1
-    assert set(record["last_run"]["added"]) == EXPECTED_15
+    assert set(record["last_run"]["added"]) == EXPECTED_12
 
 
 def test_sync_is_idempotent_and_says_zero_added(tmp_path):
@@ -115,7 +118,7 @@ def test_sync_is_idempotent_and_says_zero_added(tmp_path):
     assert rc == 0
     assert "status: current" in out
     assert "added: 0 source(s)" in out
-    assert "registry: 116 → 116 sources" in out
+    assert "registry: 121 → 121 sources" in out
 
 
 def test_sync_json_payload_is_structured(tmp_path):
@@ -125,7 +128,7 @@ def test_sync_json_payload_is_structured(tmp_path):
     assert rc == 0
     payload = json.loads(out)
     assert payload["activation"]["status"] == "activated"
-    assert set(payload["activation"]["added"]) == EXPECTED_15
+    assert set(payload["activation"]["added"]) == EXPECTED_12
     assert payload["activation_record"]["epoch"] == 1
     assert payload["activation_record"]["catalog"] == "SOURCES_2026"
 
@@ -149,7 +152,7 @@ def test_sync_over_a_corrupt_registry_reports_the_recovery(tmp_path):
     assert backups[0].read_bytes() == garbage
     assert backups[0].name in out
     registry = SourceRegistry(proxies / "sources.json")
-    assert len(registry.sources()) == 116
+    assert len(registry.sources()) == 121
 
 
 # ── (d) receipts ─────────────────────────────────────────────────────────────
