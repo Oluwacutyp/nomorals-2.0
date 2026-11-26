@@ -285,10 +285,16 @@ def _check_file(path: Path) -> dict:
 
 
 def run_oracle(corpus_dir: str | os.PathLike[str],
-               *, limit: int | None = None) -> dict:
-    """Run the oracle over every ``.psd`` under ``corpus_dir``."""
+               *, limit: int | None = None,
+               paths: list[str | os.PathLike[str]] | None = None
+               ) -> dict:
+    """Run the oracle over every ``.psd`` under ``corpus_dir``,
+    or over ``paths`` when given — a sweep slice of the corpus,
+    so a long run covers its slice without re-checking files
+    outside it."""
     root = Path(corpus_dir)
-    files = sorted(root.rglob("*.psd"))
+    files = (sorted(Path(p) for p in paths) if paths is not None
+             else sorted(root.rglob("*.psd")))
     if limit is not None:
         files = files[:limit]
     entries = [_check_file(path) for path in files]

@@ -12,7 +12,7 @@ layer-state-only changes.
 
 Every test here drives the PRODUCTION path against REAL PSD files
 — the vendored fixtures in tests/fixtures/photocraft/ plus the
-vendored 43-file corpus in tests/fixtures/photocraft-corpus/
+vendored 50-file corpus in tests/fixtures/photocraft-corpus/
 (lane 118; corpus absence is a failure, never a skip — see
 tests/test_gapfix_corpora.py). The full 258-file corpus stays in
 the mining checkout for the extended manual run.
@@ -24,57 +24,19 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 
-FIXTURES = Path(__file__).resolve().parent / "fixtures" / "photocraft"
-# Vendored corpus (lane 118): every gradient-map use below reads
-# this copy, so the suite no longer depends on the mining checkout.
-CORPUS = Path(__file__).resolve().parent / "fixtures" / "photocraft-corpus"
-
-
-def _read(path: Path) -> bytes:
-    return path.read_bytes()
-
-
-def _corpus(rel: str) -> Path:
-    return CORPUS / rel
-
-
-def _max_diff(a, b) -> int:
-    """Max per-channel absolute difference between two PIL images."""
-    import numpy as np
-
-    x = np.asarray(a).astype(int)
-    y = np.asarray(b).astype(int)
-    if x.shape != y.shape:
-        return 255
-    return int(abs(x - y).max()) if x.size else 0
-
-
-def _flatten_vs_composite(rel: str) -> int:
-    """The oracle in miniature for one corpus file."""
-    from nomorals.media.photo_editor.psd import PsdFile
-
-    psd = PsdFile.from_bytes(_read(_corpus(rel)))
-    return _max_diff(psd.flatten_layers(), psd.composite_rgba())
-
-
-def _mean_diff(rel: str) -> float:
-    """Mean per-channel absolute difference, in levels (0..255).
-
-    The honest metric for renders whose mean is rounding-level
-    but whose max has a few outlier pixels at sharp edges and
-    step boundaries.
-    """
-    import numpy as np
-
-    from nomorals.media.photo_editor.psd import PsdFile
-
-    psd = PsdFile.from_bytes(_read(_corpus(rel)))
-    a = np.asarray(psd.flatten_layers()).astype(int)
-    b = np.asarray(psd.composite_rgba()).astype(int)
-    return float(abs(a - b).mean())
+# Fixture paths and oracle helpers live in the shared photo
+# testkit (tests/photo_testkit.py) — one definition, every photo
+# test imports it, instead of each file re-defining them.
+from tests.photo_testkit import (
+    CORPUS,
+    FIXTURES,
+    flatten_vs_composite,
+    max_diff,
+    mean_diff_vs_composite,
+    read_bytes,
+)
 
 
 class AdjustmentRenderTests(unittest.TestCase):
@@ -86,53 +48,53 @@ class AdjustmentRenderTests(unittest.TestCase):
         # Catmull-Rom bake (Photoshop's interpolation) lands at
         # rounding level.
         self.assertLessEqual(
-            _flatten_vs_composite(
-                "adjustments/rgb8/gradient-map.psd"), 1)
+            flatten_vs_composite(
+                CORPUS / "adjustments/rgb8/gradient-map.psd"), 1)
 
     def test_photo_filter_clips_before_set_lum(self) -> None:
         # SetLum on the unclipped matrix output dragged saturated
         # reds out of gamut (max 0.18); clipping first lands at
         # a few levels.
         self.assertLessEqual(
-            _flatten_vs_composite(
-                "adjustments/rgb8/photo-filter.psd"), 5)
+            flatten_vs_composite(
+                CORPUS / "adjustments/rgb8/photo-filter.psd"), 5)
 
     def test_gray_curves_and_levels_are_exact(self) -> None:
         # A grey document has one channel: the grey record drives
         # all three replicated RGB channels.
         self.assertEqual(
-            _flatten_vs_composite("adjustments/gray8/curves.psd"),
+            flatten_vs_composite(CORPUS / "adjustments/gray8/curves.psd"),
             0)
         self.assertEqual(
-            _flatten_vs_composite("adjustments/gray8/levels.psd"),
+            flatten_vs_composite(CORPUS / "adjustments/gray8/levels.psd"),
             0)
 
     def test_gray_exposure_is_rounding(self) -> None:
         self.assertLessEqual(
-            _flatten_vs_composite(
-                "adjustments/gray8/exposure.psd"), 1)
+            flatten_vs_composite(
+                CORPUS / "adjustments/gray8/exposure.psd"), 1)
 
     def test_rgb_exposure_is_exact(self) -> None:
         self.assertEqual(
-            _flatten_vs_composite(
-                "adjustments/rgb8/exposure.psd"), 0)
+            flatten_vs_composite(
+                CORPUS / "adjustments/rgb8/exposure.psd"), 0)
 
     def test_lab_invert_and_tone_in_space(self) -> None:
         # Lab adjustments run in the native space (normalized
         # Lab), not through an RGB detour.
         self.assertLessEqual(
-            _mean_diff("adjustments/lab8/invert.psd"), 1.0)
+            mean_diff_vs_composite(CORPUS / "adjustments/lab8/invert.psd"), 1.0)
         self.assertLessEqual(
-            _mean_diff("adjustments/lab8/curves.psd"), 2.0)
+            mean_diff_vs_composite(CORPUS / "adjustments/lab8/curves.psd"), 2.0)
         self.assertLessEqual(
-            _mean_diff("adjustments/lab8/levels.psd"), 2.0)
+            mean_diff_vs_composite(CORPUS / "adjustments/lab8/levels.psd"), 2.0)
 
     def test_cmyk_legacy_brightness_contrast_per_ink(self) -> None:
         # Legacy brightness/contrast on a CMYK document applies
         # per ink, not in RGB space.
         self.assertLessEqual(
-            _mean_diff(
-                "adjustments/cmyk8/brightness-contrast-legacy.psd"),
+            mean_diff_vs_composite(
+                CORPUS / "adjustments/cmyk8/brightness-contrast-legacy.psd"),
             1.0)
 
     def test_rgb_adjustments_at_rounding(self) -> None:
@@ -141,49 +103,49 @@ class AdjustmentRenderTests(unittest.TestCase):
                     "adjustments/rgb8/channel-mixer.psd",
                     "adjustments/rgb8/color-balance.psd"):
             with self.subTest(rel=rel):
-                self.assertLessEqual(_flatten_vs_composite(rel), 1)
+                self.assertLessEqual(flatten_vs_composite(CORPUS / rel), 1)
 
 
 class BlendRenderTests(unittest.TestCase):
     def test_multiply_text_blend_is_rounding(self) -> None:
         self.assertLessEqual(
-            _flatten_vs_composite(
-                "text/text-on-gradient-blend-multiply.psd"), 1)
+            flatten_vs_composite(
+                CORPUS / "text/text-on-gradient-blend-multiply.psd"), 1)
 
     def test_clipped_hue_sat_blend_color(self) -> None:
         # The disc's antialiased edge is the known remainder:
         # a handful of edge pixels sit above rounding.
         self.assertLessEqual(
-            _mean_diff(
-                "adjustments/rgb8/clipped-hue-sat-blend-color.psd"),
+            mean_diff_vs_composite(
+                CORPUS / "adjustments/rgb8/clipped-hue-sat-blend-color.psd"),
             1.0)
 
 
 class EffectsRenderTests(unittest.TestCase):
     def test_inner_bevel_smooth_is_rounding(self) -> None:
         self.assertLessEqual(
-            _mean_diff("effects/bevel-inner-smooth.psd"), 0.1)
+            mean_diff_vs_composite(CORPUS / "effects/bevel-inner-smooth.psd"), 0.1)
 
     def test_outer_bevel_smooth_is_rounding(self) -> None:
         self.assertLessEqual(
-            _mean_diff("effects/bevel-outer-smooth.psd"), 0.1)
+            mean_diff_vs_composite(CORPUS / "effects/bevel-outer-smooth.psd"), 0.1)
 
     def test_chisel_bevel_renders(self) -> None:
         # Chisel-hard on a star: the height field is right and
         # the deltas match Photoshop's energy; the remainder is
         # sub-pixel edge placement at the star's points.
         self.assertLessEqual(
-            _mean_diff("effects/bevel-emboss-chisel-hard.psd"),
+            mean_diff_vs_composite(CORPUS / "effects/bevel-emboss-chisel-hard.psd"),
             2.0)
 
     def test_satin_renders(self) -> None:
         self.assertLessEqual(
-            _mean_diff("effects/satin-default.psd"), 1.0)
+            mean_diff_vs_composite(CORPUS / "effects/satin-default.psd"), 1.0)
 
     def test_outer_glow_renders(self) -> None:
         self.assertLessEqual(
-            _flatten_vs_composite(
-                "effects/outer-glow-soft.psd"), 2)
+            flatten_vs_composite(
+                CORPUS / "effects/outer-glow-soft.psd"), 2)
 
 
 class TextRenderTests(unittest.TestCase):
@@ -191,11 +153,11 @@ class TextRenderTests(unittest.TestCase):
         # The stored raster stays primary; the gamma-1.45 text
         # composite mixes it exactly.
         self.assertEqual(
-            _flatten_vs_composite("text/antialias-smooth.psd"), 0)
+            flatten_vs_composite(CORPUS / "text/antialias-smooth.psd"), 0)
 
     def test_text_with_layer_styles_renders(self) -> None:
         self.assertLessEqual(
-            _mean_diff("text/text-with-layer-styles.psd"), 1.0)
+            mean_diff_vs_composite(CORPUS / "text/text-with-layer-styles.psd"), 1.0)
 
 
 class SmartObjectTests(unittest.TestCase):
@@ -204,18 +166,18 @@ class SmartObjectTests(unittest.TestCase):
         # filter mask; Photoshop blends filtered/unfiltered by
         # the FEid mask at render time.
         self.assertEqual(
-            _flatten_vs_composite(
-                "smart-filters/sf-filter-mask-hard.psd"), 0)
+            flatten_vs_composite(
+                CORPUS / "smart-filters/sf-filter-mask-hard.psd"), 0)
 
     def test_gaussian_blur_smart_filter_renders(self) -> None:
         self.assertLessEqual(
-            _flatten_vs_composite(
-                "smart-filters/sf-gaussian-blur-r4.psd"), 1)
+            flatten_vs_composite(
+                CORPUS / "smart-filters/sf-gaussian-blur-r4.psd"), 1)
 
     def test_smart_stack_blend_and_mask(self) -> None:
         self.assertLessEqual(
-            _mean_diff(
-                "smart-filters/sf-stack-blend-and-mask.psd"), 0.01)
+            mean_diff_vs_composite(
+                CORPUS / "smart-filters/sf-stack-blend-and-mask.psd"), 0.01)
 
 
 class ByteStableTests(unittest.TestCase):
@@ -224,7 +186,7 @@ class ByteStableTests(unittest.TestCase):
 
         for fixture in sorted(FIXTURES.glob("*.psd")):
             with self.subTest(fixture=fixture.name):
-                data = _read(fixture)
+                data = read_bytes(fixture)
                 self.assertEqual(
                     PsdFile.from_bytes(data).to_bytes(), data)
 
@@ -233,7 +195,7 @@ class ByteStableTests(unittest.TestCase):
 
         for fixture in sorted(FIXTURES.glob("*.psd")):
             with self.subTest(fixture=fixture.name):
-                data = _read(fixture)
+                data = read_bytes(fixture)
                 doc = PhotoDocument.from_psd_bytes(data)
                 self.assertEqual(doc.to_psd_bytes(), data)
 
@@ -243,18 +205,18 @@ class ByteStableTests(unittest.TestCase):
 
         for fixture in sorted(FIXTURES.glob("*.psd")):
             with self.subTest(fixture=fixture.name):
-                data = _read(fixture)
+                data = read_bytes(fixture)
                 doc = PhotoDocument.from_psd_bytes(data)
                 psd = PsdFile.from_bytes(data)
                 self.assertEqual(
-                    _max_diff(doc.flatten(), psd.flatten_layers()),
+                    max_diff(doc.flatten(), psd.flatten_layers()),
                     0)
 
     def test_layer_toggle_splices_clean_layers_verbatim(self) -> None:
         from nomorals.media.photo_editor.document import PhotoDocument
         from nomorals.media.photo_editor.psd import PsdFile
 
-        data = _read(CORPUS / "adjustments" / "rgb8"
+        data = read_bytes(CORPUS / "adjustments" / "rgb8"
                      / "gradient-map.psd")
         doc = PhotoDocument.from_psd_bytes(data)
         doc.set_layer_state(1, opacity=128)
@@ -274,7 +236,7 @@ class LayerStateTests(unittest.TestCase):
     def test_layer_toggle_by_index_and_name(self) -> None:
         from nomorals.media.photo_editor.document import PhotoDocument
 
-        doc = PhotoDocument.from_psd_bytes(_read(
+        doc = PhotoDocument.from_psd_bytes(read_bytes(
             CORPUS / "adjustments" / "rgb8" / "gradient-map.psd"))
         doc.set_layer_state(1, visible=False)
         self.assertFalse(doc.layers[1].visible)
@@ -292,7 +254,7 @@ class LayerStateTests(unittest.TestCase):
             PhotoEditorError,
         )
 
-        doc = PhotoDocument.from_psd_bytes(_read(
+        doc = PhotoDocument.from_psd_bytes(read_bytes(
             CORPUS / "adjustments" / "rgb8" / "gradient-map.psd"))
         with self.assertRaises(PhotoEditorError):
             doc.set_layer_state("no such layer", visible=False)
@@ -358,7 +320,7 @@ class WiringTests(unittest.TestCase):
         from nomorals.media.photo_editor.document import PhotoDocument
         from nomorals.media.photo_editor.page import photo_page_html
 
-        doc = PhotoDocument.from_psd_bytes(_read(
+        doc = PhotoDocument.from_psd_bytes(read_bytes(
             CORPUS / "adjustments" / "rgb8" / "gradient-map.psd"))
         html = photo_page_html(doc)
         self.assertIn("gradient_map", html)

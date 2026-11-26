@@ -47,22 +47,22 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-FIXTURES = Path(__file__).resolve().parent / "fixtures" / "photocraft"
+# Fixture path and oracle helpers live in the shared photo
+# testkit (tests/photo_testkit.py) — one definition, every photo
+# test imports it, instead of each file re-defining them.
+from tests.photo_testkit import FIXTURES, max_diff, read_bytes
+
 RGB8 = FIXTURES / "rgb8-baseline-layer-copy.psd"
 RGB8_ADJ = FIXTURES / "rgb8-brightness-contrast.psd"
 CMYK8 = FIXTURES / "cmyk8-baseline-layer-copy.psd"
 GRAY8 = FIXTURES / "gray8-baseline-layer-copy.psd"
 
 
-def _read(path: Path) -> bytes:
-    return path.read_bytes()
-
-
 class PsdDecodeTests(unittest.TestCase):
     def test_real_rgb8_psd_opens_with_layers(self) -> None:
         from nomorals.media.photo_editor.psd import PsdFile
 
-        psd = PsdFile.from_bytes(_read(RGB8))
+        psd = PsdFile.from_bytes(read_bytes(RGB8))
         self.assertEqual(psd.mode, "RGB")
         self.assertEqual(psd.depth, 8)
         self.assertEqual((psd.width, psd.height), (96, 96))
@@ -78,12 +78,12 @@ class PsdDecodeTests(unittest.TestCase):
         file itself carries — pixel for pixel."""
         from nomorals.media.photo_editor.psd import PsdFile
 
-        psd = PsdFile.from_bytes(_read(RGB8))
+        psd = PsdFile.from_bytes(read_bytes(RGB8))
         flat = psd.flatten_layers()
         comp = psd.composite_rgba()
         self.assertEqual(flat.size, comp.size)
         self.assertEqual(flat.mode, "RGBA")
-        diff = _max_diff(flat, comp)
+        diff = max_diff(flat, comp)
         self.assertEqual(diff, 0, f"flatten differs from Photoshop's "
                          f"composite by up to {diff} per channel")
 
@@ -91,13 +91,13 @@ class PsdDecodeTests(unittest.TestCase):
         from nomorals.media.photo_editor.psd import PsdFile
 
         for path, mode in ((CMYK8, "CMYK"), (GRAY8, "L")):
-            psd = PsdFile.from_bytes(_read(path))
+            psd = PsdFile.from_bytes(read_bytes(path))
             self.assertEqual(psd.mode, mode)
             flat = psd.flatten_layers()
             self.assertEqual(flat.size, (96, 96))
             self.assertEqual(flat.mode, "RGBA")
             comp = psd.composite_rgba()
-            diff = _max_diff(flat, comp)
+            diff = max_diff(flat, comp)
             # CMYK conversion is the standard naive formula and Lab
             # is exact math; both must land within 2 levels of the
             # vendor rendering, never wildly off.
@@ -112,7 +112,7 @@ class PsdDecodeTests(unittest.TestCase):
         level of Photoshop's own composite."""
         from nomorals.media.photo_editor.psd import PsdFile
 
-        psd = PsdFile.from_bytes(_read(RGB8_ADJ))
+        psd = PsdFile.from_bytes(read_bytes(RGB8_ADJ))
         adj = [layer for layer in psd.layers
                if layer.adjustment_keys]
         self.assertTrue(adj, "expected an adjustment layer")
@@ -121,22 +121,22 @@ class PsdDecodeTests(unittest.TestCase):
         self.assertEqual(psd.unrendered_adjustments(), [],
                          "the adjustment is rendered, not reported")
         comp = psd.composite_rgba()
-        self.assertLessEqual(_max_diff(flat, comp), 1)
+        self.assertLessEqual(max_diff(flat, comp), 1)
 
     def test_roundtrip_preserves_pixels_and_layers(self) -> None:
         from nomorals.media.photo_editor.document import PhotoDocument
         from nomorals.media.photo_editor.psd import PsdFile, encode_psd
 
-        doc = PhotoDocument.from_psd_bytes(_read(RGB8))
+        doc = PhotoDocument.from_psd_bytes(read_bytes(RGB8))
         blob = encode_psd(doc)
         again = PsdFile.from_bytes(blob)
         self.assertEqual(again.mode, "RGB")
         self.assertEqual((again.width, again.height), (96, 96))
         self.assertEqual([layer.name for layer in again.layers],
                          [layer.name for layer in
-                          PsdFile.from_bytes(_read(RGB8)).layers])
-        diff = _max_diff(again.flatten_layers(),
-                         PsdFile.from_bytes(_read(RGB8)).flatten_layers())
+                          PsdFile.from_bytes(read_bytes(RGB8)).layers])
+        diff = max_diff(again.flatten_layers(),
+                         PsdFile.from_bytes(read_bytes(RGB8)).flatten_layers())
         self.assertEqual(diff, 0)
 
     def test_rejects_non_psd_and_truncated(self) -> None:
@@ -145,7 +145,7 @@ class PsdDecodeTests(unittest.TestCase):
         with self.assertRaises(PsdError):
             PsdFile.from_bytes(b"not a photoshop file at all" * 4)
         with self.assertRaises(PsdError):
-            PsdFile.from_bytes(_read(RGB8)[:40])
+            PsdFile.from_bytes(read_bytes(RGB8)[:40])
         with self.assertRaises(PsdError):
             PsdFile.from_bytes(b"")
 
@@ -154,29 +154,18 @@ class PsdDecodeTests(unittest.TestCase):
         never decoded as if it were RGB."""
         from nomorals.media.photo_editor.psd import PsdError, PsdFile
 
-        raw = bytearray(_read(RGB8))
+        raw = bytearray(read_bytes(RGB8))
         raw[24:26] = (7).to_bytes(2, "big")  # color mode: multichannel
         with self.assertRaises(PsdError) as caught:
             PsdFile.from_bytes(bytes(raw))
         self.assertIn("ultichannel", str(caught.exception))
 
 
-def _max_diff(a: Any, b: Any) -> int:
-    """Max per-channel absolute difference between two RGBA images."""
-    import numpy as np
-
-    x = np.asarray(a.convert("RGBA")).astype(int)
-    y = np.asarray(b.convert("RGBA")).astype(int)
-    if x.shape != y.shape:
-        raise AssertionError(f"shape mismatch {x.shape} vs {y.shape}")
-    return int(abs(x - y).max()) if x.size else 0
-
-
 class DocumentTests(unittest.TestCase):
     def _doc(self) -> Any:
         from nomorals.media.photo_editor.document import PhotoDocument
 
-        return PhotoDocument.from_psd_bytes(_read(RGB8))
+        return PhotoDocument.from_psd_bytes(read_bytes(RGB8))
 
     def test_document_opens_with_layers_and_history(self) -> None:
         doc = self._doc()
@@ -232,7 +221,7 @@ class DocumentTests(unittest.TestCase):
         self.assertEqual(doc.flatten().size, (64, 64))
         doc.undo()
         self.assertEqual((doc.width, doc.height), (96, 96))
-        self.assertEqual(_max_diff(doc.flatten(), original), 0)
+        self.assertEqual(max_diff(doc.flatten(), original), 0)
         doc.redo()
         self.assertEqual((doc.width, doc.height), (64, 64))
 
@@ -253,7 +242,7 @@ class DocumentTests(unittest.TestCase):
             self.assertEqual((reopened.width, reopened.height),
                              (64, 64))
             self.assertEqual(
-                _max_diff(reopened.flatten(), doc.flatten()), 0)
+                max_diff(reopened.flatten(), doc.flatten()), 0)
 
     def _open(self, path: str) -> Any:
         from nomorals.media.photo_editor.document import PhotoDocument
@@ -273,11 +262,11 @@ class DocumentTests(unittest.TestCase):
                 Path(tmp) / "flat.png")
             rendered = imgdoc.render()
             self.assertEqual(
-                _max_diff(rendered.image, doc.flatten()), 0)
+                max_diff(rendered.image, doc.flatten()), 0)
             back = PhotoDocument.from_image_document(imgdoc)
             self.assertEqual(len(back.layers), 1)
             self.assertEqual(
-                _max_diff(back.flatten(), doc.flatten()), 0)
+                max_diff(back.flatten(), doc.flatten()), 0)
 
 
 class OracleTests(unittest.TestCase):
@@ -367,7 +356,7 @@ class WiringTests(unittest.TestCase):
         from nomorals.media.photo_editor.document import PhotoDocument
         from nomorals.media.photo_editor.page import photo_page_html
 
-        doc = PhotoDocument.from_psd_bytes(_read(RGB8))
+        doc = PhotoDocument.from_psd_bytes(read_bytes(RGB8))
         html = photo_page_html(doc)
         self.assertIn("data:image/png;base64,", html)
         self.assertIn("Background", html)
@@ -380,7 +369,7 @@ class WiringTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             store = PhotoStore(home=tmp)
-            doc = PhotoDocument.from_psd_bytes(_read(RGB8))
+            doc = PhotoDocument.from_psd_bytes(read_bytes(RGB8))
             doc_id = store.save(doc, title="baseline")
             self.assertTrue(doc_id)
             found = store.matches(doc_id[:8])
@@ -441,7 +430,7 @@ class HttpRouteTests(unittest.TestCase):
                 tools=ToolRegistry(), bus=None, memory=None,
             )
             store = PhotoStore(home=tmp)
-            doc = PhotoDocument.from_psd_bytes(_read(RGB8))
+            doc = PhotoDocument.from_psd_bytes(read_bytes(RGB8))
             doc_id = store.save(doc, title="baseline")
             api = APIServer(context, token="test-token",
                             max_body_bytes=64 * 1024)

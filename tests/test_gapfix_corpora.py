@@ -38,6 +38,10 @@ import unittest
 from collections import Counter
 from pathlib import Path
 
+# Corpus absence is a test FAILURE, never a skip — the
+# shared definition lives in the photo testkit.
+from tests.photo_testkit import require_corpus as _require
+
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 ROOT = Path(__file__).resolve().parent.parent
 PHOTO = FIXTURES / "photocraft"
@@ -56,11 +60,6 @@ ATTRIBUTION = _load_toml("corpora-attribution.toml")
 PARITY = _load_toml("corpora-parity.toml")
 
 
-def _require(paths: list[Path]) -> None:
-    """Fail naming the file — never skip when a corpus file is gone."""
-    for path in paths:
-        if not path.is_file():
-            raise AssertionError(f"missing corpus fixture {path}")
 
 
 def _sha256(path: Path) -> str:

@@ -2925,6 +2925,25 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001
                     _log.warning("film surface reply send failed: %s", exc)
                 return
+            # Studio photo editor (lane 117): "open this photo
+            # <path.psd>" / "edit this photo <name>" → the
+            # matching /photo verb. Owner only, non-slash, never
+            # eats chat — the parser matches a .psd path or a
+            # known open document only.
+            try:
+                photo_reply = self._photo_surface_hook(message)
+            except Exception:  # noqa: BLE001 - the hook must never eat chat
+                _log.exception("photo surface hook failed")
+                photo_reply = None
+            if photo_reply is not None:
+                self._bump("controls")
+                try:
+                    self._typing_for(message.chat, photo_reply)
+                    self.gateway.send(message.chat.platform, message.chat,
+                                      photo_reply)
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("photo surface reply send failed: %s", exc)
+                return
             try:
                 union_reply = self._union_catalog_hook(message)
             except Exception:  # noqa: BLE001 - the hook must never eat chat
@@ -8616,6 +8635,45 @@ class PartnerRuntime(
             return None
         return None
 
+    def _photo_surface_hook(self, message: ChatMessage) -> str | None:
+        """Studio photo editor, in plain words: "open this photo
+        <path.psd>" / "edit this photo <name>" / "show this photo
+        <name>" — routed to the matching /photo verb.
+
+        Returns a reply string when the text names a ``.psd`` path
+        or an already-open document, else None. Owner only,
+        non-slash, never eats chat. (An earlier revision put this
+        parser inside _handle_control_inner, where it could never
+        fire: plain text never reaches the control dispatch — and
+        it intercepted slash "/photo edit <id> <op> ..." first,
+        truncating it to "edit <id>" before the dispatch ever saw
+        the op. The hook lives here, where NL flows, and slash
+        text goes through the slash dispatch untouched.)
+        """
+        text = (message.text or "").strip()
+        if not text or text.startswith("/"):
+            return None
+        if message is not None and not self._is_operator(message):
+            return None
+        try:
+            from ...media.photo_editor.store import PhotoStore
+            from ...tools.photo_editor import parse_photo_request
+
+            _home = getattr(
+                getattr(self.context, "settings", None), "home", None)
+            _store = PhotoStore(
+                home=str(_home) if _home else None)
+            _known = [(row.get("id", ""),
+                       row.get("title") or "")
+                      for row in _store.list_docs()]
+            _parsed = parse_photo_request(text, _known)
+        except Exception:  # noqa: BLE001 — no store, no hook
+            return None
+        if _parsed is None:
+            return None
+        _verb, _ref = _parsed
+        return self._control_photo(f"{_verb} {_ref}", message)
+
     def _music_full_hook(self, message: ChatMessage) -> str | None:
         """Build-map #58: "make me a song about X" → full vocal pipeline.
 
@@ -9913,32 +9971,14 @@ class PartnerRuntime(
             _, _gh_name = _gh_parsed
             return self._control_ghealth(_gh_name, message)
 
-        # Natural phrasing for the photo editor: "open this photo
-        # <path.psd>" / "edit this photo <name>" — matched only
-        # against a .psd path in the text or a document already
-        # open in the Studio store, so the question never steals
-        # an unrelated one. Owner-only, like /photo.
-        from ...tools.photo_editor import parse_photo_request
-
-        _photo_parsed = None
-        try:
-            from ...media.photo_editor.store import PhotoStore
-
-            _home = getattr(
-                getattr(self.context, "settings", None), "home", None)
-            _store = PhotoStore(
-                home=str(_home) if _home else None)
-            _known = [(row.get("id", ""),
-                       row.get("title") or "")
-                      for row in _store.list_docs()]
-            _photo_parsed = parse_photo_request(text, _known)
-        except Exception:  # noqa: BLE001 — no store, no hook
-            _photo_parsed = None
-        if _photo_parsed is not None:
-            if message is not None and not self._is_operator(message):
-                return "that one's just for the owner."
-            _verb, _ref = _photo_parsed
-            return self._control_photo(f"{_verb} {_ref}", message)
+        # The photo NL hook used to live here — but plain text
+        # never reaches the control dispatch, so "open this photo
+        # ..." did nothing, and the parser intercepted slash
+        # "/photo edit <id> <op> ..." first, truncating it to
+        # "edit <id>" before the dispatch ever saw the op. It now
+        # lives in _photo_surface_hook, called from _process_inner
+        # where NL flows; slash /photo goes through the kind
+        # dispatch below, untouched.
 
         # Natural phrasing for the Studio extensions: "install this
         # extension <path.zip>" / "studio theme <name>" / "studio
