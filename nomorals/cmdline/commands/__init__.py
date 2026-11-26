@@ -56,6 +56,7 @@ from .improve import _cmd_improve, _inbox_obj
 from .inbox import _cmd_inbox
 from .learn import _cmd_learn
 from .legal import _cmd_legal
+from .matching import _cmd_matching
 from .immune import _cmd_immune
 from .media import (
     _VIDEO_EXTS,
@@ -220,6 +221,7 @@ __all__ = [
     "_cmd_inbox",
     "_cmd_learn",
     "_cmd_legal",
+    "_cmd_matching",
     "_cmd_immune",
     "_VIDEO_EXTS",
     "_media_tools",

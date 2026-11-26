@@ -390,7 +390,7 @@ class ToolTests(unittest.TestCase):
 
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 805)
+        self.assertEqual(len(registry._tools), 806)
         self.assertIn("robot", registry._tools)
 
     def test_tool_status_drive_scan_map(self) -> None:

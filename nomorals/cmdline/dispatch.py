@@ -95,6 +95,7 @@ from .commands.inbox import _cmd_inbox
 from .commands.learn import _cmd_learn
 from .commands.legal import _cmd_legal
 from .commands.file import _cmd_file
+from .commands.matching import _cmd_matching
 from .commands.immune import _cmd_immune
 from .commands.impossible import _cmd_impossible
 from .commands.media import _cmd_media, _cmd_studio, _cmd_trendops
@@ -604,6 +605,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "inbox": _CommandSpec(_cmd_inbox),
     "learn": _CommandSpec(_cmd_learn),
     "legal": _CommandSpec(_cmd_legal),
+    "matching": _CommandSpec(_cmd_matching),
     "immune": _CommandSpec(_cmd_immune),
     "impossible": _CommandSpec(_cmd_impossible),
     "audio": _CommandSpec(_cmd_audio),

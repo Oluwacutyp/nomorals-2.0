@@ -791,6 +791,22 @@ class ToolRegistry:
                 "module": "files",
                 "error": f"{type(exc).__name__}: {exc}",
             })
+        # Matching (nomorals/matching/) is the same shape as books and
+        # archives — an out-of-package organ loaded by dotted name so
+        # the registry (L4) never statically imports it (L5). Its
+        # register() attaches the single `matching` tool (daily picks +
+        # stable matching over gigs / community / mentoring), the brain
+        # front door over the /match chat control.
+        try:
+            _matching = _importlib.import_module("nomorals.matching.tools")
+            _matching.register(self)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("tool module 'matching' failed to register: %s: %s",
+                         type(exc).__name__, exc)
+            self._failed_modules.append({
+                "module": "matching",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
         try:
             from ..media import music as _music, playback as _playback
             from ..media import video as _video

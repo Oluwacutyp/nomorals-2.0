@@ -548,9 +548,9 @@ class ToolTests(unittest.TestCase):
 
     def test_tool_is_registered_and_count_is_787(self):
         # 786 after the audit N4 lane added build_swarm;
-        # 803 after gapfix122 added file. 804 after gapfix129 added group_cleanup. 805 after gapfix130 added group_heist.
+        # 803 after gapfix122 added file. 804 after gapfix129 added group_cleanup. 805 after gapfix130 added group_heist. 806 after gapfix119 added matching.
         self.assertIn("file", self.registry._tools)
-        self.assertEqual(len(self.registry._tools), 805)
+        self.assertEqual(len(self.registry._tools), 806)
 
     def test_tool_info_list_pack(self):
         from nomorals.core.policy import CapabilitySet

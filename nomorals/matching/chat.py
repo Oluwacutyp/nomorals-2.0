@@ -78,7 +78,37 @@ def _store(context) -> tuple[DailyBatchStore, Questionnaire, str]:
 
 
 def _surface(context) -> str:
-    return getattr(context, "matching_surface", None) or "gig"
+    return _canon_surface(getattr(context, "matching_surface", None) or "gig")
+
+
+# The doc names the third surface "mentoring"; the store's canonical
+# name is "learning" (pinned by test_ten_packages_tier0). Accept the
+# doc's names everywhere so chat / CLI / tool never split one surface
+# into two stores. Unknown names pass through unchanged (the caller
+# then gets the "no candidates registered" reply, as before).
+_SURFACE_ALIASES = {
+    "gig": "gig",
+    "gigs": "gig",
+    "community": "community",
+    "learning": "learning",
+    "mentoring": "learning",
+    "mentor": "learning",
+    "mentee": "learning",
+}
+
+
+def _canon_surface(name: str) -> str:
+    return _SURFACE_ALIASES.get((name or "").strip().lower(),
+                                (name or "").strip().lower() or "gig")
+
+
+# The /match verbs, in one place — the chat control, the `matching`
+# brain tool, and `nm matching` all dispatch on this list.
+_VERBS = (
+    "daily", "add", "remove", "like", "pass", "why", "questionnaire",
+    "answer", "acceptable", "dealbreaker", "rank", "capacity", "run",
+    "roommates", "assign", "ttc", "draft", "stats", "help",
+)
 
 
 def _parse_attrs(text: str) -> dict:
@@ -141,11 +171,22 @@ def control_match(tail: str, context=None, chat=None,
 
         if action == "daily":
             segs = args.split()
-            surf = (segs[0] if segs else surface).lower()
-            try:
-                n = int(segs[1]) if len(segs) > 1 else 5
-            except ValueError:
-                n = 5
+            # A bare number is a count, not a surface: "daily 5" means
+            # five picks from the context surface (before this fix the
+            # number was taken as a surface name and always came back
+            # empty). Surface names are canonicalised (mentoring→learning).
+            surf = surface
+            n = 5
+            if segs:
+                first = segs[0].lower()
+                if first.isdigit():
+                    n = int(first)
+                else:
+                    surf = _canon_surface(first)
+                    try:
+                        n = int(segs[1]) if len(segs) > 1 else 5
+                    except ValueError:
+                        n = 5
             weights = q.weights()
             pool = batch_store.candidates(surf)
             # Deal-breakers filter first (front-loaded, Feeld pattern).
@@ -217,7 +258,7 @@ def control_match(tail: str, context=None, chat=None,
             return "\n".join(lines)
 
         if action == "questionnaire":
-            surf = (args.split() or [surface])[0].lower()
+            surf = _canon_surface((args.split() or [surface])[0])
             q.ensure_starters(surf)
             todo = q.unanswered()
             if not todo:

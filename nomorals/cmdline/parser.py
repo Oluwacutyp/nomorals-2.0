@@ -178,6 +178,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "learn": [],
     "legal": [],
     "file": [],
+    "matching": [],
     "immune": [],
     "impossible": [],
     "repair": [],
@@ -7293,6 +7294,24 @@ def _parser() -> argparse.ArgumentParser:
     )
     legal.add_argument("task", nargs="*", default=[], help="verb and arguments")
     legal.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # Tier 0 wiring: CLI mirror of the /match chat command (doc 14 #3).
+    # Same control as chat (matching/chat.py) — CLI and chat stay in sync
+    # by delegating to the same function. Surface-first, as the doc names
+    # them: gigs | community | mentoring (mentoring is the learning surface).
+    matching = sub.add_parser("matching", aliases=CLI_ALIASES["matching"],
+        help="curated daily picks + stable matching: gigs, community, mentoring",
+        description=("nm matching gigs | community | mentoring — today's picks\\n"
+                     "nm matching <surface> daily [n] | add <id> | <title> | tags | attrs\\n"
+                     "nm matching <surface> like|pass <id> | why <id> | stats\\n"
+                     "nm matching <surface> questionnaire | answer <qid> <1-5> | dealbreaker <name> <attr> <pred> <value>\\n"
+                     "nm matching <surface> rank <proposer|reviewer> <who> <ids> | capacity <who> <n> | run\\n"
+                     "nm matching <surface> roommates <ids> | assign | ttc ... | draft <agents>\\n"
+                     "nm matching daily [surface] [n] — same verbs without the surface first"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    matching.add_argument("task", nargs="*", default=[], help="surface and/or verb and arguments")
+    matching.add_argument("--json", action="store_true", help="Output as JSON")
 
     # Immune wiring: CLI mirror of the /immune chat command.
     immune = sub.add_parser("immune", aliases=CLI_ALIASES["immune"],
