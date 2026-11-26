@@ -41,19 +41,34 @@ def register(registry: Any) -> None:
             "'make him do a backflip', 'collapse crying'). ANY describable "
             "human action works — the brain directs the motion, not a fixed "
             "list. Optional camera look: phone_selfie, phone, handheld, "
-            "cctv, dashcam, cinema. Returns the video path."
+            "cctv, dashcam, cinema. Optional voice: say=<words> + voice=<a "
+            "catalogue voice> makes the person speak the words on camera "
+            "(animate -> lip-sync -> voice, one video back). backend: auto "
+            "(stableanimator -> mimicmotion -> warp by profile) | "
+            "stableanimator | mimicmotion | warp. Returns the video path."
         ),
         capability=Capability.MEDIA,
     )
     def animate_photo(image: str, action: str, *, camera: str = "",
                       duration_s: float = 4.0,
-                      workdir: str | None = None) -> dict[str, Any]:
+                      workdir: str | None = None,
+                      say: str = "", voice: str = "",
+                      backend: str = "auto") -> dict[str, Any]:
         try:
-            from ..media.directed.animator import ModelUnavailable, direct_animate
+            from ..media.directed.animator import direct_animate
             from ..media.directed.motion_score import generate_track
         except ImportError as exc:
             return {"ok": False,
                     "error": f"directed animation unavailable: {exc}"}
+        if bool(say) != bool(voice):
+            return {"ok": False,
+                    "error": "speaking needs both say=<words> and "
+                             "voice=<a catalogue voice>"}
+        if backend not in ("auto", "neural", "stableanimator",
+                           "mimicmotion", "warp"):
+            return {"ok": False,
+                    "error": f"unknown backend {backend!r} — auto | "
+                             "stableanimator | mimicmotion | warp"}
         n_frames = max(8, int(duration_s * 10))
         try:
             track, meta = generate_track(
@@ -61,10 +76,25 @@ def register(registry: Any) -> None:
         except (ValueError, RuntimeError, ImportError) as exc:
             return {"ok": False, "error": str(exc)}
         try:
-            res = direct_animate(image, track, workdir=workdir)
-        except (ModelUnavailable, ImportError) as exc:
+            if say and voice:
+                from ..media.directed.animator import animate_and_speak
+                chain = animate_and_speak(
+                    image, track, say, voice, workdir=workdir,
+                    prefer=backend)
+                path, backend_name = chain.path, chain.animate_backend
+                note = chain.note
+                extra = {"lipsync_backend": chain.lipsync_backend,
+                         "voice": chain.voice}
+            else:
+                res = direct_animate(image, track, workdir=workdir,
+                                     prefer=backend)
+                path, backend_name, note = res.path, res.backend, res.note
+                extra = {}
+        except Exception as exc:  # noqa: BLE001 - includes ImportError
+            # and ModelUnavailable (both surface as an honest error);
+            # the say path can also raise KeyError (unknown voice) or a
+            # TTS failure — those surface the same way, never crash.
             return {"ok": False, "error": str(exc)}
-        path, backend, note = res.path, res.backend, res.note
         if meta.get("notes"):
             note += " | direction notes: " + "; ".join(meta["notes"][:3])
         if camera:
@@ -81,9 +111,9 @@ def register(registry: Any) -> None:
             styled = os.path.splitext(path)[0] + f"_{camera}.mp4"
             path = camera_look_video(path, camera, styled, fps=10)
             note += f" + {camera} look"
-        return {"ok": True, "path": path, "backend": backend,
+        return {"ok": True, "path": path, "backend": backend_name,
                 "action": meta.get("action", action),
-                "source": meta.get("source", "?"), "note": note}
+                "source": meta.get("source", "?"), "note": note, **extra}
 
     @registry.register(
         "camera_look",

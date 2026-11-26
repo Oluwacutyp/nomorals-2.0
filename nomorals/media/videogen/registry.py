@@ -56,14 +56,23 @@ __all__ = [
     "BACKENDS",
 ]
 
-BACKENDS = ("ltx", "wan", "code")
+BACKENDS = ("ltx", "wan", "code", "stableanimator")
 
 #: the ``code`` backend renders scene specs (diagram / equation / chart
 #: designs, HTML scenes) with deterministic seek(t) frames — no model,
 #: no VRAM floor, CPU-only. It has no registry models or LoRAs; it is
 #: listed here so capability surfaces and ``--backend`` switches name
 #: the whole ladder, diffusion and code side by side.
-_BACKEND_FLOORS = {"ltx": LTX_MIN_VRAM_GB, "wan": WAN_MIN_VRAM_GB}
+#:
+#: the ``stableanimator`` backend is the pose-driven ID-preserving
+#: character-video rung (StableAnimator, Francis-Rings/StableAnimator,
+#: MIT). It is NOT a diffusers pipeline — it runs as a subprocess
+#: against its own repo + weights (see media/directed/animator.py) —
+#: so it has no pipeline class and no LoRAs; the registry entry is the
+#: selectable model (ID-specific hero clips) and its VRAM floor drives
+#: the capability gate in pipeline.generate().
+_BACKEND_FLOORS = {"ltx": LTX_MIN_VRAM_GB, "wan": WAN_MIN_VRAM_GB,
+                   "stableanimator": 16.0}
 
 #: pipeline ``_class_name`` values in a diffusers ``model_index.json``
 #: that each backend can actually load.
@@ -106,6 +115,21 @@ def _builtin_entries() -> list[dict]:
             "vram_gb": WAN_MIN_VRAM_GB, "license_key": "wan",
             "loadable": True, "loadable_reason": "",
             "builtin": True, "default": True, "distilled": False,
+        },
+        {
+            # Pose-driven ID-preserving character video. Not a diffusers
+            # model — "source" is the HF weight repo the provisioner
+            # fetches from; the runner is the animator backend
+            # (media/directed/animator.py: stableanimator_animate).
+            # loadable=True means "a real selectable model"; the actual
+            # render still gates on torch+CUDA+repo+weights at call
+            # time and declines honestly when they are absent.
+            "name": "stableanimator-basic", "backend": "stableanimator",
+            "source": "FrancisRing/StableAnimator",
+            "format": "hf-repo",
+            "vram_gb": 16.0, "license_key": "stableanimator",
+            "loadable": True, "loadable_reason": "",
+            "builtin": True, "default": False, "distilled": False,
         },
     ]
 
@@ -175,8 +199,12 @@ def _scan_local_models() -> list[dict]:
         if depth > 2:
             dirnames[:] = []
             continue
-        # the loras tree holds adapters, not models
-        dirnames[:] = [d for d in dirnames if d != "loras"]
+        # the loras tree holds adapters, not models; the stableanimator
+        # tree holds the provisioned SVD diffusers dir, which is not a
+        # standalone runnable model (it needs the Animation weights +
+        # repo) — listing it as "not loadable" would be noise.
+        dirnames[:] = [d for d in dirnames
+                       if d not in ("loras", "stableanimator")]
         if dirpath != root and os.path.isfile(
                 os.path.join(dirpath, "model_index.json")):
             candidates.append(dirpath)

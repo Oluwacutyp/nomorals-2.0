@@ -151,6 +151,12 @@ MODEL_LICENSES: dict[str, ModelLicense] = {
         "Apache-2.0 — output is yours.",
         "video generation (Wan 2.2 TI2V-5B, local weights via videogen)",
         "https://huggingface.co/Wan-AI/Wan2.2-TI2V-5B-Diffusers"),
+    "stableanimator": ModelLicense(
+        "stableanimator", "MIT", True,
+        "MIT — output is yours.",
+        "pose-driven ID-preserving character video (StableAnimator, "
+        "local weights via animator.py)",
+        "https://github.com/Francis-Rings/StableAnimator"),
     "ltx": ModelLicense(
         "ltx", "Lightricks LTX-Video Open Weights License", True,
         "Labels LTX-Video 0.9.7 (the videogen backend's checkpoint, "

@@ -660,3 +660,22 @@ def render_pose_video(track: PoseTrack, out_path: str) -> str:
          "-pix_fmt", "yuv420p", out_path],
         check=True, capture_output=True, timeout=300)
     return out_path
+
+
+def render_pose_frames(track: PoseTrack, out_dir: str | Path) -> Path:
+    """Render the skeleton pose FRAMES (one PNG per track frame).
+
+    Files are named ``frame_<N>.png`` — the naming StableAnimator's
+    inference loader sorts on (``int(name.split('_')[1])``), so the
+    frame order IS the track order. Same shared single-frame renderer
+    as render_pose_video; this is the folder form the neural backends
+    that take a control folder need, not a second renderer.
+    """
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    _require_pil()
+    _require_numpy()
+    for i, kp in enumerate(track.frames):
+        render_pose_frame(kp, track.width, track.height).save(
+            out / f"frame_{i}.png")
+    return out

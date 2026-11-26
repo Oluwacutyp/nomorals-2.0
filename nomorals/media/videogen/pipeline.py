@@ -46,7 +46,7 @@ __all__ = ["generate", "request_hero_clip", "capability_report", "VideoResult"]
 @dataclass
 class VideoResult:
     path: str
-    engine: str            # "ltx" | "wan" | "motion" | "code"
+    engine: str            # "ltx" | "wan" | "motion" | "code" | "stableanimator"
     routed: str            # "neural" | "motion" | "code"
     note: str              # plain-language: why this path
     prompt: str = ""
@@ -151,21 +151,21 @@ def _resolve_selection(prefer_backend: str, model: Any,
             f"video model dir {model!r} has no model_index.json — "
             "not a diffusers model directory")
     elif "/" in str(model):
-        if prefer_backend not in ("ltx", "wan"):
+        if prefer_backend not in ("ltx", "wan", "stableanimator"):
             raise VideogenError(
                 f"unregistered model id {model!r} needs an explicit "
-                "backend (backend='ltx' or 'wan') — or register it "
-                "under ~/.devon-models so the registry knows its "
-                "backend and VRAM floor")
+                "backend (backend='ltx' or 'wan' or 'stableanimator') — "
+                "or register it under ~/.devon-models so the registry "
+                "knows its backend and VRAM floor")
         sel.update(backend=prefer_backend, source=str(model),
                    label=str(model), floor=None)
     else:
         known = ", ".join(m["name"] for m in _registry.list_models())
         raise VideogenError(
             f"unknown video model {model!r} — registry models: {known}; "
-            "or pass an HF repo id with backend='ltx'|'wan', or a local "
-            "diffusers model dir path")
-    if prefer_backend in ("ltx", "wan") and sel["backend"] \
+            "or pass an HF repo id with backend='ltx'|'wan'|"
+            "'stableanimator', or a local diffusers model dir path")
+    if prefer_backend in ("ltx", "wan", "stableanimator") and sel["backend"] \
             and prefer_backend != sel["backend"]:
         raise VideogenError(
             f"backend={prefer_backend!r} conflicts with model "
@@ -262,6 +262,13 @@ def generate(prompt: str, *, backend: str = "auto",
     when neural was explicitly required (``allow_fallback=False``) and
     unavailable.
 
+    ``backend="stableanimator"`` (or ``model="stableanimator-basic"``)
+    renders an ID-preserving pose-driven hero clip: it needs
+    ``image`` (reference photo) + ``pose_track`` (a PoseTrack) or
+    ``action`` (a preset action name, e.g. "wave"). An explicitly
+    requested stableanimator clip never falls back to motion studio —
+    when the animator is unavailable the error names the missing piece.
+
     ``scene``: a scene spec for the code backend — an explainer design
     dict (``{"engine": "diagram" | "equation" | "chart", ...}``) or an
     HTML scene (``{"html": "<!doctype html>…"}``). A scene IS the
@@ -301,7 +308,7 @@ def generate(prompt: str, *, backend: str = "auto",
             "a scene spec renders on the code backend — "
             "backend='motion' renders with the motion studio, which "
             "has no scene renderer")
-    if backend in ("ltx", "wan") and scene is not None:
+    if backend in ("ltx", "wan", "stableanimator") and scene is not None:
         raise VideogenError(
             f"backend={backend!r} is a diffusion backend — a scene spec "
             "renders on the code backend (backend='code', or 'auto' "
@@ -382,6 +389,55 @@ def generate(prompt: str, *, backend: str = "auto",
         record_ledger(ledger_entry)
         return result
 
+    if backend == "stableanimator" or sel["backend"] == "stableanimator":
+        # Pose-driven ID-preserving hero clip. NOT a diffusers backend —
+        # it runs as a subprocess against its own repo + weights, so it
+        # never goes through neural_capability. An explicitly requested
+        # neural engine never falls back to motion studio: when the
+        # animator is unavailable the error names the missing piece.
+        if sel["loras"]:
+            raise VideogenError(
+                "stableanimator takes no LoRAs — drop the LoRA selection")
+        if not image or not Path(image).exists():
+            raise VideogenError(
+                "backend='stableanimator' needs image=<reference photo> — "
+                "it animates a person, it does not invent one from text")
+        track = kw.get("pose_track") or kw.get("track")
+        if track is None:
+            action = kw.get("action")
+            if not action:
+                raise VideogenError(
+                    "backend='stableanimator' needs a pose: pass "
+                    "pose_track=<PoseTrack> or action=<preset action "
+                    "name> — the pose is the control signal, the prompt "
+                    "is only recorded")
+            from ..directed.pose_rig import build_track
+            n_frames = max(8, int(duration_s * 10))
+            track = build_track(action, n_frames=n_frames, fps=10.0)
+        from ..directed.animator import (
+            ModelUnavailable as _AnimUnavailable,
+        )
+        from ..directed.animator import (
+            stableanimator_animate,
+        )
+        try:
+            res = stableanimator_animate(
+                str(image), track, out_path=str(out) if out else None)
+        except _AnimUnavailable as exc:
+            raise VideogenError(f"stableanimator unavailable: {exc}") from exc
+        model_label = sel["label"] or "stableanimator-basic"
+        result = VideoResult(
+            path=res.path, engine="stableanimator", routed="neural",
+            note=(f"ID-preserving pose-driven clip with {model_label} "
+                  f"({res.note})"),
+            prompt=prompt,
+            meta={"backend": "stableanimator", "model": model_label,
+                  "action": track.action})
+        record_ledger({"kind": "videogen.generate", "path": res.path,
+                       "engine": "stableanimator", "routed": "neural",
+                       "model": model_label, "action": track.action})
+        return result
+
     if backend != "motion":
         prefer = sel["backend"] or backend
         cap = neural_capability(prefer=prefer, min_vram_gb=sel["floor"])
@@ -440,7 +496,10 @@ def request_hero_clip(prompt: str, *, duration_s: float = 5.0,
                       seed: int = 0,
                       prefer: str = "auto",
                       model: str | None = None,
-                      lora: Any = None) -> dict[str, Any]:
+                      lora: Any = None,
+                      image: str | None = None,
+                      action: str | None = None,
+                      pose_track: Any = None) -> dict[str, Any]:
     """One neural hero clip for clip-level consumers (shorts surfaces).
 
     Exposed via chat ``/shorts hero`` and CLI ``nm shorts hero``. The
@@ -454,6 +513,12 @@ def request_hero_clip(prompt: str, *, duration_s: float = 5.0,
     substitutes motion graphics for a neural clip. ``model``/``lora``
     take the same registry selection as :func:`generate`; selection
     errors come back as an ``ok: False`` dict naming the problem.
+
+    ``prefer="stableanimator"`` (or ``model="stableanimator-basic"``)
+    renders an ID-preserving pose-driven hero clip instead: it needs
+    ``image`` (reference photo) + ``pose_track`` (a PoseTrack) or
+    ``action`` (a preset action name). Unavailable backends come back
+    as ``ok: False`` with the animator's own reason — never motion.
     """
     try:
         sel = _resolve_selection(prefer, model, lora)
@@ -461,6 +526,45 @@ def request_hero_clip(prompt: str, *, duration_s: float = 5.0,
         return {"ok": False, "reason": str(exc),
                 "suggestion": "fix the model/LoRA selection, or drop it "
                               "for the stock checkpoint"}
+    if prefer == "stableanimator" or sel["backend"] == "stableanimator":
+        if not image or not Path(image).exists():
+            return {"ok": False,
+                    "reason": "stableanimator hero clip needs "
+                              "image=<reference photo>",
+                    "suggestion": "pass the photo of the person to animate"}
+        track = pose_track
+        if track is None:
+            if not action:
+                return {"ok": False,
+                        "reason": "stableanimator hero clip needs a pose: "
+                                  "pose_track=<PoseTrack> or action=<preset>",
+                        "suggestion": "pick a preset action (wave, nod, "
+                                      "thumbs_up, ...) or build a track"}
+            from ..directed.pose_rig import build_track
+            track = build_track(action,
+                                n_frames=max(8, int(duration_s * 10)),
+                                fps=10.0)
+        from ..directed.animator import (
+            ModelUnavailable as _AnimUnavailable,
+        )
+        from ..directed.animator import (
+            stableanimator_animate,
+        )
+        try:
+            res = stableanimator_animate(str(image), track)
+        except _AnimUnavailable as exc:
+            return {"ok": False,
+                    "reason": f"stableanimator unavailable: {exc}",
+                    "suggestion": "provision the StableAnimator weights "
+                                  "on a GPU workstation, or pick the motion "
+                                  "studio hero instead"}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False,
+                    "reason": f"stableanimator failed: {exc}",
+                    "suggestion": "retry, or fall back to motion studio"}
+        return {"ok": True, "path": res.path, "backend": "stableanimator",
+                "model": sel["label"] or "stableanimator-basic",
+                "action": track.action, "vram_gb": 16.0}
     cap = neural_capability(prefer=sel["backend"] or prefer,
                             min_vram_gb=sel["floor"])
     if not cap.available:
