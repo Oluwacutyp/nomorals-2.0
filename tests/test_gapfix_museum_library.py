@@ -340,7 +340,7 @@ class MuseumLibraryToolTest(unittest.TestCase):
         self.assertTrue(outcome.ok, outcome)
         return outcome.value
 
-    def test_tool_count_is_786_with_museum_library(self) -> None:
+    def test_tool_count_is_800_with_museum_library(self) -> None:
         from types import SimpleNamespace
 
         from nomorals.tools.registry import ToolRegistry
@@ -349,7 +349,7 @@ class MuseumLibraryToolTest(unittest.TestCase):
         registry.register_builtins()
         # 785 after C.8 added the robot tool; 786 after gapfix74 added museum_library; 786 after gapfix74
         # added museum_library.
-        self.assertEqual(len(registry._tools), 794)  # trendclip adds 5 tools
+        self.assertEqual(len(registry._tools), 800)  # trendclip adds 5 tools
         self.assertIn("museum_library", registry._tools)
 
     def test_unified_search_reaches_museum_and_library(self) -> None:

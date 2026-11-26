@@ -1302,6 +1302,174 @@ def register(registry: Any) -> None:
         return {"mime": effective_mime, "bytes": len(data),
                 "data_url": f"data:{effective_mime};base64,{encoded}"}
 
+    # ── picture-to-document (gapfix146) ──────────────────────────────────
+    # Two-call shape, by design: ``vision_document`` extracts and
+    # corrects and hands the brain the corrected text + the live builder
+    # listing; the brain then calls one of the ``document_*`` builder
+    # tools. No content-kind → format mapping exists anywhere — the
+    # choice is the caller's, at runtime, from the content and the
+    # user's words.
+
+    @registry.register(
+        "vision_document",
+        description=(
+            "First step of picture-to-document: extract the text from a "
+            "picture and CORRECT it (spelling, grammar, OCR errors fixed "
+            "where confident; uncertain regions stay flagged [illegible]; "
+            "numbers never changed). Returns the corrected text, content "
+            "observations, and a live listing of the document_* builder "
+            "tools. It makes NO file — after calling this, call one of "
+            "the document_* tools with the corrected text shaped into "
+            "sections/tables to produce the editable document file. One "
+            "source: path= (workspace-relative), url=, or reference= "
+            "(inbox:<id> / room:<slug>:<path> / attachment:<n>). Raises a "
+            "clear error when the text cannot be read or no text is found "
+            "— never a fake document."
+        ),
+        capability=Capability.MODEL_CALL,
+    )
+    def vision_document(path: str = "", url: str = "",
+                        reference: str = "") -> dict[str, Any]:
+        from ..vision.seer import UNTRUSTED_VISION_PREFIX
+        from .vision_document import (
+            content_signals,
+            correct_text,
+            document_tool_listing,
+        )
+
+        data, source = _load(path, url, reference=reference)
+        result = read_text(context, data, source=source)
+        text = (result.get("text") or "").strip()
+        if text.startswith(UNTRUSTED_VISION_PREFIX):
+            text = text[len(UNTRUSTED_VISION_PREFIX):].strip()
+        if text.startswith("[vision unavailable"):
+            raise ToolError(
+                "could not read the image: tesseract OCR is not available "
+                "and the vision model is unavailable "
+                f"({text}) — install tesseract or configure a vision "
+                "model; no document was made")
+        if not text:
+            raise ToolError(
+                "no text found in the image — nothing to turn into a "
+                "document; no empty file was sent")
+        corrected = correct_text(context, text, source=source)
+        _audit("document", source, len(data), len(corrected["text"]),
+               corrected.get("provider", "") or result.get("provider", ""),
+               corrected.get("model", "") or result.get("model", ""),
+               corrected.get("usage", {}) or {}, context)
+        return {
+            "corrected_text": corrected["text"],
+            "raw_text": text,
+            "corrected": corrected["corrected"],
+            "correction_note": corrected["note"],
+            "method": result.get("method", "?"),
+            "source": source,
+            "uncertain": corrected["text"].count("[illegible]"),
+            "signals": content_signals(corrected["text"]),
+            "document_tools": document_tool_listing(registry),
+        }
+
+    @registry.register(
+        "document_word",
+        description=(
+            "Build an editable Word document (.docx) from shaped content: "
+            "give title=, text= (plain prose), and/or sections_json= (JSON "
+            "list of {heading, level, text, kind} sections) and "
+            "tables_json= (JSON list of {name, headers, rows} tables). "
+            "Tables render as REAL Word tables; sections render as headings "
+            "and paragraphs. Returns the staged file path. Pick this when "
+            "the document should be a Word file — letters, reports, and "
+            "anything with real tables."
+        ),
+        capability=Capability.FS_WRITE,
+    )
+    def document_word(title: str = "", text: str = "", sections_json: str = "",
+                      tables_json: str = "") -> dict[str, Any]:
+        from .vision_document import build_document_file
+
+        return build_document_file(context, "document_word", title, text,
+                                   sections_json, tables_json)
+
+    @registry.register(
+        "document_html",
+        description=(
+            "Build a styled, print-friendly HTML page (.html) from shaped "
+            "content: give title=, text= (plain prose), and/or "
+            "sections_json= (JSON list of {heading, level, text, kind} "
+            "sections) and tables_json= (JSON list of {name, headers, rows} "
+            "tables). The page is self-contained and opens as a real page. "
+            "Returns the staged file path. Pick this when the document "
+            "should read like a web page — notices, flyers, and anything "
+            "meant to be viewed or printed from a browser."
+        ),
+        capability=Capability.FS_WRITE,
+    )
+    def document_html(title: str = "", text: str = "", sections_json: str = "",
+                      tables_json: str = "") -> dict[str, Any]:
+        from .vision_document import build_document_file
+
+        return build_document_file(context, "document_html", title, text,
+                                   sections_json, tables_json)
+
+    @registry.register(
+        "document_text",
+        description=(
+            "Build a plain-text document (.txt) from shaped content: give "
+            "title=, text= (plain prose), and/or sections_json= (JSON list "
+            "of {heading, level, text, kind} sections) and tables_json= "
+            "(JSON list of {name, headers, rows} tables, rendered as "
+            "'a | b' lines). Returns the staged file path. Pick this for "
+            "the plain fallback — when no richer shape fits, or when the "
+            "user asked for plain text."
+        ),
+        capability=Capability.FS_WRITE,
+    )
+    def document_text(title: str = "", text: str = "", sections_json: str = "",
+                      tables_json: str = "") -> dict[str, Any]:
+        from .vision_document import build_document_file
+
+        return build_document_file(context, "document_text", title, text,
+                                   sections_json, tables_json)
+
+    @registry.register(
+        "document_pdf",
+        description=(
+            "Build a PDF document (.pdf) from shaped content: give title=, "
+            "text= (plain prose), and/or sections_json= (JSON list of "
+            "{heading, level, text, kind} sections) and tables_json= (JSON "
+            "list of {name, headers, rows} tables). Rendered by the "
+            "pure-Python PDF writer. Returns the staged file path. Pick "
+            "this when the document should be a PDF — something to share "
+            "or print exactly as laid out."
+        ),
+        capability=Capability.FS_WRITE,
+    )
+    def document_pdf(title: str = "", text: str = "", sections_json: str = "",
+                     tables_json: str = "") -> dict[str, Any]:
+        from .vision_document import build_document_file
+
+        return build_document_file(context, "document_pdf", title, text,
+                                   sections_json, tables_json)
+
+    @registry.register(
+        "document_sheet",
+        description=(
+            "Build a spreadsheet (.xlsx) from shaped content: give title= "
+            "and tables_json= (JSON list of {name, headers, rows} tables) "
+            "— one worksheet per table; prose in text=/sections_json= rides "
+            "a leading Document sheet so nothing is dropped. Returns the "
+            "staged file path. Pick this when the content is tabular data "
+            "meant to be worked with — price lists, inventories, records."
+        ),
+        capability=Capability.FS_WRITE,
+    )
+    def document_sheet(title: str = "", text: str = "", sections_json: str = "",
+                       tables_json: str = "") -> dict[str, Any]:
+        from .vision_document import build_document_file
+
+        return build_document_file(context, "document_sheet", title, text,
+                                   sections_json, tables_json)
+
 
 # ── inbox contract (Prompt 09 §2) ─────────────────────────────────────────────
 

@@ -7796,7 +7796,7 @@ class RuntimeMediaMixin:
     _VISION_SUBCOMMANDS = (
         "describe", "read-text", "read", "locate", "compare", "analyze",
         "faces", "qr", "layout", "hash", "exif", "colors", "info",
-        "capabilities",
+        "capabilities", "document",
     )
 
     def _control_vision(self, tail: str, chat_key: str = "",
@@ -7805,7 +7805,15 @@ class RuntimeMediaMixin:
 
         Subcommands (image from attachment, path, or URL):
           describe <img> [question]  — vision-model description (default)
-          read-text <img>            — transcription, native OCR first
+          read-text <img>            — transcription, native OCR first,
+                                       plus the picture as an editable
+                                       document file
+          document <img...> [format] — one step: picture(s) → editable
+                                       document file (Word, HTML, text,
+                                       PDF, spreadsheet — the shape is
+                                       chosen at runtime from the content
+                                       and your words; name a format to
+                                       win, e.g. `document shot.png word`)
           locate "<target>" <img>    — find a UI element / object
           compare <imgA> <imgB>      — native pixel diff + model reading
           analyze <img>              — native deep report (no model)
@@ -7858,11 +7866,15 @@ class RuntimeMediaMixin:
 
         # attached image wins over any path argument
         attached = ""
+        attached_all: list[str] = []
         if message is not None:
             for media in getattr(message, "media", None) or []:
                 if getattr(media, "kind", "") == "image":
-                    attached = getattr(media, "path", "") or ""
-                    break
+                    path = getattr(media, "path", "") or ""
+                    if path:
+                        attached_all.append(path)
+                    if not attached:
+                        attached = path
 
         def _pick_targets(count: int) -> list[str] | None:
             found = [t for t in rest if _looks_like_target(t)]
@@ -7882,6 +7894,55 @@ class RuntimeMediaMixin:
                 raise RuntimeError(
                     getattr(outcome.error, "message", None) or str(outcome.error))
             return outcome.value or {}
+
+        def _all_targets() -> list[str]:
+            """Every image target: all attached images first, then any
+            path/URL tokens, in order — several pictures go into ONE
+            document."""
+            found = [t for t in rest if _looks_like_target(t)]
+            if attached_all:
+                found = attached_all + [t for t in found
+                                        if t not in attached_all]
+            return found
+
+        def _deliver_document(targets: list[str], format: str | None,
+                              instruction: str) -> dict[str, Any]:
+            """Pictures → editable document file, sent with the reply.
+
+            Extract + correct each picture, let the model choose and
+            shape the document at runtime, invoke the chosen builder
+            through the registry, and send the staged file. A failure
+            raises (the caller turns it into an honest failure text) —
+            no fake document, no empty file.
+            """
+            from ...tools.vision import resolve_image
+            from ...tools.vision_document import picture_to_document
+
+            images: list[tuple[bytes, str]] = []
+            for target in targets:
+                if target.startswith(("http://", "https://")):
+                    data, source = resolve_image(self.context, url=target)
+                else:
+                    data, source = resolve_image(self.context, path=target)
+                images.append((data, source))
+            result = picture_to_document(
+                self.context, self.context.tools, images=images,
+                instruction=instruction, format=format)
+            chat = self._ref_from_key(chat_key) if chat_key else None
+            if chat is not None:
+                try:
+                    self.gateway.send_file(
+                        chat.platform, f"{chat.platform}:{chat.chat_id}",
+                        result["path"],
+                        caption=(f"📄 {result['filename']} "
+                                 f"({result['format']})"),
+                        kind="document")
+                except Exception as exc:  # noqa: BLE001
+                    record_failure(
+                        "runtime_media.RuntimeMediaMixin._control_vision",
+                        exc)
+                    result = dict(result, send_error=str(exc))
+            return result
 
         try:
             if sub == "info":
@@ -7916,15 +7977,57 @@ class RuntimeMediaMixin:
                               path_b=targets[1])
                 return _send(self._render_compare(value))
 
+            if sub == "document":
+                from ...tools.vision_document import FORMATS
+
+                targets = _all_targets()
+                if not targets:
+                    return _fail("usage: /vision document <image> [format] — "
+                                 "attach image(s) or pass path(s)/URL(s); "
+                                 "name a format to win (word, html, txt, "
+                                 "pdf, xlsx)")
+                words = _question_minus(targets).split()
+                fmt = None
+                if words and words[0].lower() in FORMATS:
+                    fmt = words[0].lower()
+                    words = words[1:]
+                instruction = " ".join(words).strip()
+                result = _deliver_document(targets, fmt, instruction)
+                lines = [f"📄 {result['filename']} "
+                         f"({result['format']} — {result['reason']})"]
+                if not result["corrected"]:
+                    lines.append(f"[{result['correction_notes'][0]}]")
+                if result["uncertain"]:
+                    lines.append(f"[{result['uncertain']} uncertain region(s) "
+                                 "marked [illegible]]")
+                if result.get("send_error"):
+                    lines.append(f"[the file could not be sent here: "
+                                 f"{result['send_error']} — it is saved at "
+                                 f"{result['path']}]")
+                lines.append("")
+                lines.append(result["text_preview"])
+                return _send("\n".join(lines))
+
             if sub == "read-text":
-                targets = _pick_targets(1)
+                targets = _all_targets()
                 if not targets:
                     return _fail("usage: /vision read-text <image> — attach "
                                  "an image or pass a path/URL")
-                value = _call("vision_read_text", path=targets[0])
-                method = value.get("method", "?")
-                return _send(f"📝 [{method}]\n{value.get('text', '')}\n"
-                             f"[{value.get('confidence_note', '')}]")
+                question = _question_minus(targets)
+                result = _deliver_document(targets, None, question)
+                lines = [f"📝 [{result['method']}]", result["text"]]
+                if not result["corrected"]:
+                    lines.append(f"[{result['correction_notes'][0]}]")
+                lines.append(f"📄 document: {result['filename']} "
+                             f"({result['format']} — {result['reason']})")
+                if result["uncertain"]:
+                    lines.append(f"[{result['uncertain']} uncertain region(s) "
+                                 "marked [illegible]]")
+                if result.get("send_error"):
+                    lines.append(f"[the file could not be sent here: "
+                                 f"{result['send_error']} — it is saved at "
+                                 f"{result['path']}]")
+                return _send("\n".join(lines))
 
             if sub == "locate":
                 targets = _pick_targets(1)

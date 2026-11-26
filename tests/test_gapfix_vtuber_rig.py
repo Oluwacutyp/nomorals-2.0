@@ -602,16 +602,16 @@ class ToolTest(unittest.TestCase):
         registry.register_builtins()
         return registry.call("mocap", **kwargs)
 
-    def test_tool_count_is_786(self):
+    def test_tool_count_is_800(self):
         # 774 at B.18 (this lane added the mocap tool, no new tool
         # count move of its own); 775 after B.19 added scene_spawn
         # (the B.19 rebase carried this file in with the pin still
         # at 774 — stale on main, fixed here); 776 after B.20 added
         # cloudcam; 777 after B.22 added show; 778 after B.26 added scene_project; 779 after this lane
-        # (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber. 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall; 785 after this lane (C.8) added robot; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class; 789 after D5 (walabel) added whatsapp_account_label; 794 after gapfix163 added 5 trendclip tools (trendclip_discover, trendclip_analyze, trendclip_render, trendclip_status, trendclip_queue).
+        # (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber. 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall; 785 after this lane (C.8) added robot; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class; 789 after D5 (walabel) added whatsapp_account_label; 794 after gapfix163 added 5 trendclip tools (trendclip_discover, trendclip_analyze, trendclip_render, trendclip_status, trendclip_queue). 800 after gapfix146 added 6 visiondoc tools (vision_document, document_word, document_html, document_text, document_pdf, document_sheet).
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 794)
+        self.assertEqual(len(registry._tools), 800)
         self.assertIn("mocap", registry._tools)
 
     def test_rig_list_load_status_pose(self):

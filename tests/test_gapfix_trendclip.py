@@ -867,13 +867,13 @@ def _ctx(home):
     return SimpleNamespace(settings=SimpleNamespace(home=str(home)))
 
 
-def test_registry_count_is_794_and_trendclip_tools_register(tmp_path):
+def test_registry_count_is_800_and_trendclip_tools_register(tmp_path):
     # 794, not 789: the trendclip port added 5 tools (trendclip_discover,
     # trendclip_analyze, trendclip_render, trendclip_status,
     # trendclip_queue).
     reg = ToolRegistry(context=_ctx(tmp_path))
     reg.register_builtins()
-    assert len(reg._tools) == 794
+    assert len(reg._tools) == 800
     for name in ("trendclip_discover", "trendclip_analyze",
                  "trendclip_render", "trendclip_status", "trendclip_queue"):
         assert name in reg.names(), name

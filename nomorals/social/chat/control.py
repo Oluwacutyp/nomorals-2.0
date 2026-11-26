@@ -4989,11 +4989,11 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/caption [style] — attach a video or pass a path",
               "example": "/caption karaoke",
               "related": "/video"},
-    "vision": {"what": "Devon's eyes: describe, read-text, locate, compare, analyze (native), info.",
+    "vision": {"what": "Devon's eyes: describe, read-text, document (picture → editable document file), locate, compare, analyze (native), info.",
               "usage": "/vision [subcommand] <image> [args] — attach an image or pass a path/URL "
-                       "(describe, read-text, locate, compare, analyze, faces, qr, layout, "
+                       "(describe, read-text, document, locate, compare, analyze, faces, qr, layout, "
                        "hash, exif, colors, info)",
-              "example": "/vision what's in this screenshot?",
+              "example": "/vision document shot.png word",
               "related": "/look /lens"},
     "exec": {"what": "Execution system: runs code in the sandbox with "
                      "structured results (stdout, stderr, exit code, wall "
