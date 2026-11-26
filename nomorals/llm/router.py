@@ -68,6 +68,9 @@ _TOKEN_PRICES: dict[str, tuple[float, float]] = {
     "hf_serverless": (0.50, 0.50),
     "openrouter": (1.50, 3.00),
     "openai_compat": (2.50, 10.00),
+    # Venice cheapest text rate (Inkling 2 Mini, $0.12/$0.5 per 1M,
+    # Venice docs 2026-11-24) — per-model pricing varies.
+    "venice": (0.12, 0.50),
     "llama_cpp": (0.0, 0.0),
     "mock": (0.0, 0.0),
     "ocr": (0.0, 0.0),

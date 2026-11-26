@@ -373,7 +373,8 @@ def render_status_markdown(specs: Iterable[ProviderSpec] | None = None) -> str:
 # ── the incumbent providers, as data ─────────────────────────────────────────
 # Registration order is the legacy chain's error-message order:
 # mock | ollama | groq | anthropic | deepseek | gemini | openrouter |
-# openai_compat | hf_serverless | llama_cpp | ocr
+# openai_compat | hf_serverless | llama_cpp | ocr — venice is appended
+# after it (a new provider, never in the legacy chain).
 
 register_provider_spec(ProviderSpec(
     id="mock",
@@ -558,5 +559,30 @@ register_provider_spec(ProviderSpec(
     verification=Verification(
         status="unverified", when="",
         how="no live verification recorded; tesseract binary absent on EC2 (INTEGRATION_PLAN §6.3)",
+    ),
+))
+
+register_provider_spec(ProviderSpec(
+    id="venice",
+    module="nomorals.llm.providers.venice",
+    class_name="VeniceProvider",
+    transport="http-openai",
+    auth=AuthSpec(kind="bearer",
+                  env_keys=("VENICE_API_KEY", "NM_VENICE_API_KEY"),
+                  kwarg="api_key"),
+    capabilities=frozenset({"chat", "complete", "embed", "vision"}),
+    default_model="venice-uncensored-1-2",
+    default_base_url="https://api.venice.ai/api/v1",
+    models_hook="module:VENICE_MODELS",
+    notes="Venice.ai — privacy-first, uncensored OpenAI-compatible API; "
+          "live roster via catalog() (GET /models), live default via "
+          "traits() (GET /models/traits). No key, no call: chains skip "
+          "it and direct calls raise naming VENICE_API_KEY.",
+    verification=Verification(
+        status="docs", when="2026-11-24",
+        how="base URL, chat-completions shape, and default model id "
+            "verified against Venice's live docs + model catalog "
+            "(docs.venice.ai, 2026-11-24); no live call recorded — "
+            "no key on this box",
     ),
 ))

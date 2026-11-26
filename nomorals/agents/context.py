@@ -627,6 +627,17 @@ def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
             if openrouter_fallbacks:
                 kwargs["fallback_models"] = openrouter_fallbacks
             return kwargs
+        if kind == "venice":
+            kwargs = {
+                **common,
+                "base_url": llm.venice_base_url,
+                "api_key": llm.venice_api_key,
+                "model": llm.venice_model,
+            }
+            venice_fallbacks = _split_models(llm.venice_models)
+            if venice_fallbacks:
+                kwargs["fallback_models"] = venice_fallbacks
+            return kwargs
         if kind == "mock":
             return {**common, "model": llm.openai_model or "mock-7b"}
         if kind in {"anthropic", "gemini", "deepseek"}:
@@ -661,6 +672,9 @@ def build_router(settings: Settings, bus: EventBus, *, db: Any | None = None,
             return
         if kind == "openrouter" and not llm.openrouter_api_key:
             _log.info("skipping openrouter fallback: NM_OPENROUTER_API_KEY not set")
+            return
+        if kind == "venice" and not llm.venice_api_key:
+            _log.info("skipping venice fallback: NM_VENICE_API_KEY not set")
             return
         # Same rule for the providers whose keys live only in the env
         # (no LLMSettings field): no key → skip quietly, never register

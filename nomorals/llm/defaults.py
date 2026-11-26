@@ -11,8 +11,13 @@ default any caller can use when no explicit config exists:
    (``NM_CODEBEAST_MODEL``); the broker prefers it whenever it can serve.
 4. **OpenRouter ``:free``** — $0 models, rotating roster.
 5. **HF serverless** — existing fallback.
-6. **Groq free tier** — last resort only.  The operator has found Groq
-   unreliable, so it is never tried before the options above.
+6. **DeepSeek** — cheapest paid chat (``DEEPSEEK_API_KEY``).
+7. **Venice** — uncensored chat (``VENICE_API_KEY``); cheapest text
+   rate ~$0.12/1M input, per-model pricing varies.
+8. **Gemini** — long-context paid tier (``GEMINI_API_KEY``).
+9. **Anthropic** — Claude, native Messages API (``ANTHROPIC_API_KEY``).
+10. **Groq free tier** — last resort only.  The operator has found Groq
+    unreliable, so it is never tried before the options above.
 
 Keyed cloud providers register only when their key is set — a provider that
 can only 401 at call time adds noise to the failover chain, not value.
@@ -101,6 +106,10 @@ CARD_HINTS: dict[str, dict[str, Any]] = {
     "openrouter": {"local": False, "cost_per_1k": 0.0},
     "hf_serverless": {"local": False, "cost_per_1k": 0.0},
     "deepseek": {"local": False, "cost_per_1k": 0.00014, "context_len": 65536},
+    # Venice: cheapest text input rate on the account ($0.12/1M, Inkling
+    # 2 Mini, per Venice's docs 2026-11-24) — per-model pricing varies,
+    # and any free allowance lives on the owner's Venice account.
+    "venice": {"local": False, "cost_per_1k": 0.00012},
     "gemini": {"local": False, "cost_per_1k": 0.0003, "context_len": 1048576},
     "anthropic": {"local": False, "cost_per_1k": 0.003, "context_len": 200000},
 }
@@ -146,11 +155,12 @@ def specs_from_env() -> list[ProviderSpec]:
     4. **OpenRouter ``:free``** — $0 models, rotating roster.
     5. **HF serverless** — generic fallback.
     6. **DeepSeek** — cheapest paid chat (``DEEPSEEK_API_KEY``).
-    7. **Gemini** — long-context paid tier (``GEMINI_API_KEY``).
-    8. **Anthropic** — Claude, native Messages API (``ANTHROPIC_API_KEY``).
-    9. **Groq free tier** — last resort.  The operator has found Groq
-       unreliable, so it sits at the end of the chain: still a fallback,
-       never the first thing tried.
+    7. **Venice** — uncensored chat (``VENICE_API_KEY``).
+    8. **Gemini** — long-context paid tier (``GEMINI_API_KEY``).
+    9. **Anthropic** — Claude, native Messages API (``ANTHROPIC_API_KEY``).
+    10. **Groq free tier** — last resort.  The operator has found Groq
+        unreliable, so it sits at the end of the chain: still a fallback,
+        never the first thing tried.
     """
     specs = [
         ProviderSpec(
@@ -183,6 +193,12 @@ def specs_from_env() -> list[ProviderSpec]:
             "deepseek", "deepseek",
             kwargs={"model": os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")},
             context_len=65536, env_key="DEEPSEEK_API_KEY",
+        ),
+        ProviderSpec(
+            "venice", "venice",
+            kwargs={"model": os.environ.get("VENICE_MODEL", "venice-uncensored-1-2"),
+                    **_models_kwarg("VENICE_MODELS")},
+            env_key="VENICE_API_KEY",
         ),
         ProviderSpec(
             "gemini", "gemini",

@@ -158,10 +158,11 @@ class DefaultsChainTest(unittest.TestCase):
         from nomorals.llm.defaults import specs_from_env
         env = {"GROQ_API_KEY": "g", "HF_TOKEN": "h",
                "OPENROUTER_API_KEY": "o", "ANTHROPIC_API_KEY": "a",
-               "DEEPSEEK_API_KEY": "d", "GEMINI_API_KEY": "gm"}
+               "DEEPSEEK_API_KEY": "d", "GEMINI_API_KEY": "gm",
+               "VENICE_API_KEY": "v"}
         with mock.patch.dict(os.environ, env, clear=True):
             names = [s.name for s in specs_from_env()]
-        for new in ("anthropic", "deepseek", "gemini"):
+        for new in ("anthropic", "deepseek", "gemini", "venice"):
             self.assertIn(new, names)
             self.assertLess(names.index(new), names.index("groq"))
         self.assertEqual(names[-1], "groq")
@@ -170,7 +171,7 @@ class DefaultsChainTest(unittest.TestCase):
         from nomorals.llm.defaults import specs_from_env
         with mock.patch.dict(os.environ, {}, clear=True):
             names = [s.name for s in specs_from_env()]
-        for new in ("anthropic", "deepseek", "gemini"):
+        for new in ("anthropic", "deepseek", "gemini", "venice"):
             self.assertNotIn(new, names)
 
 

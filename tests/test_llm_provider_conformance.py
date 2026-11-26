@@ -132,7 +132,7 @@ def _build_with_http(spec: ProviderSpec, handler, **extra: Any) -> LLMProvider:
 # Providers whose chat speaks the OpenAI wire shape through the shared
 # OpenAICompatProvider walk (the ladderfix machinery).
 _OPENAI_WALK_IDS = ("groq", "deepseek", "gemini", "openrouter",
-                    "openai_compat", "llama_cpp")
+                    "openai_compat", "llama_cpp", "venice")
 
 
 class ConstructionConformance(unittest.TestCase):
@@ -325,6 +325,12 @@ class FailoverWalkConformance(unittest.TestCase):
     def test_deepseek_walk(self):
         roster = BY_ID["deepseek"].roster()
         _provider, resp, attempted = self._walk("deepseek", roster[0], roster[1])
+        self.assertEqual(attempted, [roster[0], roster[1]])
+        self.assertTrue(resp.ok)
+
+    def test_venice_walk(self):
+        roster = BY_ID["venice"].roster()
+        _provider, resp, attempted = self._walk("venice", roster[0], roster[1])
         self.assertEqual(attempted, [roster[0], roster[1]])
         self.assertTrue(resp.ok)
 

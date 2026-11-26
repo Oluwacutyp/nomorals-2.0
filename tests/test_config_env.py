@@ -59,6 +59,8 @@ class LoadSettingsChannelConfigTest(unittest.TestCase):
                 "NM_GROQ_MODEL": "openai/gpt-oss-120b",
                 "NM_OPENROUTER_API_KEY": "sk-or-test-key",
                 "NM_OPENROUTER_MODEL": "qwen/qwen3-8b:free",
+                "NM_VENICE_API_KEY": "sk-venice-test-key",
+                "NM_VENICE_MODEL": "venice-uncensored-1-2",
             },
             use_env_file=False,
         )
@@ -70,6 +72,9 @@ class LoadSettingsChannelConfigTest(unittest.TestCase):
         self.assertEqual(settings.llm.openrouter_api_key, "sk-or-test-key")
         self.assertEqual(settings.llm.openrouter_model, "qwen/qwen3-8b:free")
         self.assertEqual(settings.llm.openrouter_base_url, "https://openrouter.ai/api/v1")
+        self.assertEqual(settings.llm.venice_api_key, "sk-venice-test-key")
+        self.assertEqual(settings.llm.venice_model, "venice-uncensored-1-2")
+        self.assertEqual(settings.llm.venice_base_url, "https://api.venice.ai/api/v1")
 
     def test_groq_builds_as_openai_compat_provider(self) -> None:
         from nomorals.llm.providers import build_provider

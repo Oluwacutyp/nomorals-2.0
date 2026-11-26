@@ -219,6 +219,16 @@ class LLMSettings:
     #: Empty = the provider's built-in fallback (the openrouter/free alias).
     openrouter_models: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    #: Venice (venice.ai) — privacy-first, uncensored OpenAI-compatible
+    #: API. Model IDs churn — set NM_VENICE_MODEL explicitly; the
+    #: default below is the live catalog's flagship id (2026-11-24).
+    venice_api_key: str = ""
+    venice_model: str = "venice-uncensored-1-2"
+    #: Ordered fallback models for Venice, comma-separated
+    #: (NM_VENICE_MODELS) — same model-walk semantics as groq_models.
+    #: Empty = the provider's built-in roster.
+    venice_models: str = ""
+    venice_base_url: str = "https://api.venice.ai/api/v1"
     local_lora: str = ""
 
     #: comma-separated GGUF LoRA adapter(s) the llama.cpp server stacks on
@@ -1376,6 +1386,10 @@ _ENV_MAP: dict[str, str] = {
     "NM_OPENROUTER_MODEL": "llm.openrouter_model",
     "NM_OPENROUTER_MODELS": "llm.openrouter_models",
     "NM_OPENROUTER_BASE_URL": "llm.openrouter_base_url",
+    "NM_VENICE_API_KEY": "llm.venice_api_key",
+    "NM_VENICE_MODEL": "llm.venice_model",
+    "NM_VENICE_MODELS": "llm.venice_models",
+    "NM_VENICE_BASE_URL": "llm.venice_base_url",
     "NM_LLM_ACTIVE_MODEL": "llm.active_model",
     "NM_LLM_TIMEOUT": "llm.timeout",
     "NM_LLM_CACHE_DIR": "llm.cache_dir",
@@ -2162,7 +2176,7 @@ def _validate(settings: Settings) -> None:
     _KNOWN_PROVIDERS = {
         "mock", "offline", "test",
         "ollama", "ollama_native",
-        "groq", "openrouter",
+        "groq", "openrouter", "venice",
         "openai", "openai_compat", "vllm", "lmstudio", "ollama_compat",
         "hf", "hf_serverless", "huggingface", "hf_endpoint",
         "llama_cpp", "llamacpp", "gguf",

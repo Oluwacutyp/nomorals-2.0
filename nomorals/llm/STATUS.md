@@ -18,6 +18,7 @@ render_status_markdown; print(render_status_markdown())"`
 | hf_serverless | `nomorals.llm.providers.hf_serverless:HFServerlessProvider` | http-hf | token (HF_TOKEN, NM_HF_TOKEN) | meta-llama/Llama-3.1-8B-Instruct | chat, complete, embed, vision | verified live | 2026-10 | default model verified live on the HF router catalog (llm/defaults.py) |
 | llama_cpp | `nomorals.llm.providers.llama_cpp:LlamaCppProvider` | http-openai | bearer | local | chat, complete, embed, grammar | not verified | — | no live verification recorded |
 | ocr | `nomorals.llm.providers.ocr:OCRProvider` | subprocess | none | tesseract | ocr | not verified | — | no live verification recorded; tesseract binary absent on EC2 (INTEGRATION_PLAN §6.3) |
+| venice | `nomorals.llm.providers.venice:VeniceProvider` | http-openai | bearer (VENICE_API_KEY, NM_VENICE_API_KEY) | venice-uncensored-1-2 | chat, complete, embed, vision | docs-verified only | 2026-11-24 | base URL, chat-completions shape, and default model id verified against Venice's live docs + model catalog (docs.venice.ai, 2026-11-24); no live call recorded — no key on this box |
 
 ## Wave 4 notes
 

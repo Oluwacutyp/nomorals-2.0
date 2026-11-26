@@ -63,15 +63,16 @@ LEGACY_MATRIX = {
 
 EXPECTED_KINDS = ["mock", "ollama", "groq", "anthropic", "deepseek",
                   "gemini", "openrouter", "openai_compat", "hf_serverless",
-                  "llama_cpp", "ocr"]
+                  "llama_cpp", "ocr", "venice"]
 
 _ALL_KEY_ENV = (
     "GROQ_API_KEY", "NM_GROQ_API_KEY", "OPENROUTER_API_KEY",
     "NM_OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "NM_ANTHROPIC_API_KEY",
     "GEMINI_API_KEY", "NM_GEMINI_API_KEY", "DEEPSEEK_API_KEY",
     "NM_DEEPSEEK_API_KEY", "HF_TOKEN", "NM_HF_TOKEN",
+    "VENICE_API_KEY", "NM_VENICE_API_KEY",
     "GROQ_MODELS", "NM_GROQ_MODELS", "OPENROUTER_MODELS",
-    "NM_OPENROUTER_MODELS",
+    "NM_OPENROUTER_MODELS", "VENICE_MODELS", "NM_VENICE_MODELS",
 )
 
 
@@ -155,6 +156,10 @@ class LegacyDefaultParity(unittest.TestCase):
             self.assertEqual(build_provider("ocr").model, "tesseract")
             ollama = build_provider("ollama")
             self.assertEqual(ollama.base_url, "http://localhost:11434")
+            venice = build_provider("venice")
+            self.assertEqual(venice.model, "venice-uncensored-1-2")
+            self.assertEqual(venice.base_url,
+                             "https://api.venice.ai/api/v1")
 
 
 class RegistryData(unittest.TestCase):
