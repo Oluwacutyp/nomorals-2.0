@@ -30,6 +30,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 import uuid
 import wave
@@ -187,6 +188,8 @@ class Job:
     niche: str
     topic: str
     style: str = ""  # edit style preset; "" = niche default
+    footage: str = ""  # "" = generated stills; "stock"|"auto" = stock first
+    voice: str = ""  # "" = catalogue voice; "edge" = Edge TTS first
     status: str = "queued"  # queued|rendering|ready|posted|failed
     attempts: int = 0
     platforms: list = field(default_factory=list)
@@ -453,7 +456,7 @@ def parse_script(text: str) -> dict:
 
 def _field(text: str, name: str) -> str:
     m = re.search(rf"(?m)^{name}:\s*(.+?)(?=^(?:HOOK|TITLE|DESCRIPTION|SAY|"
-                  rf"SHOW|\[SCENE)\s*:|\Z)", text,
+                  rf"SHOW)\s*:|^\[SCENE\s*\d*\]\s*$|\Z)", text,
                   re.S | re.I)
     if not m:
         m = re.search(rf"(?m)^{name}:\s*(.+)$", text, re.I)
@@ -544,6 +547,14 @@ def wav_duration(path: str) -> float:
         return 0.0
 
 
+# Caption burn-in style (libass force_style) — shared by the pipeline's
+# captions stage and the factory's Whisper re-time, so the two never
+# drift apart.
+CAPTION_BURN_STYLE = ("FontSize=24,PrimaryColour=&HFFFFFF&,"
+                      "OutlineColour=&H80000000&,BorderStyle=1,Outline=2,"
+                      "MarginV=130,Alignment=2")
+
+
 def _ffmpeg(*args: str, timeout: int = 600) -> None:
     try:
         subprocess.run([_FFMPEG, "-y", "-v", "error", *args],
@@ -632,13 +643,18 @@ class ShortPipeline:
     ``resume(run_id)`` replays from the first stage whose artifacts are
     missing or incomplete.  Heavy dependencies (brain/tts/studio/edit/
     niche plugin) are constructor-injectable; when omitted the real
-    subsystems are wired lazily.
+    subsystems are wired lazily. ``stock_fetch`` / ``edge_speak`` are
+    the same injection seam for the MoneyPrinterTurbo rungs (stock
+    footage, Edge TTS).
     """
 
     def __init__(self, runs_root: str | os.PathLike = "",
                  *, brain: Any = None, tts: Any = None, studio: Any = None,
                  edit: Any = None,
-                 get_niche: Callable[[str], Any] | None = None) -> None:
+                 get_niche: Callable[[str], Any] | None = None,
+                 stock_fetch: Callable[..., Any] | None = None,
+                 edge_speak: Callable[[str, str], dict] | None = None
+                 ) -> None:
         self.runs_root = Path(runs_root) if runs_root else (
             Path.home() / "workspace" / "devon" / ".shorts_runs")
         self.runs_root.mkdir(parents=True, exist_ok=True)
@@ -662,6 +678,9 @@ class ShortPipeline:
         if get_niche is None:
             get_niche, _src = _load_niche_contract()
         self._get_niche = get_niche
+        # MoneyPrinterTurbo rungs: None = the real implementations.
+        self._stock_fetch = stock_fetch
+        self._edge_speak = edge_speak
         self.calendar = ContentCalendar(self.runs_root,
                                         get_niche=self._get_niche)
 
@@ -693,10 +712,10 @@ class ShortPipeline:
     # -- planning ----------------------------------------------------
     def plan(self, niche: str, topic: str, *,
              platforms: list | None = None,
-             style: str = "") -> Job:
+             style: str = "", footage: str = "", voice: str = "") -> Job:
         """Create a queued :class:`Job` (no rendering yet)."""
         job = Job(id=new_job_id(), niche=niche, topic=topic,
-                  style=style,
+                  style=style, footage=footage, voice=voice,
                   platforms=list(platforms or []),
                   created_at=_utcnow())
         self.jobs.save(job)
@@ -750,6 +769,7 @@ class ShortPipeline:
         manifest = {
             "run_id": job.run_id, "job_id": job.id,
             "niche": job.niche, "topic": job.topic,
+            "footage": job.footage, "voice": job.voice,
             "platforms": list(job.platforms),
             "created_at": _utcnow(),
             "stages": {s: {"status": "pending", "ms": 0, "attempts": 0,
@@ -1102,8 +1122,25 @@ class ShortPipeline:
                              "nothing to speak — the script has no narration",
                              hint="re-run the script stage", retriable=False)
         out_path = str(run_dir / "voiceover.wav")
-        result, voice_name = self._speak_with_fallbacks(text, niche,
-                                                        out_path)
+        result, voice_name = None, ""
+        job = ctx.get("job")
+        if (getattr(job, "voice", "") or "").strip() == "edge":
+            # MoneyPrinterTurbo rung: free Edge TTS first (no key). Any
+            # failure falls through to the catalogue chain below — an
+            # edge outage never fails the run.
+            try:
+                result = self._speak_via_edge(text, out_path)
+                voice_name = "edge-tts"
+                _log.info("pipeline %s: voiceover via edge-tts",
+                          ctx["manifest"]["run_id"])
+            except Exception as exc:  # noqa: BLE001 — edge down = catalogue
+                _log.warning("pipeline %s: edge-tts failed (%s) — falling "
+                             "back to the catalogue voice",
+                             ctx["manifest"]["run_id"], exc)
+                result, voice_name = None, ""
+        if not result:
+            result, voice_name = self._speak_with_fallbacks(text, niche,
+                                                            out_path)
         audio_path = (result or {}).get("path") or out_path
         if not os.path.exists(audio_path):
             raise StageError("voiceover", "TTS_NO_AUDIO",
@@ -1128,6 +1165,33 @@ class ShortPipeline:
                 if os.path.dirname(audio_path) == str(run_dir)
                 else audio_path,
                 "voiceover_meta.json": "voiceover_meta.json"}
+
+    def _speak_via_edge(self, text: str, out_path: str) -> dict:
+        """Edge TTS (free, no key) → wav at ``out_path``.
+
+        Injectable via the constructor's ``edge_speak`` (tests). The
+        real path goes through ``tools.audio.tts(engine="edge_tts")``
+        (mp3) and converts to wav with ffmpeg — the voiceover stage
+        speaks wav. Any failure raises; the caller falls back to the
+        catalogue voice.
+        """
+        if self._edge_speak is not None:
+            return self._edge_speak(text, out_path)
+        from ...tools.audio import tts as _audio_tts
+        with tempfile.TemporaryDirectory(prefix="edge_tts_") as tmp:
+            spoken = _audio_tts(text, engine="edge_tts", out_dir=tmp)
+            mp3 = (spoken or {}).get("path") or ""
+            if not mp3 or not os.path.exists(mp3):
+                raise RuntimeError("edge-tts returned no audio file")
+            ffmpeg = shutil.which("ffmpeg")
+            if not ffmpeg:
+                raise RuntimeError("ffmpeg not on PATH (edge mp3 → wav)")
+            subprocess.run([ffmpeg, "-y", "-v", "error", "-i", mp3,
+                            "-ar", "22050", "-ac", "1", out_path],
+                           check=True, timeout=180)
+        if not os.path.exists(out_path):
+            raise RuntimeError("edge-tts conversion wrote no wav")
+        return {"path": out_path}
 
     def _voice_candidates(self, niche: Any) -> list[str]:
         """Voice names to try, in order.  Never empty."""
@@ -1209,36 +1273,24 @@ class ShortPipeline:
         frames_dir = run_dir / "frames"
         frames_dir.mkdir(exist_ok=True)
         records: list[dict] = []
+        use_stock = (getattr(ctx.get("job"), "footage", "") or ""
+                     ).strip() in ("stock", "auto")
         for i, (scene, prompt) in enumerate(zip(scenes, prompts)):
             dest = str(frames_dir / f"scene_{i:03d}.png")
-            try:
-                saved = self.studio.generate(
-                    prompt, save_to=dest,
-                    width=768, height=1344)  # 9:16-ish; studio filters
-            except Exception as exc:  # noqa: BLE001
-                _log.exception("visuals: scene %d failed", i)
-                raise StageError(
-                    "visuals", "IMGGEN_FAILED",
-                    f"image {i + 1}/{len(scenes)} failed: "
-                    f"{type(exc).__name__}: {exc}",
-                    hint="the native checkpoint may be missing or the "
-                         "profile too small for imggen — check `nm imggen`, "
-                         "then resume() (finished scenes are kept)",
-                    retriable=True) from None
-            path = saved[0] if isinstance(saved, (list, tuple)) else saved
-            path = str(path or dest)
-            if not os.path.exists(path):
-                raise StageError("visuals", "IMGGEN_NO_FILE",
-                                 f"image {i + 1} produced no file",
-                                 hint="check the imggen pipeline, then "
-                                      "resume()",
-                                 retriable=True)
-            records.append({"scene": i, "prompt": prompt, "path": path,
-                            "say": scene.get("say", ""),
-                            "effect": motions[i][0],
-                            "zoom_direction": motions[i][1]})
-            _log.info("pipeline %s: visual %d/%d → %s",
-                      ctx["manifest"]["run_id"], i + 1, len(scenes), path)
+            record = None
+            if use_stock:
+                # MoneyPrinterTurbo rung: real stock footage per scene.
+                # A stock miss never fails the run — the scene falls back
+                # to a generated still, and the record says which.
+                record = self._visual_stock(i, scene, prompt, dest, run_dir)
+            if record is None:
+                record = self._visual_still(i, scene, prompt, dest)
+            record["effect"] = motions[i][0]
+            record["zoom_direction"] = motions[i][1]
+            records.append(record)
+            _log.info("pipeline %s: visual %d/%d → %s (%s)",
+                      ctx["manifest"]["run_id"], i + 1, len(scenes),
+                      record["path"], record.get("source", "stills"))
         (run_dir / "frames.json").write_text(
             json.dumps(records, indent=2), encoding="utf-8")
         ctx["frames"] = records
@@ -1246,6 +1298,72 @@ class ShortPipeline:
                 **{f"frames/scene_{i:03d}.png":
                    os.path.relpath(r["path"], run_dir)
                    for i, r in enumerate(records)}}
+
+    def _visual_still(self, i: int, scene: dict, prompt: str,
+                      dest: str) -> dict:
+        """One scene's generated still (the pre-existing visual path)."""
+        try:
+            saved = self.studio.generate(
+                prompt, save_to=dest,
+                width=768, height=1344)  # 9:16-ish; studio filters
+        except Exception as exc:  # noqa: BLE001
+            _log.exception("visuals: scene %d failed", i)
+            raise StageError(
+                "visuals", "IMGGEN_FAILED",
+                f"image {i + 1} failed: "
+                f"{type(exc).__name__}: {exc}",
+                hint="the native checkpoint may be missing or the "
+                     "profile too small for imggen — check `nm imggen`, "
+                     "then resume() (finished scenes are kept)",
+                retriable=True) from None
+        path = saved[0] if isinstance(saved, (list, tuple)) else saved
+        path = str(path or dest)
+        if not os.path.exists(path):
+            raise StageError("visuals", "IMGGEN_NO_FILE",
+                             f"image {i + 1} produced no file",
+                             hint="check the imggen pipeline, then "
+                                  "resume()",
+                             retriable=True)
+        return {"scene": i, "prompt": prompt, "path": path,
+                "say": scene.get("say", ""), "source": "stills"}
+
+    def _visual_stock(self, i: int, scene: dict, prompt: str, dest: str,
+                      run_dir: Path) -> dict | None:
+        """One scene's real stock footage → poster frame record.
+
+        Returns None (caller falls back to a generated still) when
+        stock is unconfigured, empty, or any step fails. The clip
+        itself is kept under ``<run_dir>/stock/`` and the record names
+        its provider + source URL, so the run is honest about where
+        every frame came from.
+        """
+        query = (scene.get("say") or scene.get("show") or prompt
+                 or "").strip()
+        fetch = self._stock_fetch
+        if fetch is None:
+            from .stock import fetch_stock_clip
+            fetch = fetch_stock_clip
+        try:
+            clip = fetch(query, str(run_dir / "stock"))
+        except Exception as exc:  # noqa: BLE001 — stock miss = stills
+            _log.warning("visuals: stock fetch failed for scene %d: %s",
+                         i, exc)
+            return None
+        if not (clip or {}).get("ok"):
+            _log.info("visuals: scene %d stock unavailable: %s", i,
+                      (clip or {}).get("reason", "?"))
+            return None
+        clip_path = str(clip.get("path") or "")
+        from .stock import extract_poster
+        poster = extract_poster(clip_path, dest)
+        if not poster.get("ok"):
+            _log.warning("visuals: scene %d poster failed: %s", i,
+                         poster.get("reason", "?"))
+            return None
+        return {"scene": i, "prompt": prompt, "path": dest,
+                "say": scene.get("say", ""), "source": "stock",
+                "clip": clip_path, "provider": clip.get("provider", ""),
+                "source_url": clip.get("source_url", "")}
 
     def _resolve_style(self, ctx: dict) -> str:
         """Edit style preset: job override → niche default → phonk."""
@@ -1401,10 +1519,8 @@ class ShortPipeline:
         srt_esc = srt_path.replace("'", r"'\''")
         try:
             _ffmpeg("-i", str(draft), "-vf",
-                    "subtitles='%s':force_style="
-                    "'FontSize=24,PrimaryColour=&HFFFFFF&,"
-                    "OutlineColour=&H80000000&,BorderStyle=1,Outline=2,"
-                    "MarginV=130,Alignment=2'" % srt_esc,
+                    "subtitles='%s':force_style='%s'" % (srt_esc,
+                                                         CAPTION_BURN_STYLE),
                     "-c:a", "copy", captioned)
         except RuntimeError as exc:
             raise StageError("captions", "BURNIN_FAILED",

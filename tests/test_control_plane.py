@@ -555,8 +555,8 @@ class RegistryCountTests(unittest.TestCase):
     def test_registry_count_is_808_after_f3(self) -> None:
         registry = ToolRegistry(SimpleNamespace()).register_builtins()
         tools = registry.schemas()
-        self.assertEqual(len(tools), 808,
-                         "808 after this lane (F3) added control")
+        self.assertEqual(len(tools), 809,
+                         "808 after this lane (F3) added control; 809 after this lane (moneyprinter) added make_short")
 
 
 if __name__ == "__main__":

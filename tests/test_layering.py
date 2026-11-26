@@ -361,6 +361,12 @@ MODULE_PINS: dict[str, int] = {
     # name, never by static import (its only static importers are
     # tests).
     "nomorals.tools.songrecon": 5,
+    # MoneyPrinterTurbo lane: tools.shorts is a tool surface over the
+    # L4 shorts factory (media.contentops.factory) + the L5 publisher
+    # organ (agents.shorts_publisher.publish_video) — agent-composed,
+    # same shape as tools.songrecon; the registry loads it dynamically
+    # by dotted name, never by static import.
+    "nomorals.tools.shorts": 5,
     # LiveKit Agents lane: tools.voice_live is a tool surface over the
     # L5 tool-loop organ (agents.partner.tool_loop) — agent mode runs
     # each live-call turn through the real ReAct loop, and face watch

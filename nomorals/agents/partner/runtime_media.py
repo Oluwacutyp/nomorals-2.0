@@ -8600,7 +8600,10 @@ class RuntimeMediaMixin:
     def _control_shorts(self, tail: str) -> str:
         """Devon's short-form content empire in chat.
 
-        /shorts make <niche> "<topic>" [--now] [--style NAME] — queue or render now
+        /shorts make <niche> "<topic>" [--now] [--style NAME]
+            [--footage stock|stills|auto] [--voice edge|catalogue]
+            — queue or render now (--footage/--voice opt into the
+            factory rungs: stock footage, Edge TTS voiceover)
         /shorts status [job_id]                    — job list / inspect
         /shorts resume <run_id>                    — resume a failed render
         /shorts niches                             — list niches
@@ -8615,7 +8618,8 @@ class RuntimeMediaMixin:
         ref = (tail or "").strip()
         if not ref:
             return ("🎬 /shorts — Devon's short-form content empire:\n"
-                    "/shorts make <niche> \"<topic>\" [--now] [--style NAME]\n"
+                    "/shorts make <niche> \"<topic>\" [--now] [--style NAME] "
+                    "[--footage stock|stills|auto] [--voice edge|catalogue]\n"
                     "/shorts niches — list content niches\n"
                     "/shorts status [job] · /shorts resume <run_id>\n"
                     "/shorts calendar [--due] · /shorts ledger\n"
@@ -8647,7 +8651,9 @@ class RuntimeMediaMixin:
             if action == "make":
                 if len(rest) < 2:
                     return ("usage: /shorts make <niche> \"<topic>\" "
-                            "[--now] [--style phonk|documentary|vlog|minimal]")
+                            "[--now] [--style phonk|documentary|vlog|minimal] "
+                            "[--footage stock|stills|auto] "
+                            "[--voice edge|catalogue]")
                 niche = rest[0]
                 toks = rest[1:]
                 now = "--now" in toks
@@ -8657,9 +8663,22 @@ class RuntimeMediaMixin:
                     if si + 1 < len(toks):
                         style = toks[si + 1]
                         del toks[si:si + 2]
+                footage = ""
+                if "--footage" in toks:
+                    fi = toks.index("--footage")
+                    if fi + 1 < len(toks):
+                        footage = toks[fi + 1]
+                        del toks[fi:fi + 2]
+                voice = ""
+                if "--voice" in toks:
+                    vi = toks.index("--voice")
+                    if vi + 1 < len(toks):
+                        voice = toks[vi + 1]
+                        del toks[vi:vi + 2]
                 toks = [t for t in toks if t != "--now"]
                 topic = " ".join(toks).strip("\"'").strip()
-                job = pipe.plan(niche, topic, style=style)
+                job = pipe.plan(niche, topic, style=style,
+                                footage=footage, voice=voice)
                 if now:
                     result = pipe.run(job)
                     if result.ok:

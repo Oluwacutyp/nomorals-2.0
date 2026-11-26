@@ -43,6 +43,7 @@ Entry points:
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from pathlib import Path
@@ -53,6 +54,7 @@ _log = logging.getLogger(__name__)
 __all__ = [
     "PUBLISHER_JOB",
     "default_publisher_for",
+    "publish_video",
     "publish_due_shorts",
     "install_shorts_publisher_job",
     "ensure_shorts_publisher_job",
@@ -90,6 +92,56 @@ def default_publisher_for(platform: str) -> Any:
 
         return XPublisher()
     return None
+
+
+def publish_video(video_path: str | Path, platform: str, *,
+                  copy: dict[str, Any] | None = None,
+                  ledger: Any = None) -> dict[str, Any]:
+    """Publish one rendered video file to one platform.
+
+    The single-post entry point behind the ``make_short`` tool's
+    publish rung (the sweep's :func:`publish_due_shorts` covers
+    calendar-due posts; this covers a fresh factory run). The post
+    copy (title/description/hashtags) is read from ``post_copy.json``
+    next to the video when ``copy`` is not given. The tool call
+    itself is the instruction to post, so YouTube is called with
+    ``confirmed=True`` (same as :func:`_deliver_one`, same as the
+    ``nm shorts post`` verb). Returns ``{"ok": True, "platform",
+    ...}`` or ``{"ok": False, "reason"}`` — a refused post is
+    reported, never faked.
+    """
+    platform = (platform or "").strip().lower()
+    if platform not in ("youtube", "tiktok", "x", "instagram",
+                        "reels", "facebook"):
+        return {"ok": False,
+                "reason": f"unknown platform {platform!r} "
+                          "(youtube|tiktok|x|instagram|facebook)"}
+    video = Path(video_path)
+    if not video.exists():
+        return {"ok": False,
+                "reason": f"video file missing: {video} — nothing to post"}
+    if copy is None:
+        copy_path = video.parent / "post_copy.json"
+        try:
+            copy = json.loads(copy_path.read_text(encoding="utf-8")) \
+                if copy_path.exists() else {}
+        except (OSError, ValueError):
+            copy = {}
+    publisher = default_publisher_for(platform)
+    if publisher is None:
+        return {"ok": False,
+                "reason": f"no publisher for platform {platform!r}"}
+    try:
+        result = _deliver_one(platform, publisher, str(video),
+                              copy or {}, ledger)
+    except Exception as exc:  # noqa: BLE001 — publish failure is honest
+        _log.warning("publish_video: %s publish failed: %s", platform, exc)
+        return {"ok": False,
+                "reason": f"{platform} publish failed: "
+                          f"{type(exc).__name__}: {exc}"}
+    if isinstance(result, dict) and "ok" in result:
+        return {"platform": platform, **result}
+    return {"ok": True, "platform": platform, "result": result}
 
 
 def _load_post_copy(pipe: Any, job: Any) -> dict[str, Any]:

@@ -314,14 +314,14 @@ class Batch2OverrideTransportTests(unittest.TestCase):
 
 
 class Batch2ToolSurfaceTests(unittest.TestCase):
-    def test_no_new_brain_tool_registry_stays_808(self):
+    def test_no_new_brain_tool_registry_stays_809(self):
         # 794, not 789: the trendclip port added 5 tools
         # 789, not 788: the D5 (walabel) ship's whatsapp_account_label tool landed
         # after this pin's base (parent re-bump, 2026-11-25).
         context = SimpleNamespace(settings=Settings())
         registry = ToolRegistry(context=context)
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 808)  # trendclip adds 5 tools
+        self.assertEqual(len(registry._tools), 809)  # trendclip adds 5 tools
         for name in ("mcp_call", "mcp_list_tools", "mcp_status"):
             self.assertIsNotNone(registry.get(name), name)
 

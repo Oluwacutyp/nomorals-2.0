@@ -634,7 +634,7 @@ class ToolRegistry:
             "errorsys",  # system health / error budgets / incident history
             "error_scan",
             "ruff_ratchet", "secret_scan", "landability",  # Wave 8 gates
-            "map", "macros", "mcp_client", "media", "media_edit", "media_gen", "media_director", "media_pipeline", "trendclip", "metadata",
+            "map", "macros", "mcp_client", "media", "media_edit", "media_gen", "media_director", "media_pipeline", "shorts", "trendclip", "metadata",
             "board",  # whiteboard organ (Excalidraw/Tldraw)
             "bgremove",  # one-shot background removal (Remove.bg core)
             "music", "studio", "songrecon",
