@@ -797,16 +797,20 @@ def _parser() -> argparse.ArgumentParser:
     goals.add_argument("action", nargs="?", default="list",
                        choices=["list", "board", "briefing", "review",
                                 "focus", "progress", "add", "class",
-                                "classes"],
+                                "classes", "checkin", "checkins",
+                                "milestones"],
                        help="Action to perform")
     goals.add_argument("arg", nargs="?", default="",
-                       help="class (list), goal ref (progress/class), "
-                            "title (add)")
+                       help="class (list), goal ref (progress/class/checkin/milestones), "
+                            "title (add), sub-action (classes: add|remove)")
     goals.add_argument("arg2", nargs="?", default="",
-                       help="class id (class action)")
+                       help="class id (class action; classes add/remove)")
     goals.add_argument("--title", default="", help="Goal title (add)")
     goals.add_argument("--class", dest="goal_class", default="",
                        help="Goal class id (add)")
+    goals.add_argument("--progress", default="",
+                       help="Progress percent 0-100 (checkin)")
+    goals.add_argument("--note", default="", help="Check-in note (checkin)")
     goals.add_argument("--user", default="owner",
                        help="user id for goal storage")
     goals.add_argument("--json", action="store_true", help="Output as JSON")

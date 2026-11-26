@@ -409,7 +409,7 @@ class RegisterTests(unittest.TestCase):
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
         self.assertIn("build_swarm", registry._tools)
-        self.assertEqual(len(registry._tools), 787)
+        self.assertEqual(len(registry._tools), 788)  # goal-class adds goal_class
 
 
 class AgentLoopTests(unittest.TestCase):

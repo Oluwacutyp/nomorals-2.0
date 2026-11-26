@@ -37,12 +37,14 @@ from .classes import (
     ClassProgress,
     GoalClass,
     get_class,
+    get_class_for,
     list_classes,
-    validate_class_id,
+    validate_class_id_for,
 )
 
 __all__ = [
     "OWNER_USER_ID",
+    "check_in_goal",
     "class_briefing_lines",
     "create_goal_filed",
     "goals_context_snapshot",
@@ -50,10 +52,12 @@ __all__ = [
     "progress_label",
     "refile_goal",
     "render_briefing",
+    "render_checkins_due",
     "render_class_board",
     "render_classes",
     "render_focus",
     "render_goal_progress",
+    "render_milestones",
     "render_review",
     "resolve_goal",
     "run_sync",
@@ -161,8 +165,9 @@ def render_class_board(
         active_by_class.setdefault(goal.goal_class or DEFAULT_CLASS_ID,
                                    []).append(goal)
 
-    descriptors = ([get_class(only_class)] if only_class is not None
-                   else list_classes())
+    descriptors = ([get_class_for(tracker.db, only_class)]
+                   if only_class is not None
+                   else tracker.list_all_classes())
 
     from ..social.chat.typography import Card, card_text
 
@@ -202,8 +207,13 @@ def render_class_board(
     return card_text(card)
 
 
-def render_classes() -> str:
+def render_classes(tracker: GoalTracker | None = None) -> str:
     """The class picker as text: every class, what it is, how to file.
+
+    With a tracker the list is the merged registry — built-ins plus
+    the owner's custom classes (data, not code) — and the reply names
+    how to add one more.  Without one (legacy callers) it is the
+    built-in list exactly as before.
 
     Presentation Phase 3: a menu-class Card, the picker lines
     verbatim inside it."""
@@ -211,13 +221,99 @@ def render_classes() -> str:
 
     card = Card("menu", title="Goal classes")
     lines = ["🧭 **Goal classes:**"]
-    for descriptor in list_classes():
+    descriptors = (tracker.list_all_classes() if tracker is not None
+                   else list_classes())
+    for descriptor in descriptors:
         lines.append(
             f"  `{descriptor.id}` — {descriptor.title}: "
             f"{descriptor.description}")
     lines.append("")
     lines.append("file a goal: /goals add <title> in <class>")
     lines.append("move a goal: /goals class <goal> <class>")
+    if tracker is not None:
+        lines.append(
+            "add a class of your own: /goals classes add <id> <title>")
+    card.block_lines(lines, title="")
+    return card_text(card)
+
+
+def render_milestones(tracker: GoalTracker, user_id: str, ref: str) -> str:
+    """One goal's milestones: the class's shape, checked off or not.
+
+    The unknown-goal answer stays a plain honest line — no record
+    exists to frame."""
+    goal, candidates = resolve_goal(tracker, user_id, ref)
+    if goal is None:
+        return _unknown_goal_text(ref, candidates, tracker.db)
+    descriptor = get_class_for(tracker.db, goal.goal_class)
+    milestones = run_sync(tracker.list_milestones(goal.goal_id))
+    lines = [f"**{goal.title}** — {descriptor.title} (`{descriptor.id}`)"]
+    if not milestones:
+        lines.append("  no milestones yet — this class seeds none; "
+                     "add one with the goal's own milestone verbs.")
+    for milestone in milestones:
+        mark = "✅" if milestone.is_completed else "⬜"
+        lines.append(f"  {mark} {milestone.title}")
+    from ..social.chat.typography import Card, card_text
+
+    card = Card("briefing", title="Goal milestones")
+    card.block_lines(lines, title="")
+    return card_text(card)
+
+
+def check_in_goal(
+    tracker: GoalTracker, user_id: str, ref: str, *,
+    progress: float | None = None, note: str = "",
+) -> str:
+    """Record a check-in on one goal and report the class reading.
+
+    A check-in without a progress value logs activity at the current
+    % — it keeps the class's cadence honest without moving the
+    number; with one, the goal's % moves and the history records it.
+    The reply always carries the progress basis, so a measured
+    reading and a self-reported one are never confused."""
+    goal, candidates = resolve_goal(tracker, user_id, ref)
+    if goal is None:
+        return _unknown_goal_text(ref, candidates, tracker.db)
+    entry = run_sync(tracker.check_in(
+        goal.goal_id, note=note, progress=progress))
+    # Re-read: the resolved goal object predates the check-in, so its
+    # stored % is stale — the reading must come from the fresh row.
+    goal = run_sync(tracker.get(goal.goal_id)) or goal
+    reading = tracker.class_progress(goal)
+    descriptor = get_class_for(tracker.db, goal.goal_class)
+    lines = [
+        f"checked in on **{goal.title}** — {descriptor.title}",
+        f"  progress: {progress_label(reading)}",
+        f"  note: {entry.note}",
+    ]
+    return "\n".join(lines)
+
+
+def render_checkins_due(
+    tracker: GoalTracker, user_id: str, *, now: float | None = None,
+) -> str:
+    """Classes whose check-in cadence has lapsed, as a board.
+
+    Empty is a plain honest line — every class with goals was
+    checked in inside its window."""
+    due = run_sync(tracker.class_checkins_due(user_id, now=now))
+    if not due:
+        return ("no goal class is due a check-in — every class with "
+                "goals was checked in inside its window.")
+    from ..social.chat.typography import Card, card_text
+
+    card = Card("leaderboard", title="Check-ins due")
+    lines = ["⏰ **Check-ins due** (by class cadence):"]
+    for entry in due:
+        lines.append(
+            f"  • {entry['class_title']} (`{entry['class_id']}`) — "
+            f"{entry['days_since_checkin']:.0f}d since the last "
+            f"check-in (cadence: {entry['review_cadence']}, "
+            f"{entry['cadence_days']}d) · {entry['stale_goals']}/"
+            f"{entry['goals']} goal(s) stale")
+    lines.append("")
+    lines.append("check in: /goals checkin <goal> [progress] [note]")
     card.block_lines(lines, title="")
     return card_text(card)
 
@@ -272,7 +368,7 @@ def render_focus(tracker: GoalTracker, user_id: str, *,
     lines = ["🎯 **Focus now** (ranked by urgency, deadlines, momentum):"]
     for i, entry in enumerate(focus, 1):
         goal = entry["goal"]
-        descriptor = get_class(goal.goal_class)
+        descriptor = get_class_for(tracker.db, goal.goal_class)
         reading = tracker.class_progress(goal, now=now)
         lines.append(
             f"  {i}. {goal.title} — {progress_label(reading)}"
@@ -290,8 +386,8 @@ def render_goal_progress(tracker: GoalTracker, user_id: str, ref: str, *,
     honest line — no record exists to frame."""
     goal, candidates = resolve_goal(tracker, user_id, ref)
     if goal is None:
-        return _unknown_goal_text(ref, candidates)
-    descriptor = get_class(goal.goal_class)
+        return _unknown_goal_text(ref, candidates, tracker.db)
+    descriptor = get_class_for(tracker.db, goal.goal_class)
     reading = run_sync(tracker.measured_progress(goal.goal_id, now=now))
     lines = [
         f"**{goal.title}** — {descriptor.title} (`{descriptor.id}`)",
@@ -362,12 +458,14 @@ def resolve_goal(
     return None, active
 
 
-def _unknown_goal_text(ref: str, candidates: list[Goal]) -> str:
+def _unknown_goal_text(
+    ref: str, candidates: list[Goal], db: Any = None,
+) -> str:
     lines = [f"no single goal matches {ref!r}."]
     if candidates:
         lines.append("active goals:")
         for goal in candidates[:10]:
-            descriptor = get_class(goal.goal_class)
+            descriptor = get_class_for(db, goal.goal_class)
             lines.append(
                 f"  • {goal.title} ({descriptor.id}) — {goal.goal_id}")
     else:
@@ -442,7 +540,7 @@ def create_goal_filed(
     live watch in the reply via :func:`interest_watch_note`.
     """
     if class_arg:
-        class_id = validate_class_id(class_arg)
+        class_id = validate_class_id_for(tracker.db, class_arg)
         goal = run_sync(tracker.create(user_id, title, goal_class=class_id))
         suggested = False
     else:
@@ -455,6 +553,10 @@ def create_goal_filed(
             goal = run_sync(tracker.create(user_id, title))
             class_id = goal.goal_class or DEFAULT_CLASS_ID
             suggested = False
+    # The class's milestone shape materialises as real milestone
+    # rows at creation (idempotent — a re-seed never duplicates).
+    # A class with no templates (general) seeds nothing.
+    run_sync(tracker.seed_class_milestones(goal.goal_id))
     if class_id == "interests":
         from . import providers
 
@@ -507,14 +609,14 @@ def refile_goal(
     the goal's topics minus those protections).  Both acts are
     named in the reply.
     """
-    class_id = validate_class_id(class_arg)
+    class_id = validate_class_id_for(tracker.db, class_arg)
     goal, candidates = resolve_goal(tracker, user_id, ref)
     if goal is None:
-        return _unknown_goal_text(ref, candidates)
-    before = get_class(goal.goal_class)
+        return _unknown_goal_text(ref, candidates, tracker.db)
+    before = get_class_for(tracker.db, goal.goal_class)
     updated = run_sync(
         tracker.update(goal.goal_id, goal_class=class_id))
-    after = get_class(updated.goal_class)
+    after = get_class_for(tracker.db, updated.goal_class)
     text = (f"moved **{updated.title}** from {before.title} "
             f"to {after.title} (`{after.id}`).")
     if after.id == "interests" and before.id != "interests":
@@ -564,7 +666,7 @@ def class_briefing_lines(
         key = goal.goal_class or DEFAULT_CLASS_ID
         active_counts[key] = active_counts.get(key, 0) + 1
     lines: list[str] = []
-    for descriptor in list_classes():
+    for descriptor in tracker.list_all_classes():
         rollup = by_class.get(descriptor.id)
         if not rollup:
             continue
@@ -608,7 +710,7 @@ def goals_context_snapshot(
     entries: list[dict[str, Any]] = []
     for entry in ranked:
         goal = entry["goal"]
-        descriptor = get_class(goal.goal_class)
+        descriptor = get_class_for(tracker.db, goal.goal_class)
         reading = tracker.class_progress(goal, now=now)
         item: dict[str, Any] = {
             "title": goal.title,

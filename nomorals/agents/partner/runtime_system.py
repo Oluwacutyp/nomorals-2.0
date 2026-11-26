@@ -2378,6 +2378,14 @@ class RuntimeSystemMixin:
                                      — create, filed under a class
         /goals class <goal> <class>  — re-file a goal under another class
         /goals classes               — the class picker as text
+        /goals classes add <id> <title>
+                                     — define a custom class as data
+        /goals classes remove <id>   — remove an unused custom class
+        /goals checkin <goal> [progress] [note]
+                                     — record a check-in on a goal
+        /goals checkins              — classes whose check-in cadence
+                                       has lapsed
+        /goals milestones <goal>     — one goal's milestones
 
         <goal> is a goal id (or unique prefix), #n from the board,
         or a unique part of its title.  Owner-only (the handle_control
@@ -2392,7 +2400,7 @@ class RuntimeSystemMixin:
         import re
 
         from ...goals import surface
-        from ...goals.classes import GoalClassError, list_classes
+        from ...goals.classes import GoalClassError
 
         tracker = self._goal_tracker()
         if tracker is None:
@@ -2407,8 +2415,8 @@ class RuntimeSystemMixin:
             only = None
             if rest:
                 try:
-                    from ...goals.classes import get_class
-                    only = get_class(rest.split()[0]).id
+                    from ...goals.classes import get_class_for
+                    only = get_class_for(tracker.db, rest.split()[0]).id
                 except GoalClassError as exc:
                     return str(exc)
             text = surface.render_class_board(tracker, user, only_class=only)
@@ -2423,7 +2431,7 @@ class RuntimeSystemMixin:
                 return text
             from ...social.chat.tgbot_buttons import actionable, grid_layout
             buttons = [(c.title, f"/goals list {c.id}")
-                       for c in list_classes()]
+                       for c in tracker.list_all_classes()]
             buttons += [("Briefing", "/goals briefing"),
                         ("Review", "/goals review")]
             return actionable(text, grid_layout([buttons]))
@@ -2438,7 +2446,60 @@ class RuntimeSystemMixin:
                 return "usage: /goals progress <goal id|#n|title part>"
             return surface.render_goal_progress(tracker, user, rest)
         if verb == "classes":
-            return surface.render_classes()
+            words = rest.split(None, 2)
+            if words and words[0] == "add":
+                if len(words) < 3:
+                    return ("usage: /goals classes add <id> <title> "
+                            "(id: lowercase slug, e.g. gardening)")
+                try:
+                    descriptor = tracker.define_class(
+                        words[1], words[2].strip())
+                except GoalClassError as exc:
+                    return str(exc)
+                return (f"defined goal class **{descriptor.title}** "
+                        f"(`{descriptor.id}`) — file a goal there with "
+                        f"/goals add <title> in {descriptor.id}")
+            if words and words[0] == "remove":
+                if len(words) < 2:
+                    return "usage: /goals classes remove <id>"
+                try:
+                    tracker.remove_class(words[1])
+                except GoalClassError as exc:
+                    return str(exc)
+                return f"removed goal class `{words[1]}`."
+            return surface.render_classes(tracker)
+        if verb == "checkin":
+            if not rest:
+                return ("usage: /goals checkin <goal id|#n|title part> "
+                        "[progress] [note]")
+            # <ref> [progress] [note]: the first token that parses as a
+            # 0–100 number (optional trailing %) is the progress; tokens
+            # before it are the goal ref, after it the note.  A number
+            # above 100 (e.g. "save 1000") is part of the ref, never a
+            # progress value.
+            tokens = rest.split()
+            ref, progress, note = rest, None, ""
+            for i, token in enumerate(tokens):
+                try:
+                    value = float(token.rstrip("%"))
+                except ValueError:
+                    continue
+                if 0.0 <= value <= 100.0 and i > 0:
+                    ref = " ".join(tokens[:i])
+                    progress = value
+                    note = " ".join(tokens[i + 1:])
+                    break
+            if not ref:
+                return ("usage: /goals checkin "
+                        "<goal id|#n|title part> [progress] [note]")
+            return surface.check_in_goal(
+                tracker, user, ref, progress=progress, note=note)
+        if verb == "checkins":
+            return surface.render_checkins_due(tracker, user)
+        if verb == "milestones":
+            if not rest:
+                return "usage: /goals milestones <goal id|#n|title part>"
+            return surface.render_milestones(tracker, user, rest)
         if verb == "add":
             if not rest:
                 return ("usage: /goals add <title> [in <class>] | "
@@ -2461,8 +2522,8 @@ class RuntimeSystemMixin:
                 return str(exc)
             except ValueError as exc:
                 return f"couldn't create that goal: {exc}"
-            from ...goals.classes import get_class
-            descriptor = get_class(class_id)
+            from ...goals.classes import get_class_for
+            descriptor = get_class_for(tracker.db, class_id)
             note = (f" — filed under {descriptor.title} from the title; "
                     f"/goals class {goal.goal_id} <class> moves it"
                     if suggested else "")
@@ -2483,7 +2544,9 @@ class RuntimeSystemMixin:
                 return str(exc)
         return ("usage: /goals [list [class]] | briefing | review | focus | "
                 "progress <goal> | add <title> [in <class>] | "
-                "class <goal> <class> | classes")
+                "class <goal> <class> | classes [add <id> <title> | "
+                "remove <id>] | checkin <goal> [progress] [note] | "
+                "checkins | milestones <goal>")
 
     # ── careers: /careers ─────────────────────────────────────────────
     def _careers_store(self) -> Any:

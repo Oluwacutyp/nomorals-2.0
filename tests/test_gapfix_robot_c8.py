@@ -7,7 +7,7 @@ when nothing is attached, and the daemon's simulated pose is always
 labelled simulated.
 
 Tool-count pin: 784 after this lane (C.4) added camwall; 785 after
-this lane (C.8) added robot.
+this lane (C.8) added robot; 786 after this lane (goal-class) added goal_class.
 """
 
 from __future__ import annotations
@@ -383,14 +383,14 @@ class ToolTests(unittest.TestCase):
 
     def test_tool_count_is_786_after_c8_added_robot(self) -> None:
         # 784 after this lane (C.4) added camwall; 785 after this lane
-        # (C.8) added robot.
+        # (C.8) added robot; 786 after this lane (goal-class) added goal_class.
         from types import SimpleNamespace
 
         from nomorals.tools.registry import ToolRegistry
 
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 787)
+        self.assertEqual(len(registry._tools), 788)
         self.assertIn("robot", registry._tools)
 
     def test_tool_status_drive_scan_map(self) -> None:

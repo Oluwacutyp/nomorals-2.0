@@ -314,13 +314,13 @@ class Batch2OverrideTransportTests(unittest.TestCase):
 
 
 class Batch2ToolSurfaceTests(unittest.TestCase):
-    def test_no_new_brain_tool_registry_stays_787(self):
-        # 787, not 786: the museum ship's museum_library tool landed
+    def test_no_new_brain_tool_registry_stays_788(self):
+        # 788, not 787: the goal-class ship's goal_class tool landed
         # after this pin's base (parent re-bump, 2026-11-25).
         context = SimpleNamespace(settings=Settings())
         registry = ToolRegistry(context=context)
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 787)
+        self.assertEqual(len(registry._tools), 788)  # goal-class adds goal_class
         for name in ("mcp_call", "mcp_list_tools", "mcp_status"):
             self.assertIsNotNone(registry.get(name), name)
 

@@ -52,10 +52,18 @@ from .classes import (
     ClassProgress,
     GoalClass,
     GoalClassError,
+    cadence_days,
     class_for_template,
+    define_custom_class,
+    ensure_goal_classes_table,
+    get_class_for,
     goal_progress,
+    list_all_classes,
+    list_custom_classes,
     register_progress_provider,
+    remove_custom_class,
     validate_class_id,
+    validate_class_id_for,
 )
 
 __all__ = [
@@ -88,6 +96,16 @@ __all__ = [
     "goal_progress",
     "register_progress_provider",
     "validate_class_id",
+    # Custom classes as data (goal-class lane): "something else" is a
+    # persisted class, not a code change — see goals/classes.py.
+    "cadence_days",
+    "define_custom_class",
+    "ensure_goal_classes_table",
+    "get_class_for",
+    "list_all_classes",
+    "list_custom_classes",
+    "remove_custom_class",
+    "validate_class_id_for",
 ]
 
 _log = get_logger(__name__)
@@ -667,6 +685,13 @@ class GoalTracker:
             self.db.execute("CREATE INDEX IF NOT EXISTS idx_links_to ON goal_links(to_goal_id)")
             self.db.execute("CREATE INDEX IF NOT EXISTS idx_milestones_goal ON goal_milestones(goal_id)")
 
+            # Goal-class lane: custom classes as data — a persisted
+            # registry beside the built-in GOAL_CLASSES dict, so a class
+            # the owner names ("something else") is a row, not a code
+            # change.  A new table (CREATE TABLE IF NOT EXISTS), never
+            # a touch to the frozen migrations.
+            ensure_goal_classes_table(self.db)
+
             # Column migrations for databases created before this sweep.
             _ensure_column(self.db, "goals", "kind", "TEXT NOT NULL DEFAULT 'outcome'")
             # WS2: the goal-class axis. Same _ensure_column pattern —
@@ -758,7 +783,7 @@ class GoalTracker:
             raise ValueError("goal title must not be empty")
         if kind not in GOAL_KINDS:
             raise ValueError(f"unknown goal kind {kind!r} (expected one of {GOAL_KINDS})")
-        resolved_class = validate_class_id(goal_class)
+        resolved_class = validate_class_id_for(self.db, goal_class)
         goal_id = new_id("goal")
         now = time.time()
         tags = list(tags or [])
@@ -891,7 +916,7 @@ class GoalTracker:
                 raise ValueError(f"unknown goal kind {kind!r} (expected one of {GOAL_KINDS})")
             updates["kind"] = kind
         if goal_class is not None:
-            updates["goal_class"] = validate_class_id(goal_class)
+            updates["goal_class"] = validate_class_id_for(self.db, goal_class)
         if updates:
             updates["updated_at"] = time.time()
             set_clause = ", ".join(f"{k} = ?" for k in updates)
@@ -1145,7 +1170,7 @@ class GoalTracker:
 
         if goal_class is not None:
             query += " AND goal_class = ?"
-            params.append(validate_class_id(goal_class))
+            params.append(validate_class_id_for(self.db, goal_class))
 
         if due_within_days is not None:
             query += " AND target_date IS NOT NULL AND target_date <= ?"
@@ -1248,6 +1273,120 @@ class GoalTracker:
         """Class-progress reading by goal id. Raises KeyError if missing."""
         goal = await self._require(goal_id)
         return self.class_progress(goal, now=now)
+
+    # ── goal classes as data (goal-class lane) ────────────────────────
+
+    def list_all_classes(self) -> list[GoalClass]:
+        """Every class: the built-ins in presentation order, then customs."""
+        return list_all_classes(self.db)
+
+    def define_class(
+        self,
+        class_id: str,
+        title: str,
+        description: str = "",
+        *,
+        progress_model: str = "manual",
+        review_cadence: str = "weekly",
+        tool_hints: tuple[str, ...] | list[str] = (),
+        milestone_templates: tuple[str, ...] | list[str] = (),
+    ) -> GoalClass:
+        """Define a custom goal class as data (persisted, not code).
+
+        A class the owner names that is not built in — "something
+        else" — becomes a row in ``goal_classes`` and is immediately
+        usable everywhere a built-in class is: create, list, board,
+        briefing, snapshot.  Refuses built-in ids, malformed ids and
+        empty titles with :class:`GoalClassError`.
+        """
+        return define_custom_class(
+            self.db, class_id, title, description,
+            progress_model=progress_model, review_cadence=review_cadence,
+            tool_hints=tool_hints, milestone_templates=milestone_templates)
+
+    def remove_class(self, class_id: str) -> int:
+        """Remove a custom class. Returns 0 (it was unused).
+
+        Refuses built-in ids and classes still in use, with
+        :class:`GoalClassError` naming the blocker.
+        """
+        return remove_custom_class(self.db, class_id)
+
+    async def seed_class_milestones(self, goal_id: str) -> int:
+        """Seed a goal's milestones from its class's templates.
+
+        Adds each of the class's ``milestone_templates`` as a real
+        milestone row, skipping titles the goal already has — so
+        re-seeding (or re-filing then re-seeding) never duplicates.
+        Returns how many milestones were added.  A class with no
+        templates (``general``) seeds nothing.
+        """
+        goal = await self._require(goal_id)
+        descriptor = get_class_for(self.db, goal.goal_class)
+        existing = {m.title.strip().lower()
+                    for m in await self.list_milestones(goal_id)}
+        added = 0
+        order = len(existing)
+        for title in descriptor.milestone_templates:
+            if title.strip().lower() in existing:
+                continue
+            await self.add_milestone(goal_id, title, order=order)
+            order += 1
+            added += 1
+        return added
+
+    async def class_checkins_due(
+        self, user_id: str, *, now: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Classes whose check-in cadence has lapsed, soonest-lapsed first.
+
+        A class is due when ANY of its active goals has had no
+        check-in (progress-history entry) within the class's cadence
+        window — ``daily-brief`` classes after 1 day, ``weekly`` /
+        ``digest:*`` after 7.  A fresh sibling does not hide a stale
+        goal: the class is due while any goal in it is stale, and
+        ``days_since_checkin`` is the stalest goal's gap, so the
+        most-neglected class sorts first.  Each goal's last activity
+        is the newest of its history entries (falling back to its
+        creation when it has never been touched — an untouched goal
+        is not a checked-in goal).  Each entry names the class, the
+        days since the stalest check-in, the cadence in days, and
+        how many of the class's goals are stale.  A class with no
+        active goals is never due — nothing to check in on.
+        """
+        now = time.time() if now is None else now
+        active = await self.list_goals(user_id, status="active")
+        by_class: dict[str, list[Goal]] = {}
+        for goal in active:
+            by_class.setdefault(goal.goal_class or DEFAULT_CLASS_ID, []).append(goal)
+        due: list[dict[str, Any]] = []
+        for class_id in sorted(by_class):
+            goals = by_class[class_id]
+            descriptor = get_class_for(self.db, class_id)
+            window = cadence_days(descriptor.review_cadence)
+            oldest: float | None = None
+            stale = 0
+            for goal in goals:
+                row = self.db.query_one(
+                    "SELECT MAX(recorded_at) AS last FROM goal_progress_history "
+                    "WHERE goal_id = ?", (goal.goal_id,))
+                touched = float((row or {}).get("last") or 0.0) or goal.created_at
+                oldest = touched if oldest is None else min(oldest, touched)
+                if now - touched > window * 86400:
+                    stale += 1
+            if oldest is None or stale == 0:
+                continue
+            due.append({
+                "class_id": descriptor.id,
+                "class_title": descriptor.title,
+                "review_cadence": descriptor.review_cadence,
+                "cadence_days": window,
+                "days_since_checkin": round((now - oldest) / 86400.0, 1),
+                "goals": len(goals),
+                "stale_goals": stale,
+            })
+        due.sort(key=lambda d: -d["days_since_checkin"])
+        return due
 
     # ── reminders ─────────────────────────────────────────────────────────
 

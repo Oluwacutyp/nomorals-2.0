@@ -18,7 +18,7 @@ from ..emit import _emit
 
 
 def _cmd_goals(args: argparse.Namespace, context: Any) -> int:
-    """Goals CLI: list|briefing|review|focus|progress|add|class|classes."""
+    """Goals CLI: list|briefing|review|focus|progress|add|class|classes|checkin|checkins|milestones."""
     from ...goals import GoalTracker, surface
     from ...goals.classes import GoalClassError
 
@@ -54,8 +54,70 @@ def _cmd_goals(args: argparse.Namespace, context: Any) -> int:
         _emit(args, {"progress": text}, text)
         return 0
     if action == "classes":
-        text = surface.render_classes()
+        if arg == "add":
+            title = getattr(args, "title", "") or ""
+            if not arg2 or not title:
+                _emit(args, {"error": "usage"},
+                      "usage: nm goals classes add <id> --title <title>")
+                return 1
+            try:
+                descriptor = tracker.define_class(arg2, title)
+            except GoalClassError as exc:
+                _emit(args, {"error": str(exc)}, str(exc))
+                return 1
+            _emit(args, {"class": descriptor.to_dict()},
+                  f"defined goal class {descriptor.title} (`{descriptor.id}`)")
+            return 0
+        if arg == "remove":
+            if not arg2:
+                _emit(args, {"error": "usage"},
+                      "usage: nm goals classes remove <id>")
+                return 1
+            try:
+                tracker.remove_class(arg2)
+            except GoalClassError as exc:
+                _emit(args, {"error": str(exc)}, str(exc))
+                return 1
+            _emit(args, {"removed": arg2}, f"removed goal class `{arg2}`.")
+            return 0
+        text = surface.render_classes(tracker)
         _emit(args, {"classes": text}, text)
+        return 0
+    if action == "checkin":
+        if not arg:
+            _emit(args, {"error": "usage"},
+                  "usage: nm goals checkin <goal id|#n|title part> "
+                  "[--progress <0-100>] [--note <text>]")
+            return 1
+        progress = None
+        raw_progress = getattr(args, "progress", "") or ""
+        if raw_progress != "":
+            try:
+                progress = float(str(raw_progress).rstrip("%"))
+            except ValueError:
+                _emit(args, {"error": "usage"},
+                      f"progress must be a number 0-100, got {raw_progress!r}")
+                return 1
+            if not 0.0 <= progress <= 100.0:
+                _emit(args, {"error": "usage"},
+                      f"progress must be 0-100, got {progress}")
+                return 1
+        text = surface.check_in_goal(
+            tracker, user, arg, progress=progress,
+            note=getattr(args, "note", "") or "")
+        _emit(args, {"checkin": text}, text)
+        return 0
+    if action == "checkins":
+        text = surface.render_checkins_due(tracker, user)
+        _emit(args, {"checkins": text}, text)
+        return 0
+    if action == "milestones":
+        if not arg:
+            _emit(args, {"error": "usage"},
+                  "usage: nm goals milestones <goal id|#n|title part>")
+            return 1
+        text = surface.render_milestones(tracker, user, arg)
+        _emit(args, {"milestones": text}, text)
         return 0
     if action == "add":
         title = getattr(args, "title", "") or arg

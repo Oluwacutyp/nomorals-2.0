@@ -410,7 +410,7 @@ class TestToolAndCliSurface(_RotationCase):
             reg.call("proxy_rotate", action="stop")
         self.assertIsNone(core_http.get_proxy_resolver())
 
-    def test_registry_tool_count_still_787(self) -> None:
+    def test_registry_tool_count_still_788(self) -> None:
         # No new brain tool was added by this lane (the proxy_rotate
         # tool gained a parameter, not a new registration).
         # 787, not 786: the museum ship's museum_library tool landed
@@ -419,7 +419,7 @@ class TestToolAndCliSurface(_RotationCase):
         # after this lane's base (parent re-bump, 2026-11-24).)
         reg = ToolRegistry(context=_ctx(self.tmp))
         reg.register_builtins()
-        self.assertEqual(len(reg._tools), 787)
+        self.assertEqual(len(reg._tools), 788)  # goal-class adds goal_class
 
     def _run_cli(self, ctx, **fields):
         base = {"proxy_action": "", "proxy_sources_action": "",

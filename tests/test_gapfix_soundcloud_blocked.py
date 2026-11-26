@@ -634,7 +634,7 @@ class TestFailureReporting:
 
 
 class TestToolCount:
-    def test_tool_count_still_787(self):
+    def test_tool_count_still_788(self):
         from types import SimpleNamespace
 
         from nomorals.tools.registry import ToolRegistry
@@ -645,4 +645,4 @@ class TestToolCount:
         # lane's base pinned 785; rebumped at N3 ship time).
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        assert len(registry._tools) == 787
+        assert len(registry._tools) == 788  # goal-class adds goal_class

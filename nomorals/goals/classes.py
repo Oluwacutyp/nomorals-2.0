@@ -47,18 +47,27 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, avoids a cycle
     from . import Goal
 
 __all__ = [
+    "CADENCE_DAYS",
     "DEFAULT_CLASS_ID",
     "GOAL_CLASSES",
     "ClassProgress",
     "GoalClass",
     "GoalClassError",
+    "cadence_days",
     "class_for_template",
+    "define_custom_class",
+    "ensure_goal_classes_table",
     "get_class",
+    "get_class_for",
     "goal_progress",
+    "list_all_classes",
     "list_classes",
+    "list_custom_classes",
     "register_progress_provider",
+    "remove_custom_class",
     "require_class",
     "validate_class_id",
+    "validate_class_id_for",
 ]
 
 
@@ -91,7 +100,10 @@ class GoalClass:
     are the ``GOAL_TEMPLATES`` keys this class owns — a goal created
     from one of those templates is filed under this class.
     ``tool_hints`` are the organ/tool names the brain may reach for
-    when working a goal of this class.
+    when working a goal of this class.  ``milestone_templates`` are
+    the starter milestones a goal of this class is seeded with at
+    creation (see ``GoalTracker.seed_class_milestones``) — what a
+    milestone looks like for this class, as data, not a code branch.
     """
 
     id: str
@@ -102,6 +114,7 @@ class GoalClass:
     summarizer_key: str = ""
     template_names: tuple[str, ...] = ()
     tool_hints: tuple[str, ...] = ()
+    milestone_templates: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -113,6 +126,7 @@ class GoalClass:
             "summarizer_key": self.summarizer_key,
             "template_names": list(self.template_names),
             "tool_hints": list(self.tool_hints),
+            "milestone_templates": list(self.milestone_templates),
         }
 
 
@@ -129,6 +143,7 @@ GOAL_CLASSES: dict[str, GoalClass] = {
         review_cadence="weekly",
         summarizer_key="careers",
         tool_hints=("matching", "documents", "artifacts", "learn"),
+        milestone_templates=("Submit the first application", "Reach the interview stage", "Receive an offer"),
     ),
     "productivity": GoalClass(
         id="productivity",
@@ -140,6 +155,7 @@ GOAL_CLASSES: dict[str, GoalClass] = {
         review_cadence="weekly",
         summarizer_key="productivity",
         tool_hints=("commitments", "focus", "planning", "reminders"),
+        milestone_templates=("Keep a 7-day streak", "Keep a 30-day streak", "Clear the week's focus list"),
     ),
     "finance": GoalClass(
         id="finance",
@@ -152,6 +168,7 @@ GOAL_CLASSES: dict[str, GoalClass] = {
         summarizer_key="finance",
         template_names=("save-money",),
         tool_hints=("finance", "ledger", "budgets", "alerts"),
+        milestone_templates=("Reach 25% funded", "Reach 50% funded", "Fully funded"),
     ),
     "interests": GoalClass(
         id="interests",
@@ -163,6 +180,7 @@ GOAL_CLASSES: dict[str, GoalClass] = {
         review_cadence="daily-brief",
         summarizer_key="interests",
         tool_hints=("news", "watchers", "briefing"),
+        milestone_templates=("First finding delivered", "Watch reaches 10 findings"),
     ),
     "health": GoalClass(
         id="health",
@@ -175,6 +193,7 @@ GOAL_CLASSES: dict[str, GoalClass] = {
         summarizer_key="health",
         template_names=("fitness",),
         tool_hints=("health", "coach", "timeline"),
+        milestone_templates=("Log 7 days in a row", "Log 30 days in a row"),
     ),
     "learning": GoalClass(
         id="learning",
@@ -187,6 +206,7 @@ GOAL_CLASSES: dict[str, GoalClass] = {
         summarizer_key="learning",
         template_names=("learn-language", "read-books"),
         tool_hints=("learn", "tutor", "flashcards", "curriculum"),
+        milestone_templates=("Finish the first study session", "Reach 80% mastery on a topic"),
     ),
     "build": GoalClass(
         id="build",
@@ -199,6 +219,7 @@ GOAL_CLASSES: dict[str, GoalClass] = {
         summarizer_key="build",
         template_names=("ship-project",),
         tool_hints=("goal", "missions", "skills", "projects"),
+        milestone_templates=("Ship the first version", "Launch"),
     ),
     "relationships": GoalClass(
         id="relationships",
@@ -210,6 +231,7 @@ GOAL_CLASSES: dict[str, GoalClass] = {
         review_cadence="weekly",
         summarizer_key="relationships",
         tool_hints=("commitments", "family", "relationships"),
+        milestone_templates=("Keep every promise this week",),
     ),
     "trading": GoalClass(
         id="trading",
@@ -221,6 +243,7 @@ GOAL_CLASSES: dict[str, GoalClass] = {
         review_cadence="digest:trading",
         summarizer_key="trading",
         tool_hints=("trading_desk", "trade_pipeline", "goldenswing"),
+        milestone_templates=("First realized profit", "Hit the P&L target"),
     ),
     DEFAULT_CLASS_ID: GoalClass(
         id=DEFAULT_CLASS_ID,
@@ -299,6 +322,234 @@ def class_for_template(template_name: str | None) -> str | None:
     return None
 
 
+# ── custom classes: "something else", as data ─────────────────────────
+#
+# The built-in registry above is code.  A class the owner names that is
+# not built in ("something else") must NOT need a code change to exist:
+# custom classes live in the ``goal_classes`` table of the same database
+# the goals live in (created by ``GoalTracker._ensure_schema``; the
+# functions below create it idempotently too, so a bare database works).
+# A custom class is data with the same shape as a built-in descriptor —
+# title, description, progress model, review cadence, tool hints,
+# milestone templates — and its goals measure ``manual`` (self-reported)
+# unless a provider is registered for it later: no measuring organ
+# exists for a class nobody has wired one for, and the reading says so.
+# ``list_classes()`` / ``get_class()`` / ``validate_class_id()`` stay
+# built-in-only (the ten-class pin); the ``*_for`` / ``list_all_*``
+# functions below are the db-aware path every writer and renderer
+# uses, so a custom-class goal never breaks a board, a briefing, or
+# the brain snapshot.
+
+import json as _json
+import re as _re
+
+#: Custom class ids: lowercase slug, must start with a letter.
+_CUSTOM_ID_RE = _re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+
+#: Review-cadence names → check-in window in days.  ``digest:*``
+#: cadences ride the weekly digest, so they read as weekly here.
+CADENCE_DAYS: dict[str, int] = {
+    "daily-brief": 1,
+    "daily": 1,
+    "weekly": 7,
+    "monthly": 30,
+}
+
+
+def cadence_days(cadence: str | None) -> int:
+    """Check-in window in days for a review-cadence name.
+
+    ``digest:*`` → 7; an unknown/empty cadence → 7 (weekly is the
+    standing default, never a crash).
+    """
+    name = (cadence or "").strip()
+    if name in CADENCE_DAYS:
+        return CADENCE_DAYS[name]
+    if name.startswith("digest:"):
+        return 7
+    return 7
+
+
+def ensure_goal_classes_table(db: Any) -> None:
+    """Create the ``goal_classes`` table when it is missing (idempotent)."""
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS goal_classes (
+            class_id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            progress_model TEXT NOT NULL DEFAULT 'manual',
+            review_cadence TEXT NOT NULL DEFAULT 'weekly',
+            summarizer_key TEXT NOT NULL DEFAULT '',
+            tool_hints TEXT NOT NULL DEFAULT '[]',
+            milestone_templates TEXT NOT NULL DEFAULT '[]',
+            created_at REAL NOT NULL
+        )
+    """)
+
+
+def _row_to_custom_class(row: dict[str, Any]) -> GoalClass:
+    def _str_list(raw: Any) -> tuple[str, ...]:
+        try:
+            values = _json.loads(raw or "[]")
+        except (ValueError, TypeError):
+            return ()
+        return tuple(str(v) for v in values if str(v).strip())
+
+    return GoalClass(
+        id=str(row["class_id"]),
+        title=str(row["title"]),
+        description=str(row.get("description") or ""),
+        progress_model=str(row.get("progress_model") or "manual"),
+        review_cadence=str(row.get("review_cadence") or "weekly"),
+        summarizer_key=str(row.get("summarizer_key") or ""),
+        tool_hints=_str_list(row.get("tool_hints")),
+        milestone_templates=_str_list(row.get("milestone_templates")),
+    )
+
+
+def _custom_classes(db: Any) -> dict[str, GoalClass]:
+    """Custom classes from the db, keyed by id; {} when unavailable.
+
+    Any store problem (no table yet, bare :memory: db, no db at all)
+    reads as "no custom classes" — the built-ins still resolve, so a
+    board over a database that predates the table never breaks.
+    """
+    if db is None:
+        return {}
+    try:
+        rows = db.query("SELECT * FROM goal_classes ORDER BY class_id")
+    except Exception:  # noqa: BLE001 - no table yet = no custom classes
+        return {}
+    out: dict[str, GoalClass] = {}
+    for row in rows or []:
+        try:
+            descriptor = _row_to_custom_class(row)
+        except Exception:  # noqa: BLE001 - one bad row is not all of them
+            continue
+        out[descriptor.id] = descriptor
+    return out
+
+
+def list_custom_classes(db: Any) -> list[GoalClass]:
+    """Custom (owner-defined) classes, in id order."""
+    return [_custom_classes(db)[k] for k in sorted(_custom_classes(db))]
+
+
+def list_all_classes(db: Any) -> list[GoalClass]:
+    """Every class: the built-ins in presentation order, then customs."""
+    customs = _custom_classes(db)
+    return list(GOAL_CLASSES.values()) + [customs[k] for k in sorted(customs)]
+
+
+def get_class_for(db: Any, class_id: str | None) -> GoalClass:
+    """The descriptor for ``class_id`` — built-in first, then custom.
+
+    ``None``/empty → ``general``.  Raises :class:`GoalClassError`
+    for an id in neither registry, listing the known classes.
+    """
+    if class_id is None or not str(class_id).strip():
+        return GOAL_CLASSES[DEFAULT_CLASS_ID]
+    key = str(class_id).strip().lower()
+    descriptor = GOAL_CLASSES.get(key)
+    if descriptor is not None:
+        return descriptor
+    descriptor = _custom_classes(db).get(key)
+    if descriptor is not None:
+        return descriptor
+    known = ", ".join(sorted(list(GOAL_CLASSES) + list(_custom_classes(db))))
+    raise GoalClassError(f"unknown goal class {class_id!r} (known classes: {known})")
+
+
+def validate_class_id_for(db: Any, class_id: str | None) -> str:
+    """Normalise a class id for storage (built-in or custom); unknown ids raise."""
+    return get_class_for(db, class_id).id
+
+
+def define_custom_class(
+    db: Any,
+    class_id: str,
+    title: str,
+    description: str = "",
+    *,
+    progress_model: str = "manual",
+    review_cadence: str = "weekly",
+    summarizer_key: str = "",
+    tool_hints: tuple[str, ...] | list[str] = (),
+    milestone_templates: tuple[str, ...] | list[str] = (),
+) -> GoalClass:
+    """Define a new goal class as data (persisted in ``goal_classes``).
+
+    Refuses a built-in id (those are code, not data), a malformed id,
+    and an empty title.  Re-defining an existing custom id replaces
+    its descriptor — a class is data, and data can be corrected.
+    """
+    key = (class_id or "").strip().lower()
+    if not _CUSTOM_ID_RE.match(key):
+        raise GoalClassError(
+            f"invalid goal class id {class_id!r} — use a lowercase slug "
+            "starting with a letter, e.g. 'gardening'")
+    if key in GOAL_CLASSES:
+        raise GoalClassError(
+            f"goal class {key!r} is built in — custom classes cannot "
+            "shadow a built-in id")
+    title = (title or "").strip()
+    if not title:
+        raise GoalClassError("a goal class needs a title")
+    ensure_goal_classes_table(db)
+    db.execute("""
+        INSERT INTO goal_classes
+            (class_id, title, description, progress_model, review_cadence,
+             summarizer_key, tool_hints, milestone_templates, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(class_id) DO UPDATE SET
+            title = excluded.title,
+            description = excluded.description,
+            progress_model = excluded.progress_model,
+            review_cadence = excluded.review_cadence,
+            summarizer_key = excluded.summarizer_key,
+            tool_hints = excluded.tool_hints,
+            milestone_templates = excluded.milestone_templates
+    """, (key, title, description,
+          (progress_model or "manual").strip() or "manual",
+          (review_cadence or "weekly").strip() or "weekly",
+          (summarizer_key or "").strip(),
+          _json.dumps([str(t) for t in tool_hints]),
+          _json.dumps([str(t) for t in milestone_templates]),
+          time.time()))
+    return get_class_for(db, key)
+
+
+def remove_custom_class(db: Any, class_id: str) -> int:
+    """Remove a custom class; returns how many goals were filed under it.
+
+    Refuses built-in ids and unknown ids with :class:`GoalClassError`.
+    A class still in use is NOT removed — the caller must re-file or
+    delete those goals first (the count returned names them in the
+    error); deleting a class out from under live goals would orphan
+    their filing.  The goals table may not exist on a bare db — then
+    the class is trivially unused.
+    """
+    key = (class_id or "").strip().lower()
+    if key in GOAL_CLASSES:
+        raise GoalClassError(
+            f"goal class {key!r} is built in — it cannot be removed")
+    if key not in _custom_classes(db):
+        raise GoalClassError(f"unknown goal class {class_id!r} (not a custom class)")
+    in_use = 0
+    try:
+        row = db.query_one(
+            "SELECT COUNT(*) AS n FROM goals WHERE goal_class = ?", (key,))
+        in_use = int((row or {}).get("n") or 0)
+    except Exception:  # noqa: BLE001 - no goals table yet = unused
+        in_use = 0
+    if in_use:
+        raise GoalClassError(
+            f"goal class {key!r} is in use by {in_use} goal(s) — "
+            "re-file them first (/goals class <goal> <class>)")
+    db.execute("DELETE FROM goal_classes WHERE class_id = ?", (key,))
+    return in_use
+
+
 # ── progress providers ────────────────────────────────────────────────
 
 
@@ -375,7 +626,7 @@ def goal_progress(
     the provider returns ``None``, the goal's manual % is returned
     labelled ``basis="self-reported"`` — never dressed up as measured.
     """
-    descriptor = get_class(getattr(goal, "goal_class", None))
+    descriptor = get_class_for(db, getattr(goal, "goal_class", None))
     provider = _PROGRESS_PROVIDERS.get(descriptor.id)
     if provider is not None:
         reading = provider(db, goal, now=now)

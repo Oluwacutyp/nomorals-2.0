@@ -29,7 +29,7 @@ What is pinned here:
   ``nm g2p tiers|load|override`` works from the terminal, and
   ``/g2p tiers|load|override`` answers in chat; the registry
   stays at 786 tools — no new tool was needed (785 after C.8 added
-  the robot tool).
+  the robot tool; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class).
 """
 
 from __future__ import annotations
@@ -373,7 +373,7 @@ class TestG2pWiring:
 
 
 class TestWiring:
-    def test_tool_count_still_787(self):
+    def test_tool_count_still_788(self):
         from types import SimpleNamespace
 
         from nomorals.tools.registry import ToolRegistry
@@ -382,8 +382,8 @@ class TestWiring:
         registry.register_builtins()
         # No new tool in this lane: the tiers ride the existing
         # tonal_g2p tool, the nm g2p CLI and the /g2p chat verb.
-        # 785 after C.8 added the robot tool; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library.
-        assert len(registry._tools) == 787
+        # 785 after C.8 added the robot tool; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class.
+        assert len(registry._tools) == 788
         assert "tonal_g2p" in registry._tools
 
     def test_tool_tonal_g2p_arpabet_action_names_tier(self):

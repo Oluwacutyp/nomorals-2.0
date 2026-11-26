@@ -557,19 +557,19 @@ class TestChat:
 
 
 # -- tool count: this lane adds NO brain tool, so the count stays 786 -------
-# (785 after C.8 added the robot tool; 786 after this lane (audit N4) added build_swarm; the easyenv lane's 784 pin was
+# (785 after C.8 added the robot tool; 786 after this lane (audit N4) added build_swarm; the easyenv lane's 784 pin was; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class
 # updated by the parent at the C.9 ship because the C.8 bump missed it.)
 
 
 class TestToolCount:
-    def test_tool_count_still_787(self):
+    def test_tool_count_still_788(self):
         # 782 after C.2 registered the (previously dead) tonal_g2p tool;
         # 783 after C.1 added smarthome; 784 after C.4 added camwall;
-        # 785 after C.8 added robot.
+        # 785 after C.8 added robot; 786 after this lane (goal-class) added goal_class.
         # C.6 adds no tool — the env surface is `nm env` + `/env` over
         # the core/easyenv organ — so the count does not move.
         from nomorals.tools.registry import ToolRegistry
 
         count = len(ToolRegistry(SimpleNamespace()).register_builtins()
                     ._tools)
-        assert count == 787
+        assert count == 788
