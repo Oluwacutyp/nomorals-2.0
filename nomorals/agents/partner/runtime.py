@@ -3529,6 +3529,16 @@ class PartnerRuntime(
                 self._start_native_build()
             except Exception as exc:  # noqa: BLE001 - boot never dies here
                 _log.warning("native self-provision not started: %s", exc)
+        # Self-provisioned font library: stock the full pack when
+        # it is missing, on a daemon thread — startup and chat
+        # readiness are never blocked by a multi-gigabyte fetch
+        # (same shape as the native build above; the stocker
+        # resumes a partial build and reports honestly).
+        if not self.dry_run:
+            try:
+                self._start_font_stock()
+            except Exception as exc:  # noqa: BLE001 - boot never dies here
+                _log.warning("font self-provision not started: %s", exc)
         started = self.gateway.start(self.on_message)
         # Shared bot registry (dupfix3): register this runtime's
         # bot ids and push the merged set into the userbot
@@ -5384,6 +5394,27 @@ class PartnerRuntime(
                 _log.exception("native self-provision failed")
 
         thread = threading.Thread(target=_job, name="native-boot-build",
+                                  daemon=True)
+        thread.start()
+
+    def _start_font_stock(self) -> None:
+        """Spawn the full font-pack stock on a daemon thread.
+
+        The pack is ~2,000 families / ~2.5 GB at the pinned
+        commit and must never hold up chat readiness; the
+        stocker runs in bounded resumable batches and lands
+        mid-process, after which the next /fonts read sees the
+        stocked pack.  One attempt per boot at most — a fatal
+        attempt is not retried for an hour unless forced.
+        """
+
+        def _job() -> None:
+            try:
+                self._ensure_font_pack_stocked()
+            except Exception:  # noqa: BLE001 - boot continues regardless
+                _log.exception("font self-provision failed")
+
+        thread = threading.Thread(target=_job, name="font-boot-stock",
                                   daemon=True)
         thread.start()
 

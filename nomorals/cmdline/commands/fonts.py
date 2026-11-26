@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from typing import Any
 
 
@@ -19,7 +20,30 @@ def _cmd_fonts(args: argparse.Namespace, context: Any) -> int:
 
     action = args.fonts_action
 
+    if action == "status":
+        status = fontpack.stock_status()
+        print(json.dumps(status, indent=2))
+        return 0
+
     if action == "stock":
+        if getattr(args, "auto", False):
+            # Progress goes to stderr: stdout carries the JSON
+            # report alone, so it stays machine-readable.
+            try:
+                report = fontpack.ensure_font_pack(
+                    source_dir=getattr(args, "source_dir", "") or None,
+                    batch_families=getattr(args, "batch", 0) or
+                    fontpack.DEFAULT_BATCH_FAMILIES,
+                    force=getattr(args, "force", False),
+                    log=lambda *a: print(*a, file=sys.stderr))
+            except fontpack.FontPackError as exc:
+                print(f"fonts: {exc}")
+                return 1
+            print(json.dumps(report, indent=2))
+            return 0 if report.get("status") == "stocked" else 1
+        if not getattr(args, "pack_dir", ""):
+            print("fonts: --pack DIR is required unless --auto")
+            return 1
         try:
             if args.build:
                 manifest = fontpack.build_pack(

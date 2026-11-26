@@ -45,16 +45,23 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
+from ...core.inflight import run_inflight
 from .fontlib import MANIFEST_NAME, estate_library_dir
 
 __all__ = [
+    "DEFAULT_BATCH_FAMILIES",
     "DEFAULT_SOURCE_COMMIT",
     "STOCK_BUCKETS",
+    "STOCK_STATE_NAME",
     "FontPackError",
     "build_pack",
+    "build_pack_resumable",
     "core_subset",
+    "ensure_font_pack",
+    "estate_build_dir",
     "parse_metadata_pb",
     "stock_pack",
+    "stock_status",
     "verify_pack",
 ]
 
@@ -64,6 +71,34 @@ __all__ = [
 DEFAULT_SOURCE_COMMIT = "c30b221beb0c1da59d563feb91ec8656a1fa972a"
 SOURCE_REPO = "google/fonts"
 STOCK_BUCKETS = ("ofl", "apache", "ufl")
+
+#: The per-run state file inside a resumable build dir: which
+#: families are done, which are named exclusions, what the last
+#: fatal attempt said.  The build dir is never the library
+#: itself; :func:`stock_pack` refuses to stock it until the
+#: manifest is whole, and never copies this file into the stock.
+STOCK_STATE_NAME = "stock-state.json"
+
+#: Families fetched per batch of a resumable build — bounded so
+#: one run (one boot, one CLI invocation) never has to swallow
+#: the whole ~2,000-family catalogue to make progress, and a
+#: killed run resumes from the state file instead of restarting.
+DEFAULT_BATCH_FAMILIES = 200
+
+#: A fatal attempt (the repo tree cannot be enumerated, the disk
+#: is short) is not retried for this long unless forced — a
+#: dead network at 03:00 must not become a retry loop.  A single
+#: family's fetch failure is NOT fatal: the family stays pending
+#: and the next batch retries it.
+STOCK_RETRY_COOLDOWN_S = 3600
+
+#: Mean bytes per family in the real pack (~2.47 GB over 2,067
+#: families): the per-batch disk estimate.  A batch is refused
+#: when free space cannot cover it plus margin — the refusal is
+#: reported, never worked around by shrinking the pack.
+_EST_BYTES_PER_FAMILY = 1_200_000
+_BATCH_DISK_MARGIN_BYTES = 256 * 1024 * 1024
+_STOCK_DISK_MARGIN_BYTES = 512 * 1024 * 1024
 
 _LICENSE_IDS = {"OFL": "OFL-1.1", "APACHE2": "Apache-2.0",
                 "UFL": "UFL-1.0"}
@@ -643,8 +678,27 @@ def stock_pack(pack_dir: Any, *, home: Any = None,
     The source pack is FULLY hash-verified first; the copy
     lands in a staging sibling and swaps in only when whole,
     then the stocked copy is verified again.  A pack that
-    fails verification is never stocked."""
+    fails verification is never stocked — and a PARTIAL pack
+    (a resumable build that still has families pending) is
+    refused by name, so a half library can never be swapped
+    in as the library.  The build state file is never copied
+    into the stock."""
     src = Path(pack_dir).expanduser()
+    manifest_path = src / MANIFEST_NAME
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(
+                manifest_path.read_text(encoding="utf-8"))
+            kind = manifest.get("kind", "")
+        except (OSError, ValueError):
+            manifest = {}
+            kind = ""
+        if kind == "partial":
+            pending = int(manifest.get("pending_families", -1))
+            raise FontPackError(
+                "refusing to stock a partial pack: "
+                f"{pending} families still pending — finish the "
+                "build first (nm fonts stock --auto)")
     check = verify_pack(src, full=True)
     if not check["ok"]:
         raise FontPackError(f"refusing to stock an unverified "
@@ -654,7 +708,9 @@ def stock_pack(pack_dir: Any, *, home: Any = None,
     staging = dest.with_name(dest.name + ".staging")
     if staging.exists():
         shutil.rmtree(staging)
-    shutil.copytree(src, staging)
+    shutil.copytree(
+        src, staging,
+        ignore=shutil.ignore_patterns(STOCK_STATE_NAME))
     staged = verify_pack(staging, full=True)
     if not staged["ok"]:
         shutil.rmtree(staging, ignore_errors=True)
@@ -670,6 +726,538 @@ def stock_pack(pack_dir: Any, *, home: Any = None,
     log(f"fontpack: stocked {final['families']} families at {dest}")
     return {"dest": str(dest), "families": final["families"],
             "files": final["files"], "checked": final["checked"]}
+
+
+# ── resumable batched stocking ───────────────────────────────
+
+def estate_build_dir(home: Any = None) -> Path:
+    """Where a resumable pack build lives: the sibling of the
+    stocked library, never the library itself."""
+    return estate_library_dir(home).parent / "library.build"
+
+
+def _read_state(build_dir: Path) -> dict[str, Any]:
+    path = build_dir / STOCK_STATE_NAME
+    if not path.is_file():
+        return {"commit": "", "done": [], "excluded": [],
+                "failures": {}, "weight_disagreements": 0,
+                "metadata_less": [], "unlisted": {},
+                "last_error": "", "last_fatal_attempt": 0.0,
+                "batches": 0}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"commit": "", "done": [], "excluded": [],
+                "failures": {}, "weight_disagreements": 0,
+                "metadata_less": [], "unlisted": {},
+                "last_error": "", "last_fatal_attempt": 0.0,
+                "batches": 0}
+    if not isinstance(data, dict):
+        return {"commit": "", "done": [], "excluded": [],
+                "failures": {}, "weight_disagreements": 0,
+                "metadata_less": [], "unlisted": {},
+                "last_error": "", "last_fatal_attempt": 0.0,
+                "batches": 0}
+    data.setdefault("done", [])
+    data.setdefault("excluded", [])
+    data.setdefault("failures", {})
+    data.setdefault("weight_disagreements", 0)
+    data.setdefault("metadata_less", [])
+    data.setdefault("unlisted", {})
+    data.setdefault("last_error", "")
+    data.setdefault("last_fatal_attempt", 0.0)
+    data.setdefault("batches", 0)
+    return data
+
+
+def _write_state(build_dir: Path, state: dict[str, Any]) -> None:
+    build_dir.mkdir(parents=True, exist_ok=True)
+    tmp = build_dir / (STOCK_STATE_NAME + ".part")
+    tmp.write_text(json.dumps(state, indent=1) + "\n",
+                   encoding="utf-8")
+    os.replace(tmp, build_dir / STOCK_STATE_NAME)
+
+
+def _write_manifest(out_dir: Path,
+                    manifest: dict[str, Any]) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tmp = out_dir / (MANIFEST_NAME + ".part")
+    tmp.write_text(json.dumps(manifest, indent=1) + "\n",
+                   encoding="utf-8")
+    os.replace(tmp, out_dir / MANIFEST_NAME)
+
+
+def _free_bytes(path: Path) -> int:
+    try:
+        return shutil.disk_usage(path).free
+    except OSError:
+        return 0
+
+
+def _manifest_from_records(
+        records: list[dict[str, Any]], *,
+        source_commit: str, kind: str, pending: int,
+        exclusions: list[dict[str, Any]],
+        universe_dirs: int | None, endpoint_count: int | None,
+        disagreements: int, metadata_less: list[str],
+        unlisted: dict[str, Any]) -> dict[str, Any]:
+    """The manifest for the records stocked so far — the same
+    shape :func:`build_pack` writes, plus the pending count
+    that says whether this manifest is the whole library."""
+    return {
+        "format": 1,
+        "kind": kind,
+        "source": {"repo": SOURCE_REPO, "commit": source_commit},
+        "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                  time.gmtime()),
+        "family_count": len(records),
+        "file_count": sum(len(r["faces"]) for r in records),
+        "total_bytes": sum(f["bytes"] for r in records
+                           for f in r["faces"]),
+        "pending_families": pending,
+        "universe": {
+            "repo_family_directories": universe_dirs,
+            "metadata_endpoint_families": endpoint_count,
+        },
+        "exclusions": exclusions,
+        "metadata_less_families": sorted(metadata_less),
+        "families_without_license_file": sorted(
+            r["name"] for r in records if not r["license_file"]),
+        "unlisted_faces": unlisted,
+        "weight_disagreements": disagreements,
+        "families": records,
+    }
+
+
+def build_pack_resumable(
+        build_dir: Any, *, commit: str = DEFAULT_SOURCE_COMMIT,
+        source_dir: Any = None,
+        batch_families: int = DEFAULT_BATCH_FAMILIES,
+        max_batches: int | None = None, workers: int = 12,
+        log=lambda *_a: None) -> dict[str, Any]:
+    """Stock the pack in bounded, resumable batches.
+
+    One call stocks up to ``max_batches`` batches of
+    ``batch_families`` families (``None`` = until the pack is
+    whole or a fatal error stops the run) into ``build_dir``,
+    persisting progress in ``stock-state.json`` after every
+    batch.  A killed or failed run resumes where it stopped:
+    families already stocked are never re-fetched.  A family
+    whose fetch fails stays pending and is retried next run —
+    it is never silently dropped and never becomes an
+    exclusion.  Only :class:`_FamilyExcluded` (no TTF faces,
+    no determinable licence) becomes a NAMED exclusion.
+
+    The manifest in the build dir is rewritten after every
+    batch: kind ``partial`` with ``pending_families`` while
+    work remains, kind ``full`` only when nothing is pending.
+    Returns a report dict; ``complete`` is the verdict.  A
+    fatal error (the repo tree cannot be enumerated, the disk
+    is short) raises :class:`FontPackError` AFTER recording
+    itself in the state file, so the next caller can say what
+    happened instead of guessing.
+    """
+    out = Path(build_dir).expanduser()
+    out.mkdir(parents=True, exist_ok=True)
+    state = _read_state(out)
+    if state.get("commit") and state["commit"] != str(commit):
+        raise FontPackError(
+            f"build dir holds a pack from commit "
+            f"{state['commit'][:12]}; rebuild from a fresh "
+            f"directory to build commit {str(commit)[:12]}")
+    manifest_path = out / MANIFEST_NAME
+    records: list[dict[str, Any]] = []
+    if manifest_path.is_file():
+        try:
+            prior = json.loads(
+                manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            prior = None
+        if isinstance(prior, dict):
+            if str((prior.get("source") or {}).get(
+                    "commit", "")) not in ("", str(commit)):
+                raise FontPackError(
+                    "build dir holds a pack from a different "
+                    "source commit; rebuild from a fresh "
+                    "directory")
+            records = [r for r in prior.get("families", [])
+                       if isinstance(r, dict)]
+    done: set[str] = set(state.get("done") or [])
+    excluded_keys: set[str] = {
+        str(e.get("dir", "")) for e in state.get("excluded") or []
+        if isinstance(e, dict)}
+    # A family the state calls done but whose files are gone
+    # (a killed run, a deleted file) is NOT done: drop it from
+    # the records and the done set so this run re-fetches it.
+    # The manifest never claims a family whose files are absent.
+    # (When nothing is pending the loop below simply does not
+    # run and the call returns complete — the no-op path.)
+    kept: list[dict[str, Any]] = []
+    for record in records:
+        faces = record.get("faces", [])
+        if faces and all((out / f["file"]).is_file()
+                         for f in faces
+                         if isinstance(f, dict)):
+            kept.append(record)
+        else:
+            done.discard(str(record.get("dir", "")))
+    records = kept
+    try:
+        if source_dir:
+            families, bucket_exclusions, fetch = _enumerate_local(
+                Path(source_dir).expanduser())
+        else:
+            families, bucket_exclusions, fetch = _enumerate_remote(
+                commit)
+    except Exception as exc:  # noqa: BLE001 - fatal, recorded
+        state["commit"] = str(commit)
+        state["last_error"] = str(exc)
+        state["last_fatal_attempt"] = time.time()
+        _write_state(out, state)
+        raise FontPackError(f"cannot enumerate the font source: "
+                            f"{exc}") from exc
+    state["commit"] = str(commit)
+    pending = sorted(
+        key for key in families
+        if key not in done and key not in excluded_keys)
+    total = len(families)
+    families_this_run = 0
+    failures: dict[str, str] = {}
+    excluded_this_run: list[dict[str, Any]] = []
+    batches_run = 0
+    endpoint_count: int | None = None
+    while pending and (max_batches is None
+                       or batches_run < max_batches):
+        batch = pending[:max(1, batch_families)]
+        need = (len(batch) * _EST_BYTES_PER_FAMILY
+                + _BATCH_DISK_MARGIN_BYTES)
+        free = _free_bytes(out)
+        if free < need:
+            reason = (f"disk short for the next batch: "
+                      f"{free} bytes free, about {need} needed "
+                      f"for {len(batch)} families")
+            state["last_error"] = reason
+            state["last_fatal_attempt"] = time.time()
+            _write_state(out, state)
+            return {
+                "complete": False, "build_dir": str(out),
+                "families_done": len(done),
+                "families_total": total,
+                "families_pending": len(pending),
+                "families_this_run": families_this_run,
+                "files": sum(len(r["faces"]) for r in records),
+                "bytes": sum(f["bytes"] for r in records
+                             for f in r["faces"]),
+                "failures": failures,
+                "excluded_this_run": excluded_this_run,
+                "manifest_kind": "partial",
+                "blocked_reason": reason,
+                "batches_run": batches_run,
+            }
+        log(f"fontpack: batch {batches_run + 1}: {len(batch)} "
+            f"families ({len(pending)} pending)")
+
+        def job(item):
+            fam_key, rels = item
+            return _stock_family(fam_key, rels, fetch, out)
+
+        items = [(key, families[key]) for key in batch]
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            results = list(pool.map(_job_guard(job), items))
+        new_records: list[dict[str, Any]] = []
+        for (fam_key, _rels), result in zip(items, results,
+                                            strict=True):
+            if isinstance(result, _FamilyExcluded):
+                entry = {"dir": result.fam_key,
+                         "reason": result.reason}
+                state.setdefault("excluded", []).append(entry)
+                excluded_keys.add(result.fam_key)
+                excluded_this_run.append(entry)
+            elif isinstance(result, Exception):
+                failures[fam_key] = str(result)
+            else:
+                new_records.append(result)
+                done.add(fam_key)
+                families_this_run += 1
+        state["failures"] = dict(failures)
+        disagreements = _parse_pass(out, new_records, log)
+        state["weight_disagreements"] = int(
+            state.get("weight_disagreements", 0)) + disagreements
+        for record in new_records:
+            extra = record.pop("_unlisted_faces", None)
+            if extra:
+                state.setdefault("unlisted", {})[record["name"]] = \
+                    extra
+            if record.pop("_metadata_less", False) and \
+                    record["name"] not in \
+                    state.setdefault("metadata_less", []):
+                state["metadata_less"].append(record["name"])
+        records.extend(new_records)
+        records.sort(key=lambda r: r["name"].casefold())
+        pending = sorted(
+            key for key in families
+            if key not in done and key not in excluded_keys)
+        complete = not pending
+        if complete and endpoint_count is None:
+            endpoint_count = _endpoint_family_count()
+        manifest = _manifest_from_records(
+            records, source_commit=str(commit),
+            kind="full" if complete else "partial",
+            pending=len(pending),
+            exclusions=list(bucket_exclusions)
+            + list(state.get("excluded") or []),
+            universe_dirs=total, endpoint_count=endpoint_count,
+            disagreements=int(state.get("weight_disagreements", 0)),
+            metadata_less=list(state.get("metadata_less") or []),
+            unlisted=dict(state.get("unlisted") or {}))
+        _write_manifest(out, manifest)
+        state["done"] = sorted(done)
+        state["batches"] = int(state.get("batches", 0)) + 1
+        if complete:
+            state["last_error"] = ""
+        _write_state(out, state)
+        batches_run += 1
+        if complete:
+            break
+    check = verify_pack(out, sample=25)
+    if not check["ok"]:
+        raise FontPackError(
+            f"batch-built pack failed verification: "
+            f"{check['bad'][:5]}")
+    return {
+        "complete": not pending, "build_dir": str(out),
+        "families_done": len(done), "families_total": total,
+        "families_pending": len(pending),
+        "families_this_run": families_this_run,
+        "files": sum(len(r["faces"]) for r in records),
+        "bytes": sum(f["bytes"] for r in records
+                     for f in r["faces"]),
+        "failures": failures,
+        "excluded_this_run": excluded_this_run,
+        "manifest_kind": "full" if not pending else "partial",
+        "blocked_reason": "",
+        "batches_run": batches_run,
+    }
+
+
+def stock_status(home: Any = None, *,
+                 build_dir: Any = None) -> dict[str, Any]:
+    """The honest stocking facts, read from disk only — no
+    network, never raises.  The pack tier as stocked, the
+    build in progress (if any), and one plain sentence saying
+    where the library stands."""
+    pack: dict[str, Any] = {"stocked": False}
+    build: dict[str, Any] = {"started": False}
+    try:
+        dest = estate_library_dir(home)
+        manifest_path = dest / MANIFEST_NAME
+        if manifest_path.is_file():
+            data = json.loads(
+                manifest_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                pack = {
+                    "stocked": data.get("kind") == "full",
+                    "kind": str(data.get("kind", "")),
+                    "families": int(data.get("family_count", 0)
+                                    or 0),
+                    "files": int(data.get("file_count", 0) or 0),
+                    "bytes": int(data.get("total_bytes", 0) or 0),
+                    "source_commit": str(
+                        (data.get("source") or {}).get(
+                            "commit", "")),
+                }
+        build_root = Path(build_dir).expanduser() \
+            if build_dir else estate_build_dir(home)
+        state = _read_state(build_root)
+        if state.get("commit") or state.get("done") or \
+                (build_root / MANIFEST_NAME).is_file():
+            done = state.get("done") or []
+            manifest = None
+            if (build_root / MANIFEST_NAME).is_file():
+                try:
+                    manifest = json.loads(
+                        (build_root / MANIFEST_NAME).read_text(
+                            encoding="utf-8"))
+                except (OSError, ValueError):
+                    manifest = None
+            pending = None
+            total = None
+            if isinstance(manifest, dict):
+                pending = int(manifest.get("pending_families", 0)
+                              or 0)
+                universe = manifest.get("universe") or {}
+                total = universe.get("repo_family_directories")
+            build = {
+                "started": True,
+                "build_dir": str(build_root),
+                "families_done": len(done),
+                "families_pending": pending,
+                "families_total": total,
+                "batches": int(state.get("batches", 0) or 0),
+                "failures": dict(state.get("failures") or {}),
+                "last_error": str(state.get("last_error") or ""),
+                "last_attempt": float(
+                    state.get("last_fatal_attempt", 0.0) or 0.0),
+            }
+    except Exception as exc:  # noqa: BLE001 - status never raises
+        return {"pack": {"stocked": False},
+                "build": {"started": False},
+                "summary": f"font stock status could not be read: "
+                           f"{exc}"}
+    if pack["stocked"]:
+        summary = (f"full pack stocked: {pack['families']} "
+                   f"families · {pack['files']} files")
+    elif build["started"] and build.get("families_total"):
+        summary = (
+            f"full pack not stocked yet — "
+            f"{build['families_done']} of "
+            f"{build['families_total']} families fetched so far")
+        if build.get("families_pending"):
+            summary += (f" ({build['families_pending']} still to "
+                        f"fetch)")
+        if build.get("last_error"):
+            summary += (f"; last attempt failed: "
+                        f"{build['last_error']}")
+    elif build["started"]:
+        summary = ("full pack not stocked yet — a stocking build "
+                   "is in progress")
+        if build.get("last_error"):
+            summary += (f"; last attempt failed: "
+                        f"{build['last_error']}")
+    else:
+        summary = ("full pack not stocked — stocking starts on "
+                   "its own at startup, or run "
+                   "nm fonts stock --auto")
+    return {"pack": pack, "build": build, "summary": summary}
+
+
+def ensure_font_pack(
+        home: Any = None, *, commit: str = DEFAULT_SOURCE_COMMIT,
+        source_dir: Any = None,
+        batch_families: int = DEFAULT_BATCH_FAMILIES,
+        max_batches: int | None = None, workers: int = 12,
+        force: bool = False,
+        log=lambda *_a: None) -> dict[str, Any]:
+    """Stock the full pack, or say honestly why it is not
+    stocked.  The auto-stock driver: a no-op when the pack
+    tier is already whole and verifies; otherwise resumable
+    batches until the pack is whole (or ``max_batches`` is
+    spent), then the stock swap.  Concurrent callers in this
+    process attach to the one in-flight run (self-provisioning
+    law §3.9) instead of starting parallel multi-gigabyte
+    builds.  Never raises for a failed fetch or a short disk
+    — the returned status dict carries the reason.  Never
+    claims ``stocked`` on a partial pack."""
+    dest = estate_library_dir(home)
+    manifest_path = dest / MANIFEST_NAME
+    if manifest_path.is_file():
+        try:
+            data = json.loads(
+                manifest_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and \
+                    data.get("kind") == "full":
+                check = verify_pack(dest, sample=25)
+                if check["ok"]:
+                    return {
+                        "status": "stocked",
+                        "families": int(data.get("family_count",
+                                                 0) or 0),
+                        "files": int(data.get("file_count", 0)
+                                     or 0),
+                        "bytes": int(data.get("total_bytes", 0)
+                                     or 0),
+                        "detail": "full pack already stocked",
+                        "batches": 0,
+                    }
+        except (OSError, ValueError):
+            pass
+
+    def _run() -> dict[str, Any]:
+        build_root = estate_build_dir(home)
+        state = _read_state(build_root)
+        if not force and state.get("last_fatal_attempt"):
+            age = time.time() - float(
+                state["last_fatal_attempt"])
+            if age < STOCK_RETRY_COOLDOWN_S:
+                return {
+                    "status": "deferred",
+                    "families_done": len(state.get("done") or []),
+                    "families_pending": None,
+                    "detail": (
+                        "last stocking attempt failed "
+                        f"{int(age)}s ago: "
+                        f"{state.get('last_error', '')} — "
+                        "retrying after the cooldown, or run "
+                        "with --force"),
+                    "batches": 0,
+                }
+        try:
+            report = build_pack_resumable(
+                build_root, commit=commit, source_dir=source_dir,
+                batch_families=batch_families,
+                max_batches=max_batches, workers=workers, log=log)
+        except FontPackError as exc:
+            return {
+                "status": "failed",
+                "families_done": len(
+                    _read_state(build_root).get("done") or []),
+                "families_pending": None,
+                "detail": str(exc),
+                "batches": 0,
+            }
+        if report.get("blocked_reason"):
+            return {
+                "status": "blocked",
+                "families_done": report["families_done"],
+                "families_pending": report["families_pending"],
+                "detail": str(report["blocked_reason"]),
+                "batches": 0,
+            }
+        if not report["complete"]:
+            return {
+                "status": "partial",
+                "families_done": report["families_done"],
+                "families_total": report["families_total"],
+                "families_pending": report["families_pending"],
+                "failures": report["failures"],
+                "detail": (
+                    f"{report['families_done']} of "
+                    f"{report['families_total']} families "
+                    f"fetched; {report['families_pending']} "
+                    f"still pending — the next run resumes "
+                    f"where this one stopped"),
+                "batches": report.get("batches_run", 0),
+            }
+        total_bytes = int(report["bytes"])
+        free = _free_bytes(build_root)
+        if free < total_bytes + _STOCK_DISK_MARGIN_BYTES:
+            reason = (f"disk short for the stock swap: {free} "
+                      f"bytes free, about "
+                      f"{total_bytes + _STOCK_DISK_MARGIN_BYTES} "
+                      f"needed")
+            return {"status": "blocked",
+                    "families_done": report["families_done"],
+                    "families_pending": 0, "detail": reason,
+                    "batches": 0}
+        try:
+            stocked = stock_pack(build_root, home=home, log=log)
+        except FontPackError as exc:
+            return {"status": "failed",
+                    "families_done": report["families_done"],
+                    "families_pending": 0, "detail": str(exc),
+                    "batches": 0}
+        return {
+            "status": "stocked",
+            "families": stocked["families"],
+            "files": stocked["files"],
+            "bytes": total_bytes,
+            "detail": (f"full pack stocked: "
+                       f"{stocked['families']} families · "
+                       f"{stocked['files']} files"),
+            "batches": report.get("batches_run", 0),
+        }
+
+    return run_inflight("fontpack-stock", _run)
 
 
 # ── the vendored core subset ─────────────────────────────────

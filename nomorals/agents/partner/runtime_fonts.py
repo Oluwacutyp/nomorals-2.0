@@ -101,6 +101,19 @@ class RuntimeFontsMixin:
             rows.append(("total", f"{stats['families']} families · "
                                   f"{stats['faces']} faces"))
             card.stats(rows, title="stocked tiers")
+            if not any(tier["tier"] == "pack" and tier["stocked"]
+                       for tier in stats["tiers"]):
+                # The 2026-11-15 complaint was this card saying
+                # "full pack: not stocked" and nothing else — no
+                # progress, no reason, no way forward.  The
+                # stocking facts are read from disk (never the
+                # network); when they cannot be read the card
+                # simply carries no progress line.
+                try:
+                    from ...media.typography.fontpack import stock_status
+                    card.line(stock_status()["summary"])
+                except Exception:  # noqa: BLE001 - note is best-effort
+                    pass
             cats = stats["categories"]
             if cats:
                 card.stats(

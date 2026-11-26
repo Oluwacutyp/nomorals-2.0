@@ -151,6 +151,43 @@ class RuntimeProvisionMixin:
             return {"status": "skipped",
                     "detail": "provision hook failed", "missing": []}
 
+    def _ensure_font_pack_stocked(self) -> dict[str, Any]:
+        """Best-effort full font-pack stocking at boot.
+
+        Devon stocks her own font library when the pack tier is
+        missing (and resumes a partial build where it stopped) —
+        the owner never types a stock command.  Mirrors
+        :meth:`_ensure_native_built`: ``fontpack.ensure_font_pack``
+        does the work and returns a status dict; a failure here
+        is a status, never a broken boot.  Nothing is logged
+        when the pack is already stocked — a quiet boot stays
+        quiet.  ``NM_FONT_AUTOSTOCK=0`` opts the host out.
+        """
+        if os.environ.get("NM_FONT_AUTOSTOCK", "1") == "0":
+            return {"status": "skipped",
+                    "detail": "NM_FONT_AUTOSTOCK=0", "batches": 0}
+        try:
+            from ...media.typography import fontpack
+
+            home = getattr(getattr(self, "settings", None),
+                           "home", None)
+            result = fontpack.ensure_font_pack(home=home,
+                                               log=_log.info)
+            status = result.get("status")
+            if status == "stocked":
+                _log.info("font library stocked at startup: %s",
+                          result.get("detail", ""))
+            elif status in ("partial", "failed", "blocked",
+                            "deferred"):
+                _log.info("font library not stocked at startup "
+                          "(%s): %s", status,
+                          result.get("detail", ""))
+            return result
+        except Exception:  # noqa: BLE001 - boot must not brick
+            _log.debug("font self-provision skipped", exc_info=True)
+            return {"status": "skipped",
+                    "detail": "provision hook failed", "batches": 0}
+
     def _bridge_provisioned_credentials(self) -> list[str]:
         """Populate registry env keys from the vault at startup.
 

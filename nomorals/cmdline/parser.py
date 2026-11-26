@@ -2176,6 +2176,10 @@ def _parser() -> argparse.ArgumentParser:
         help="her stocked font library: stock / verify / browse",
         description=("nm fonts stock --pack DIR [--build] "
                      "(one-time whole-library stocking)\n"
+                     "nm fonts stock --auto (stock the full pack "
+                     "on her own, in resumable batches)\n"
+                     "nm fonts status (pack tier + build progress "
+                     "+ last failure)\n"
                      "nm fonts build --pack DIR (build the pack "
                      "from the pinned google/fonts commit)\n"
                      "nm fonts verify --pack DIR [--sample]\n"
@@ -2185,12 +2189,30 @@ def _parser() -> argparse.ArgumentParser:
     fonts_sub = fonts.add_subparsers(dest="fonts_action", required=True)
     f_stock = fonts_sub.add_parser(
         "stock", help="verify + stock a built pack into this home")
-    f_stock.add_argument("--pack", dest="pack_dir", required=True,
-                         help="the built pack directory")
+    f_stock.add_argument("--pack", dest="pack_dir", default="",
+                         help="the built pack directory "
+                              "(not needed with --auto)")
     f_stock.add_argument("--build", action="store_true",
                          help="build the pack first (pinned commit)")
     f_stock.add_argument("--commit", default="",
                          help="google/fonts commit to build from")
+    f_stock.add_argument("--auto", action="store_true",
+                         help="stock the full pack on your own: "
+                              "resumable batches until stocked, "
+                              "or an honest reason why not")
+    f_stock.add_argument("--batch", type=int, default=0,
+                         help="families per batch for --auto "
+                              "(default: 200)")
+    f_stock.add_argument("--source-dir", default="",
+                         help="build from a local google/fonts "
+                              "checkout instead of the network "
+                              "(offline path, used by tests)")
+    f_stock.add_argument("--force", action="store_true",
+                         help="retry even inside the cooldown "
+                              "after a failed attempt")
+    fonts_sub.add_parser(
+        "status", help="the honest stocking facts: pack tier, "
+                       "build progress, last failure")
     f_build = fonts_sub.add_parser(
         "build", help="build the pack from the pinned commit")
     f_build.add_argument("--pack", dest="pack_dir", required=True,
