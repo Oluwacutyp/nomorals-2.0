@@ -2603,7 +2603,13 @@ def _parser() -> argparse.ArgumentParser:
 
     pump_p = sub.add_parser("pump", aliases=CLI_ALIASES["pump"],
         help="pump.fun intelligence desk: dossiers, de-rug gate, graded signal calls (signals only — never trades)",
-        description=("nm pump status\\n"
+        description=("nm pump board [--min-composite F] [--max-rug F] "
+                     "[--min-momentum F] [--candidates] [--watched] "
+                     "[--limit N]\\n"
+                     "nm pump open\\n"
+                     "nm pump watch-mint <mint> [--note TEXT]\\n"
+                     "nm pump unwatch <wallet|mint>\\n"
+                     "nm pump status\\n"
                      "nm pump watch [--no-deliver]\\n"
                      "nm pump study\\n"
                      "nm pump dossier <mint>\\n"
@@ -2617,6 +2623,25 @@ def _parser() -> argparse.ArgumentParser:
                      "nm pump provision"),
     )
     pump_sub = pump_p.add_subparsers(dest="pump_action", required=True)
+    p_board = pump_sub.add_parser(
+        "board", help="ranked board of live candidates by current verdict")
+    p_board.add_argument("--min-composite", type=float, default=0.0)
+    p_board.add_argument("--max-rug", type=float, default=1.0)
+    p_board.add_argument("--min-momentum", type=float, default=0.0)
+    p_board.add_argument("--candidates", action="store_true",
+                         help="CALL_CANDIDATE rows only")
+    p_board.add_argument("--watched", action="store_true",
+                         help="watched mints only")
+    p_board.add_argument("--limit", type=int, default=10)
+    pump_sub.add_parser(
+        "open", help="open calls with live progress to target/invalidation")
+    p_wmint = pump_sub.add_parser(
+        "watch-mint", help="pin a token mint on the board")
+    p_wmint.add_argument("mint")
+    p_wmint.add_argument("--note", default="")
+    p_unwatch = pump_sub.add_parser(
+        "unwatch", help="stop tracking a wallet or a watched mint")
+    p_unwatch.add_argument("target")
     pump_sub.add_parser("status", help="launches, dossiers, call calibration, feed health")
     p_watch = pump_sub.add_parser("watch", help="one intake + evaluation cycle; publish calls")
     p_watch.add_argument("--no-deliver", action="store_true",

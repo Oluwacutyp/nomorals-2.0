@@ -745,6 +745,53 @@ class PumpDesk:
         return {"query": query, "hits": hits,
                 "rendered": _shelf.render_shelf_hits(hits, query)}
 
+    # ── the board: what the owner looks at and acts from ──────────
+
+    def board_view(self, **filters: Any) -> dict[str, Any]:
+        """The ranked board: every dossiered mint by its CURRENT
+        verdict, filtered and pinned.  Pure store reads — no
+        registry, no RPC, no network.  *filters* are the
+        :func:`board.parse_board_filters` keys."""
+        from . import board as _board
+
+        rows, total = _board.board_rows(
+            self.store,
+            min_composite=float(filters.get("min_composite") or 0.0),
+            max_rug=float(filters.get("max_rug")
+                          if filters.get("max_rug") is not None else 1.0),
+            min_momentum=float(filters.get("min_momentum") or 0.0),
+            only_candidates=bool(filters.get("only_candidates")),
+            only_watched=bool(filters.get("only_watched")),
+            limit=int(filters.get("limit") or _board.DEFAULT_LIMIT))
+        desc = ""
+        bits = []
+        if filters.get("min_composite"):
+            bits.append(f"min comp {filters['min_composite']}")
+        if filters.get("max_rug") is not None and \
+                float(filters["max_rug"]) < 1.0:
+            bits.append(f"max rug {filters['max_rug']}")
+        if filters.get("min_momentum"):
+            bits.append(f"min mom {filters['min_momentum']}")
+        if filters.get("only_candidates"):
+            bits.append("candidates only")
+        if filters.get("only_watched"):
+            bits.append("watched only")
+        if bits:
+            desc = " (" + ", ".join(bits) + ")"
+        return {"rows": rows, "total": total, "filters": filters,
+                "rendered": _board.render_board(rows, total,
+                                                filters_desc=desc)}
+
+    def open_view(self) -> dict[str, Any]:
+        """Open calls with live progress from the observations
+        ledger.  Pure store reads — no registry, no RPC, no
+        network."""
+        from . import board as _board
+
+        rows = _board.open_rows(self.store, self.calls.log.calls())
+        return {"calls": rows,
+                "rendered": _board.render_open(rows)}
+
     # ── health (Pass-7 alert discipline) ──────────────────────────
 
     def _health_report(self, states: Any = None) -> dict[str, Any]:

@@ -4610,6 +4610,11 @@ class RuntimeGamesMixin:
     def _control_pump(self, tail: str, chat_key: str) -> str:
         """/pump — the pump.fun intelligence desk (signals only).
 
+        /pump board [min=0.6 rug=0.3 mom=0.45 candidates watched
+                           limit=10] — the ranked board of live
+                           candidates, watched mints pinned first
+        /pump open       — open calls with live progress to target /
+                           invalidation, time to expiry
         /pump status     — launches, dossiers, call calibration, feeds
         /pump watch      — one intake + evaluation cycle now
         /pump study      — grade due calls, recompute dev profiles,
@@ -4625,7 +4630,8 @@ class RuntimeGamesMixin:
         /pump shelf <query> — search the Library shelf
         /pump sources    — the desk's feeds on the shared registry
         /pump watch dev|smart <wallet> — track a wallet
-        /pump unwatch <wallet> — stop tracking a wallet
+        /pump watch mint <mint> — pin a token on the board
+        /pump unwatch <wallet|mint> — stop tracking a wallet or token
         /pump provision [service] — keyed RPC tier state / drive
         """
         from ..pumpdesk import PumpDesk, render_calls, render_dossier, render_status
@@ -4635,7 +4641,10 @@ class RuntimeGamesMixin:
         verb = parts[0].lower() if parts else ""
 
         def _usage() -> str:
-            return ("/pump status — launches, dossiers, call "
+            return ("/pump board [min=0.6 rug=0.3 mom=0.45 candidates "
+                    "watched limit=10] — ranked live candidates\n"
+                    "/pump open — open calls with live progress\n"
+                    "/pump status — launches, dossiers, call "
                     "calibration vs the graduation base rate, feeds\n"
                     "/pump watch — run one intake + evaluation cycle "
                     "now (publishes calls)\n"
@@ -4655,25 +4664,49 @@ class RuntimeGamesMixin:
                     "of dossiers + wallets\n"
                     "/pump sources — memecoin feeds on the registry\n"
                     "/pump watch dev|smart <wallet> — track a wallet\n"
-                    "/pump unwatch <wallet>\n"
+                    "/pump watch mint <mint> — pin a token on the "
+                    "board\n"
+                    "/pump unwatch <wallet|mint>\n"
                     "/pump provision [helius] — keyed RPC tier state, "
                     "or drive provisioning\n"
                     "signals only — the desk never trades")
 
         if verb in ("", "help"):
             return _usage()
+        if verb == "board":
+            from ..pumpdesk.board import parse_board_filters
+            filters, bad = parse_board_filters(" ".join(parts[1:]))
+            view = desk.board_view(**filters)
+            out = view["rendered"]
+            if bad:
+                out += ("\n(ignored filter token(s): "
+                        + ", ".join(bad) + ")")
+            return out
+        if verb == "open":
+            return desk.open_view()["rendered"]
         if verb == "status":
             return render_status(desk.status())
         if verb == "watch" and len(parts) >= 2 and \
-                parts[1].lower() in ("dev", "smart"):
+                parts[1].lower() in ("dev", "smart", "mint"):
+            kind = parts[1].lower()
             if len(parts) < 3 or not parts[2].strip():
-                return f"usage: /pump watch {parts[1].lower()} <wallet>"
-            wallet = parts[2].strip().split()[0]
-            if parts[1].lower() == "dev":
-                desk.store.watch_dev(wallet, note="via /pump")
-            else:
-                desk.store.watch_smart(wallet, note="via /pump")
-            return f"watching {parts[1].lower()} wallet {wallet}"
+                return (f"usage: /pump watch {kind} "
+                        f"{'<wallet>' if kind != 'mint' else '<mint>'}")
+            rest = parts[2].strip().split(None, 1)
+            target = rest[0]
+            note = rest[1].strip() if len(rest) > 1 else ""
+            if kind == "dev":
+                desk.store.watch_dev(target, note=note or "via /pump")
+                return f"watching dev wallet {target}"
+            if kind == "smart":
+                desk.store.watch_smart(target, note=note or "via /pump")
+                return f"watching smart wallet {target}"
+            from ..pumpdesk.board import valid_mint
+            if not valid_mint(target):
+                return f"{target!r} is not a valid token mint"
+            desk.store.watch_mint(target, note=note or "via /pump")
+            return (f"watching token {target} — pinned first on "
+                    f"/pump board")
         if verb == "watch":
             rep = desk.watch_cycle(deliver=True)
             lines = ["pump watch cycle:"]
@@ -4694,7 +4727,7 @@ class RuntimeGamesMixin:
             return "\n".join(lines)
         if verb == "unwatch":
             if len(parts) < 2:
-                return "usage: /pump unwatch <wallet>"
+                return "usage: /pump unwatch <wallet|mint>"
             wallet = parts[1].strip()
             gone = desk.store.unwatch(wallet)
             return (f"stopped watching {wallet}" if gone

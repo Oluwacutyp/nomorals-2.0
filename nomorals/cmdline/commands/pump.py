@@ -14,6 +14,37 @@ def _cmd_pump(args: Any, context: Any) -> int:
     desk = PumpDesk(context)
     action = args.pump_action
 
+    if action == "board":
+        view = desk.board_view(
+            min_composite=args.min_composite,
+            max_rug=args.max_rug,
+            min_momentum=args.min_momentum,
+            only_candidates=args.candidates,
+            only_watched=args.watched,
+            limit=args.limit)
+        print(view["rendered"])
+        return 0
+
+    if action == "open":
+        print(desk.open_view()["rendered"])
+        return 0
+
+    if action == "watch-mint":
+        from ...agents.pumpdesk.board import valid_mint
+        if not valid_mint(args.mint):
+            print(f"{args.mint!r} is not a valid token mint")
+            return 2
+        desk.store.watch_mint(args.mint, note=args.note or "via nm pump")
+        print(f"watching token {args.mint} — pinned first on "
+              f"the board (nm pump board)")
+        return 0
+
+    if action == "unwatch":
+        gone = desk.store.unwatch(args.target)
+        print(f"stopped watching {args.target}" if gone
+              else f"{args.target} was not on a watchlist")
+        return 0
+
     if action == "status":
         print(render_status(desk.status()))
         return 0

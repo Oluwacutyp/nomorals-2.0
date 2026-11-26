@@ -205,6 +205,7 @@ class PumpStore:
         data = self._load_json(self._watch_path)
         data.setdefault("devs", {})
         data.setdefault("smart", {})
+        data.setdefault("mints", {})
         return data
 
     def _save_watchlists(self, data: dict[str, Any]) -> None:
@@ -220,10 +221,20 @@ class PumpStore:
         data["smart"][wallet] = {"note": note, "added_at": time.time()}
         self._save_watchlists(data)
 
+    def watch_mint(self, mint: str, note: str = "") -> None:
+        """Pin a TOKEN mint to the desk watchlist (board pins it
+        first).  A mint watchlist is a board annotation only — it
+        starts no job and sends no ping."""
+        data = self.watchlists()
+        data["mints"][mint] = {"note": note, "added_at": time.time()}
+        self._save_watchlists(data)
+
     def unwatch(self, wallet: str) -> bool:
+        """Stop tracking a wallet OR a watched mint (either list)."""
         data = self.watchlists()
         gone = data["devs"].pop(wallet, None) is not None
         gone = (data["smart"].pop(wallet, None) is not None) or gone
+        gone = (data["mints"].pop(wallet, None) is not None) or gone
         if gone:
             self._save_watchlists(data)
         return gone
@@ -233,6 +244,9 @@ class PumpStore:
 
     def watched_smart(self) -> set[str]:
         return set(self.watchlists().get("smart", {}))
+
+    def watched_mints(self) -> set[str]:
+        return set(self.watchlists().get("mints", {}))
 
     # ── wallet graph (P2) ─────────────────────────────────────────
 
