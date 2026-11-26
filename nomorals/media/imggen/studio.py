@@ -72,6 +72,15 @@ class Studio:
         self.config = config or StudioConfig()
         self._pipeline = None
         self._pipeline_key: tuple = ()
+        #: Progress callback for a stock-checkpoint provision
+        #: (``progress(downloaded, total)``) — set by a caller that
+        #: can show it (chat's slow-command working message covers
+        #: the wait live). None means log-only.
+        self.provision_progress = None
+        #: Facts from the most recent stock-checkpoint provision
+        #: on this Studio (None when no provision ran) — the
+        #: caller reports it so the owner sees what landed.
+        self.last_provision: dict | None = None
         #: Disclosures from the most recent generate() (e.g. the
         #: hashing-tokenizer fallback warning for SD1.5 models whose
         #: checkpoint has no BPE vocab nearby). Also written into the
@@ -108,7 +117,7 @@ class Studio:
         return local_timing_line(self._timing_store())
 
     # -- pipeline ----------------------------------------------------
-    def _resolve_entry(self) -> dict:
+    def _resolve_entry(self, *, provision: bool = False) -> dict:
         """Resolve StudioConfig.checkpoint through the registry.
 
         Accepts a native run name, a registry model name, or a path.
@@ -117,6 +126,18 @@ class Studio:
         FLUX. A registered but not-yet-loadable model (e.g. a
         diffusers-layout FLUX transformer) raises with its registry
         reason instead of vanishing.
+
+        With ``provision=True`` and no loadable entry at all, the
+        stock SD1.5 checkpoint is fetched for her (see
+        :mod:`.provision`) and the re-listed registry decides —
+        a bare generate works out of the box. Display probes
+        (``readiness``, ``checkpoints``) call with ``provision=False``:
+        a listing must never start a 4 GB download. An explicit
+        checkpoint name never provisions — a name that is not
+        there is still "not found". Provision is skipped when
+        torch is absent: weights this box cannot load are waste,
+        and the caller falls through to the next rung (the
+        serverless backend) instead.
         """
         from .registry import list_models, resolve
 
@@ -139,6 +160,25 @@ class Studio:
         loadable = [e for e in entries if e["loadable"]]
         if loadable:
             return loadable[0]
+        if provision and TORCH_AVAILABLE:
+            from .provision import ensure_stock_checkpoint
+
+            try:
+                facts = ensure_stock_checkpoint(
+                    progress=self.provision_progress)
+            except ImgGenError as exc:
+                raise ImgGenError(
+                    "no loadable image checkpoint — and fetching "
+                    f"the stock one failed: {exc}") from exc
+            self.last_provision = facts
+            entries = list_models()
+            loadable = [e for e in entries if e["loadable"]]
+            if loadable:
+                return loadable[0]
+            raise ImgGenError(
+                "stock checkpoint fetched but the registry still "
+                "lists no loadable image model — refusing to "
+                "pretend it landed")
         if entries:
             first = entries[0]
             raise ImgGenError(
@@ -189,7 +229,11 @@ class Studio:
         """
         from .pipeline import load_native_checkpoint
 
-        entry = self._resolve_entry()
+        # The real render path provisions: a bare generate with no
+        # loadable checkpoint fetches the stock one (see
+        # _resolve_entry). Display probes call _resolve_entry
+        # directly with provision=False and never download.
+        entry = self._resolve_entry(provision=True)
         dtype, quant = self._effective_dtype_quant(entry)
         key = (self.config.checkpoint, self.config.device, dtype,
                quant)

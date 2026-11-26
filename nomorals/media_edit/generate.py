@@ -616,22 +616,46 @@ class HFInferenceBackend(GenerativeBackend):
 
     def __init__(self, model: str | None = None,
                  provider: str | None = None,
-                 token: str | None = None) -> None:
+                 token: str | None = None,
+                 installer: Any = None) -> None:
         self.model = model or os.environ.get("MEDIA_GEN_MODEL",
                                              DEFAULT_HF_MODEL)
         self.provider = provider or os.environ.get("MEDIA_GEN_PROVIDER")
         # env only — never accept a token from chat/logs
         self.token = token or os.environ.get("HF_TOKEN", "") or None
+        #: pip runner for the self-install of huggingface_hub
+        #: (tests inject a fake); None means the real pip run.
+        self._installer = installer
 
     def _client(self) -> Any:
         try:
             from huggingface_hub import InferenceClient
         except ImportError as exc:
-            raise GenerativeEditError(
-                "generative edit needs huggingface_hub: "
-                "pip install huggingface_hub (or set MEDIA_GEN_BACKEND=diffusers "
-                "with diffusers+torch installed)",
-                kind="unavailable") from exc
+            # The rung provisions its own library (small,
+            # pure-python) instead of dead-ending on the import —
+            # the shared seam (core/provision), same shape as the
+            # mask organ's pip-install step.
+            from ..core.provision import ProvisionError, ensure_package
+
+            try:
+                ensure_package("huggingface_hub",
+                               runner=self._installer)
+            except ProvisionError as pexc:
+                raise GenerativeEditError(
+                    "generative edit needs huggingface_hub: "
+                    "pip install huggingface_hub (or set "
+                    "MEDIA_GEN_BACKEND=diffusers with diffusers+torch "
+                    f"installed); self-install failed: {pexc}",
+                    kind="unavailable") from exc
+            try:
+                from huggingface_hub import InferenceClient
+            except ImportError as exc2:
+                raise GenerativeEditError(
+                    "generative edit needs huggingface_hub: "
+                    "pip install huggingface_hub (or set "
+                    "MEDIA_GEN_BACKEND=diffusers with diffusers+torch "
+                    "installed)",
+                    kind="unavailable") from exc2
         kwargs: dict[str, Any] = {}
         if self.provider:
             kwargs["provider"] = self.provider
@@ -1166,15 +1190,37 @@ class NativeBackend(GenerativeBackend):
                  guidance_scale: float | None = None,
                  width: int | None = None,
                  height: int | None = None,
+                 dtype: str | None = None,
+                 quant: str | None = None,
                  n: int = 1) -> list:
+        #: Facts from a stock-checkpoint provision this call ran
+        #: (None when none ran) — the caller reports it.
+        self.last_provision = None
         ok, reason = self.readiness()
+        if not ok and "checkpoint yet" in reason:
+            # No loadable checkpoint: fetch the stock one for her
+            # (the shared provision seam) and re-check, instead of
+            # handing the owner a train-one errand. A torch-missing
+            # reason never reaches here — weights this box cannot
+            # load are not downloaded.
+            from ..media.imggen.provision import ensure_stock_checkpoint
+
+            try:
+                self.last_provision = ensure_stock_checkpoint()
+            except Exception as exc:  # noqa: BLE001 - receipt kept
+                raise GenerativeEditError(
+                    f"native backend not ready: {reason}; stock "
+                    f"checkpoint fetch failed: {exc}",
+                    kind="unavailable") from exc
+            ok, reason = self.readiness()
         if not ok:
             raise GenerativeEditError(
                 f"native backend not ready: {reason}", kind="unavailable")
         from ..media.imggen.pipeline import PipelineConfig
         from ..media.imggen.studio import Studio, StudioConfig
 
-        studio = Studio(StudioConfig())
+        studio = Studio(StudioConfig(dtype=dtype or "",
+                                     quant=quant or ""))
         images = []
         for _ in range(n):
             paths = studio.generate(
@@ -1193,6 +1239,7 @@ class NativeBackend(GenerativeBackend):
             images.append(_Image.open(paths[0]))
             if seed is not None:
                 seed += 1  # each image gets its own reproducible seed
+        self.last_provision = getattr(studio, "last_provision", None)
         return images
 
     def describe(self) -> str:
@@ -1844,7 +1891,8 @@ def _paid_backend(name: str, vault: Any | None, *,
 
 def get_backend(name: str | None = None,
                 vault: Any | None = None, *,
-                connector_factory: Any | None = None) -> GenerativeBackend:
+                connector_factory: Any = None,
+                exclude: Any = ()) -> GenerativeBackend:
     """Resolve a generative backend.
 
     ``name`` or ``MEDIA_GEN_BACKEND``: "auto" (default), "native", "hf",
@@ -1856,6 +1904,9 @@ def get_backend(name: str | None = None,
     costs real money/credits. ``vault`` is the credential vault for the
     paid backends; when omitted it is opened lazily from the default
     database via the one unlock path (any owner credential).
+    ``exclude`` (auto only) names backends an already-attempted caller
+    has ruled out — a load-stage failure is never retried blind.
+
     """
     want = (name or os.environ.get("MEDIA_GEN_BACKEND", "auto")).lower()
     if want == "off":
@@ -1882,20 +1933,88 @@ def get_backend(name: str | None = None,
                 "installed", kind="unavailable")
         return DiffusersBackend()
     if want == "auto":
-        if NativeBackend.available():
+        excluded = {str(e).lower() for e in (exclude or ())}
+        if "native" not in excluded and NativeBackend.available():
             return NativeBackend()
-        if DiffusersBackend.available():
+        if "diffusers" not in excluded and DiffusersBackend.available():
             return DiffusersBackend()
-        try:
-            import huggingface_hub  # noqa: F401
-            return HFInferenceBackend()
-        except ImportError:  # noqa: E103 - optional backend probe, absence is handled below
-            pass
+        if "hf" not in excluded:
+            try:
+                import huggingface_hub  # noqa: F401
+                return HFInferenceBackend()
+            except ImportError:  # noqa: E103 - optional backend probe, absence is handled below
+                pass
         raise GenerativeEditError(_NO_BACKEND_MSG, kind="unavailable")
     raise GenerativeEditError(
         f"unknown MEDIA_GEN_BACKEND={want!r}; use auto|native|hf|diffusers|"
         f"comfy|{'|'.join(PAID_IMAGE_BACKENDS)}|off",
         kind="invalid_request")
+
+
+def generate_image(prompt: str, *,
+                   seed: int | None = None,
+                   negative_prompt: str | None = None,
+                   steps: int | None = None,
+                   guidance_scale: float | None = None,
+                   width: int | None = None,
+                   height: int | None = None,
+                   dtype: str | None = None,
+                   quant: str | None = None,
+                   n: int = 1) -> tuple[list, str, list[str]]:
+    """One front door for text-to-image: native → diffusers → HF.
+
+    Returns ``(images, rung_name, notes)``. The native rung is
+    Devon's own studio and self-provisions the stock checkpoint
+    when the registry is empty (see
+    :mod:`nomorals.media.imggen.provision`); a load-stage native
+    failure is never retried — the auto call excludes it. The
+    auto rung is diffusers when importable, else HF when its
+    library imports; the final HF rung constructs the backend
+    directly, so its client self-installs ``huggingface_hub``
+    instead of dead-ending on the import (the auto rung only
+    probes). Paid backends are never in this chain (explicit
+    opt-in only). ``dtype``/``quant`` apply to local renders
+    only and are noted as such when another rung serves. Every
+    failure is recorded in ``notes``; when truly nothing in the
+    system can produce, the raised error names every rung.
+    """
+    common = dict(seed=seed, negative_prompt=negative_prompt,
+                  steps=steps, guidance_scale=guidance_scale,
+                  width=width, height=height, n=n)
+    notes: list[str] = []
+    native = NativeBackend()
+    try:
+        images = native.generate(prompt, dtype=dtype, quant=quant,
+                                 **common)
+        facts = getattr(native, "last_provision", None)
+        if facts:
+            notes.append(
+                "provision: first run fetched the stock SD1.5 "
+                f"checkpoint ({facts.get('bytes', 0) / 1e9:.2f} GB) "
+                "— a checkpoint you drop in yourself always wins "
+                "over it")
+        return images, "native", notes
+    except Exception as exc:  # noqa: BLE001 - a rung sheds, named
+        notes.append(f"native: {exc}")
+    try:
+        backend = get_backend("auto", exclude=("native",))
+        images = backend.generate(prompt, **common)
+        if dtype is not None or quant is not None:
+            notes.append("dtype/quant apply to local renders only")
+        return images, backend.name, notes
+    except Exception as exc:  # noqa: BLE001 - a rung sheds, named
+        notes.append(f"auto: {exc}")
+    try:
+        images = HFInferenceBackend().generate(prompt, **common)
+        if dtype is not None or quant is not None:
+            notes.append("dtype/quant apply to local renders only")
+        return images, "hf", notes
+    except Exception as exc:  # noqa: BLE001 - a rung sheds, named
+        notes.append(f"hf: {exc}")
+    raise GenerativeEditError(
+        "nothing in the system could produce an image: "
+        + "; ".join(notes),
+        kind="unavailable")
 
 
 def _paid_backend_status() -> dict[str, Any]:

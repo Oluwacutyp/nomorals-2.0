@@ -390,7 +390,16 @@ def _native_patches(tmp: Path):
             return [str(path)]
 
     studio_mod.Studio = _FakeStudio
-    studio_mod.StudioConfig = object
+    # gapfix168: the real StudioConfig is a dataclass that takes
+    # checkpoint=/device= kwargs, and the provisioned-native path
+    # pins the resolved checkpoint through it — so the stub must
+    # accept kwargs too (plain ``object`` raises "takes no
+    # arguments" the moment the backend constructs a config).
+    class _FakeStudioConfig:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    studio_mod.StudioConfig = _FakeStudioConfig
     pipeline_mod = ModuleType("nomorals.media.imggen.pipeline")
     pipeline_mod.PipelineConfig = object
     return [

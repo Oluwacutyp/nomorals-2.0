@@ -8179,7 +8179,9 @@ class RuntimeMediaMixin:
 
                 entries = list_models()
                 if not entries:
-                    return ("no native checkpoints yet — train one: "
+                    return ("no native checkpoints yet — the first "
+                            "/imggen <prompt> fetches the stock SD1.5 "
+                            "checkpoint itself; or train one: "
                             "`nm imggen train --data <photo-folder>`, "
                             "or drop an SD1.5 .safetensors into "
                             "~/.nomorals/imggen")
@@ -8225,13 +8227,17 @@ class RuntimeMediaMixin:
                         break
                 paths = Studio().upscale(path, scale=scale)
                 return f"🎨 upscaled ×{scale}: {paths[0]}"
-            # Default: generation. Parse --flags inline.
+            # Default: generation. Parse --flags inline. The
+            # prompt is the WHOLE tail: the first word is not a
+            # subcommand (those are handled above), and splitting
+            # on ``rest`` ate it — "/imggen cyberpunk city"
+            # generated "city" alone.
             import shlex
 
             try:
-                toks = shlex.split(rest or ref)
+                toks = shlex.split(ref)
             except ValueError:
-                toks = (rest or ref).split()
+                toks = ref.split()
             kwargs: dict = {}
             prompt_toks: list[str] = []
             i = 0
@@ -8259,10 +8265,44 @@ class RuntimeMediaMixin:
             prompt = " ".join(prompt_toks).strip()
             if not prompt:
                 return "usage: /imggen <prompt> [--seed N] [--ar 16:9]"
-            from ...media.imggen.studio import Studio
+            # One front door, not the Studio alone: native
+            # (self-provisioning the stock checkpoint) → diffusers
+            # → HF serverless. A bare prompt works out of the box —
+            # no training, no file drop, no flag.
+            from ...media_edit.generate import generate_image
 
-            paths = Studio().generate(prompt, **kwargs)
-            return f"🎨 generated: {prompt}\nsaved: {paths[0]}"
+            images, rung, notes = generate_image(prompt, **kwargs)
+            if not images:
+                return "imggen failed: backend returned no images"
+            import time
+            from pathlib import Path
+
+            out_dir = Path(self.context.settings.resolve(
+                "data/media/generated"))
+            out_dir.mkdir(parents=True, exist_ok=True)
+            # Nanosecond stamp: a 1-second name made any two
+            # generations in the same second overwrite each other.
+            fname = f"img_{time.time_ns()}.png"
+            out_path = out_dir / fname
+            img = images[0]
+            if hasattr(img, "save"):
+                img.save(str(out_path))
+            else:
+                return (f"🎨 generated image for: {prompt!r} (could "
+                        "not save — unsupported image type)")
+            lines = [f"🎨 generated: {prompt}", f"saved: {out_path}"]
+            if rung == "native":
+                lines.extend(n for n in notes
+                             if n.startswith("provision: "))
+            else:
+                lines.append(f"via {rung}")
+                for n in notes:
+                    if n.startswith("native:"):
+                        lines.append(
+                            "local unavailable: "
+                            + n[len("native: "):])
+                        break
+            return "\n".join(lines)
         except Exception as exc:  # noqa: BLE001 - chat never raises
             return f"imggen failed: {exc}"
 
