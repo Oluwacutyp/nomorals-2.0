@@ -1034,6 +1034,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "dislike": (0, None),    # /dislike [notes…] — last production missed
     "cookies": (0, None),    # /cookies [check] | import|status|clear … — YouTube cookie file status + browser session bundles (owner only)
     "sham": (0, 0),          # /sham — reply to audio/voice note to identify the song
+    "songrecon": (0, 0),     # alias of /sham — /songrecon, same identification pipeline
     "musicnote": (1, 1),     # /musicnote find|create — answer the music voice-note ask (owner-only)
     # anime organ (FEI gap wave B): AniList-first records with a
     # Jikan second seed; handlers own their tail grammar, so every
@@ -5084,6 +5085,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/sham",
                 "example": "/sham (reply to a voice note)",
                 "related": "/play · /audio melody"},
+    "songrecon": {"what": "SongRecon — the system's own name for the /sham identification pipeline. Reply to a voice note or audio with /songrecon, or send audio with /songrecon as the caption. Devon's local fingerprint catalog is searched first; a local hit reports its coherent-offset fraction (query landmark hashes aligned at one reference offset — an uncalibrated alignment measure, not a probability). When no recording matches, her melody catalog compares the tune itself: covers, re-performances and hummed voice notes get ranked melodic hypotheses with their interval alignment fraction — hypotheses, never identifications, and their accuracy on real recordings is unproven. AudD is the labelled external fallback.",
+                "usage": "/songrecon",
+                "example": "/songrecon (reply to a voice note)",
+                "related": "/sham · /play · /audio melody"},
     "musicnote": {"what": "Answer the music voice-note ask — Find this music (identify the song) or Create a song (produce a new song from it). Owner-only; the ask's buttons call this.",
                 "usage": "/musicnote find | create",
                 "example": "/musicnote find",
@@ -5155,7 +5160,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("decoding & crypto", ["decode", "cookies", "cookielab", "structure", "cipher",
                            "monitor", "investigate", "breach"]),
     ("media system", ["music", "distribute", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "dj", "mix", "produce", "like", "dislike", "cookies",
-                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "clip", "trend", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "g2p", "vtuber", "sham", "musicnote", "smarthome", "camwall", "robot",
+                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "clip", "trend", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "g2p", "vtuber", "sham", "songrecon", "musicnote", "smarthome", "camwall", "robot",
                       "steal", "sticker", "convert", "gif", "emoji", "customemoji", "emojiart", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "models", "mcp", "a2a", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion",
@@ -5423,7 +5428,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("media system — music · playback · video · podcast",
      ["music", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
       "distribute", "dj", "mix", "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "produce", "like", "dislike",
-      "shorts", "clip", "trend", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "g2p", "vtuber", "sham", "musicnote", "smarthome", "camwall", "robot",
+      "shorts", "clip", "trend", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "g2p", "vtuber", "sham", "songrecon", "musicnote", "smarthome", "camwall", "robot",
       "steal", "sticker", "convert", "gif", "emoji", "customemoji",
       "emojiart", "react", "create",
       "awoo", "baka", "bite", "blush", "bonk", "bored",
@@ -6090,6 +6095,7 @@ LIST_ONELINERS: dict[str, str] = {
     "produce": "compose original music, taste-aware: /produce [spotify-url|vibe words…]",
     "rewind": "restore a coding checkpoint: /rewind [n]",
     "sham": "reply to an audio/voice note to identify the song: /sham",
+    "songrecon": "same as /sham — identify the song: /songrecon",
     "musicnote": "answer the music voice-note ask: /musicnote find | create",
     "sing": "sing a melody: /sing <melody> (C4:0.5:hello …)",
     "stripe": "Stripe payments: /stripe balance|customers|charges|link",

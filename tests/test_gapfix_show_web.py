@@ -510,4 +510,4 @@ def test_chat_web(tmp_path: Path) -> None:
 
 def test_registry_tool_count(tmp_path: Path) -> None:
     registry = _tool_registry(tmp_path)
-    assert len(registry._tools) == 801
+    assert len(registry._tools) == 802

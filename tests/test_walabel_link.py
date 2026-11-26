@@ -722,7 +722,7 @@ def test_brain_tool_registered_and_counts_789():
     registry = ToolRegistry(SimpleNamespace())
     registry.register_builtins()
     assert "whatsapp_account_label" in registry._tools
-    assert len(registry._tools) == 801
+    assert len(registry._tools) == 802
 
 
 def test_brain_tool_renames_and_applies(tmp_path):

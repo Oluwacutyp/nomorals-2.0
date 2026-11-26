@@ -359,3 +359,37 @@ class AudDConnector(Connector):
             msg = str(err.get("error_message") or "unknown AudD error")
             raise AudDError(f"AudD error {code}: {msg}", error_code=code)
         return data
+
+
+def open_audd(db: Any = None, context: Any = None, *,
+              actor: str = "songrecon") -> tuple[Any | None, str]:
+    """Open the AudD connector through the credential vault.
+
+    The one place SongRecon's external step is assembled, shared by
+    chat (``/sham``), the ``songrecon`` brain tool and
+    ``nm audio identify``. Returns ``(connector, "")`` when AudD is
+    usable, otherwise ``(None, unavailable)`` where ``unavailable``
+    is ``"vault_locked"`` (the vault could not be opened) or
+    ``"not_configured"`` (no vault / no connector). Never raises
+    for the two named cases; any other vault error propagates
+    exactly as :func:`nomorals.accounts.vault.open_vault` raises it.
+
+    The vault/connector imports live inside the function so tests
+    patching ``nomorals.accounts.vault.open_vault`` and
+    ``nomorals.connectors.registry.create_connector`` still apply.
+    """
+    from ..accounts.vault import VaultLockedError, open_vault
+    from ..core.failures import record_failure
+    from .registry import create_connector
+
+    try:
+        vault = open_vault(db, context=context, actor=actor)
+    except VaultLockedError:
+        return None, "vault_locked"
+    if vault is None:
+        return None, "not_configured"
+    try:
+        return create_connector("audd", vault), ""
+    except Exception as exc:  # noqa: BLE001
+        record_failure("connectors.audd.open_audd", exc)
+        return None, "not_configured"

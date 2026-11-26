@@ -12086,7 +12086,7 @@ class PartnerRuntime(
             return self._control_like(command.tail or arg)
         if kind == "dislike":
             return self._control_dislike(command.tail or arg)
-        if kind == "sham":
+        if kind in {"sham", "songrecon"}:
             return self._control_sham(command.tail or arg, chat_key=chat_key,
                                       message=message)
         if kind == "musicnote":

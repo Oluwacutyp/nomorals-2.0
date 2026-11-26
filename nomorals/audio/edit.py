@@ -1253,28 +1253,12 @@ def control_audio(tail: str, *, context: Any = None,
                         f"(energy {s.mean_energy:.2f})")
             return "\n".join(lines)
         if verb == "fingerprint" and len(parts) >= 2:
-            from .fingerprint import default_fingerprint_db
-            from .melodic import default_melody_catalog
+            from .songrecon import enroll_track
+
             title = " ".join(parts[2:]) if len(parts) > 2 else ""
-            db = default_fingerprint_db()
-            res = db.add_track(
-                parts[1], title=title or Path(parts[1]).stem,
-                artist="local", source="library")
-            if not res.get("ok"):
-                return f"🎛️ {res.get('reason', 'failed')}"
-            reply = (f"🎛️ fingerprinted '{res.get('title')}' — "
-                     f"{res.get('hashes')} hashes in local memory")
-            # SR3: the same enrollment also derives the work's
-            # melody, so covers/hums of it can be hypothesized.
-            work = default_melody_catalog().enroll_fingerprint_track(
-                db, int(res.get("track_id") or 0), parts[1])
-            if work.get("ok"):
-                reply += (f"; melody enrolled for cover/hum matching "
-                          f"({work.get('notes')} notes)")
-            else:
-                reply += (f"; melody not enrolled "
-                          f"({work.get('reason', 'extraction failed')})")
-            return reply
+            res = enroll_track(parts[1], title=title, artist="local",
+                               source="library")
+            return str(res.get("text") or "🎛️ fingerprint failed")
         if verb == "melody" and len(parts) >= 3 and parts[1] == "enroll":
             from .melodic import enroll_work
             title = " ".join(parts[3:]) if len(parts) > 3 else ""

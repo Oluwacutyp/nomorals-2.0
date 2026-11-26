@@ -347,6 +347,13 @@ MODULE_PINS: dict[str, int] = {
     "nomorals.tools.services": 5,    # -> connectors.registry
     "nomorals.tools.trading": 5,     # -> connectors.* + agents.financial_expert
     "nomorals.tools.braineval": 5,   # tool surface over agents.braineval (the eval-pack engine)
+    # SongRecon lane: tools.songrecon is a tool surface over the L5
+    # AudD connector (connectors.audd.open_audd) + the L4 recognition
+    # pipeline (audio.songrecon) — agent-composed, same shape as
+    # tools.services; the registry loads it dynamically by dotted
+    # name, never by static import (its only static importers are
+    # tests).
+    "nomorals.tools.songrecon": 5,
     # LiveKit Agents lane: tools.voice_live is a tool surface over the
     # L5 tool-loop organ (agents.partner.tool_loop) — agent mode runs
     # each live-call turn through the real ReAct loop, and face watch

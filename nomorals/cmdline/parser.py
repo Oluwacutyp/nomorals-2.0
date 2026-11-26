@@ -152,7 +152,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "env": [],
     "robot": ["rb"],
     "game": [],
-    "audio": ["au"],
+    "audio": ["au", "songrecon"],
     "weather": ["wx"],
     "workspace": ["ws"],
     "zip": ["z"],
@@ -5030,6 +5030,7 @@ def _parser() -> argparse.ArgumentParser:
                      "nm audio analyze <file>\n"
                      "nm audio fingerprint <file> [--title T] [--artist A]\n"
                      "nm audio match <file>\n"
+                     "nm audio identify <file> [--json] [--no-external]\n"
                      "nm audio lineage <file>"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -5063,6 +5064,13 @@ def _parser() -> argparse.ArgumentParser:
                            help="recognize against the local library")
     a_m.add_argument("file", help="audio file")
     a_m.add_argument("--json", action="store_true")
+    a_id = a_sub.add_parser(
+        "identify",
+        help="identify the song: local catalog, then melody, then AudD")
+    a_id.add_argument("file", help="audio file")
+    a_id.add_argument("--json", action="store_true")
+    a_id.add_argument("--no-external", action="store_true",
+                      help="skip the AudD external catalogue (local + melody only)")
     a_l = a_sub.add_parser(
         "lineage",
         help="sample/lineage scan against the local library "

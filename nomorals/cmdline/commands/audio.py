@@ -28,6 +28,8 @@ def _cmd_audio(args: argparse.Namespace, context: Any) -> int:
         return _audio_fingerprint(args)
     if action == "match":
         return _audio_match(args)
+    if action == "identify":
+        return _audio_identify(args, context)
     if action == "lineage":
         return _audio_lineage(args)
     print(f"unknown audio action: {action}", file=sys.stderr)
@@ -149,6 +151,24 @@ def _audio_match(args: argparse.Namespace) -> int:
     print(f"🎵 {res.get('artist')} — {res.get('title')} "
           f"(local match; {measure})")
     return 0
+
+
+def _audio_identify(args: argparse.Namespace, context: Any) -> int:
+    """Full SongRecon pipeline: local catalog, then melody, then AudD."""
+    from ...audio.songrecon import recognize
+    from ...connectors.audd import open_audd
+
+    if args.no_external:
+        audd, unavailable = None, "not_configured"
+    else:
+        db = getattr(context, "db", None) if context is not None else None
+        audd, unavailable = open_audd(db, context, actor="songrecon")
+    res = recognize(args.file, audd=audd, audd_unavailable=unavailable)
+    if args.json:
+        print(json.dumps(res, indent=2, default=str))
+        return 0 if res.get("ok") else 1
+    print(res.get("text") or "no result")
+    return 0 if res.get("ok") else 1
 
 
 def _audio_lineage(args: argparse.Namespace) -> int:

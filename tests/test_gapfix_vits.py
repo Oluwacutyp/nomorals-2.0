@@ -389,7 +389,7 @@ class PreprocessTests(unittest.TestCase):
 
 
 class RegistryTests(unittest.TestCase):
-    def test_tool_count_still_801(self):
+    def test_tool_count_still_802(self):
         # This lane adds NO brain tool: the VITS capability is exercised
         # through the prepare/train CLIs and the lazily-registered TTS
         # backend, not a new tool.
@@ -403,8 +403,8 @@ class RegistryTests(unittest.TestCase):
         from nomorals.tools.registry import ToolRegistry
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        # 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber. 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall; 785 after this lane (C.8) added robot; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class; 789 after D5 (walabel) added whatsapp_account_label; 794 after gapfix163 added 5 trendclip tools (trendclip_discover, trendclip_analyze, trendclip_render, trendclip_status, trendclip_queue). 800 after gapfix146 added 6 visiondoc tools (vision_document, document_word, document_html, document_text, document_pdf, document_sheet). 801 after gapfix124 added browser_watch.
-        self.assertEqual(len(registry._tools), 801)
+        # 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber. 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall; 785 after this lane (C.8) added robot; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class; 789 after D5 (walabel) added whatsapp_account_label; 794 after gapfix163 added 5 trendclip tools (trendclip_discover, trendclip_analyze, trendclip_render, trendclip_status, trendclip_queue). 800 after gapfix146 added 6 visiondoc tools (vision_document, document_word, document_html, document_text, document_pdf, document_sheet). 801 after gapfix124 added browser_watch. 802 after this lane (SongRecon surface) added songrecon.
+        self.assertEqual(len(registry._tools), 802)
 
     def test_vits_backend_registered_but_unavailable_here(self):
         from nomorals.voice.tts import (

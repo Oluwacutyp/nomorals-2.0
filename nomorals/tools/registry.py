@@ -637,7 +637,7 @@ class ToolRegistry:
             "map", "macros", "mcp_client", "media", "media_edit", "media_gen", "media_director", "media_pipeline", "trendclip", "metadata",
             "board",  # whiteboard organ (Excalidraw/Tldraw)
             "bgremove",  # one-shot background removal (Remove.bg core)
-            "music", "studio",
+            "music", "studio", "songrecon",
             "network", "osint", "osint_people", "parsers",
             "prompt_compiler",
             "proxy", "proxy_rotation", "proxylab", "pytest_runner", "robot",

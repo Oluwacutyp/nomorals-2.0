@@ -694,10 +694,10 @@ def _tool(registry, **kwargs):
         f"facemcap call failed: {getattr(outcome, 'error', outcome)}")
 
 
-def test_tool_count_is_786_after_facemcap():
+def test_tool_count_is_787_after_facemcap():
     registry = ToolRegistry(SimpleNamespace())
     registry.register_builtins()
-    assert len(registry._tools) == 801
+    assert len(registry._tools) == 802
     assert "facemcap" in registry._tools
 
 
