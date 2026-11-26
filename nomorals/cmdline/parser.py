@@ -177,6 +177,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     # Tier 0 wiring: CLI mirrors of the /learn and /legal chat commands.
     "learn": [],
     "legal": [],
+    "file": [],
     "immune": [],
     "impossible": [],
     "repair": [],
@@ -676,6 +677,21 @@ def _parser() -> argparse.ArgumentParser:
     zip_cmd.add_argument("action", nargs="?", default="list")
     zip_cmd.add_argument("path", nargs="?", default="")
     zip_cmd.add_argument("--dest", default="")
+
+    # File-class wiring: console twin of the /files chat command.
+    # Same control as chat (files/chat.py) — CLI and chat stay in sync
+    # by delegating to the same function.
+    file_cmd = sub.add_parser("file", aliases=CLI_ALIASES["file"],
+        help="the file class: info, shelve, pack, unpack, send, ingest, exhibit",
+        description=("nm file — the file class from the console\n"
+                     "nm file [shelves] | info <ref> | list [shelf] | shelve <ref> [shelf]\n"
+                     "nm file pack <ref...> --dest <pack> [--title T] [--fmt zip|tar.gz]\n"
+                     "nm file unpack <pack> [--shelf S] [--dest DIR] | packinfo <pack>\n"
+                     "nm file send <ref> <platform> <chat> [caption] | ingest <ref> | exhibit [shelf]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    file_cmd.add_argument("task", nargs="*", default=[], help="verb and arguments")
+    file_cmd.add_argument("--json", action="store_true", help="Output as JSON")
 
     deliver_cmd = sub.add_parser("deliver", aliases=CLI_ALIASES["deliver"],
                                  help="create-and-deliver flows: generate -> zip -> send")

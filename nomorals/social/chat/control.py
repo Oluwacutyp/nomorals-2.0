@@ -910,6 +910,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "record": (0, None),     # /record start <name>|stop|step <tool> [json]|status
     "macro": (0, None),      # /macro [list] | /macro <name> [json overrides]
     "file": (1, None),       # /file <platform> <chat> <path> [caption]
+    "files": (0, None),      # /files | info <ref> | shelve <ref> [shelf] | pack <ref...> --dest <pack> | unpack <pack> [--shelf S] | send <ref> <platform> <chat> | ingest <ref> | exhibit [shelf] — the file class (owner-only)
     "publish": (1, None),    # /publish <platform> <chat> <md path> [format]
     "deliver": (1, None),     # /deliver report <topic> [--section "T::body"] [--to p:c]
     "data": (0, None),       # /data mine [name] | /data list | /data fetch <ref> [rows]
@@ -4424,6 +4425,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "usage": "/file <platform> <chat> <path> [caption]",
              "example": "/file telegram 123 /sdcard/a.txt",
              "related": "/publish"},
+    "files": {"what": "the file class — one addressable file across the system: /files lists the shelves under <home>/data/files; /files info <ref> names one file (plain path, downloads:<name>, files:<shelf>/<name>, museum:<id>, library:<slug>, archive:<path>::<member>); /files shelve <ref> [shelf] moves it onto its kind's shelf; /files pack <ref...> --dest <pack> builds a manifest-carrying artifact archive (SHA-256 per member, file cards inside); /files unpack <pack> [--shelf S] verifies the manifest first and reports bad/missing members honestly; /files send <ref> <platform> <chat> rides the live file-send path; /files ingest <ref> puts a book/document into the Library; /files exhibit [shelf] shows the shelved files in the Museum census. The chat twin of the `file` brain tool and `nm file`. Owner-only.",
+             "usage": "/files | info <ref> | shelve <ref> [shelf] | pack <ref...> --dest <pack> | unpack <pack> [--shelf S] | send <ref> <platform> <chat> | ingest <ref> | exhibit [shelf]",
+             "example": "/files shelve downloads:song.mp3   ·   /files pack museum:library-book:dragon-codex --dest codex.zip",
+             "related": "/file /zip /museum /library"},
     "publish": {"what": "convert markdown to pdf/html and send it to a chat.",
                 "usage": "/publish <platform> <chat> <md> [fmt]",
                 "example": "/publish telegram 123 notes.md pdf",
@@ -5165,7 +5170,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "models", "mcp", "a2a", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion",
                             "gcal", "trello", "proxy", "workspace", "record",
-                            "macro", "file", "publish", "notify", "proactive", "mission",
+                            "macro", "file", "files", "publish", "notify", "proactive", "mission",
                             "bet", "desk", "markets", "pattern", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
                            "exness", "stripe", "content", "drafts", "day",
                            "calendar", "repurpose", "engage", "cases", "runs", "craft", "glossary", "read", "env",
@@ -5495,7 +5500,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "vision", "voices", "clonevoice", "sing", "translate", "tl",
       "sentence"]),
     ("tools & automation",
-     ["schedule", "db", "artifact", "api", "proxy", "tor", "onion", "combo", "enum", "recon", "subbrute", "chain", "disclose", "seed", "bin", "toolhub", "workspace", "record", "macro", "file",
+     ["schedule", "db", "artifact", "api", "proxy", "tor", "onion", "combo", "enum", "recon", "subbrute", "chain", "disclose", "seed", "bin", "toolhub", "workspace", "record", "macro", "file", "files",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
       "monitor", "investigate", "breach", "bet", "desk", "markets", "pattern", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
       "connectors", "provision", "models", "mcp", "a2a", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion", "gcal", "trello", "exness", "stripe", "sec",
@@ -5942,6 +5947,7 @@ LIST_ONELINERS: dict[str, str] = {
     "record": "capture actions into a macro",
     "macro": "replay a recorded macro",
     "file": "send a file to any live chat",
+    "files": "the file class: shelve, pack, unpack, send, ingest, exhibit",
     "publish": "md→pdf/html and send",
     "notify": "recent alerts",
     "proactive": "proactive push sends: switches + delivery states",

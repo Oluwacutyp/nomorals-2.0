@@ -11678,6 +11678,17 @@ class PartnerRuntime(
                 sender_id=getattr(message, "sender_id", "") if message else "",
                 sender=getattr(message, "sender", "") if message else "",
             )
+        if kind == "files":
+            # The file class — moves, packs, and sends real files.
+            # Owner-only (absent from PUBLIC_COMMANDS).
+            from ...files.chat import control_files
+            return control_files(
+                command.tail or arg,
+                context=self.context,
+                chat=chat,
+                sender_id=getattr(message, "sender_id", "") if message else "",
+                sender=getattr(message, "sender", "") if message else "",
+            )
         if kind == "cgroup":
             # Community groups + events + meetups (#84) — not owner-gated
             # (shared surfaces). Anyone drives it.

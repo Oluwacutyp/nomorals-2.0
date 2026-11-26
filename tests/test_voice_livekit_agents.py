@@ -699,7 +699,7 @@ class TestAgentToolWiring(unittest.TestCase):
 
         self.assertIn("face_watch", inspect.signature(fn).parameters)
 
-    def test_tool_count_still_802(self):
+    def test_tool_count_still_803(self):
         """No new brain tool was added — agent mode and face watch
         are modes of the existing tools, so the count stays at 787
         after the swarm ship added build_swarm (was 785 at the
@@ -710,7 +710,7 @@ class TestAgentToolWiring(unittest.TestCase):
 
         registry = ToolRegistry(_NS())
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 802)  # trendclip adds 5 tools
+        self.assertEqual(len(registry._tools), 803)  # trendclip adds 5 tools
         schemas = {s["name"]: s for s in registry.schemas()}
         self.assertIn("agent", str(schemas["voice_live_start"]))
         self.assertIn("face_watch", str(schemas["video_live_start"]))

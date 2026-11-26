@@ -116,6 +116,13 @@ LAYERS: dict[str, int] = {
     "partner": 5,
     "games": 5,
     "books": 5,
+    # files/ is the file class organ (shelves, packs, museum/library
+    # connection): an L5 organ beside books/agents. Its imports peak
+    # at L5 (books.library, agents.apkforge.project) and its only
+    # static importers sit at L5 (agents/partner/runtime) and L7
+    # (cmdline) — the registry loads it by dotted name, not by
+    # import — so 5 is the one layer that satisfies both directions.
+    "files": 5,
     # wisdom/ is the WisdomKeeper esoteric-study organ (corpus/history/
     # practice): an L5 organ beside books/agents, wrapping books.Library
     # for ingest/search and documents/ for parsing. Reaches only downward.

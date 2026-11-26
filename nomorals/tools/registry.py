@@ -771,6 +771,24 @@ class ToolRegistry:
                 "module": "archives",
                 "error": f"{type(exc).__name__}: {exc}",
             })
+        # The file class (nomorals/files/) is the same shape as books,
+        # archives, and matching — an out-of-package organ loaded by
+        # dotted name so the registry (L4) never statically imports
+        # it (L5). Its register() attaches the single `file` tool
+        # (info | list | shelve | pack | unpack | send | ingest |
+        # exhibit over paths, museum:<id>, library:<slug>, and
+        # archive:<path>::<member>), the brain front door over the
+        # /files chat control.
+        try:
+            _files = _importlib.import_module("nomorals.files.tools")
+            _files.register(self)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("tool module 'files' failed to register: %s: %s",
+                         type(exc).__name__, exc)
+            self._failed_modules.append({
+                "module": "files",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
         try:
             from ..media import music as _music, playback as _playback
             from ..media import video as _video

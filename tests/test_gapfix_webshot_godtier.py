@@ -982,10 +982,10 @@ def test_webrec_handler_long_clamp_names_300s(
 # ── no new brain tool ─────────────────────────────────────
 
 
-def test_tool_count_still_802_no_new_tool():
+def test_tool_count_still_803_no_new_tool():
     registry = ToolRegistry(SimpleNamespace())
     registry.register_builtins()
-    assert len(registry._tools) == 802
+    assert len(registry._tools) == 803
     assert "robot" in registry._tools
 
 

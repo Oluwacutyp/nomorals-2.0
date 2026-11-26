@@ -373,7 +373,7 @@ class TestG2pWiring:
 
 
 class TestWiring:
-    def test_tool_count_still_802(self):
+    def test_tool_count_still_803(self):
         from types import SimpleNamespace
 
         from nomorals.tools.registry import ToolRegistry
@@ -382,8 +382,8 @@ class TestWiring:
         registry.register_builtins()
         # No new tool in this lane: the tiers ride the existing
         # tonal_g2p tool, the nm g2p CLI and the /g2p chat verb.
-        # 785 after C.8 added the robot tool; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class; 789 after D5 (walabel) added whatsapp_account_label; 794 after gapfix163 added 5 trendclip tools (trendclip_discover, trendclip_analyze, trendclip_render, trendclip_status, trendclip_queue). 800 after gapfix146 added 6 visiondoc tools (vision_document, document_word, document_html, document_text, document_pdf, document_sheet). 801 after gapfix124 added browser_watch. 802 after this lane (SongRecon surface) added songrecon.
-        assert len(registry._tools) == 802
+        # 785 after C.8 added the robot tool; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class; 789 after D5 (walabel) added whatsapp_account_label; 794 after gapfix163 added 5 trendclip tools (trendclip_discover, trendclip_analyze, trendclip_render, trendclip_status, trendclip_queue). 800 after gapfix146 added 6 visiondoc tools (vision_document, document_word, document_html, document_text, document_pdf, document_sheet). 801 after gapfix124 added browser_watch. 802 after this lane (SongRecon surface) added songrecon. 803 after gapfix122 added file.
+        assert len(registry._tools) == 803
         assert "tonal_g2p" in registry._tools
 
     def test_tool_tonal_g2p_arpabet_action_names_tier(self):

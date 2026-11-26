@@ -40,6 +40,7 @@ from .focus import _cmd_focus
 from .workflow import _cmd_workflow
 from .plan import _cmd_plan
 from .museum import _cmd_museum
+from .file import _cmd_file
 from .community import _cmd_community
 from .groups import _cmd_groups
 from .digest import _cmd_digest
@@ -194,6 +195,7 @@ __all__ = [
     "_cmd_workflow",
     "_cmd_plan",
     "_cmd_museum",
+    "_cmd_file",
     "_cmd_community",
     "_cmd_groups",
     "_cmd_digest",

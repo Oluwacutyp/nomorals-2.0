@@ -94,6 +94,7 @@ from .commands.improve import _cmd_improve
 from .commands.inbox import _cmd_inbox
 from .commands.learn import _cmd_learn
 from .commands.legal import _cmd_legal
+from .commands.file import _cmd_file
 from .commands.immune import _cmd_immune
 from .commands.impossible import _cmd_impossible
 from .commands.media import _cmd_media, _cmd_studio, _cmd_trendops
@@ -583,6 +584,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "workflow": _CommandSpec(_cmd_workflow),
     "plan": _CommandSpec(_cmd_plan),
     "museum": _CommandSpec(_cmd_museum),
+    "file": _CommandSpec(_cmd_file),
     "community": _CommandSpec(_cmd_community),
     "groups": _CommandSpec(_cmd_groups),
     "digest": _CommandSpec(_cmd_digest),
