@@ -1176,7 +1176,10 @@ class GameEngine:
                 msgs.append(f"{player.name} sits down.")
         room.last_activity = time.time()
         self._persist(room)
-        self._emit(room, *msgs)
+        # Return-only: the caller sends these lines.
+        # Emitting here as well doubled them — the join line
+        # reached the chat once from this emit and once inside
+        # the dispatch's joined reply.
         self._table_event(room, "joined")
         return msgs
 
@@ -1227,7 +1230,8 @@ class GameEngine:
             msgs.append(notice)
         if wager_note:
             msgs.append(wager_note)
-        self._emit(room, *msgs)
+        # Return-only, like join() above: the caller sends
+        # these lines; emitting here doubled them.
         self._pump_ai(room, [])
         self._persist(room)
         self._table_event(room, "left")

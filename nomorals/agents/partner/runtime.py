@@ -12513,7 +12513,7 @@ class PartnerRuntime(
                 kind + (" " + (command.tail or arg)
                         if (command.tail or arg) else ""),
                 chat_key=chat_key,
-                player=self._game_player_for_key(chat_key),
+                player=self._game_player_for_command(message, chat_key),
                 # The chat kind rides the inbound message when
                 # there is one (a failover re-entry for a GROUP
                 # game must meet the §33 gate — the old hardcoded
@@ -12531,7 +12531,7 @@ class PartnerRuntime(
             # kind is the chat's real kind (see above).
             return self._control_game(
                 command.tail or arg, chat_key=chat_key,
-                player=self._game_player_for_key(chat_key),
+                player=self._game_player_for_command(message, chat_key),
                 kind=getattr(getattr(message, "chat", None),
                              "kind", "dm"),
                 is_owner=is_owner)
@@ -12542,7 +12542,7 @@ class PartnerRuntime(
             # handle_control has no conversation fall-through.
             res = self._control_math(
                 command.tail or arg, chat_key,
-                player=self._game_player_for_key(chat_key),
+                player=self._game_player_for_command(message, chat_key),
                 kind=getattr(getattr(message, "chat", None), "kind", "dm"),
                 is_owner=is_owner)
             if res is None:
@@ -12563,40 +12563,40 @@ class PartnerRuntime(
         if kind in ("inventory", "equip", "unequip", "repair"):
             return self._control_gear(
                 kind, command.tail or arg,
-                player=self._game_player_for_key(chat_key))
+                player=self._game_player_for_command(message, chat_key))
         # ── progression ──────────────────────────────────────────────────────
         if kind == "level":
             return self._control_level(
-                player=self._game_player_for_key(chat_key))
+                player=self._game_player_for_command(message, chat_key))
         # ── battle skills ────────────────────────────────────────────────────
         if kind == "skill":
             return self._control_skills(
                 command.tail or arg,
-                player=self._game_player_for_key(chat_key))
+                player=self._game_player_for_command(message, chat_key))
         # ── titles ───────────────────────────────────────────────────────────
         if kind == "title":
             return self._control_titles(
                 command.tail or arg,
-                player=self._game_player_for_key(chat_key))
+                player=self._game_player_for_command(message, chat_key))
         # ── RPG attributes ───────────────────────────────────────────────────
         if kind == "stats":
             return self._control_stats(
                 command.tail or arg,
-                player=self._game_player_for_key(chat_key))
+                player=self._game_player_for_command(message, chat_key))
         # ── daily hunt ───────────────────────────────────────────────────────
         if kind == "daily":
             return self._control_daily(
-                player=self._game_player_for_key(chat_key))
+                player=self._game_player_for_command(message, chat_key))
         # ── per-game mastery tiers ───────────────────────────────────────────
         if kind == "mastery":
             return self._control_mastery(
                 command.tail or arg,
-                player=self._game_player_for_key(chat_key))
+                player=self._game_player_for_command(message, chat_key))
         # ── player-to-player gifting ─────────────────────────────────────────
         if kind == "gift":
             return self._control_gift(
                 command.tail or arg,
-                player=self._game_player_for_key(chat_key))
+                player=self._game_player_for_command(message, chat_key))
         if kind == "news":
             return self._control_news(command.tail or arg)
         if kind in {"translate", "tl"}:

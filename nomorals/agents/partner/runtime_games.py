@@ -1898,7 +1898,16 @@ class RuntimeGamesMixin:
         handler = self._math_handler()
         player_key = getattr(player, "key", "") or ""
         if not player_key:
-            player_key = self._game_player_for_key(chat_key).key
+            # The chat key is a player ONLY for a DM (the chat IS
+            # the human there). In a group with no sender there is
+            # no human to bill the round to — refuse honestly
+            # instead of minting a profile for the chat itself
+            # (the group-as-player shape).
+            if str(kind).lower() == "dm":
+                player_key = self._game_player_for_key(chat_key).key
+            else:
+                return ("i couldn't tell who you are in this chat, "
+                        "so the round didn't register.")
         if str(kind).lower() == "group":
             # §34: stamp the room this member is playing in, so a
             # timed round started here can be closed back INTO
@@ -3068,6 +3077,27 @@ class RuntimeGamesMixin:
         # number), never the raw JID with its domain attached.
         label = sender_id_label(ref.chat_id) or ref.chat_id[:40]
         return Player.from_sender(ref.platform, ref.chat_id, label)
+
+    def _game_player_for_command(self, message: Any,
+                                 chat_key: str) -> Any:
+        """The player for a handle_control game branch.
+
+        A live inbound message carries its real sender — use it,
+        so a group game seats the human who typed the command. A
+        console call carries no message: the chat key is the
+        player (the console path is DM by construction — every
+        handle_control game branch defaults its kind to "dm" when
+        there is no message). A group message whose sender is
+        unresolvable yields None here — every game handler
+        already refuses None honestly — instead of minting a
+        profile for the chat itself. That minting is the
+        group-as-player defect: a deferred group /game failed
+        over through handle_control and seated
+        `telegram:-1004381594376` as the arena's human.
+        """
+        if message is not None:
+            return self._game_player(message)
+        return self._game_player_for_key(chat_key)
 
     @staticmethod
     @staticmethod
