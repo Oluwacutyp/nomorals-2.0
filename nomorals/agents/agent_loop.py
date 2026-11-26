@@ -481,7 +481,11 @@ def run_loop(
         _ok, reply = verify_dispatch("build", reply)
         return reply, ctx
 
-    intent = mind.decide(text, live_game=live_game, allow_model=True)
+    # helpdup2 Q2-3: the message rides into decide() so the multi
+    # trigger can see it quotes a command (a command answer never
+    # trips multi, even when its text carries two strong signals).
+    intent = mind.decide(text, live_game=live_game, allow_model=True,
+                         message=message)
     if intent.kind == "chat":
         return None, ctx
     if intent.action == "ask":

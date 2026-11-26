@@ -1018,10 +1018,25 @@ class TelegramAdapter(ChatAdapter):
         sender = getattr(event, "sender", None)
         if sender is not None and bool(getattr(sender, "bot", False)):
             return True
-        # Fallback: the raw message's from_id may carry a bot flag on some
-        # Telethon versions (PeerUser with bot attribute on the sender object).
+        # Fallback (helpdup2): the raw message's from_id carries the
+        # sender's NUMERIC id — compare it against the companion set.
+        # The old ``from_id.bot`` read is dead for bot senders: a bot's
+        # from_id is a PeerUser, which carries no .bot attribute, so
+        # the guard fell through to the .bot flag alone whenever the
+        # companion set was empty or the sender entity unresolved.
+        # This tier fires on the id alone, with no entity resolution.
         from_id = getattr(message, "from_id", None)
-        if from_id is not None and bool(getattr(from_id, "bot", False)):
+        _fid_match = False
+        if from_id is not None and companions:
+            for attr in ("user_id", "channel_id", "chat_id"):
+                try:
+                    _fid = getattr(from_id, attr, None)
+                    if _fid is not None and int(_fid) in companions:
+                        _fid_match = True
+                        break
+                except (TypeError, ValueError):
+                    continue
+        if _fid_match:
             return True
         return False
 
@@ -2285,8 +2300,27 @@ class TelegramAdapter(ChatAdapter):
         # recognised by sender OR by the DM chat id itself
         # (_peer_is_bot_dm) — the chat id needs no entity resolution
         # and no .bot flag.
-        if self._sender_is_bot(event, message) \
-                or self._peer_is_bot_dm(chat_id):
+        # helpdup2: log the routing decision for every group post —
+        # companion-set size, sender id, verdict — so the live log
+        # can prove the guard instead of leaving it to inference.
+        # Peer posts are rare (only a bot's own posts), so the
+        # recognised branch also logs at INFO; the unrecognised
+        # branch rides the debug routing-decision log below.
+        _is_bot_post = self._sender_is_bot(event, message) \
+            or self._peer_is_bot_dm(chat_id)
+        if str(chat_id or "").startswith("-"):
+            _companions_n = len(
+                getattr(self, "_companion_bot_ids", None) or ())
+            _log.debug(
+                "telegram: peer-post routing decision chat_id=%r "
+                "sender_id=%r companions=%d is_bot_post=%s",
+                chat_id, getattr(event, "sender_id", None),
+                _companions_n, _is_bot_post)
+        if _is_bot_post:
+            _log.info(
+                "telegram: peer post recognised in chat_id=%s "
+                "sender_id=%s — delivering as observation, never a turn",
+                chat_id, getattr(event, "sender_id", None))
             self._deliver_peer_post(event, message, handler)
             return
         entity = None

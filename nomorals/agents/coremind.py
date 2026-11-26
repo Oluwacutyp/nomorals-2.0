@@ -512,6 +512,36 @@ def is_orchestrator_status_text(text: Any) -> bool:
                for prefix in ORCHESTRATOR_STATUS_PREFIXES)
 
 
+#: A control-command answer's shape (helpdup2 Q2-1/Q2-3): the /help
+#: catalog's header, and the two markers that only the catalog
+#: carries together. A message with this shape is Devon's own
+#: output coming back — never a fresh owner turn, never a
+#: multi-part goal.
+_CATALOG_HEADER = "🛠 Devon — what I do here"
+
+
+def _looks_like_command_answer(text: Any) -> bool:
+    """True when ``text`` is itself a command answer (helpdup2
+    Q2-1/Q2-3): the /help catalog (header, or both catalog
+    markers together), or a long command listing — eight or more
+    slash-command tokens next to Devon's name, which is the
+    catalog's second chunk. A false positive costs only the
+    multi trigger (the turn still reaches the brain as chat),
+    never silence."""
+    stripped = str(text or "").strip()
+    if not stripped:
+        return False
+    if stripped.startswith(_CATALOG_HEADER):
+        return True
+    if "for everyone:" in stripped and "/rules — the group rules" in stripped:
+        return True
+    if "Devon" in stripped:
+        commands = re.findall(r"/[a-z][a-z0-9_]{1,30}", stripped)
+        if len(set(commands)) >= 8:
+            return True
+    return False
+
+
 def _is_group_ref(ref: Any) -> bool:
     """True when a chat ref names a group room (modnoreply). The ref
     may carry kind==GROUP — or, for refs rebuilt from a chat key
@@ -2018,7 +2048,7 @@ class CoreMind:
             return None
 
     def decide(self, text: str, *, live_game: str | None = None,
-               allow_model: bool = True) -> Intent:
+               allow_model: bool = True, message: Any = None) -> Intent:
         """The decision, pure and inspectable.  ``chat`` = just talk.
 
         Every decision is also counted in the persisted router telemetry
@@ -2026,7 +2056,8 @@ class CoreMind:
         ``nm mind`` shows live route behavior across processes. The write
         is best-effort — it never changes or delays the decision.
         """
-        intent = self._decide(text, live_game=live_game, allow_model=allow_model)
+        intent = self._decide(text, live_game=live_game,
+                              allow_model=allow_model, message=message)
         self._record_route(intent)
         return intent
 
@@ -2054,7 +2085,7 @@ class CoreMind:
         router_telemetry.record_plan_error(db, error, route=route)
 
     def _decide(self, text: str, *, live_game: str | None = None,
-                allow_model: bool = True) -> Intent:
+                allow_model: bool = True, message: Any = None) -> Intent:
         """The decision, pure and inspectable.  ``chat`` = just talk."""
         # LLM-first: let the model interpret meaning before regex patterns.
         # Falls back to regex when the model is unavailable or uncertain.
@@ -2087,9 +2118,24 @@ class CoreMind:
         strong_bar, check_lo = _confidence_bands(cands)
         # two strong distinct signals → a multi-part goal for the orchestrator
         strong = {c.kind for c in cands if c.confidence >= strong_bar}
+        # helpdup2 Q2-3: a message that is itself a command answer —
+        # the catalog text, or a message quoting a command — never
+        # trips the multi trigger. The sender-based gate in
+        # handle() is the primary defence; this is the text-shape
+        # defence for paths that reach _decide without sender
+        # context. Only the multi branch closes: the best single
+        # intent below still fires, and chat still falls through.
         if len(strong) >= 2 and _MULTI_JOINERS.search(text):
-            return Intent("multi", 0.8, target=text.strip()[:400], route="orchestrator",
-                          why=f"{len(strong)} intent classes: {', '.join(sorted(strong))}")
+            _is_command_answer = _looks_like_command_answer(text)
+            if not _is_command_answer and message is not None:
+                _meta = getattr(message, "meta", None) or {}
+                _reply_to = str(_meta.get("reply_to") or "")
+                if not _reply_to:
+                    _reply_to = str(getattr(message, "reply_to", "") or "")
+                _is_command_answer = bool(_reply_to)
+            if not _is_command_answer:
+                return Intent("multi", 0.8, target=text.strip()[:400], route="orchestrator",
+                              why=f"{len(strong)} intent classes: {', '.join(sorted(strong))}")
         if check_lo <= best.confidence < strong_bar and allow_model and best.kind not in ("game",):
             model = self._model_check(text, best)
             if model is not None:
@@ -2146,12 +2192,94 @@ class CoreMind:
         """
         if not text or not text.strip():
             return None
+        # helpdup2 Q2-1: a command answer is never a fresh owner
+        # turn — the bot's own catalog coming back (the live
+        # /help double) must not launch a goal. The turn still
+        # falls through to the brain as a chat turn; only the
+        # goal path closes.
+        if _looks_like_command_answer(text):
+            return None
         if not self._is_owner_dm(message, chat_key):
             return None
+        # helpdup2 Q2-1: in a GROUP the chat-based gate above is
+        # not enough — the bot's own catalog post arrives in an
+        # owner chat, so only a sender-based gate can tell a
+        # sibling surface's post from a fresh owner turn.
+        chat = getattr(message, "chat", None)
+        if chat is not None:
+            try:
+                from ..social.chat import ChatKind
+
+                if chat.kind == ChatKind.GROUP and \
+                        not self._is_owner_group_turn(message):
+                    return None
+            except Exception:  # noqa: BLE001 - the gate never eats a turn
+                pass
         from .agent_loop import run_loop
         reply, _ctx = run_loop(self, text.strip(), message=message,
                                chat_key=chat_key, runtime=self.runtime)
         return reply
+
+    def _is_owner_group_turn(self, message: Any) -> bool:
+        """Sender-based owner-turn gate for GROUP chats (helpdup2
+        Q2-1): a message is an owner turn in a group only when
+        the sender is the owner AND it is not a sibling-surface
+        post. The chat-based gate (is_owner_chat) cannot tell
+        them apart — the bot's own catalog post arrives in an
+        owner chat. Best-effort: any fault returns False and the
+        turn falls through to the brain as chat, so a gate fault
+        can never silence the owner — it only closes the goal
+        path for that turn."""
+        try:
+            chat = getattr(message, "chat", None)
+            platform = str(getattr(chat, "platform", "") or "")
+            sender_id = str(getattr(message, "sender_id", "") or "")
+            if not sender_id:
+                return False
+            meta = getattr(message, "meta", None) or {}
+            # A post arriving as a peer-post observation is a
+            # sibling surface's post by construction.
+            if str(meta.get("service") or "") == "peer_post" \
+                    or bool(meta.get("observe_only")):
+                return False
+            # A bot account's post is a sibling surface's post.
+            if self.runtime is not None:
+                try:
+                    if self.runtime._sender_is_bot_account(message):
+                        return False
+                except Exception:  # noqa: BLE001 - next check
+                    pass
+            # The sender must be the owner — the owner registry,
+            # or this runtime's own account id (the userbot IS
+            # the owner's account on its platform).
+            is_owner = False
+            if self.runtime is not None:
+                try:
+                    is_owner = bool(
+                        self.runtime._owner_registry().is_owner(
+                            platform, sender_id))
+                except Exception:  # noqa: BLE001 - next check
+                    is_owner = False
+                if not is_owner:
+                    try:
+                        own = self.runtime._surface_account_id(platform)
+                        is_owner = bool(own) and str(own) == sender_id
+                    except Exception:  # noqa: BLE001 - not the owner
+                        pass
+            if not is_owner:
+                return False
+            # A message quoting another message, sent from the
+            # owner's own account, is a sibling surface's answer
+            # — not a fresh owner turn. Trade-off, recorded: the
+            # owner replying to a bot message with a fresh
+            # instruction still reaches the brain as a chat turn;
+            # only the goal launch closes for quoted messages.
+            reply_to = str(meta.get("reply_to") or "")
+            if not reply_to:
+                reply_to = str(getattr(message, "reply_to", "") or "")
+            return not reply_to
+        except Exception:  # noqa: BLE001 - the gate never eats a turn
+            return False
 
     def _dispatch_from_loop(self, loop_ctx: Any, text: str, *,
                             message: Any) -> str | None:

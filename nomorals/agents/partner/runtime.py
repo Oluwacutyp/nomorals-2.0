@@ -1962,6 +1962,28 @@ class PartnerRuntime(
             # observation never dies on a registry fault.
             with contextlib.suppress(Exception):
                 self._bot_account_ids()
+            # helpdup2 (Q1-4): journal every incoming group post
+            # BEFORE any routing — sender, reply_to, time. The
+            # journal is the belt-and-braces second proof source
+            # for the sweep: a bot's answer quoting a command is
+            # provable from the room's own history even when the
+            # peer-post recognition below missed it entirely.
+            with contextlib.suppress(Exception):
+                self._journal_room_post(message)
+            # helpdup2 (Q1-1): a group post from one of Devon's
+            # own bot accounts IS a peer post, full stop — no
+            # slash exemption, no game-live exemption, no
+            # conversational-claim consult. A bot never types a
+            # fresh owner command, and the owner account id can
+            # never be in the bot set (_bot_id exists only on the
+            # Bot API adapters, from their tokens), so this
+            # cannot eat an owner message. Numeric sender_id
+            # against the registry (settings tokens included),
+            # so it holds even when the adapter companion set
+            # is empty and Telethon never resolved the sender.
+            if self._sender_is_bot_account(message):
+                self._peer_post_observed(message)
+                return
             if self._is_own_surface_group_post(message):
                 self._peer_post_observed(message)
                 return
@@ -6257,6 +6279,26 @@ class PartnerRuntime(
         except Exception:  # noqa: BLE001 - a guard never eats intake
             return set()
 
+    def _sender_is_bot_account(self, message: Any) -> bool:
+        """True iff the message's sender is one of Devon's own bot
+        accounts (helpdup2 Q1-1).
+
+        Numeric sender_id against the bot registry — no companion
+        set, no Telethon entity, no .bot flag needed. The set
+        holds only Bot API adapter ids (from their tokens, the
+        shared registry, and the settings tokens), so the owner's
+        own account id can never appear here: a bot post is never
+        a fresh owner command, and treating it as a peer post
+        cannot eat an owner turn. Best-effort: any fault returns
+        False and the older grounds decide."""
+        try:
+            sender_id = getattr(message, "sender_id", None)
+            if sender_id is None:
+                return False
+            return str(sender_id).strip() in self._bot_account_ids()
+        except Exception:  # noqa: BLE001 - a guard never eats intake
+            return False
+
     _BOT_REGISTRY_TTL_S = 60.0
 
     def _sync_bot_registry(self) -> set[str]:
@@ -6307,6 +6349,29 @@ class PartnerRuntime(
             except Exception as exc:  # noqa: BLE001 - registry is best-effort
                 record_failure(
                     "runtime.PartnerRuntime._sync_bot_registry", exc)
+            # helpdup2: the bot ids straight from this runtime's own
+            # settings tokens — no adapter state, no companion set,
+            # no Telethon sender resolution needed. The live double
+            # happened with a guard resting on exactly those three
+            # sources; the settings derivation is the independent
+            # fourth source that keeps peer recognition true even
+            # when the adapters never learned their ids and the
+            # shared registry is empty.
+            try:
+                _chat_settings = getattr(
+                    getattr(self, "settings", None), "chat", None)
+                for _token in (
+                        getattr(_chat_settings,
+                                "telegram_bot_token", "") or "",
+                        getattr(_chat_settings,
+                                "telegram_personal_bot_token", "") or ""):
+                    _head = str(_token).split(":")[0].strip()
+                    if _head.isdigit():
+                        ids.add(_head)
+            except Exception as exc:  # noqa: BLE001 - settings read never dies
+                record_failure(
+                    "runtime.PartnerRuntime._sync_bot_registry:settings",
+                    exc)
             # Push the merged set into attached userbot adapters.
             for adapter in adapters.values():
                 push = getattr(adapter, "note_companion_bot_ids", None)
@@ -6626,15 +6691,50 @@ class PartnerRuntime(
                 return False
             try:
                 ledger = self._shared_conversation_claims()
-                if ledger is None:
-                    return False
-                family = ("telegram" if platform.startswith("telegram")
-                          else platform)
-                return bool(ledger.has_live_claim_in_chat(
-                    family, str(message.chat.chat_id or ""),
-                    self._claim_surface(platform)))
+                if ledger is not None:
+                    family = ("telegram" if platform.startswith("telegram")
+                              else platform)
+                    if ledger.has_live_claim_in_chat(
+                            family, str(message.chat.chat_id or ""),
+                            self._claim_surface(platform)):
+                        return True
+            except Exception:  # noqa: BLE001 - probe fault: next ground
+                pass
+            # helpdup2 Q2-4b: the same post, quoting a command the
+            # shared command ledger already carries — a live claim
+            # for the quoted command, or a fresh recorded answer
+            # for it — is a sibling surface's answer, even when
+            # no conversational claim is live (slash commands are
+            # exempt from the conversational claim ground, so a
+            # /help answer could never satisfy it). The key is the
+            # group command key family:chat_id:quoted_id — the
+            # same shape command_claim_key builds for a group
+            # command. Both accessors are expiry-aware (a claim
+            # past its window reads as no claim; an answer past
+            # ANSWER_WINDOW_S reads as no answer), so a stale
+            # /help can never bless a later post. Trade-off,
+            # recorded: an owner follow-up that quotes /help
+            # itself inside the window reads the same way — the
+            # existing ground (ii) already makes that trade.
+            try:
+                quoted = str((message.meta or {}).get("reply_to")
+                             or getattr(message, "reply_to", "") or "")
+                if quoted:
+                    family = ("telegram"
+                              if platform.startswith("telegram")
+                              else platform)
+                    qkey = (f"{family}:"
+                            f"{message.chat.chat_id or ''}:{quoted}")
+                    claims = self._command_claims()
+                    if claims is not None:
+                        cinfo = claims.claim_info(qkey)
+                        if cinfo is not None and cinfo[0]:
+                            return True
+                        if claims.answer_info(qkey) is not None:
+                            return True
             except Exception:  # noqa: BLE001 - probe fault: not a peer post
-                return False
+                pass
+            return False
         except Exception:  # noqa: BLE001 - recognition never eats a turn
             return False
 
@@ -7211,6 +7311,71 @@ class PartnerRuntime(
         except Exception:  # noqa: BLE001 - unproven: not answered
             return False
 
+    # ── room journal (helpdup2 Q1-4) ───────────────────────────────
+    # A bounded, in-memory record of every incoming GROUP post —
+    # (chat_key, sender_id, reply_to, ts) — kept 300s. The sweep's
+    # second proof source: when peer-post recognition missed a
+    # bot's answer entirely (no companion set, no entity, no
+    # claim), the room's own history still proves it answered
+    # the command it quotes. Deliberately separate from
+    # _recent_peer_answers (which only fills when a post is
+    # RECOGNISED as a peer post): the journal fills for every
+    # group post, recognised or not, so it is the proof that
+    # survives a total recognition miss.
+    _ROOM_JOURNAL_TTL_S = 300.0
+    _ROOM_JOURNAL_MAXLEN = 500
+
+    def _journal_room_post(self, message) -> None:  # type: ignore[no-untyped-def]
+        """Append one incoming group post to the room journal.
+        Never raises."""
+        try:
+            chat = getattr(message, "chat", None)
+            if chat is None or getattr(chat, "kind", None) != ChatKind.GROUP:
+                return
+            chat_key = str(getattr(chat, "key", "") or "")
+            if not chat_key:
+                return
+            sender_id = str(getattr(message, "sender_id", "") or "")
+            reply_to = str((message.meta or {}).get("reply_to") or "")
+            journal = getattr(self, "_room_posts", None)
+            if journal is None:
+                journal = self._room_posts = deque(
+                    maxlen=self._ROOM_JOURNAL_MAXLEN)
+            now = time.time()
+            journal.append((chat_key, sender_id, reply_to, now))
+            while journal and now - journal[0][3] > self._ROOM_JOURNAL_TTL_S:
+                journal.popleft()
+        except Exception:  # noqa: BLE001 - the journal never dies
+            pass
+
+    def _room_has_peer_answer(self, chat_key: str,
+                              message_id: str) -> bool:
+        """True when the room journal holds a post in ``chat_key``
+        from one of Devon's own bot accounts quoting
+        ``message_id`` inside the window (helpdup2 Q1-4): the
+        primary answered this command in the room, whatever the
+        peer-post recognition above concluded. Never raises."""
+        try:
+            journal = getattr(self, "_room_posts", None)
+            if not journal:
+                return False
+            now = time.time()
+            bot_ids = self._bot_account_ids()
+            chat_key = str(chat_key or "")
+            message_id = str(message_id or "")
+            for entry_chat, entry_sender, entry_reply, entry_ts in journal:
+                if now - float(entry_ts) > self._ROOM_JOURNAL_TTL_S:
+                    continue
+                if entry_chat != chat_key:
+                    continue
+                if entry_reply != message_id:
+                    continue
+                if entry_sender and entry_sender in bot_ids:
+                    return True
+            return False
+        except Exception:  # noqa: BLE001 - unproven: not answered
+            return False
+
     def _honest_failover_failure(self, record, message, *,  # type: ignore[no-untyped-def]
                                  reason: str) -> None:
         """End a blind deferral in an honest failure (dupfix6):
@@ -7644,6 +7809,26 @@ class PartnerRuntime(
                         "deferred /%s in %s already answered "
                         "in-room — standing down [dupfix6 "
                         "shared=%s]",
+                        record.get("kind"), record.get("chat_key"),
+                        self._claims_are_shared())
+                    continue
+                # (1b-bis) The same proof, read off the room
+                # journal (helpdup2 Q1-4): the journal fills for
+                # EVERY incoming group post, recognised as a peer
+                # post or not — so a bot's answer quoting this
+                # command is provable from the room's own history
+                # even when recognition missed it entirely (empty
+                # companion set, unresolved sender, no claim).
+                # A distinct log line so the live log can say
+                # which proof channel stood the sweep down.
+                if self._room_has_peer_answer(
+                        str(record.get("chat_key") or ""),
+                        str(getattr(message, "message_id", "")
+                            or "")):
+                    _log.info(
+                        "deferred /%s in %s already answered "
+                        "in-room (room journal) — standing down "
+                        "[helpdup2 shared=%s]",
                         record.get("kind"), record.get("chat_key"),
                         self._claims_are_shared())
                     continue
@@ -9378,6 +9563,85 @@ class PartnerRuntime(
             elif getattr(result, "ok", True) is False:
                 return
             self._record_command_answer(message)
+            # helpdup2 Q1-2 (self-observe): the send just proved
+            # this surface answered the command in this chat, so
+            # record the observation directly — in the same
+            # memory the sweep's step (1b) reads — instead of
+            # waiting for the Telethon round-trip to deliver our
+            # own post back to us. Keyed on the COMMAND id, so
+            # the session-edit staleness hazard cannot poison it:
+            # the edit path re-uses the same command id.
+            # GROUP chats only: the observation memory is the
+            # group-deferral proof channel; DM answers resolve
+            # through the shared ledger alone.
+            try:
+                chat = getattr(message, "chat", None)
+                if chat is not None and getattr(
+                        chat, "kind", None) == ChatKind.GROUP:
+                    reply_to = str(
+                        getattr(message, "message_id", "") or "")
+                    chat_key = str(getattr(chat, "key", "") or "")
+                    if reply_to and chat_key:
+                        mem = getattr(self, "_recent_peer_answers", None)
+                        if mem is None:
+                            mem = self._recent_peer_answers = {}
+                        now = time.time()
+                        mem[(chat_key, reply_to)] = now
+                        for old_key in [k for k, ts in mem.items()
+                                        if now - ts > 300.0]:
+                            mem.pop(old_key, None)
+                        # helpdup2 Q1-4: the room journal is the
+                        # sweep's second proof source and it fills
+                        # from incoming posts — but a surface's own
+                        # send never arrives as an incoming post,
+                        # so journal it here too: the same tuple
+                        # the journal holds for a bot's post
+                        # quoting the command.
+                        journal = getattr(self, "_room_posts", None)
+                        if journal is None:
+                            journal = self._room_posts = deque(
+                                maxlen=self._ROOM_JOURNAL_MAXLEN)
+                        journal.append((
+                            chat_key,
+                            str(self._surface_account_id(
+                                str(getattr(
+                                    message.chat, "platform", "")
+                                    or "")) or ""),
+                            reply_to, now))
+                        while (journal and now - journal[0][3]
+                               > self._ROOM_JOURNAL_TTL_S):
+                            journal.popleft()
+            except Exception:  # noqa: BLE001 - self-observe is best-effort
+                pass
+            # helpdup2 Q2-4a: a group control answer also leaves a
+            # CONVERSATIONAL claim in this chat, so the sibling's
+            # peer-post ground (ii) — a live claim by another
+            # surface — fires when the sibling's own failover
+            # answer arrives a few seconds later. The command
+            # ledger is separate and untouched: the sweep's step
+            # (2) foreign-claim logic keeps reading command
+            # claims, never conversational ones. The claim
+            # window is 30s and the failover lands ~8s after
+            # the command, so it is inside the window when it
+            # matters. Best-effort: a claim fault never eats
+            # the answer's own proof above.
+            try:
+                chat = getattr(message, "chat", None)
+                if chat is not None and getattr(
+                        chat, "kind", None) == ChatKind.GROUP:
+                    platform = str(getattr(
+                        message.chat, "platform", "") or "")
+                    surface = self._claim_surface(platform)
+                    ledger = self._shared_conversation_claims()
+                    if ledger is not None:
+                        from .reply_claims import reply_content_key
+
+                        key = reply_content_key(message)
+                        ledger.claim(key, surface)
+            except Exception as exc:  # noqa: BLE001 - claims never eat replies
+                record_failure(
+                    "runtime.PartnerRuntime._note_control_answer:claim",
+                    exc)
         except Exception as exc:  # noqa: BLE001 - bookkeeping never eats a reply
             record_failure(
                 "runtime.PartnerRuntime._note_control_answer", exc)
