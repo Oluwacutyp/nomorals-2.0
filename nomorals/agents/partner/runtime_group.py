@@ -5785,18 +5785,52 @@ class RuntimeGroupMixin:
             kind="" if pdf else "image", **extra)
         return str(path)
 
+    def _deliver_block_evidence(self, message, exc):  # type: ignore[no-untyped-def]
+        """Deliver a refusal's challenge-state evidence as
+        exactly that: the screenshot of the challenge page
+        as found, captioned as a BLOCK — never as the shot
+        the owner asked for.  Returns the note line for
+        the failure reply ("" when there is no evidence
+        to show).  Best-effort throughout: a delivery
+        failure never masks the refusal itself."""
+        from contextlib import suppress
+
+        evidence = getattr(exc, "evidence", None)
+        if evidence is None or not getattr(
+                evidence, "screenshot", b""):
+            return ""
+        wall = str(getattr(evidence, "wall", "") or "gate")
+        title = str(getattr(evidence, "title", "") or "")
+        caption = (
+            "🚧 blocked — this is the challenge page as "
+            f"found ({wall}), not the page asked for"
+            + (f"\n{title}" if title else "")
+            + (f"\n{evidence.url}" if evidence.url else ""))
+        with suppress(Exception):
+            self._webshot_deliver(message, bytes(
+                evidence.screenshot), caption=caption,
+                pdf=False, audience="")
+            return (f"\n🚧 challenge evidence attached: the "
+                    f"{wall} page as found")
+        return ""
+
     def _control_webshot(self, tail, message):  # type: ignore[no-untyped-def]
         """/webshot (§18 + §20): render a page and return the
         shot as a photo with the URL + page title as its
         caption (Devon's own style).  One command, the whole
         variant space: full/viewport, phone|tablet|desktop,
-        dark, idle-wait, element clip, PDF.  In a group this is
-        system output — §33's claim gates it, at send time,
-        like every other system post; in DM it is free.  A
-        replied-to message's first link is the target when the
-        command carries none (the resolver's reply discipline).
+        dark, idle-wait, element clip, PDF, scroll-stitched
+        composite, and flow (shoot the landing page, then
+        click through the named links and shoot every
+        stop).  In a group this is system output — §33's
+        claim gates it, at send time, like every other
+        system post; in DM it is free.  A replied-to
+        message's first link is the target when the command
+        carries none (the resolver's reply discipline).
         ``watch`` rides the same command: page-watch re-shots
-        on the cycle and alerts only on a real change."""
+        on the cycle and alerts only on a real change.  A
+        gate/wall refusal delivers the challenge page as
+        labelled block evidence, never as the shot."""
         from ...social.chat import webshot as shot_organ
         from ...social.chat.typography import resolve_media_mark
 
@@ -5855,30 +5889,75 @@ class RuntimeGroupMixin:
             f"{opts.device if opts.device_chosen else 'auto'}"
             f" · {opts.scheme}"
             + (f" · clip {opts.clip}" if opts.clip else "")
-            + (" · pdf" if opts.pdf else ""))
+            + (" · pdf" if opts.pdf else "")
+            + (" · scroll-stitched" if opts.scroll else "")
+            + (f" · flow ({len(opts.flow_steps)} steps)"
+               if opts.flow_steps else ""))
         db = getattr(getattr(self, "context", None), "db", None)
         on_step, finish, fail = self._nav_progress(message, "📸 shot")
         try:
-            result = shot_organ.capture(
-                url, opts, db=db,
-                takeover_factory=self._webshot_takeover_factory(
-                    message),
-                profile_dir=self._webshot_profile_dir(book),
-                on_step=on_step)
+            if opts.flow_steps:
+                shots = shot_organ.capture_flow(
+                    url, opts,
+                    takeover_factory=self._webshot_takeover_factory(
+                        message),
+                    profile_dir=self._webshot_profile_dir(book),
+                    on_step=on_step)
+                result = shots[0]
+            else:
+                result = shot_organ.capture(
+                    url, opts, db=db,
+                    takeover_factory=self._webshot_takeover_factory(
+                        message),
+                    profile_dir=self._webshot_profile_dir(book),
+                    on_step=on_step)
+                shots = [result]
         except shot_organ.WebshotUnavailable as exc:
             book.record(url=url, ok=False, error=str(exc),
                         scope=scope, requester=requester,
                         options=options_line)
             fail(f"couldn't shoot {url}")
+            note = self._deliver_block_evidence(message, exc)
             return (f"📸 couldn't shoot {url} — every rung "
-                    f"failed: {exc}")
-        book.record(url=url, ok=True, rung=result.rung,
-                    size=len(result.data), width=result.width,
-                    height=result.height, pdf=result.pdf,
-                    scope=scope, requester=requester,
-                    options=options_line + (
-                        f" · {result.presentation}"
-                        if result.presentation else ""))
+                    f"failed: {exc}{note}")
+        except Exception as exc:  # noqa: BLE001 - the flow's
+            # honest stop: a step that could not be followed
+            # (or a gate/wall on a later page).  The shots
+            # already taken ride the failure so the owner
+            # still gets what the flow reached.
+            from contextlib import suppress
+
+            from ...social.chat import webnav as nav_organ
+
+            if not isinstance(exc, nav_organ.NavError):
+                raise
+            shots = list(getattr(exc, "shots", []) or [])
+            book.record(url=url, ok=False, error=str(exc),
+                        scope=scope, requester=requester,
+                        options=options_line)
+            fail(f"couldn't shoot {url}")
+            for shot in shots:
+                with suppress(Exception):
+                    self._webshot_deliver(
+                        message, shot.data,
+                        caption=f"🌐 {shot.title or url}\n"
+                                f"{url} — step: {shot.step}",
+                        pdf=shot.pdf, audience="")
+            note = self._deliver_block_evidence(message, exc)
+            return (f"📸 the flow stopped at {exc}"
+                    + (f" — {len(shots)} stop(s) delivered"
+                       if shots else "")
+                    + note)
+        for shot in shots:
+            book.record(url=url, ok=True, rung=shot.rung,
+                        size=len(shot.data), width=shot.width,
+                        height=shot.height, pdf=shot.pdf,
+                        scope=scope, requester=requester,
+                        options=options_line + (
+                            f" · {shot.presentation}"
+                            if shot.presentation else "")
+                        + (f" · step {shot.step}"
+                           if shot.step else ""))
         # §19's media mark still RESOLVES from the one
         # presentation home (the destination group's settings
         # in a group, the house defaults + the owner's mark in
@@ -5906,22 +5985,32 @@ class RuntimeGroupMixin:
                         options=f"brand pill · send seam · "
                                 f"{mark.mode}")
         title = result.title or url
-        caption = f"🌐 {title}\n{url}"
-        if result.pdf and mark.text:
-            caption += f"\n{mark.text}"
-        try:
-            self._webshot_deliver(message, data,
-                                  caption=caption,
-                                  pdf=result.pdf,
-                                  audience=audience)
-        except Exception as exc:  # noqa: BLE001 - the shot is
-            return (f"📸 shot {url} ({len(data)} bytes via "
-                    f"{result.rung}) but the send failed: "
-                    f"{exc}")
+        for i, shot in enumerate(shots):
+            caption = f"🌐 {shot.title or url}\n{url}"
+            if len(shots) > 1:
+                caption += (f" — step {i + 1}/{len(shots)}: "
+                            f"{shot.step}")
+            if shot.pdf and mark.text:
+                caption += f"\n{mark.text}"
+            try:
+                self._webshot_deliver(
+                    message, shot.data, caption=caption,
+                    pdf=shot.pdf,
+                    audience=audience if not shot.pdf else "")
+            except Exception as exc:  # noqa: BLE001 - the
+                # shot is taken; the send is the failure
+                return (f"📸 shot {url} ({len(shot.data)} "
+                        f"bytes via {shot.rung}) but the send "
+                        f"failed: {exc}")
         reply = (f"📸 {title} — {result.width}×{result.height}"
                  if not result.pdf else
                  f"📄 {title} — print PDF of the page")
         reply += f" · {options_line} · via {result.rung}"
+        if len(shots) > 1:
+            reply += ("\n🧭 flow: "
+                      + " → ".join(
+                          f"{i + 1}. {s.step}" for i, s in
+                          enumerate(shots)))
         if result.gates_cleared:
             reply += ("\n🚪 cleared on the way in: "
                       + ", ".join(result.gates_cleared))
@@ -5969,9 +6058,12 @@ class RuntimeGroupMixin:
         inline video.  The navigation pipeline clears the
         gates and works the bot checks FIRST — the recording
         opens on the real page and scrolls it, eased, for
-        the requested duration (5s floor, 60s ceiling, the
-        clamp reported).  In a group this is system output —
-        §33's claim gates it exactly like /webshot."""
+        the requested duration (5s floor, 60s ceiling — 300s
+        with ``long`` — the clamp reported).  ``frames``
+        takes stills at intervals across the duration plus
+        a contact sheet, instead of a video.  In a group
+        this is system output — §33's claim gates it
+        exactly like /webshot."""
         from contextlib import suppress
         from pathlib import Path
 
@@ -6015,7 +6107,9 @@ class RuntimeGroupMixin:
         options_line = (
             f"webrec · {opts.seconds:.0f}s · "
             f"{opts.device if opts.device_chosen else 'auto'}"
-            f" · {opts.scheme}")
+            f" · {opts.scheme}"
+            + (" · long" if opts.long else "")
+            + (" · frames" if opts.frames else ""))
         on_step, finish, fail = self._nav_progress(message,
                                                    "🎬 recording")
         out_dir = Path(book.root) / "webrec_out"
@@ -6031,7 +6125,64 @@ class RuntimeGroupMixin:
                         scope=scope, requester=requester,
                         options=options_line)
             fail(f"couldn't record {url}")
-            return f"🎬 couldn't record {url} — {exc}"
+            note = ""
+            evidence = getattr(exc, "evidence", None)
+            if evidence is not None:
+                note = (f"\n🚧 challenge evidence: "
+                        f"{getattr(evidence, 'wall', '') or 'gate'}"
+                        f" at {evidence.url or url}"
+                        + (f" — {evidence.title}"
+                           if evidence.title else ""))
+            return f"🎬 couldn't record {url} — {exc}{note}"
+        if opts.frames:
+            # A frame sequence: the contact sheet is the
+            # photo; the frames themselves are on disk
+            # beside it, in order.
+            size = 0
+            with suppress(OSError):
+                size = sum(p.stat().st_size
+                           for p in outcome.paths)
+            book.record(url=url, ok=True, rung="webrec-frames",
+                        size=size, scope=scope,
+                        requester=requester,
+                        options=options_line + (
+                            f" · {outcome.nav.presentation}"
+                            if outcome.nav
+                            and outcome.nav.presentation
+                            else ""))
+            title = (outcome.nav.title if outcome.nav else "") \
+                or url
+            caption = (f"🎬 {title}\n{url}\n"
+                       f"{len(outcome.paths)} frames over "
+                       f"{outcome.duration_s:.0f}s")
+            if outcome.contact_sheet is not None:
+                try:
+                    self._webshot_deliver(
+                        message, outcome.contact_sheet.read_bytes(),
+                        caption=caption, pdf=False, audience="")
+                except Exception as exc:  # noqa: BLE001
+                    return (f"🎬 recorded {len(outcome.paths)} "
+                            f"frames of {url} but the send "
+                            f"failed: {exc}")
+            reply = (f"🎬 {title} — {len(outcome.paths)} "
+                     f"frames over {outcome.duration_s:.0f}s "
+                     f"· {options_line}")
+            if outcome.contact_sheet is None:
+                reply += ("\n⚠️ contact sheet unavailable — "
+                          "the frames are on disk in order")
+            if opts.clamped:
+                ceiling = ("300s" if opts.long else "60s")
+                reply += (f"\n⏱ duration clamped to the "
+                          f"{'5s minimum' if opts.clamped == 'min' else ceiling + ' maximum'}")
+            if outcome.nav and outcome.nav.gates:
+                reply += ("\n🚪 cleared on the way in: "
+                          + ", ".join(
+                              g.kind for g in outcome.nav.gates))
+            if outcome.nav and outcome.nav.wall:
+                reply += (f"\n🧱 bot check passed via "
+                          f"{outcome.nav.wall}")
+            finish(f"🎬 {title}")
+            return reply
         size = 0
         with suppress(OSError):
             size = outcome.path.stat().st_size
@@ -6067,8 +6218,9 @@ class RuntimeGroupMixin:
         reply = (f"🎬 {title} — {outcome.duration_s:.0f}s "
                  f"{outcome.fmt} · {options_line}")
         if opts.clamped:
+            ceiling = ("300s" if opts.long else "60s")
             reply += (f"\n⏱ duration clamped to the "
-                      f"{'5s minimum' if opts.clamped == 'min' else '60s maximum'}")
+                      f"{'5s minimum' if opts.clamped == 'min' else ceiling + ' maximum'}")
         if outcome.nav and outcome.nav.gates:
             reply += ("\n🚪 cleared on the way in: "
                       + ", ".join(

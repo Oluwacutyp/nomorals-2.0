@@ -26,8 +26,10 @@ package — no new layering pairs.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
+import queue
 import re
 import subprocess
 import threading
@@ -43,6 +45,9 @@ from urllib.parse import urlsplit
 __all__ = [
     "DEFAULT_PRESENTATION",
     "PRESENTATIONS",
+    "BlockEvidence",
+    "FlowStep",
+    "FrameSequence",
     "GateAction",
     "GateBlocked",
     "GateCandidate",
@@ -55,14 +60,17 @@ __all__ = [
     "PageProbe",
     "RecordOutcome",
     "ScrollPlan",
+    "ScrolledCapture",
     "TakeoverAsk",
     "TakeoverBridge",
     "TakeoverHook",
     "format_takeover_message",
     "WallBlocked",
     "apply_cookies_to_live",
+    "capture_block_evidence",
     "classify_wall",
     "clear_cookies_from_live",
+    "contact_sheet_png",
     "context_kwargs",
     "detect_gates",
     "imported_cookies_path",
@@ -72,6 +80,7 @@ __all__ = [
     "presentation_ladder",
     "playwright_cookie_payload",
     "read_imported_cookie_records",
+    "record_frames",
     "record_page",
     "run_interstitial_pass",
     "run_wall_pass",
@@ -108,6 +117,10 @@ class GateBlocked(NavError):
                  gates: list[GateCandidate] | None = None):
         super().__init__(message)
         self.gates = list(gates or [])
+        #: Challenge-state evidence captured at the failure
+        #: site (screenshot + DOM excerpt), when the driver
+        #: could take it — None for scripted/probe failures.
+        self.evidence: BlockEvidence | None = None
 
 
 class WallBlocked(NavError):
@@ -119,6 +132,7 @@ class WallBlocked(NavError):
         super().__init__(message)
         self.wall = wall
         self.attempts = list(attempts or [])
+        self.evidence: BlockEvidence | None = None
 
 
 # ── interstitial gates: detection (pure) ──────────────────
@@ -130,15 +144,73 @@ class GateCandidate:
     it, and the hint the driver needs to click it."""
 
     kind: str                # cookie | consent | age | age_dob
-    label: str               # the control's visible text
+    label: str               # the control's visible text,
+                             # NORMALISED (classification)
     selector: str = ""       # css hint, when the page gives one
     host: str = ""
+    #: The control's ORIGINAL rendered text, kept apart
+    #: from the normalised classification label: the
+    #: clicker searches for THIS (a curly "I’m" is not the
+    #: ASCII "I'm" the classifier folded it to, and
+    #: searching the folded form finds nothing).
+    label_raw: str = ""
     #: The control sits in the layer that is actually
     #: BLOCKING the page (a modal / overlay / dialog),
     #: not in an inline banner or a footer — the pass
     #: works the blocking layer's control first, because
     #: a covered control cannot be clicked at all.
     blocking: bool = False
+
+
+#: Challenge-state evidence: what the page looked like
+#: when a gate or wall refused to clear — the screenshot
+#: and the DOM state at that moment, so a block is
+#: reported with proof instead of a bare sentence.  This
+#: is evidence OF the block, never a capture of the page.
+@dataclass
+class BlockEvidence:
+    """One refused page, as found."""
+
+    kind: str                # "gate" | "wall"
+    wall: str = ""           # wall type, or the gate kinds
+    url: str = ""
+    title: str = ""
+    #: PNG bytes of the challenge page as found; b"" when
+    #: the driver could not take one.
+    screenshot: bytes = b""
+    #: Bounded excerpt of the live DOM (first 8000 chars)
+    #: — the challenge text / gate markup as found.
+    html_excerpt: str = ""
+    attempts: list[str] = field(default_factory=list)
+    ts: float = 0.0
+
+
+def capture_block_evidence(
+        probe: Any, *, kind: str, wall: str = "",
+        attempts: list[str] | None = None) -> BlockEvidence:
+    """Best-effort evidence for a refusal: the probe's
+    screenshot (when it offers one) + a bounded DOM
+    excerpt + the attempts so far.  Never raises — a
+    failed evidence grab is an empty screenshot, not a
+    second failure."""
+    shot = b""
+    grab = getattr(probe, "screenshot_png", None)
+    if callable(grab):
+        with suppress(Exception):
+            shot = bytes(grab() or b"")
+    html = ""
+    with suppress(Exception):
+        html = str(probe.html() or "")
+    title = ""
+    with suppress(Exception):
+        title = str(probe.title() or "")
+    url = ""
+    with suppress(Exception):
+        url = str(probe.url() or "")
+    return BlockEvidence(
+        kind=kind, wall=wall, url=url, title=title,
+        screenshot=shot, html_excerpt=html[:8000],
+        attempts=list(attempts or []), ts=time.time())
 
 
 # Age-confirmation wording (matched case-insensitively).
@@ -226,12 +298,13 @@ def _is_layer(a: dict[str, str]) -> bool:
 
 
 class _ClickScanner(HTMLParser):
-    """Collects clickable controls (buttons, links, inputs)
-    with their text, classes and ids — and whether each
-    sits inside the blocking layer (see :func:`_is_layer`),
-    so the pass can aim at the control that actually
-    covers the page instead of the first gate-shaped
-    button in DOM order."""
+    """Collects clickable controls (buttons, links, inputs,
+    and ARIA role="button" elements) with their text,
+    classes and ids — and whether each sits inside the
+    blocking layer (see :func:`_is_layer`), so the pass
+    can aim at the control that actually covers the page
+    instead of the first gate-shaped button in DOM
+    order."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -246,10 +319,15 @@ class _ClickScanner(HTMLParser):
                         ) -> None:
         a = {k: (v or "") for k, v in attrs}
         layer = _is_layer(a)
+        # An ARIA button is a button: custom consent/age
+        # controls are often a div/span with role="button",
+        # and a scanner that only sees <button> never even
+        # offers them to the pass.
         if tag in ("button", "a") or (
                 tag == "input"
                 and a.get("type", "").lower()
-                in ("button", "submit", "")):
+                in ("button", "submit", "")) or (
+                (a.get("role") or "").lower() == "button"):
             self._open = {
                 "tag": tag,
                 "id": a.get("id", ""),
@@ -341,16 +419,18 @@ def detect_gates(html: str, url: str = "") -> list[GateCandidate]:
             s = s.replace(fancy, plain)
         return " ".join(s.split())
 
-    labels = [(c, norm(c["text"] or c["value"]))
+    labels = [(c, norm(c["text"] or c["value"]),
+               " ".join((c["text"] or c["value"]).split()))
               for c in controls]
 
     by_kind: dict[str, GateCandidate] = {}
 
     def add(kind: str, control: dict[str, str],
-            label: str) -> None:
+            label: str, label_raw: str = "") -> None:
         cand = GateCandidate(
             kind=kind, label=label,
             selector=_selector_for(control), host=host,
+            label_raw=label_raw or label,
             blocking=bool(control.get("blocking")))
         old = by_kind.get(kind)
         # One candidate per kind; the blocking layer's
@@ -364,13 +444,13 @@ def detect_gates(html: str, url: str = "") -> list[GateCandidate]:
     # ── age gates ──
     age_context = any(m in low for m in _AGE_MARKERS)
     site_labels = SITE_AGE_LABELS.get(host, ())
-    for control, label in labels:
+    for control, label, raw in labels:
         if not label:
             continue
         if label in _AGE_LABELS or label in site_labels or \
                 any(a in label for a in _AGE_LABELS) or (
                 age_context and label in _AGE_BARE_LABELS):
-            add("age", control, label)
+            add("age", control, label, raw)
     if "age" not in by_kind and age_context and \
             scanner.forms_with_dob:
         # A date-of-birth form is an age gate Devon will not
@@ -382,17 +462,17 @@ def detect_gates(html: str, url: str = "") -> list[GateCandidate]:
     # ── consent walls ──
     consent_context = any(m in low for m in _CONSENT_MARKERS)
     if consent_context:
-        for control, label in labels:
+        for control, label, raw in labels:
             if label in _CONSENT_LABELS or \
                     label.startswith("accept"):
-                add("consent", control, label)
+                add("consent", control, label, raw)
 
     # ── cookie banners ──
     cookie_context = any(m in low for m in _COOKIE_MARKERS)
     if cookie_context and "consent" not in by_kind:
-        for control, label in labels:
+        for control, label, raw in labels:
             if label in _COOKIE_LABELS:
-                add("cookie", control, label)
+                add("cookie", control, label, raw)
 
     order = {"age": 0, "age_dob": 0, "consent": 1, "cookie": 2}
     found = sorted(
@@ -464,7 +544,15 @@ def classify_wall(signal: Any, html: str, title: str) -> str:
 
 class PageProbe(Protocol):
     """What the passes need from a live page.  Playwright
-    implements it in production; tests script it."""
+    implements it in production; tests script it.
+
+    Optional seams a probe MAY offer (consulted via
+    ``getattr``, never required): ``gate_visible(gate)``
+    — live visibility of a gate's control (a hidden
+    dialog is not a standing gate); ``screenshot_png()``
+    — the page as found, for block evidence;
+    ``last_click_error`` — the last click failure's
+    reason, for the honest message."""
 
     def url(self) -> str: ...
     def title(self) -> str: ...
@@ -505,6 +593,32 @@ def _emit(on_step: StepHook | None, text: str) -> None:
             on_step(text)
 
 
+def _gate_is_gone(probe: PageProbe, gate: GateCandidate,
+                    *, budget_s: float = 3.0,
+                    step_s: float = 0.4) -> bool:
+    """Bounded outcome wait: is this gate gone yet?  A
+    gate is gone when the probe can SEE it is gone (a
+    live visibility check — a hidden dialog is gone even
+    though its HTML is still in the DOM) or, for probes
+    without a visibility seam, when a fresh detection
+    finds no same-kind candidate.  Polls for up to
+    ``budget_s`` instead of one fixed 600 ms glance, so
+    a slow CMP transition is not misread as a refusal."""
+    visible = getattr(probe, "gate_visible", None)
+    deadline = time.monotonic() + max(0.1, budget_s)
+    while True:
+        if callable(visible):
+            with suppress(Exception):
+                if not visible(gate):
+                    return True
+        elif not any(g.kind == gate.kind for g in
+                     detect_gates(probe.html(), probe.url())):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        probe.wait(step_s)
+
+
 def run_interstitial_pass(
         probe: PageProbe, *,
         memory: GateMemory | None = None,
@@ -519,7 +633,13 @@ def run_interstitial_pass(
     a covered, unrelated button.  Raises GateBlocked
     honestly when no candidate clears — including
     date-of-birth forms, which Devon does not invent an
-    answer for."""
+    answer for.
+
+    Live evidence outranks remembered consent: a gate
+    that is standing NOW is worked NOW, whatever another
+    context cleared before (memory is journal only — the
+    pass still records clears into it, but never skips a
+    live gate on its say-so)."""
     actions: list[GateAction] = []
     failed: dict[tuple[str, str], str] = {}
     for _round in range(max(1, rounds)):
@@ -527,6 +647,7 @@ def run_interstitial_pass(
         if not gates:
             return actions
         progressed = False
+        hidden_only = True
         for gate in gates:
             if gate.kind == "age_dob":
                 raise GateBlocked(
@@ -534,37 +655,58 @@ def run_interstitial_pass(
                     "verify age — Devon does not invent one, "
                     "so the gate stays up",
                     gates=gates)
-            if memory is not None and memory.knows(
-                    gate.host or _host_of(probe.url()),
-                    gate.kind):
-                continue
             key = (gate.kind, gate.label)
             if key in failed:
+                hidden_only = False
                 continue
+            visible = getattr(probe, "gate_visible", None)
+            if callable(visible):
+                with suppress(Exception):
+                    if not visible(gate):
+                        # Detected in the HTML but not
+                        # rendered: a hidden template, not a
+                        # standing gate.  No click, no action,
+                        # no failure — the pass moves on.
+                        continue
+            hidden_only = False
             _emit(on_step, f"clearing a {gate.kind} gate")
             if not probe.click_gate(gate):
+                detail = str(getattr(
+                    probe, "last_click_error", "") or "")
                 failed[key] = (
                     f"the {gate.kind} gate "
-                    f"({gate.label!r}) would not click")
+                    f"({gate.label!r}) would not click"
+                    + (f" ({detail})" if detail else ""))
                 continue
-            probe.wait(0.6)
-            if any(g.kind == gate.kind for g in
-                   detect_gates(probe.html(), probe.url())):
-                failed[key] = (
-                    f"the {gate.kind} gate "
-                    f"({gate.label!r}) was clicked but "
-                    "stayed up")
+            if _gate_is_gone(probe, gate):
+                action = GateAction(
+                    kind=gate.kind, label=gate.label,
+                    host=gate.host or _host_of(probe.url()))
+                actions.append(action)
+                if memory is not None:
+                    memory.remember(action)
+                progressed = True
                 continue
-            action = GateAction(
-                kind=gate.kind, label=gate.label,
-                host=gate.host or _host_of(probe.url()))
-            actions.append(action)
-            if memory is not None:
-                memory.remember(action)
-            progressed = True
+            failed[key] = (
+                f"the {gate.kind} gate "
+                f"({gate.label!r}) was clicked but "
+                "stayed up")
+        if hidden_only:
+            # Every candidate this round was a hidden
+            # template, not a standing gate.
+            return actions
         if not progressed:
             break
     remaining = detect_gates(probe.html(), probe.url())
+    visible = getattr(probe, "gate_visible", None)
+    if callable(visible) and remaining:
+        # A hidden template is not a standing gate.
+        kept: list[GateCandidate] = []
+        for gate in remaining:
+            with suppress(Exception):
+                if visible(gate):
+                    kept.append(gate)
+        remaining = kept
     if remaining:
         kinds = ", ".join(g.kind for g in remaining)
         message = (
@@ -842,6 +984,313 @@ def scroll_plan(duration_s: float, page_height: float,
                       cycles=max(1, cycles))
 
 
+# ── thread affinity: the session owner ───────────────────
+#
+# Sync Playwright sessions are THREAD-AFFINE: the event
+# loop and dispatcher fiber live in the thread that
+# started them, so a session created in a ladder-race
+# worker thread is DEAD the moment the caller thread
+# touches it (TargetClosedError on the first screenshot
+# — proven on pristine at 2a66db93, where the repo's own
+# real-browser suite could never have passed on a host
+# with Playwright).  The race stays — the owner directive
+# and its tests forbid the serial walk — but a winning
+# session is handed over with its owner thread kept
+# alive as its executor: every later driver call is
+# marshalled back to that thread, and the caller drives
+# the session through proxies that do exactly that.
+# A session driven from its owner thread runs direct
+# (no queue hop); a session with no owner (direct
+# construction) is untouched by any of this.
+
+
+class _SessionOwner:
+    """The executor for one live session: the thread that
+    created it serves callables posted by other threads
+    until told to stop."""
+
+    def __init__(self) -> None:
+        self.thread = threading.current_thread()
+        self._queue: queue.Queue = queue.Queue()
+
+    def call(self, fn: Callable[[], Any], *,
+             timeout: float | None = None) -> Any:
+        """Run ``fn`` on the owner thread and return its
+        value (or raise its error).  Direct when already
+        on the owner thread — no queue hop, no deadlock."""
+        if threading.current_thread() is self.thread:
+            return fn()
+        done = threading.Event()
+        box: dict[str, Any] = {}
+
+        def run() -> None:
+            try:
+                box["value"] = fn()
+            except BaseException as exc:  # noqa: BLE001
+                box["error"] = exc
+            finally:
+                done.set()
+
+        self._queue.put(run)
+        if not done.wait(timeout):
+            raise TimeoutError(
+                "the session owner thread did not answer")
+        if "error" in box:
+            raise box["error"]
+        return box.get("value")
+
+    def serve(self) -> None:
+        """Serve posted calls until :meth:`stop`.  Runs on
+        the owner thread — for a race winner, that is the
+        worker thread, which stays alive as the session's
+        executor after the race resolves."""
+        while True:
+            job = self._queue.get()
+            if job is None:
+                return
+            job()
+
+    def stop(self) -> None:
+        self._queue.put(None)
+
+
+def _driven(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Marshal a NavSession driver method to the session's
+    owner thread (direct when already there, or when the
+    session has no owner)."""
+
+    @functools.wraps(fn)
+    def wrapper(self: Any, *args: Any,
+                **kwargs: Any) -> Any:
+        owner = getattr(self, "_owner", None)
+        if owner is None:
+            return fn(self, *args, **kwargs)
+        return owner.call(
+            lambda: fn(self, *args, **kwargs))
+
+    return wrapper
+
+
+class _ThreadLocator:
+    """A Playwright locator driven through the session
+    owner — the locator the caller holds was built in the
+    owner thread, and every call on it runs there."""
+
+    def __init__(self, locator: Any, owner: _SessionOwner
+                 ) -> None:
+        self._loc = locator
+        self._owner = owner
+
+    @property
+    def first(self) -> _ThreadLocator:
+        return _ThreadLocator(
+            self._owner.call(lambda: self._loc.first),
+            self._owner)
+
+    def count(self) -> int:
+        return int(self._owner.call(
+            lambda: self._loc.count()))
+
+    def is_visible(self) -> bool:
+        return bool(self._owner.call(
+            lambda: self._loc.is_visible()))
+
+    def click(self, timeout: float | None = None) -> None:
+        self._owner.call(
+            lambda: self._loc.click(timeout=timeout))
+
+    def screenshot(self, timeout: float | None = None
+                   ) -> bytes:
+        return bytes(self._owner.call(
+            lambda: self._loc.screenshot(timeout=timeout))
+            or b"")
+
+    def inner_text(self) -> str:
+        return str(self._owner.call(
+            lambda: self._loc.inner_text()) or "")
+
+
+class _ThreadMouse:
+    """A Playwright mouse driven through the owner."""
+
+    def __init__(self, mouse: Any, owner: _SessionOwner
+                 ) -> None:
+        self._mouse = mouse
+        self._owner = owner
+
+    def click(self, x: float, y: float) -> None:
+        self._owner.call(
+            lambda: self._mouse.click(x, y))
+
+    def wheel(self, dx: float, dy: float) -> None:
+        self._owner.call(
+            lambda: self._mouse.wheel(dx, dy))
+
+
+class _ThreadKeyboard:
+    """A Playwright keyboard driven through the owner."""
+
+    def __init__(self, keyboard: Any,
+                 owner: _SessionOwner) -> None:
+        self._keyboard = keyboard
+        self._owner = owner
+
+    def type(self, text: str) -> None:
+        self._owner.call(
+            lambda: self._keyboard.type(text))
+
+    def press(self, key: str) -> None:
+        self._owner.call(
+            lambda: self._keyboard.press(key))
+
+
+class _ThreadVideo:
+    """A Playwright video handle driven through the owner."""
+
+    def __init__(self, video: Any, owner: _SessionOwner
+                 ) -> None:
+        self._video = video
+        self._owner = owner
+
+    def path(self) -> str:
+        return str(self._owner.call(
+            lambda: self._video.path()) or "")
+
+
+class _ThreadFrame:
+    """A Playwright frame driven through the owner.
+    Equality is the underlying frame's identity, so a
+    proxied frame still compares equal to the proxied
+    main frame (the probe's skip-main-frame check)."""
+
+    def __init__(self, frame: Any, owner: _SessionOwner
+                 ) -> None:
+        self._frame = frame
+        self._owner = owner
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, _ThreadFrame):
+            return self._frame is other._frame
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash(id(self._frame))
+
+    @property
+    def url(self) -> str:
+        return str(self._owner.call(
+            lambda: self._frame.url) or "")
+
+    def locator(self, selector: str) -> _ThreadLocator:
+        return _ThreadLocator(
+            self._owner.call(
+                lambda: self._frame.locator(selector)),
+            self._owner)
+
+
+class _ThreadPage:
+    """A Playwright page driven through the session owner:
+    every call the organ makes on a live page — goto,
+    evaluate, screenshots, locators, frames, mouse,
+    keyboard, video — runs on the owner thread.  Plain
+    values pass through; Playwright objects come back
+    wrapped, so a locator built here stays drivable too."""
+
+    def __init__(self, page: Any, owner: _SessionOwner
+                 ) -> None:
+        self._page = page
+        self._owner = owner
+
+    @property
+    def url(self) -> str:
+        return str(self._owner.call(
+            lambda: self._page.url) or "")
+
+    def title(self) -> str:
+        return str(self._owner.call(
+            lambda: self._page.title()) or "")
+
+    def content(self) -> str:
+        return str(self._owner.call(
+            lambda: self._page.content()) or "")
+
+    def screenshot(self, **kwargs: Any) -> bytes:
+        return bytes(self._owner.call(
+            lambda: self._page.screenshot(**kwargs)) or b"")
+
+    def pdf(self, **kwargs: Any) -> bytes:
+        return bytes(self._owner.call(
+            lambda: self._page.pdf(**kwargs)) or b"")
+
+    def goto(self, url: str, **kwargs: Any) -> None:
+        self._owner.call(
+            lambda: self._page.goto(url, **kwargs))
+
+    def reload(self, **kwargs: Any) -> None:
+        self._owner.call(
+            lambda: self._page.reload(**kwargs))
+
+    def wait_for_timeout(self, ms: float) -> None:
+        self._owner.call(
+            lambda: self._page.wait_for_timeout(ms))
+
+    def wait_for_load_state(self, state: str, **kwargs: Any
+                            ) -> None:
+        self._owner.call(
+            lambda: self._page.wait_for_load_state(
+                state, **kwargs))
+
+    def evaluate(self, js: str) -> Any:
+        return self._owner.call(
+            lambda: self._page.evaluate(js))
+
+    def locator(self, selector: str) -> _ThreadLocator:
+        return _ThreadLocator(
+            self._owner.call(
+                lambda: self._page.locator(selector)),
+            self._owner)
+
+    def get_by_role(self, role: str, **kwargs: Any
+                    ) -> _ThreadLocator:
+        return _ThreadLocator(
+            self._owner.call(
+                lambda: self._page.get_by_role(
+                    role, **kwargs)),
+            self._owner)
+
+    @property
+    def frames(self) -> list[_ThreadFrame]:
+        raw = self._owner.call(
+            lambda: list(self._page.frames))
+        return [_ThreadFrame(f, self._owner) for f in raw]
+
+    @property
+    def main_frame(self) -> _ThreadFrame:
+        return _ThreadFrame(
+            self._owner.call(
+                lambda: self._page.main_frame),
+            self._owner)
+
+    @property
+    def mouse(self) -> _ThreadMouse:
+        return _ThreadMouse(
+            self._owner.call(lambda: self._page.mouse),
+            self._owner)
+
+    @property
+    def keyboard(self) -> _ThreadKeyboard:
+        return _ThreadKeyboard(
+            self._owner.call(lambda: self._page.keyboard),
+            self._owner)
+
+    @property
+    def video(self) -> Any:
+        raw = self._owner.call(lambda: self._page.video)
+        if raw is None:
+            return None
+        return _ThreadVideo(raw, self._owner)
+
+
 # ── the Playwright probe ──────────────────────────────────
 
 _GATE_FRAME_HINTS = ("onetrust", "qc-cmp", "sp_message",
@@ -863,6 +1312,10 @@ class _PlaywrightProbe:
 
     def __init__(self, page: Any) -> None:
         self._page = page
+        #: The last click failure's reason, for the pass's
+        #: honest message — a swallowed exception is never
+        #: the answer; the driver keeps its reason here.
+        self.last_click_error: str = ""
 
     def url(self) -> str:
         return str(self._page.url or "")
@@ -877,6 +1330,12 @@ class _PlaywrightProbe:
             return str(self._page.content() or "")
         return ""
 
+    def screenshot_png(self) -> bytes:
+        """The page as found, for block evidence."""
+        with suppress(Exception):
+            return bytes(self._page.screenshot() or b"")
+        return b""
+
     def reload(self) -> None:
         with suppress(Exception):
             self._page.reload(wait_until="load",
@@ -886,17 +1345,13 @@ class _PlaywrightProbe:
         self._page.wait_for_timeout(
             int(max(0.0, seconds) * 1000))
 
-    def click_gate(self, gate: GateCandidate) -> bool:
+    def _find_visible(self, gate: GateCandidate) -> Any:
+        """The gate's control, resolved by IDENTITY
+        (accessible role/name, then literal text) — never
+        by a class-only hint alone.  Returns a visible
+        locator or None."""
         page = self._page
-        label = gate.label.strip()
-        # 1. The selector hint the detector collected.
-        if gate.selector:
-            with suppress(Exception):
-                loc = page.locator(gate.selector).first
-                if loc.count() and loc.is_visible():
-                    loc.click(timeout=3_000)
-                    return True
-        # 2. Text/role lookup on the main frame.
+        label = (gate.label_raw or gate.label or "").strip()
         if label:
             for finder in (
                     lambda: page.get_by_role(
@@ -906,9 +1361,83 @@ class _PlaywrightProbe:
                 with suppress(Exception):
                     loc = finder()
                     if loc.count() and loc.is_visible():
-                        loc.click(timeout=3_000)
+                        return loc
+        return None
+
+    def gate_visible(self, gate: GateCandidate) -> bool:
+        """True when the gate's control is actually
+        rendered and visible — a dialog that stays in the
+        DOM after being hidden is NOT visible, and is not
+        a standing gate."""
+        if self._find_visible(gate) is not None:
+            return True
+        if gate.selector:
+            with suppress(Exception):
+                loc = self._page.locator(
+                    gate.selector).first
+                if loc.count() and loc.is_visible():
+                    return True
+        for frame in self._page.frames:
+            if frame == self._page.main_frame:
+                continue
+            label = (gate.label_raw or gate.label
+                     or "").strip()
+            if not label:
+                continue
+            with suppress(Exception):
+                loc = frame.locator(
+                    f"text={label}").first
+                if loc.count() and loc.is_visible():
+                    return True
+        return False
+
+    def click_gate(self, gate: GateCandidate) -> bool:
+        page = self._page
+        self.last_click_error = ""
+        # 1. Identity first: the control whose accessible
+        # name IS the detected label (original text, curly
+        # apostrophes and all).
+        loc = self._find_visible(gate)
+        if loc is not None:
+            try:
+                loc.click(timeout=3_000)
+                return True
+            except Exception as exc:  # noqa: BLE001 - the
+                # reason is kept, not swallowed
+                self.last_click_error = (
+                    f"{type(exc).__name__}: {exc}"[:200])
+                return False
+        # 2. The selector hint — only when the element it
+        # finds is the detected control: its visible text
+        # must match the label.  A class-only hint plus
+        # `.first` once clicked the preferences button
+        # instead of the accept button; it never does
+        # that again.
+        if gate.selector:
+            try:
+                cand = page.locator(gate.selector).first
+                if cand.count() and cand.is_visible():
+                    text = ""
+                    with suppress(Exception):
+                        text = str(
+                            cand.inner_text() or "")
+                    norm = " ".join(text.lower().split())
+                    want = " ".join(
+                        (gate.label_raw or gate.label
+                         or "").lower().split())
+                    if want and (want in norm
+                                 or norm in want):
+                        cand.click(timeout=3_000)
                         return True
+                    self.last_click_error = (
+                        "selector hint matched a different "
+                        f"control ({text[:60]!r})")
+            except Exception as exc:  # noqa: BLE001
+                if not self.last_click_error:
+                    self.last_click_error = (
+                        f"{type(exc).__name__}: {exc}"[:200])
         # 3. Frames — consent managers live in iframes.
+        label = (gate.label_raw or gate.label or "").strip()
         for frame in page.frames:
             if frame == page.main_frame:
                 continue
@@ -919,6 +1448,9 @@ class _PlaywrightProbe:
                         loc.is_visible():
                     loc.click(timeout=3_000)
                     return True
+        if not self.last_click_error:
+            self.last_click_error = (
+                "no visible control matched the gate")
         return False
 
     def click_checkbox(self) -> bool:
@@ -1404,6 +1936,14 @@ class NavSession:
         self._browser: Any = None
         self._context: Any = None
         self._page: Any = None
+        #: The session owner (see _SessionOwner): set when
+        #: a ladder race hands this session to another
+        #: thread — every later driver call marshals back
+        #: to the thread that created the session.  None
+        #: for directly-constructed sessions, which run
+        #: unproxied in the caller's thread.
+        self._owner: _SessionOwner | None = None
+        self._page_proxy: Any = None
         self._lock: threading.Lock | None = None
         self._started_at: float | None = None
         self._slot_held = False
@@ -1594,6 +2134,31 @@ class NavSession:
             if cookies:
                 estate.upsert(cookies, source=SOURCE_WEBNAV)
 
+    def _start_owner_loop(self) -> None:
+        """Hand this session to its creating thread as its
+        owner executor: every later driver call marshals
+        back there (see :class:`_SessionOwner`).  Called
+        in the creating thread, before the session is
+        returned to another thread — for a ladder-race
+        winner, that is the race worker thread, which then
+        serves the session until it closes.  No-op when
+        the session has no live page yet, or already has
+        an owner."""
+        if self._page is None or self._owner is not None:
+            return
+        owner = _SessionOwner()
+        self._owner = owner
+        self._page_proxy = _ThreadPage(self._page, owner)
+        # The probe drives the page through the proxy from
+        # now on, so gate/wall passes called from the
+        # caller thread still run on the owner thread.
+        self.probe = _PlaywrightProbe(self._page_proxy)
+
+    def _close_owned(self) -> None:
+        """Harvest + teardown, on the owner thread."""
+        self._harvest_cookies()
+        self._teardown()
+
     def _teardown(self) -> None:
         if self._profile_dir is not None \
                 and self._context is not None:
@@ -1609,6 +2174,12 @@ class NavSession:
             with suppress(Exception):
                 self._pw.stop()
         self._context = self._browser = self._pw = None
+        # The session is closed: drop the owner so a later
+        # touch fails fast on the dead page instead of
+        # queueing forever on an executor that will never
+        # answer again.
+        self._owner = None
+        self._page_proxy = None
         if self._lock is not None:
             with suppress(RuntimeError):
                 self._lock.release()
@@ -1616,13 +2187,27 @@ class NavSession:
         self._release_slot()
 
     def __exit__(self, *exc: Any) -> None:
-        self._harvest_cookies()
-        self._teardown()
+        owner = getattr(self, "_owner", None)
+        if owner is not None and \
+                threading.current_thread() is not owner.thread:
+            # Close on the owner thread, bounded — a dead
+            # owner must not hang the caller — then stop
+            # the executor so its worker thread can end.
+            with suppress(Exception):
+                owner.call(self._close_owned, timeout=30.0)
+            owner.stop()
+            return
+        self._close_owned()
 
     @property
     def page(self) -> Any:
         if self._page is None:
             raise NavError("the session is not open")
+        if self._owner is not None \
+                and self._page_proxy is not None:
+            # A race-won session: the caller drives the
+            # page through its owner thread.
+            return self._page_proxy
         return self._page
 
     @property
@@ -1637,6 +2222,7 @@ class NavSession:
         return self._started_at
 
     # -- the pipeline --
+    @_driven
     def settle(self, *, budget_s: float = SETTLE_BUDGET_S
                ) -> None:
         """Load is the contract; then wait for the render to
@@ -1661,6 +2247,7 @@ class NavSession:
             last = cur
             page.wait_for_timeout(350)
 
+    @_driven
     def open(self, url: str, *,
              takeover_hook: TakeoverHook | None = None,
              takeover_bridge: "TakeoverBridge | None" = None,
@@ -1718,6 +2305,7 @@ class NavSession:
             gates=gates, wall=wall, steps=steps)
 
     # -- capture + record primitives --
+    @_driven
     def capture_still(self, *, full_page: bool = False,
                       clip: dict[str, Any] | None = None,
                       pdf: bool = False) -> bytes:
@@ -1731,6 +2319,7 @@ class NavSession:
             kwargs["clip"] = clip
         return bytes(page.screenshot(**kwargs))
 
+    @_driven
     def run_scroll(self, duration_s: float, *,
                    clock: Callable[[], float] = time.monotonic
                    ) -> ScrollPlan:
@@ -1760,6 +2349,182 @@ class NavSession:
             page.wait_for_timeout(int(tail * 1000))
         return plan
 
+    @_driven
+    def capture_scrolled(self, *, settle_ms: int = 250
+                         ) -> ScrolledCapture:
+        """Scroll through the whole page, viewport by
+        viewport, and composite the segments into one tall
+        PNG — the scrolling capture.  Each step is a REAL
+        scroll (``window.scrollTo`` + a settle), so
+        lazy-loaded content that only renders on scroll
+        is in the frame when its segment is shot; a
+        plain ``full_page`` screenshot never scrolls the
+        page itself.  Segments are pasted at their scroll
+        offsets and the last one is cropped to the page
+        height, so the composite is exactly the page,
+        top to bottom, with nothing doubled and nothing
+        cut.  ``reached_bottom`` is False when the page
+        grew while scrolling (infinite scroll) and the
+        capture stops at the honest height instead."""
+        page = self.page
+        metrics = page.evaluate(
+            "() => [document.documentElement.scrollHeight,"
+            " window.innerHeight]")
+        page_height = int(float(metrics[0]))
+        viewport = max(1, int(float(metrics[1])))
+        if page_height <= viewport:
+            data = bytes(page.screenshot())
+            return ScrolledCapture(
+                data=data, segments=1,
+                page_height=page_height,
+                viewport_height=viewport, reached_bottom=True)
+        step = viewport
+        segments: list[tuple[int, bytes]] = []
+        y = 0
+        guard = 0
+        while y < page_height and guard < 200:
+            guard += 1
+            with suppress(Exception):
+                page.evaluate(f"window.scrollTo(0, {y})")
+            if settle_ms > 0:
+                page.wait_for_timeout(int(settle_ms))
+            # The browser clamps the scroll to
+            # scrollHeight − viewport: the segment's TRUE
+            # offset is the scroll position the page
+            # actually reached, not the one requested —
+            # pasting at the requested offset would
+            # duplicate the rows the clamp re-showed.
+            actual_y = y
+            with suppress(Exception):
+                actual_y = int(float(page.evaluate(
+                    "() => window.scrollY")))
+            segments.append(
+                (actual_y, bytes(page.screenshot())))
+            # The page may grow under us (infinite scroll):
+            # re-read the height each step and stop at the
+            # honest end instead of chasing it forever.
+            with suppress(Exception):
+                grown = page.evaluate(
+                    "() => document.documentElement"
+                    ".scrollHeight")
+                page_height = max(page_height,
+                                  int(float(grown)))
+            y += step
+        reached = bool(segments) and \
+            segments[-1][0] + viewport >= page_height
+        # Screenshots are device pixels (viewport × scale)
+        # while scroll offsets are CSS pixels: the scale
+        # comes from the first frame, and every offset is
+        # multiplied by it before pasting.
+        import io
+
+        from PIL import Image
+
+        frames: list[tuple[int, Any]] = []
+        for offset, shot in segments:
+            frames.append((offset, Image.open(
+                io.BytesIO(shot)).convert("RGB")))
+        first = frames[0][1]
+        scale = float(first.height) / float(viewport) \
+            if viewport else 1.0
+        canvas = Image.new(
+            "RGB", (int(first.width),
+                    max(1, int(page_height * scale))),
+            "white")
+        for offset, frame in frames:
+            top = int(offset * scale)
+            bottom = min(top + int(frame.height),
+                         int(canvas.height))
+            if bottom > top:
+                canvas.paste(
+                    frame.crop((0, 0, frame.width,
+                                bottom - top)),
+                    (0, top))
+        for _, frame in frames:
+            frame.close()
+        buf = io.BytesIO()
+        canvas.save(buf, "PNG")
+        with suppress(Exception):
+            page.evaluate("window.scrollTo(0, 0)")
+        return ScrolledCapture(
+            data=buf.getvalue(), segments=len(segments),
+            page_height=page_height,
+            viewport_height=viewport,
+            reached_bottom=reached)
+
+    @_driven
+    def follow_step(self, step: FlowStep, *,
+                    memory: GateMemory | None = None,
+                    on_step: StepHook | None = None,
+                    takeover_hook: TakeoverHook | None = None,
+                    takeover_bridge: TakeoverBridge | None = None
+                    ) -> NavOutcome:
+        """One step of a multi-step capture flow, on the
+        live page: ``click`` lands on the link/button
+        named by the step (accessible name first, then
+        literal text — a missing target is an honest
+        ``NavError``, never a silent stay); ``goto`` opens
+        the step's URL.  Either way the page settles and
+        the interstitial + bot-check passes run again —
+        a new page in the flow can gate behind its own
+        cookie wall or age confirm, and the capture never
+        shoots the gate."""
+        assert self.probe is not None
+        probe = self.probe
+        page = self.page
+        if step.kind == "goto":
+            try:
+                page.goto(step.target, wait_until="load",
+                          timeout=45_000)
+            except Exception as exc:  # noqa: BLE001
+                raise NavError(
+                    f"the flow step would not open "
+                    f"{step.target}: {exc}") from exc
+        elif step.kind == "click":
+            target = (step.target or "").strip()
+            clicked = False
+            for finder in (
+                    lambda: page.get_by_role(
+                        "link", name=target, exact=False),
+                    lambda: page.get_by_role(
+                        "button", name=target, exact=False),
+                    lambda: page.locator(
+                        f"text={target}").first):
+                with suppress(Exception):
+                    loc = finder()
+                    if loc.count() and loc.is_visible():
+                        loc.click(timeout=5_000)
+                        clicked = True
+                        break
+            if not clicked:
+                raise NavError(
+                    f"no link or button named {target!r} "
+                    "on the page — the flow stops here")
+        else:
+            raise NavError(
+                f"unknown flow step kind {step.kind!r}")
+        self.settle()
+        gates = run_interstitial_pass(
+            probe, memory=memory, on_step=on_step)
+        wall = run_wall_pass(
+            probe, url=probe.url(),
+            takeover_hook=(takeover_bridge.hook
+                           if takeover_bridge is not None
+                           else takeover_hook),
+            takeover_done=(takeover_bridge.done
+                           if takeover_bridge is not None
+                           else None),
+            on_step=on_step)
+        if wall:
+            self.settle()
+            more = run_interstitial_pass(
+                probe, memory=memory, on_step=on_step)
+            gates = gates + more
+        return NavOutcome(
+            final_url=probe.url(), title=probe.title(),
+            gates=gates, wall=wall, steps=[step.target])
+
+    @_driven
     def video_path(self) -> Path | None:
         """The recorded file's path.  Readable while the
         driver is alive; the file itself is finalized when
@@ -1773,6 +2538,7 @@ class NavSession:
         except Exception:  # noqa: BLE001
             return None
 
+    @_driven
     def stop_recording(self) -> Path | None:
         """Finalize the recording and return its file.
 
@@ -2049,6 +2815,14 @@ def open_with_ladder(
     loses every rung reports every rung tried, never
     just the first failure.
 
+    Thread affinity (proven 2026-11-21): sync Playwright
+    sessions live in the thread that created them, so the
+    winning rung's worker thread stays alive as the
+    session's owner executor (``_start_owner_loop`` +
+    ``serve``) and the caller drives the session through
+    it — a session handed back without its owner is dead
+    on arrival (TargetClosedError on the first shot).
+
     The owner's takeover is attached ONLY to the last
     rung, and it is GATED: the hook fires only once
     every other rung has failed (see :class:`_LadderRace`),
@@ -2091,7 +2865,20 @@ def open_with_ladder(
             _record(idx, "err", exc)
             return
         if race.note_winner(idx):
+            # The winner's session was created on THIS
+            # thread, and sync Playwright is thread-affine:
+            # hand it an owner executor BEFORE recording
+            # it, so the caller thread can drive it, and
+            # serve it here until it closes.
+            start = getattr(
+                session, "_start_owner_loop", None)
+            if callable(start):
+                with suppress(Exception):
+                    start()
             _record(idx, "ok", (session, outcome))
+            owner = getattr(session, "_owner", None)
+            if owner is not None:
+                owner.serve()
         else:
             # Superseded: another rung cleared first —
             # this session closes immediately.
@@ -2181,17 +2968,23 @@ def open_with_ladder(
         # surfaces unwrapped.
         raise base_exc
     if isinstance(base_exc, WallBlocked):
-        raise WallBlocked(
+        wrapped_wall = WallBlocked(
             f"{base_exc} — fingerprints tried: "
             f"{names_csv}; none cleared",
             wall=base_exc.wall,
             attempts=[*base_exc.attempts,
                       *(f"fingerprint {t}" for t in names)])
+        # The re-wrap must not drop the challenge-state
+        # evidence the losing rung captured.
+        wrapped_wall.evidence = base_exc.evidence
+        raise wrapped_wall
     if isinstance(base_exc, GateBlocked):
-        raise GateBlocked(
+        wrapped_gate = GateBlocked(
             f"{base_exc} — fingerprints tried: "
             f"{names_csv}; none cleared",
             gates=base_exc.gates)
+        wrapped_gate.evidence = base_exc.evidence
+        raise wrapped_gate
     if base_exc is not None:
         raise NavError(
             f"no presentation could open the page — "
@@ -2206,8 +2999,8 @@ def navigate(url: str, *, device: dict[str, Any] | None = None,
              scheme: str = "light",
              profile_dir: Path | None = None,
              takeover_hook: TakeoverHook | None = None,
-             takeover_factory: "Callable[[NavSession], "
-             "TakeoverBridge | None] | None" = None,
+             takeover_factory: Callable[
+                 [NavSession], TakeoverBridge | None] | None = None,
              memory: GateMemory | None = None,
              on_step: StepHook | None = None,
              managed_budget_s: float = MANAGED_BUDGET_S,
@@ -2270,11 +3063,28 @@ def navigate(url: str, *, device: dict[str, Any] | None = None,
                 on_step=on_step,
                 managed_budget_s=managed_budget_s,
                 takeover_budget_s=takeover_budget_s)
-        except BaseException:  # noqa: BLE001 — cleanup, then re-raise
-            # Deliberate catch-all: a session that fails to open — on any
-            # interruption, including KeyboardInterrupt/SystemExit — must
-            # release its browser profile before the failure propagates,
-            # or the profile lock strands every later capture.
+        except BaseException as exc:  # noqa: BLE001 — cleanup,
+            # then re-raise.  Deliberate catch-all: a session
+            # that fails to open — on any interruption,
+            # including KeyboardInterrupt/SystemExit — must
+            # release its browser profile before the failure
+            # propagates, or the profile lock strands every
+            # later capture.  A gate/wall refusal first gets
+            # its challenge-state evidence captured from the
+            # LIVE probe — after the session closes there is
+            # no page left to photograph.
+            if isinstance(exc, (GateBlocked, WallBlocked)) \
+                    and exc.evidence is None \
+                    and session.probe is not None:
+                kind = "wall" if isinstance(
+                    exc, WallBlocked) else "gate"
+                attempts = list(getattr(exc, "attempts", [])
+                                or [g.kind for g in
+                                    getattr(exc, "gates", [])])
+                exc.evidence = capture_block_evidence(
+                    session.probe, kind=kind,
+                    wall=str(getattr(exc, "wall", "") or ""),
+                    attempts=attempts)
             session.__exit__()
             raise
         return session, outcome
@@ -2283,6 +3093,28 @@ def navigate(url: str, *, device: dict[str, Any] | None = None,
         url, presentations, open_one,
         takeover_hook=ladder_hook, on_step=on_step,
         race=race)
+
+
+@dataclass
+class ScrolledCapture:
+    """One stitched scrolling capture: the whole page as
+    one tall PNG, composited from real viewport segments."""
+
+    data: bytes
+    segments: int
+    page_height: int
+    viewport_height: int
+    reached_bottom: bool
+
+
+@dataclass
+class FlowStep:
+    """One step of a multi-step capture flow: click the
+    link/button named ``target``, or open ``target`` as a
+    URL outright."""
+
+    kind: str                # "click" | "goto"
+    target: str
 
 
 @dataclass
@@ -2332,6 +3164,127 @@ def _convert_to_mp4(webm: Path) -> Path | None:
     return None
 
 
+#: The ceiling for a LONG recording (`/webrec long`):
+#: sustained capture past the 60 s chat-video ceiling,
+#: for watching a page over minutes rather than seconds.
+REC_MAX_LONG_S = 300.0
+
+
+@dataclass
+class FrameSequence:
+    """One frame-sequence capture (`/webrec frames`): a
+    still at every interval across the duration, plus a
+    contact sheet of the whole run — the LONG capture
+    rung for pages whose change is slow (a scoreboard, a
+    queue, a build) and where a video would be mostly
+    identical frames."""
+
+    paths: list[Path]
+    contact_sheet: Path | None
+    duration_s: float
+    interval_s: float
+    nav: NavOutcome | None
+
+
+def contact_sheet_png(paths: list[Path], *, cols: int = 3,
+                      thumb_w: int = 360) -> bytes:
+    """One contact sheet PNG from frame files: thumbnails
+    in a grid, in order, so the whole run is visible in a
+    single photo.  Raises when there is nothing to sheet."""
+    import io
+
+    from PIL import Image
+
+    if not paths:
+        raise ValueError("no frames to sheet")
+    thumbs: list[Any] = []
+    for path in paths:
+        with Image.open(path) as img:
+            frame = img.convert("RGB")
+            scale = thumb_w / max(1, frame.width)
+            thumbs.append(frame.resize(
+                (thumb_w, max(1, int(frame.height * scale)))))
+    rows = (len(thumbs) + cols - 1) // cols
+    row_h = max(t.height for t in thumbs)
+    sheet = Image.new(
+        "RGB", (cols * thumb_w, rows * row_h), "white")
+    for i, thumb in enumerate(thumbs):
+        sheet.paste(thumb, ((i % cols) * thumb_w,
+                            (i // cols) * row_h))
+    buf = io.BytesIO()
+    sheet.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def _warm_up(url: str, *, device: dict[str, Any] | None,
+             ladder: list[dict[str, Any]] | None,
+             scheme: str,
+             profile_dir: Path | None,
+             takeover_hook: TakeoverHook | None,
+             takeover_factory: "Callable[[NavSession], "
+             "TakeoverBridge | None] | None",
+             memory: GateMemory,
+             on_step: StepHook | None,
+             managed_budget_s: float,
+             takeover_budget_s: float,
+             navigate_fn: Any = None
+             ) -> tuple[dict[str, Any], NavOutcome]:
+    """Phase 1 shared by video + frame recording: clear
+    whatever stands in the way (unrecorded, walking the
+    fingerprint ladder) and learn which fingerprint
+    clears it.  Returns the winning device + outcome;
+    the warm-up session is closed by the caller."""
+    nav = navigate_fn or navigate
+    warm_session, warm_nav = nav(
+        url, device=device, ladder=ladder, scheme=scheme,
+        profile_dir=profile_dir, takeover_hook=takeover_hook,
+        takeover_factory=takeover_factory,
+        memory=memory, on_step=on_step,
+        managed_budget_s=managed_budget_s,
+        takeover_budget_s=takeover_budget_s)
+    device = dict(warm_session.device)
+    warm_session.__exit__()
+    return device, warm_nav
+
+
+def _open_recording_session(
+        session: NavSession, url: str, *,
+        takeover_hook: TakeoverHook | None,
+        takeover_factory: Callable[
+            [NavSession], TakeoverBridge | None] | None,
+        memory: GateMemory,
+        on_step: StepHook | None,
+        managed_budget_s: float,
+        takeover_budget_s: float) -> NavOutcome:
+    """Open the recording session's page through the
+    pipeline, attaching block evidence when the page
+    refuses — the session is still live here, so the
+    challenge page can still be photographed."""
+    try:
+        bridge = takeover_factory(session) \
+            if takeover_factory is not None else None
+        return session.open(
+            url,
+            takeover_hook=None if bridge is not None
+            else takeover_hook,
+            takeover_bridge=bridge, memory=memory,
+            on_step=on_step,
+            managed_budget_s=managed_budget_s,
+            takeover_budget_s=takeover_budget_s)
+    except (GateBlocked, WallBlocked) as exc:
+        if exc.evidence is None and session.probe is not None:
+            kind = "wall" if isinstance(
+                exc, WallBlocked) else "gate"
+            attempts = list(getattr(exc, "attempts", [])
+                            or [g.kind for g in
+                                getattr(exc, "gates", [])])
+            exc.evidence = capture_block_evidence(
+                session.probe, kind=kind,
+                wall=str(getattr(exc, "wall", "") or ""),
+                attempts=attempts)
+        raise
+
+
 def record_page(url: str, *, seconds: float,
                 out_dir: Path,
                 device: dict[str, Any] | None = None,
@@ -2343,27 +3296,32 @@ def record_page(url: str, *, seconds: float,
                 "TakeoverBridge | None] | None" = None,
                 on_step: StepHook | None = None,
                 managed_budget_s: float = MANAGED_BUDGET_S,
-                takeover_budget_s: float = TAKEOVER_BUDGET_S
+                takeover_budget_s: float = TAKEOVER_BUDGET_S,
+                max_seconds: float = REC_MAX_S,
+                navigate_fn: Any = None,
+                session_factory: Any = None,
                 ) -> RecordOutcome:
     """Record a page: warm-up pass first (gates/walls
     cleared into the persistent profile, unrecorded —
     walking the fingerprint ladder, so the recording runs
     under the presentation that actually cleared), then
     the recording pass — eased scroll for the requested
-    duration → mp4 when ffmpeg allows, webm otherwise."""
-    seconds = max(REC_MIN_S, min(REC_MAX_S, float(seconds)))
+    duration → mp4 when ffmpeg allows, webm otherwise.
+    ``max_seconds`` is the ceiling for this request
+    (60 s normally, 300 s for a `long` recording);
+    ``navigate_fn`` / ``session_factory`` are injectable
+    seams (tests drive a fake page through them)."""
+    seconds = max(REC_MIN_S, min(float(max_seconds),
+                                 float(seconds)))
     memory = GateMemory()
-    # Phase 1 — warm-up: clear whatever stands in the way,
-    # and learn which fingerprint clears it.
-    warm_session, warm_nav = navigate(
+    device, warm_nav = _warm_up(
         url, device=device, ladder=ladder, scheme=scheme,
         profile_dir=profile_dir, takeover_hook=takeover_hook,
         takeover_factory=takeover_factory,
         memory=memory, on_step=on_step,
         managed_budget_s=managed_budget_s,
-        takeover_budget_s=takeover_budget_s)
-    device = dict(warm_session.device)
-    warm_session.__exit__()
+        takeover_budget_s=takeover_budget_s,
+        navigate_fn=navigate_fn)
     # Phase 2 — record.
     out_dir.mkdir(parents=True, exist_ok=True)
     includes_clearing = False
@@ -2371,20 +3329,21 @@ def record_page(url: str, *, seconds: float,
     for attempt in range(2):
         rec_dir = out_dir / f"rec-{int(time.time() * 1000)}"
         rec_dir.mkdir(parents=True, exist_ok=True)
-        session = NavSession(profile_dir=profile_dir,
-                             device=device, scheme=scheme,
-                             record_dir=rec_dir)
+        if session_factory is not None:
+            session = session_factory(
+                profile_dir=profile_dir, device=device,
+                scheme=scheme, record_dir=rec_dir)
+        else:
+            session = NavSession(profile_dir=profile_dir,
+                                 device=device, scheme=scheme,
+                                 record_dir=rec_dir)
         session.__enter__()
         video: Path | None = None
         try:
-            bridge = takeover_factory(session) \
-                if takeover_factory is not None else None
-            nav = session.open(
-                url,
-                takeover_hook=None if bridge is not None
-                else takeover_hook,
-                takeover_bridge=bridge, memory=memory,
-                on_step=on_step,
+            nav = _open_recording_session(
+                session, url, takeover_hook=takeover_hook,
+                takeover_factory=takeover_factory,
+                memory=memory, on_step=on_step,
                 managed_budget_s=managed_budget_s,
                 takeover_budget_s=takeover_budget_s)
             # The recording ran under the warm-up's winning
@@ -2439,3 +3398,108 @@ def record_page(url: str, *, seconds: float,
     if outcome is None:  # pragma: no cover - loop always sets
         raise NavError("the recording did not complete")
     return outcome
+
+
+def record_frames(url: str, *, seconds: float,
+                  interval_s: float = 5.0,
+                  out_dir: Path,
+                  device: dict[str, Any] | None = None,
+                  ladder: list[dict[str, Any]] | None = None,
+                  scheme: str = "light",
+                  profile_dir: Path | None = None,
+                  takeover_hook: TakeoverHook | None = None,
+                  takeover_factory: Callable[
+                      [NavSession], TakeoverBridge | None] | None = None,
+                  on_step: StepHook | None = None,
+                  managed_budget_s: float = MANAGED_BUDGET_S,
+                  takeover_budget_s: float = TAKEOVER_BUDGET_S,
+                  max_seconds: float = REC_MAX_LONG_S,
+                  navigate_fn: Any = None,
+                  session_factory: Any = None,
+                  clock: Callable[[], float] = time.monotonic,
+                  ) -> FrameSequence:
+    """The LONG capture as stills: warm up through the
+    pipeline (same as video), then hold the page open for
+    the requested duration, taking a still every
+    ``interval_s`` while the page scrolls eased beneath
+    it — one frame per interval, plus a contact sheet of
+    the whole run.  Duration is clamped to
+    [5 s, ``max_seconds``] (300 s for a `long` run).  The
+    frames are real stills of the live page at real
+    times; a page that never changes yields identical
+    frames, honestly."""
+    seconds = max(REC_MIN_S, min(float(max_seconds),
+                                 float(seconds)))
+    interval = max(1.0, float(interval_s))
+    memory = GateMemory()
+    device, warm_nav = _warm_up(
+        url, device=device, ladder=ladder, scheme=scheme,
+        profile_dir=profile_dir, takeover_hook=takeover_hook,
+        takeover_factory=takeover_factory,
+        memory=memory, on_step=on_step,
+        managed_budget_s=managed_budget_s,
+        takeover_budget_s=takeover_budget_s,
+        navigate_fn=navigate_fn)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    run_dir = out_dir / f"frames-{int(time.time() * 1000)}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    if session_factory is not None:
+        session = session_factory(
+            profile_dir=profile_dir, device=device,
+            scheme=scheme, record_dir=None)
+    else:
+        session = NavSession(profile_dir=profile_dir,
+                             device=device, scheme=scheme)
+    session.__enter__()
+    try:
+        nav = _open_recording_session(
+            session, url, takeover_hook=takeover_hook,
+            takeover_factory=takeover_factory,
+            memory=memory, on_step=on_step,
+            managed_budget_s=managed_budget_s,
+            takeover_budget_s=takeover_budget_s)
+        nav.presentation = warm_nav.presentation
+        nav.presentations_tried = list(
+            warm_nav.presentations_tried)
+        if on_step is not None:
+            on_step(f"capturing frames for {seconds:.0f}s")
+        started = session.started_at or clock()
+        metrics = session.page.evaluate(
+            "() => [document.documentElement.scrollHeight,"
+            " window.innerHeight]")
+        plan = scroll_plan(seconds, float(metrics[0]),
+                           float(metrics[1]))
+        paths: list[Path] = []
+        count = int(seconds // interval) + 1
+        for i in range(count):
+            at = min(float(i) * interval, seconds)
+            while clock() - started < at:
+                session.page.wait_for_timeout(100)
+            y = plan.y_at(at)
+            with suppress(Exception):
+                session.page.evaluate(
+                    f"window.scrollTo(0, {y:.1f})")
+            shot = session.capture_still()
+            path = run_dir / f"frame-{i:04d}.png"
+            path.write_bytes(bytes(shot))
+            paths.append(path)
+        while clock() - started < seconds:
+            session.page.wait_for_timeout(100)
+        sheet: Path | None = None
+        try:
+            data = contact_sheet_png(paths)
+            sheet = run_dir / "contact.png"
+            sheet.write_bytes(data)
+        except Exception:  # noqa: BLE001 - the frames are
+            sheet = None   # the result; the sheet is extra
+        return FrameSequence(
+            paths=paths, contact_sheet=sheet,
+            duration_s=seconds, interval_s=interval,
+            nav=NavOutcome(final_url=nav.final_url,
+                           title=nav.title, gates=nav.gates,
+                           wall=nav.wall, steps=nav.steps,
+                           presentation=nav.presentation,
+                           presentations_tried=list(
+                               nav.presentations_tried)))
+    finally:
+        session.__exit__()

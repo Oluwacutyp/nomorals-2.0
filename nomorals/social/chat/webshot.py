@@ -66,8 +66,8 @@ __all__ = [
     "ShotOptions", "CaptureResult", "ShotUsageError",
     "WebshotUnavailable", "WebshotStoreError",
     "DEVICE_PROFILES", "parse_shot_tail", "validate_url",
-    "capture", "playwright_renderer", "nav_renderer",
-    "provider_specs",
+    "capture", "capture_flow", "playwright_renderer",
+    "nav_renderer", "provider_specs",
     "WebshotBook", "change_ratio", "image_dimensions",
     "CHANGE_THRESHOLD", "WATCH_MIN_INTERVAL_S",
     "RecOptions", "parse_rec_tail", "record_video",
@@ -110,6 +110,11 @@ class WebshotUnavailable(RuntimeError):
     def __init__(self, url: str, reasons: list[str]) -> None:
         self.url = url
         self.reasons = reasons
+        #: Challenge-state evidence from the refused rung
+        #: (screenshot + DOM excerpt), when the refusal
+        #: carried any — the handler delivers it labelled
+        #: as a block, never as the shot.
+        self.evidence: Any = None
         super().__init__(
             f"no rung could shoot {url}: " + "; ".join(reasons))
 
@@ -135,10 +140,19 @@ class ShotOptions:
     pdf: bool = False
     annotate: bool = False         # §20c: the vision organ
                                    # reads the shot too
+    #: Scrolling capture: scroll through the whole page,
+    #: viewport by viewport, and composite the segments
+    #: into one tall image (lazy content included).
+    scroll: bool = False
+    #: Multi-step flow: labels (or URLs) to click/open in
+    #: order after the landing shot, e.g. ("Docs",
+    #: "Install").  Empty = a single shot.
+    flow_steps: tuple[str, ...] = ()
 
     def provider_compatible(self) -> dict[str, bool]:
         """Which provider seeds can honor these options."""
-        base = not self.pdf and not self.clip
+        base = not self.pdf and not self.clip \
+            and not self.scroll and not self.flow_steps
         return {
             # microlink: viewport PNG, light only.
             "microlink": base and not self.full_page
@@ -169,6 +183,9 @@ class CaptureResult:
     presentation: str = ""
     presentations_tried: list[str] = field(
         default_factory=list)
+    #: Flow captures only: which step this shot is
+    #: ("landing", or the step label/URL that led here).
+    step: str = ""
 
 
 # ── request grammar ──────────────────────────────────────────
@@ -187,6 +204,7 @@ _MODIFIERS = {
     "idle": ("wait", "idle"),
     "annotate": ("annotate", True),
     "read": ("annotate", True),
+    "scroll": ("scroll", True),
 }
 
 
@@ -202,15 +220,38 @@ def parse_shot_tail(tail: str, *, reply_url: str = ""
     """Parse ``/webshot``'s tail: modifiers in any order, then
     the URL — or no URL, when the caller supplies the replied
     message's link (``reply_url``).  ``clip`` takes the NEXT
-    token as its selector.  Raises :class:`ShotUsageError`
+    token as its selector.  ``flow`` starts a multi-step
+    capture: ``/webshot flow <url> -> <link> -> <link>``
+    shoots the landing page, then clicks each named link
+    (a step that is itself a URL is opened outright) and
+    shoots each stop.  Raises :class:`ShotUsageError`
     with the exact problem."""
+    raw = str(tail or "")
+    flow_steps: tuple[str, ...] = ()
+    if "->" in raw:
+        head, *step_parts = raw.split("->")
+        if "flow" not in head.lower().split():
+            raise ShotUsageError(
+                "steps need the flow mode: /webshot flow "
+                "<url> -> <link> -> <link>")
+        flow_steps = tuple(p.strip() for p in step_parts)
+        if not flow_steps or any(not s for s in flow_steps):
+            raise ShotUsageError(
+                "flow needs at least one step after ->: "
+                "/webshot flow <url> -> <link>")
+        raw = head
     opts = ShotOptions()
-    tokens = str(tail or "").split()
+    tokens = raw.split()
     url = ""
     i = 0
+    flow_mode = False
     while i < len(tokens):
         token = tokens[i]
         low = token.lower()
+        if low == "flow":
+            flow_mode = True
+            i += 1
+            continue
         if low == "clip":
             if i + 1 >= len(tokens):
                 raise ShotUsageError(
@@ -234,18 +275,25 @@ def parse_shot_tail(tail: str, *, reply_url: str = ""
             continue
         raise ShotUsageError(
             f"I don't know the webshot option {token!r} — "
-            "options: full, phone|tablet|desktop, dark, idle, "
+            "options: full, scroll, flow <url> -> <link>, "
+            "phone|tablet|desktop, dark, idle, "
             "pdf, annotate, clip <selector>, then the URL")
     if not url:
         url = str(reply_url or "").strip()
     if not url:
         raise ShotUsageError(
             "give me a URL, or reply to a message that has one: "
-            "/webshot [full] [phone|tablet|desktop] [dark] "
-            "[pdf] [clip <selector>] <url>")
+            "/webshot [full] [scroll] [phone|tablet|desktop] "
+            "[dark] [pdf] [clip <selector>] <url> · "
+            "/webshot flow <url> -> <link> -> <link>")
     if not url.lower().startswith(("http://", "https://",
                                    "data:")):
         url = "https://" + url
+    if flow_mode and not flow_steps:
+        raise ShotUsageError(
+            "flow needs at least one step: /webshot flow "
+            "<url> -> <link> -> <link>")
+    opts.flow_steps = flow_steps
     return url, opts
 
 
@@ -454,6 +502,21 @@ def nav_renderer(url: str, opts: ShotOptions, *,
                 raise RuntimeError(
                     f"no element matched {opts.clip!r} on "
                     f"the page ({exc})") from exc
+        elif opts.scroll:
+            scrolled = session.capture_scrolled()
+            data = scrolled.data
+            result = CaptureResult(
+                data=data, title=nav.title,
+                final_url=nav.final_url, rung="playwright",
+                pdf=False,
+                gates_cleared=[g.kind for g in nav.gates],
+                wall_via=nav.wall or "",
+                presentation=nav.presentation,
+                presentations_tried=list(
+                    nav.presentations_tried))
+            result.width, result.height = image_dimensions(
+                data)
+            return result
         else:
             data = session.capture_still(
                 full_page=opts.full_page)
@@ -466,6 +529,94 @@ def nav_renderer(url: str, opts: ShotOptions, *,
         wall_via=nav.wall or "",
         presentation=nav.presentation,
         presentations_tried=list(nav.presentations_tried))
+
+
+def capture_flow(url: str, opts: ShotOptions, *,
+                 takeover_hook: Any = None,
+                 takeover_factory: Any = None,
+                 profile_dir: Path | None = None,
+                 on_step: Any = None,
+                 navigate_fn: Any = None) -> list[CaptureResult]:
+    """Multi-step capture: shoot the landing page, then
+    follow each flow step in order (click the named
+    link/button, or open the step outright when it is a
+    URL) and shoot every stop.  One session, one
+    fingerprint ladder, the interstitial pass re-run after
+    every step — a later page's own gate is cleared (or
+    refuses honestly) before its shot.  A step that
+    cannot be followed stops the flow with the honest
+    ``NavError``; the shots already taken are returned
+    on the exception as ``exc.shots`` so the caller can
+    still hand them over."""
+    from . import webnav
+
+    ladder = webnav.presentation_ladder(
+        opts.device if opts.device_chosen else None)
+    navigate = navigate_fn or webnav.navigate
+    session, nav = navigate(
+        url, ladder=ladder, scheme=opts.scheme,
+        profile_dir=profile_dir, takeover_hook=takeover_hook,
+        takeover_factory=takeover_factory,
+        on_step=on_step)
+    shots: list[CaptureResult] = []
+    try:
+        def _shoot(step_label: str) -> CaptureResult:
+            if opts.pdf:
+                data = session.capture_still(pdf=True)
+            elif opts.clip:
+                loc = session.page.locator(opts.clip).first
+                try:
+                    data = bytes(
+                        loc.screenshot(timeout=10_000))
+                except Exception as exc:  # noqa: BLE001
+                    raise RuntimeError(
+                        f"no element matched {opts.clip!r} "
+                        f"on the page ({exc})") from exc
+            elif opts.scroll:
+                data = session.capture_scrolled().data
+            else:
+                data = session.capture_still(
+                    full_page=opts.full_page)
+            shot = CaptureResult(
+                data=data, title=nav.title,
+                final_url=nav.final_url,
+                rung="playwright", pdf=opts.pdf,
+                gates_cleared=[g.kind for g in nav.gates],
+                wall_via=nav.wall or "",
+                presentation=nav.presentation,
+                presentations_tried=list(
+                    nav.presentations_tried),
+                step=step_label)
+            if not shot.pdf:
+                shot.width, shot.height = image_dimensions(
+                    data)
+            return shot
+
+        shots.append(_shoot("landing"))
+        for raw_step in opts.flow_steps:
+            target = str(raw_step or "").strip()
+            kind = "goto" if _looks_like_url(target) and \
+                target.lower().startswith(
+                    ("http://", "https://", "data:")) \
+                else "click"
+            if kind == "goto" and not target.lower() \
+                    .startswith(("http://", "https://",
+                                 "data:")):
+                target = "https://" + target
+            try:
+                nav = session.follow_step(
+                    webnav.FlowStep(kind=kind, target=target),
+                    on_step=on_step)
+            except Exception as exc:  # noqa: BLE001 - the
+                # shots so far ride the failure, honestly
+                err = webnav.NavError(
+                    f"the flow stopped at {target!r}: {exc}")
+                err.shots = shots  # type: ignore[attr-defined]
+                raise err from exc
+            shots.append(_shoot(target))
+        return shots
+    finally:
+        session.__exit__()
 
 
 # ── rung 2: provider seeds (SourceHealth-gated) ──────────────
@@ -625,7 +776,12 @@ def capture(url: str, opts: ShotOptions, *,
                     "a readable image")
         return result
     except (webnav.GateBlocked, webnav.WallBlocked) as exc:
-        raise WebshotUnavailable(url, [str(exc)]) from exc
+        failed = WebshotUnavailable(url, [str(exc)])
+        # The refusal's challenge-state evidence rides
+        # along: the handler delivers it labelled as a
+        # block, never as the shot.
+        failed.evidence = getattr(exc, "evidence", None)
+        raise failed from exc
     except Exception as exc:  # noqa: BLE001 - next rung
         reasons.append(f"local chromium: {exc}")
 
@@ -675,9 +831,13 @@ def capture(url: str, opts: ShotOptions, *,
 
 #: Recording bounds: 5s is the floor the owner set; 60s is
 #: the ceiling a chat video can stay watchable (and the
-#: file shippable) at.  The default sits between.
+#: file shippable) at.  The default sits between.  A LONG
+#: recording (``/webrec long``) stretches the ceiling to
+#: 300s — sustained capture over minutes, for watching a
+#: page change rather than a single scroll-through.
 REC_MIN_S = 5.0
 REC_MAX_S = 60.0
+REC_MAX_LONG_S = 300.0
 REC_DEFAULT_S = 10.0
 
 _REC_SECONDS = None  # compiled lazily in parse_rec_tail
@@ -696,6 +856,13 @@ class RecOptions:
     #: "min" / "max" when the requested duration was
     #: clamped to the bounds — the reply reports it.
     clamped: str = ""
+    #: Long capture: the ceiling is 300s, not 60s.
+    long: bool = False
+    #: Frame-sequence capture: stills at intervals across
+    #: the duration + a contact sheet, instead of a video.
+    frames: bool = False
+    #: Seconds between frames in frames mode.
+    interval_s: float = 5.0
 
 
 def parse_rec_tail(tail: str, *, reply_url: str = ""
@@ -703,8 +870,10 @@ def parse_rec_tail(tail: str, *, reply_url: str = ""
     """Parse ``/webrec``'s tail: ``[12s|12] [phone|tablet|
     desktop] [dark|light] <url>`` in any order, or no URL
     when the replied message supplies one.  Duration is
-    clamped to [5s, 60s] and the clamp is RECORDED on the
-    result, never silent."""
+    clamped to [5s, 60s] — or [5s, 300s] with ``long`` —
+    and the clamp is RECORDED on the result, never
+    silent.  ``frames`` records stills at intervals plus
+    a contact sheet instead of a video."""
     global _REC_SECONDS
     if _REC_SECONDS is None:
         import re
@@ -730,6 +899,12 @@ def parse_rec_tail(tail: str, *, reply_url: str = ""
         if low in ("dark", "light"):
             opts.scheme = low
             continue
+        if low == "long":
+            opts.long = True
+            continue
+        if low == "frames":
+            opts.frames = True
+            continue
         if _looks_like_url(token):
             if url:
                 raise ShotUsageError(
@@ -739,22 +914,25 @@ def parse_rec_tail(tail: str, *, reply_url: str = ""
             continue
         raise ShotUsageError(
             f"I don't know the webrec option {token!r} — "
-            "options: [seconds, 5–60] [phone|tablet|desktop] "
-            "[dark|light], then the URL")
+            "options: [seconds, 5–60, 5–300 with long] "
+            "[phone|tablet|desktop] [dark|light] "
+            "[long] [frames], then the URL")
     if not url:
         url = str(reply_url or "").strip()
     if not url:
         raise ShotUsageError(
             "give me a URL, or reply to a message that has "
-            "one: /webrec [12s] [phone] [dark] <url>")
+            "one: /webrec [12s] [phone] [dark] [long] "
+            "[frames] <url>")
     if not url.lower().startswith(("http://", "https://",
                                    "data:")):
         url = "https://" + url
+    ceiling = REC_MAX_LONG_S if opts.long else REC_MAX_S
     if opts.seconds < REC_MIN_S:
         opts.seconds = REC_MIN_S
         opts.clamped = "min"
-    elif opts.seconds > REC_MAX_S:
-        opts.seconds = REC_MAX_S
+    elif opts.seconds > ceiling:
+        opts.seconds = ceiling
         opts.clamped = "max"
     return url, opts
 
@@ -770,17 +948,29 @@ def record_video(url: str, opts: RecOptions, *,
     passes run BEFORE the recording starts, so the video
     opens on the real page and scrolls it, eased, for the
     requested duration.  Returns a ``webnav.RecordOutcome``;
-    raises ``webnav.NavError`` (typed) on honest failure."""
+    with ``opts.frames`` returns a ``webnav.FrameSequence``
+    (stills + contact sheet) instead; raises
+    ``webnav.NavError`` (typed) on honest failure."""
     from . import webnav
 
     ladder = webnav.presentation_ladder(
         opts.device if opts.device_chosen else None)
+    if opts.frames:
+        return webnav.record_frames(
+            url, seconds=opts.seconds,
+            interval_s=opts.interval_s, out_dir=out_dir,
+            ladder=ladder, scheme=opts.scheme,
+            profile_dir=profile_dir,
+            takeover_hook=takeover_hook,
+            takeover_factory=takeover_factory,
+            on_step=on_step)
     return webnav.record_page(
         url, seconds=opts.seconds, out_dir=out_dir,
         ladder=ladder, scheme=opts.scheme,
         profile_dir=profile_dir, takeover_hook=takeover_hook,
         takeover_factory=takeover_factory,
-        on_step=on_step)
+        on_step=on_step,
+        max_seconds=REC_MAX_LONG_S if opts.long else REC_MAX_S)
 
 
 # ── the book: journal + watches ──────────────────────────────
