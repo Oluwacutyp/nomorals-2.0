@@ -697,7 +697,7 @@ def _tool(registry, **kwargs):
 def test_tool_count_is_786_after_facemcap():
     registry = ToolRegistry(SimpleNamespace())
     registry.register_builtins()
-    assert len(registry._tools) == 789
+    assert len(registry._tools) == 794
     assert "facemcap" in registry._tools
 
 

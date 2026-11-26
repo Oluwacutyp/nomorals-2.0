@@ -410,16 +410,20 @@ class TestToolAndCliSurface(_RotationCase):
             reg.call("proxy_rotate", action="stop")
         self.assertIsNone(core_http.get_proxy_resolver())
 
-    def test_registry_tool_count_still_789(self) -> None:
+    def test_registry_tool_count_still_794(self) -> None:
         # No new brain tool was added by this lane (the proxy_rotate
         # tool gained a parameter, not a new registration).
+        # 794, not 787: the trendclip port (gapfix163) added 5 tools
+        # (trendclip_discover, trendclip_analyze, trendclip_render,
+        # trendclip_status, trendclip_queue) after this lane's base
+        # (parent re-bump, 2026-11-25).
         # 787, not 786: the museum ship's museum_library tool landed
         # after this lane's base (parent re-bump, 2026-11-25).
         # (786, not 785: the swarm ship's build_swarm tool landed
         # after this lane's base (parent re-bump, 2026-11-24).)
         reg = ToolRegistry(context=_ctx(self.tmp))
         reg.register_builtins()
-        self.assertEqual(len(reg._tools), 789)  # D5 (walabel) adds whatsapp_account_label
+        self.assertEqual(len(reg._tools), 794)  # trendclip adds 5 tools
 
     def _run_cli(self, ctx, **fields):
         base = {"proxy_action": "", "proxy_sources_action": "",

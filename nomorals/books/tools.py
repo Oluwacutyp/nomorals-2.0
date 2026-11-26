@@ -2055,6 +2055,7 @@ def register(registry: Any) -> None:
         if callable(resolve):
             downloads = str(resolve("data/downloads"))
             museum_root = str(resolve("museum"))
+            trendclip = str(resolve("trendclip"))
             archives = str(Path(
                 getattr(settings, "workspace_dir", "") or
                 resolve("workspace")) / "archives")
@@ -2062,12 +2063,14 @@ def register(registry: Any) -> None:
             home = Path(getattr(settings, "home", "") or "~").expanduser()
             downloads = str(home / "data" / "downloads")
             museum_root = str(home / "museum")
+            trendclip = str(home / "trendclip")
             workspace = getattr(settings, "workspace_dir", None)
             archives = str((Path(workspace) if workspace else
                             home / "workspace") / "archives")
         return {"downloads_root": downloads,
                 "archives_root": archives,
-                "museum_root": museum_root}
+                "museum_root": museum_root,
+                "trendclip_root": trendclip}
 
     def _museum(apk_root: str = "") -> Any:
         """The one Museum construction site: every museum tool builds
@@ -2076,18 +2079,26 @@ def register(registry: Any) -> None:
         from ..agents.apkforge.project import apkforge_dir
         from ..characters.learn import LearnStore
         from ..characters.store import CharacterStore
+        from ..media.trendclip.exhibitor import trendclip_exhibitor
         from ..media.trendops.editor import DEFAULT_ROOT as _trendops_root
         from ..museum import Museum
 
         root = apk_root.strip() or str(apkforge_dir(context))
         roots = _museum_roots()
-        return Museum(apk_root=root, library=_library(),
-                      char_store=CharacterStore(),
-                      learn_store=LearnStore(),
-                      trendops_root=_trendops_root,
-                      downloads_root=roots["downloads_root"],
-                      archives_root=roots["archives_root"],
-                      museum_root=roots["museum_root"])
+        museum = Museum(apk_root=root, library=_library(),
+                        char_store=CharacterStore(),
+                        learn_store=LearnStore(),
+                        trendops_root=_trendops_root,
+                        downloads_root=roots["downloads_root"],
+                        archives_root=roots["archives_root"],
+                        museum_root=roots["museum_root"])
+        # The trendclip shelf joins the census here, at the construction
+        # site — the Museum core never imports an organ (it sits below
+        # them in the layering), and the organ registers itself.
+        museum.register_exhibitor(
+            "trendclip",
+            lambda: trendclip_exhibitor(roots["trendclip_root"]))
+        return museum
 
     @registry.register(
         "museum_census",

@@ -12814,6 +12814,10 @@ class PartnerRuntime(
                                          message=message)
         if kind == "shorts":
             return self._control_shorts(command.tail or arg)
+        if kind == "clip":
+            return self._control_clip(command.tail or arg)
+        if kind == "trend":
+            return self._control_trend(command.tail or arg)
         if kind == "trendops":
             return self._control_trendops(command.tail or arg,
                                           chat_key=chat_key)

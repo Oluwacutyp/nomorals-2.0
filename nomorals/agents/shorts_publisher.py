@@ -269,20 +269,45 @@ def _publish_one_post(post: Any, *, pipeline: Any, db: Any,
             cell.fail(outcome["reason"], by=cell.steward)
         return outcome
 
-    # Render (the worker).
-    job = pipeline.plan(post.niche, post.topic,
-                        platforms=platforms, style=post.style or "")
-    pipeline.calendar.mark(post.id, "rendering", job_id=job.id)
-    result = pipeline.run(job)
-    if not getattr(result, "ok", False):
-        outcome["reason"] = (
-            f"render failed: {getattr(result, 'error', 'unknown')}")
-        pipeline.calendar.mark(post.id, "failed", job_id=job.id)
-        if cell is not None:
-            cell.fail(outcome["reason"])
-        return outcome
-    video_path = str(getattr(result, "final_path", "")
-                     or getattr(job, "final_path", "") or "")
+    # A trendclip post already has its video: a planned post whose job
+    # links a completed, validated trendclip job uses that clip instead
+    # of re-rendering a scripted short. The render evidence below still
+    # verifies the file is real, and the skeptic still checks the copy
+    # against the transcript. Anything unusable falls through to the
+    # normal render path.
+    prerendered = ""
+    trendclip_copy: dict[str, Any] | None = None
+    if str(getattr(post, "job_id", "") or "").startswith("tc_"):
+        try:
+            from ..media.trendclip.pipeline import prerendered_clip_for_job, trendclip_post_copy
+            prerendered = prerendered_clip_for_job(None, post.job_id)
+            if prerendered:
+                trendclip_copy = trendclip_post_copy(None, post.job_id)
+        except Exception:  # noqa: BLE001 - fall through to the normal render
+            prerendered = ""
+            trendclip_copy = None
+
+    # Render (the worker) — or the pre-rendered trendclip clip.
+    job = None
+    if prerendered:
+        video_path = prerendered
+        pipeline.calendar.mark(post.id, "rendering", job_id=post.job_id)
+        job_id = post.job_id
+    else:
+        job = pipeline.plan(post.niche, post.topic,
+                            platforms=platforms, style=post.style or "")
+        pipeline.calendar.mark(post.id, "rendering", job_id=job.id)
+        result = pipeline.run(job)
+        if not getattr(result, "ok", False):
+            outcome["reason"] = (
+                f"render failed: {getattr(result, 'error', 'unknown')}")
+            pipeline.calendar.mark(post.id, "failed", job_id=job.id)
+            if cell is not None:
+                cell.fail(outcome["reason"])
+            return outcome
+        video_path = str(getattr(result, "final_path", "")
+                         or getattr(job, "final_path", "") or "")
+        job_id = job.id
     render_claim = None
     if cell is not None:
         def _file_is_real() -> bool:
@@ -293,21 +318,25 @@ def _publish_one_post(post: Any, *, pipeline: Any, db: Any,
 
         render_claim = cell.evidence(
             "render",
-            f"rendered {job.id} → {video_path}",
+            f"rendered {job_id} → {video_path}",
             producer=cell.drafter, evidence_ref=video_path,
             verify=_file_is_real)
         if render_claim.verdict != "supported":
             outcome["reason"] = (
                 "the render reported success but the file is not"
                 " there to verify — nothing was published")
-            pipeline.calendar.mark(post.id, "failed", job_id=job.id)
+            pipeline.calendar.mark(post.id, "failed", job_id=job_id)
             cell.fail(outcome["reason"], by=cell.verifier)
             return outcome
 
     # Skeptic: the post copy's numbers must trace to the topic or
     # the script the pipeline wrote — invented figures block the
     # delivery before anything posts.
-    copy = _load_post_copy(pipeline, job)
+    copy = (trendclip_copy if trendclip_copy is not None
+            else _load_post_copy(pipeline, job)
+            if job is not None else
+            {"title": post.topic, "description": "",
+             "hashtags": []})
     if cell is not None:
         basis = post.topic + "\n" + str(copy.get("script") or "")
         bad = untraced_numbers(
@@ -330,7 +359,7 @@ def _publish_one_post(post: Any, *, pipeline: Any, db: Any,
             outcome["reason"] = (
                 "the skeptic blocked this post: its copy states"
                 " numbers the topic and script never gave")
-            pipeline.calendar.mark(post.id, "failed", job_id=job.id)
+            pipeline.calendar.mark(post.id, "failed", job_id=job_id)
             return outcome
 
     # Delivery (the steward): one attempt per named platform.
@@ -391,12 +420,12 @@ def _publish_one_post(post: Any, *, pipeline: Any, db: Any,
                          "; ".join(decision.reasons or []))
     if posted:
         outcome["status"] = "posted"
-        pipeline.calendar.mark(post.id, "posted", job_id=job.id)
+        pipeline.calendar.mark(post.id, "posted", job_id=job_id)
     else:
         outcome["reason"] = (
             "every platform delivery failed — see the per-platform"
             " errors and the publish ledger")
-        pipeline.calendar.mark(post.id, "failed", job_id=job.id)
+        pipeline.calendar.mark(post.id, "failed", job_id=job_id)
     return outcome
 
 

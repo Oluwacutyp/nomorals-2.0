@@ -8925,6 +8925,229 @@ class RuntimeMediaMixin:
             return (f"{render_line}\n"
                     f"(couldn't queue the draft: {exc})")
 
+    def _control_clip(self, tail: str) -> str:
+        """TrendClip in chat: find what's hot, cut it into a vertical clip.
+
+        /clip <url> [--strategy gaming|conversation|educational|comedy|craft] [--no-brain]
+            — ingest, transcribe locally, score moments (deterministic +
+              brain) and leave the job ready with its drafts
+        /clip render <job> <pick> [--layout balanced|punch|clean] [--dest youtube,facebook,tiktok]
+            — render one picked moment into a validated vertical clip + package
+        /clip status [job] — job list / inspect
+        /clip queue <job> [platforms] — queue the rendered clip for the publisher sweep
+        """
+        import shlex
+
+        from ...media.trendclip import TrendclipPipeline, topic_from_query, trendclip_root
+
+        ref = (tail or "").strip()
+        if not ref:
+            return ("🎬 /clip — TrendClip: find what's hot, cut it into a vertical clip:\\n"
+                    "/clip <url> [--strategy NAME] [--no-brain]\\n"
+                    "/clip render <job> <pick> [--layout balanced|punch|clean]\\n"
+                    "/clip status [job] · /clip queue <job> [platforms]\\n"
+                    "Manual publish only — nothing auto-posts.")
+        try:
+            toks = shlex.split(ref)
+        except ValueError:
+            toks = ref.split()
+        if not toks:
+            return ("usage: /clip <url> | /clip render <job> <pick> | "
+                    "/clip status [job] | /clip queue <job> [platforms]")
+        action = toks[0].lower()
+        pipe = TrendclipPipeline(trendclip_root(self.settings))
+
+        def _pick_fn(prompt: str) -> Any:
+            """The brain rung: chat_json wrapped to the organ's
+            ``pick_fn(prompt) -> parsed JSON | None`` shape."""
+            from ...llm.base import Message, SamplingParams
+            from ...llm.brain import brain_for
+            try:
+                data, _response = brain_for(self.context).chat_json(
+                    [Message.user(prompt)], task_kind="judge",
+                    params=SamplingParams(temperature=0.2, max_tokens=800))
+            except Exception as exc:  # noqa: BLE001 - a dead brain is a note
+                _log.warning("trendclip brain pick failed: %s", exc)
+                return None
+            return data if isinstance(data, dict) else None
+
+        def _copy_fn(prompt: str) -> Any:
+            from ...llm.base import Message, SamplingParams
+            from ...llm.brain import brain_for
+            try:
+                data, _response = brain_for(self.context).chat_json(
+                    [Message.user(prompt)], task_kind="judge",
+                    params=SamplingParams(temperature=0.2, max_tokens=500))
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("trendclip brain copy failed: %s", exc)
+                return None
+            return data if isinstance(data, dict) else None
+
+        if action == "status":
+            if len(toks) > 1:
+                try:
+                    info = pipe.status(toks[1])
+                except KeyError:
+                    return f"no trendclip job {toks[1]!r}"
+                lines = [f"🎬 trendclip {info['job_id']} — {info['stage']}",
+                         f"topic: {info['topic']} · source: {info['source_url']}",
+                         f"moments: {info['moments']} · brain picks: {info['brain_picks']}",
+                         f"clip: {info['clip'] or 'not rendered yet'}",
+                         f"validation: {'passed' if info['validation_passed'] else 'not passed'}"]
+                if info["error"]:
+                    lines.append(f"error: {info['error']}")
+                return "\n".join(lines)
+            jobs = pipe.list_jobs()
+            if not jobs:
+                return "no trendclip jobs yet — /clip <url> to start one"
+            return "\n".join(
+                f"{j['job_id']} — {j['stage']} · {j['topic']} · "
+                f"{j['moments']} moments"
+                for j in jobs[:10])
+
+        if action == "render":
+            if len(toks) < 3:
+                return "usage: /clip render <job> <pick> [--layout NAME]"
+            layout = "balanced"
+            destinations = None
+            i = 3
+            while i < len(toks):
+                if toks[i] == "--layout" and i + 1 < len(toks):
+                    layout = toks[i + 1]
+                    i += 2
+                elif toks[i] == "--dest" and i + 1 < len(toks):
+                    destinations = [d.strip() for d in toks[i + 1].split(",")
+                                    if d.strip()]
+                    i += 2
+                else:
+                    i += 1
+            try:
+                pick_n = int(toks[2])
+            except ValueError:
+                return f"pick must be a number, got {toks[2]!r}"
+            pipe_with_brain = TrendclipPipeline(
+                trendclip_root(self.settings), copy_fn=_copy_fn)
+            try:
+                job = pipe_with_brain.render(
+                    toks[1], pick_n, layout=layout,
+                    destinations=destinations)
+            except (KeyError, RuntimeError) as exc:
+                return f"render failed: {exc}"
+            render_info = (job.receipt or {}).get("render") or {}
+            validation = (job.receipt or {}).get("validation") or {}
+            if job.stage == "failed":
+                problems = "; ".join(validation.get("problems") or [])
+                return (f"render failed: {job.error}"
+                        + (f" — {problems}" if problems else ""))
+            package = render_info.get("package") or {}
+            return ("\n".join([
+                f"🎬 clip ready — {render_info.get('clip_path')}",
+                f"duration {render_info.get('duration')}s · "
+                f"layout {render_info.get('layout')} · "
+                f"validation {'passed' if validation.get('passed') else 'FAILED'}",
+                f"package: {package.get('dir', '')}",
+                "Review draft — third-party media. Manual upload only."]))
+
+        if action == "queue":
+            if len(toks) < 2:
+                return "usage: /clip queue <job> [platforms...]"
+            try:
+                queued = pipe.queue(toks[1], platforms=toks[2:] or None)
+            except (KeyError, RuntimeError) as exc:
+                return f"queue failed: {exc}"
+            return (f"🎬 queued for the publisher sweep — post "
+                    f"{queued['post_id']} "
+                    f"({', '.join(queued['platforms']) or 'no platforms named'}). "
+                    "The sweep delivers the pre-rendered clip; nothing re-renders.")
+
+        url = toks[0]
+        if not url.startswith("http"):
+            return ("usage: /clip <url> — give me a video URL to cut a clip from "
+                    "(or /clip render|status|queue ...)")
+        strategy = "conversation"
+        use_brain = True
+        i = 1
+        while i < len(toks):
+            if toks[i] == "--strategy" and i + 1 < len(toks):
+                strategy = toks[i + 1]
+                i += 2
+            elif toks[i] == "--no-brain":
+                use_brain = False
+                i += 1
+            else:
+                i += 1
+        topic = topic_from_query(url, strategy=strategy)
+        pipe_with_brain = TrendclipPipeline(
+            trendclip_root(self.settings),
+            pick_fn=_pick_fn if use_brain else None)
+        job = pipe_with_brain.analyze(url, topic, brain=use_brain)
+        if job.stage == "failed":
+            return f"analysis failed: {job.error or 'unknown error'}"
+        receipt = job.receipt or {}
+        brain_info = receipt.get("brain") or {}
+        lines = [f"🎬 analyzed — job {job.job_id}",
+                 f"source: {(receipt.get('source') or {}).get('title') or url}",
+                 f"rights: {(receipt.get('rights') or {}).get('label') or ''}",
+                 f"words: {(receipt.get('transcript') or {}).get('words', 0)} · "
+                 f"strategy: {receipt.get('strategy')}",
+                 "",
+                 receipt.get("editorial_summary") or "no moments scored",
+                 ""]
+        if brain_info.get("ran") and brain_info.get("picks"):
+            lines.append("brain picks:")
+            for pick in brain_info["picks"]:
+                lines.append(f"  #{pick['n']}: {pick['reason']}")
+        elif brain_info.get("error"):
+            lines.append(f"brain rung: {brain_info['error']}")
+        lines.append("")
+        lines.append(f"render one with: /clip render {job.job_id} <pick>")
+        return "\n".join(lines)
+
+    def _control_trend(self, tail: str) -> str:
+        """What's hot right now: /trend <query> [--limit N]."""
+        import shlex
+
+        from ...media.trendclip import TrendclipPipeline, topic_from_query, trendclip_root
+
+        ref = (tail or "").strip()
+        if not ref:
+            return "usage: /trend <query> [--limit N] — e.g. /trend GTA 6 gameplay"
+        try:
+            toks = shlex.split(ref)
+        except ValueError:
+            toks = ref.split()
+        limit = 10
+        query_parts: list[str] = []
+        i = 0
+        while i < len(toks):
+            if toks[i] == "--limit" and i + 1 < len(toks):
+                with contextlib.suppress(ValueError):
+                    limit = max(1, min(20, int(toks[i + 1])))
+                i += 2
+            else:
+                query_parts.append(toks[i])
+                i += 1
+        query = " ".join(query_parts).strip()
+        if not query:
+            return "usage: /trend <query> [--limit N]"
+        topic = topic_from_query(query)
+        items = TrendclipPipeline(
+            trendclip_root(self.settings)).discover(topic, limit=limit)
+        if items and "error" in items[0]:
+            return f"trend search failed: {items[0]['error']}"
+        if not items:
+            return f"nothing trending found for {query!r}"
+        lines = [f"🔥 trending — {query}:"]
+        for idx, item in enumerate(items[:limit], 1):
+            lines.append(
+                f"{idx}. {item.get('title') or 'untitled'} "
+                f"({item.get('channel') or '?'}) — "
+                f"{item.get('views_per_hour', 0):,.0f} views/hr · "
+                f"score {item.get('feed_score', 0)}\n"
+                f"   {item.get('url') or ''}")
+        lines.append("\ncut one with: /clip <url from the list>")
+        return "\n".join(lines)
+
     def _control_trendops(self, tail: str, chat_key: str = "") -> Any:
         """Trend-driven video editing in chat.
 

@@ -817,13 +817,13 @@ class TestSmarthomeSurface:
         assert "Kitchen Plug" in found
 
     def test_tool_count_is_786_after_c1_added_smarthome(self):
-        # 782 after this lane (C.1) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall; 785 after this lane (C.8) added robot; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class; 789 after D5 (walabel) added whatsapp_account_label.
+        # 782 after this lane (C.1) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall; 785 after this lane (C.8) added robot; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class; 789 after D5 (walabel) added whatsapp_account_label; 794 after gapfix163 added 5 trendclip tools (trendclip_discover, trendclip_analyze, trendclip_render, trendclip_status, trendclip_queue).
         from types import SimpleNamespace
 
         from nomorals.tools.registry import ToolRegistry
         count = len(ToolRegistry(SimpleNamespace()).register_builtins()
                     ._tools)
-        assert count == 789
+        assert count == 794
 
 
 class _NoCredentials:

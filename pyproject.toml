@@ -29,7 +29,10 @@ dependencies = []
 # Numerical acceleration for the vector store and native trainer.
 fast = ["numpy>=1.24"]
 # Media download and processing.
-media = ["yt-dlp>=2024.4.9"]
+# av is bounded because faster-whisper 1.2.1 calls av.open(...,
+# metadata_errors=...) and PyAV 14+ dropped that parameter — an
+# unbounded resolve installs av 19 and transcription TypeErrors.
+media = ["yt-dlp>=2024.4.9", "faster-whisper>=1.1", "av>=11,<14"]
 # Media editing engine (Pillow + OpenCV + scikit-image advanced ops;
 # ffmpeg used from PATH).
 media-edit = ["Pillow>=10.0", "opencv-python-headless>=4.8",

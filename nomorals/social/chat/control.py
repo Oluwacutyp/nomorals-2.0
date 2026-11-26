@@ -959,6 +959,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "unirig": (0, None),     # /unirig <mesh path-or-url> [out] [--seed N] — mesh -> rigged character via UniRig (GPU-gated, owner-only)
     "blender": (0, None),    # /blender status|scene|look|code <bpy>|import <glb|fbx> — steer the operator's live Blender (owner-only)
     "shorts": (0, None),     # /shorts make|status|resume|niches|calendar|ledger|estimate
+    "clip": (0, None),      # /clip <url>|render|status|queue — trendclip: find what's hot, cut a vertical clip
+    "trend": (1, None),     # /trend <query> — trending videos for a topic, ranked by views-per-hour
     "trendops": (0, None),   # /trendops formats|apply|capture|propose|remove
     "lens": (1, 3),          # /lens <path-or-url> — reverse image search
     # devon: the autonomous dev & investigation agent
@@ -4651,6 +4653,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/shorts make <niche> \"<topic>\" [--now] | /shorts niches | /shorts status | /shorts calendar | /shorts ledger",
               "example": "/shorts make motivation \"discipline beats motivation\" --now",
               "related": "/imggen /say"},
+    "clip": {"what": "TrendClip: take a trending video, transcribe it locally, score its moments (deterministic formula + the brain) and cut a vertical 1080x1920 clip with word captions — manual publish only.",
+              "usage": "/clip <url> [--strategy gaming|conversation|educational|comedy|craft] [--no-brain] | /clip render <job> <pick> [--layout balanced|punch|clean] | /clip status [job] | /clip queue <job> [platforms]",
+              "example": "/clip https://www.youtube.com/watch?v=... --strategy gaming",
+              "related": "/trend /shorts /trendops"},
+    "trend": {"what": "What's hot right now: trending YouTube videos for any topic, ranked by views-per-hour and a deterministic relevance/freshness score.",
+              "usage": "/trend <query> [--limit N]",
+              "example": "/trend GTA 6 gameplay",
+              "related": "/clip /shorts"},
     "trendops": {"what": "Trend-driven video editing: catch a trending clip and cut footage to its format — velocity ramps, beat-synced cuts, meme caption.",
               "usage": "/trendops formats | /trendops apply <format> <footage> [--music <audio>] [--caption \"text\"] | /trendops capture <url> | /trendops propose",
               "example": "/trendops apply roadster clips/game.mp4 --caption \"Me and bro in 2030\"",
@@ -5143,7 +5153,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("decoding & crypto", ["decode", "cookies", "cookielab", "structure", "cipher",
                            "monitor", "investigate", "breach"]),
     ("media system", ["music", "distribute", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "dj", "mix", "produce", "like", "dislike", "cookies",
-                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "g2p", "vtuber", "sham", "musicnote", "smarthome", "camwall", "robot",
+                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "clip", "trend", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "g2p", "vtuber", "sham", "musicnote", "smarthome", "camwall", "robot",
                       "steal", "sticker", "convert", "gif", "emoji", "customemoji", "emojiart", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "models", "mcp", "a2a", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion",
@@ -5411,7 +5421,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("media system — music · playback · video · podcast",
      ["music", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
       "distribute", "dj", "mix", "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "produce", "like", "dislike",
-      "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "g2p", "vtuber", "sham", "musicnote", "smarthome", "camwall", "robot",
+      "shorts", "clip", "trend", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "g2p", "vtuber", "sham", "musicnote", "smarthome", "camwall", "robot",
       "steal", "sticker", "convert", "gif", "emoji", "customemoji",
       "emojiart", "react", "create",
       "awoo", "baka", "bite", "blush", "bonk", "bored",
@@ -5915,6 +5925,8 @@ LIST_ONELINERS: dict[str, str] = {
     "api": "external API connectors (weather, fx, github, …)",
     "connectors": "manage the service connectors: list, status, connect",
     "shorts": "short-form content empire: make, queue, post vertical videos",
+    "clip": "trendclip: cut a trending video into a vertical clip (local transcribe + scored moments)",
+    "trend": "what's hot: trending videos for any topic, ranked by views-per-hour",
     "trendops": "trend-driven video editing: cut footage to a trending format",
     "notion": "Notion databases, rows, and page creation",
     "gcal": "Google Calendar agenda and event creation",

@@ -5,7 +5,7 @@ canonical five, and the sitemap.
 
 craft-wiki carries NO licence, so this is original Devon code
 implementing mined patterns, never a copy of its text or files. The
-tool count stays 774 — the secprobe wire-up added 25 tools; the new 775 after this lane (B.19) added scene_spawn. 776 after this lane (B.20) added cloudcam. 777 after this lane (B.22) added show. 778 after this lane (B.26) added scene_project. 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber. 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall; 785 after this lane (C.8) added robot; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class; 789 after D5 (walabel) added whatsapp_account_label.
+tool count stays 774 — the secprobe wire-up added 25 tools; the new 775 after this lane (B.19) added scene_spawn. 776 after this lane (B.20) added cloudcam. 777 after this lane (B.22) added show. 778 after this lane (B.26) added scene_project. 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber. 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall; 785 after this lane (C.8) added robot; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class; 789 after D5 (walabel) added whatsapp_account_label; 794 after gapfix163 added 5 trendclip tools (trendclip_discover, trendclip_analyze, trendclip_render, trendclip_status, trendclip_queue).
 actions ride the existing action-dispatched ``wiki`` tool (774 =
 749 + 25 secprobe tools; 749 = 748 at the lane's base + 1 mocap
 tool, lane 125).
@@ -416,7 +416,7 @@ class TestToolAndVerb(unittest.TestCase):
     def _call(self, reg, **kw):
         return reg._tools["wiki"].fn(**kw)
 
-    def test_tool_count_stays_789(self) -> None:
+    def test_tool_count_stays_794(self) -> None:
         from nomorals.tools.registry import ToolRegistry
 
         registry = ToolRegistry(SimpleNamespace())
@@ -425,8 +425,8 @@ class TestToolAndVerb(unittest.TestCase):
         # existing action-dispatched "wiki" tool. 774 = 749 + 25 secprobe
         # tools; 749 = 748 at the lane's base + 1 mocap tool
         # (lane 125), which landed between the lane's base and
-        # the rebase. 778 after B.26 added scene_project. 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber. 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall; 785 after this lane (C.8) added robot; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class; 789 after D5 (walabel) added whatsapp_account_label.
-        self.assertEqual(len(registry._tools), 789)
+        # the rebase. 778 after B.26 added scene_project. 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh. 781 after this lane (B.27) added vtuber. 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall; 785 after this lane (C.8) added robot; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class; 789 after D5 (walabel) added whatsapp_account_label; 794 after gapfix163 added 5 trendclip tools (trendclip_discover, trendclip_analyze, trendclip_render, trendclip_status, trendclip_queue).
+        self.assertEqual(len(registry._tools), 794)
         self.assertIn("wiki", registry._tools)
 
     def test_tool_nav_sitemap_canonical(self) -> None:

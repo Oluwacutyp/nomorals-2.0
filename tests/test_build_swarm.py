@@ -409,7 +409,7 @@ class RegisterTests(unittest.TestCase):
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
         self.assertIn("build_swarm", registry._tools)
-        self.assertEqual(len(registry._tools), 789)  # D5 (walabel) adds whatsapp_account_label
+        self.assertEqual(len(registry._tools), 794)  # trendclip adds 5 tools
 
 
 class AgentLoopTests(unittest.TestCase):
