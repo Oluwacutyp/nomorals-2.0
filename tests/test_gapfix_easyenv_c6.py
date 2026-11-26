@@ -562,14 +562,14 @@ class TestChat:
 
 
 class TestToolCount:
-    def test_tool_count_still_806(self):
+    def test_tool_count_still_807(self):
         # 782 after C.2 registered the (previously dead) tonal_g2p tool;
         # 783 after C.1 added smarthome; 784 after C.4 added camwall;
-        # 785 after C.8 added robot; 786 after this lane (goal-class) added goal_class.
+        # 785 after C.8 added robot; 786 after this lane (goal-class) added goal_class. 807 after this lane (agents192) added fleet.
         # C.6 adds no tool — the env surface is `nm env` + `/env` over
         # the core/easyenv organ — so the count did not move at the time.
         from nomorals.tools.registry import ToolRegistry
 
         count = len(ToolRegistry(SimpleNamespace()).register_builtins()
                     ._tools)
-        assert count == 806
+        assert count == 807

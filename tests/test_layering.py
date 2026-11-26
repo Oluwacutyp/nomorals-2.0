@@ -374,6 +374,7 @@ MODULE_PINS: dict[str, int] = {
     # composes integrations.naija_deals — and none has a static importer
     # below L5 (the registry loads tool modules by name at runtime).
     "nomorals.tools.agents": 5,        # agent-tool bridge -> agents.*
+    "nomorals.tools.fleet": 5,         # fleet tool surface -> agents.fleet
     "nomorals.tools.code_executor": 5, # plan executor -> agents.coding
     "nomorals.tools.edit_loop": 5,     # coding edit engine (agents.coding composes it)
     "nomorals.tools.decoder_agent": 5, # tool over agents.decoder/context

@@ -548,7 +548,7 @@ def test_tool_count_is_787_after_browser_watch():
     registry.register_builtins()
     # 786 after audit N4 added build_swarm; 801 after gapfix124 added
     # browser_watch.
-    assert len(registry._tools) == 806
+    assert len(registry._tools) == 807
     assert registry.get("browser_watch") is not None
 
 

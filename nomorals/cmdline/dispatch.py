@@ -67,6 +67,7 @@ from .commands.fonts import _cmd_fonts
 from .commands.cards import _cmd_cards
 from .commands.browse import _cmd_browse
 from .commands.code import _cmd_code
+from .commands.fleet import _cmd_fleet
 from .commands.graph import _cmd_graph
 from .commands.trace import _cmd_trace
 from .commands.prompt import _cmd_prompt
@@ -538,6 +539,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "arena-research": _CommandSpec(_cmd_arena_research),
     "code": _CommandSpec(_cmd_code),
     "graph": _CommandSpec(_cmd_graph),
+    "fleet": _CommandSpec(_cmd_fleet),
     "trace": _CommandSpec(_cmd_trace),
     "prompt": _CommandSpec(_cmd_prompt),
     "doc": _CommandSpec(_cmd_doc),

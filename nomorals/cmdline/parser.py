@@ -99,6 +99,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "sentence": [],  # "sent" is already a command — no alias
     "code": ["c"],
     "graph": [],
+    "fleet": [],
     "commands": ["cmd"],
     "connectors": ["conn"],
     "cookies": ["ck"],
@@ -1003,6 +1004,59 @@ def _parser() -> argparse.ArgumentParser:
     g_search = graph_sub.add_parser("search", help="search names + docstrings")
     g_search.add_argument("query", help="free-text query")
     _graph_common(g_search, limit=True)
+
+    fleet = sub.add_parser("fleet", aliases=CLI_ALIASES["fleet"],
+        help="Parallel coding-agent fleet: create, dispatch, board, review, approve",
+        description=("nm fleet create --repo DIR [--name NAME] [--base REV]\n"
+                     "nm fleet dispatch <fleet> \"<brief>\" [--key KEY] [--wait SECONDS]\n"
+                     "nm fleet board <fleet>\n"
+                     "nm fleet list\n"
+                     "nm fleet review <task>\n"
+                     "nm fleet approve <task>\n"
+                     "nm fleet cleanup <fleet>"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    fleet_sub = fleet.add_subparsers(dest="fleet_action", required=True)
+    f_create = fleet_sub.add_parser("create", help="create a fleet over a repo")
+    f_create.add_argument("--repo", required=True,
+                          help="repo the fleet works over")
+    f_create.add_argument("--name", default="fleet", help="fleet name")
+    f_create.add_argument("--base", default="",
+                          help="base revision (default: HEAD)")
+    f_create.add_argument("--json", action="store_true",
+                          help="Output as JSON")
+    f_dispatch = fleet_sub.add_parser(
+        "dispatch", help="dispatch a coding brief as an isolated task")
+    f_dispatch.add_argument("fleet", help="fleet id, id prefix, or name")
+    f_dispatch.add_argument("brief", nargs="+", help="coding brief")
+    f_dispatch.add_argument("--key", default="",
+                            help="short task key (default: brief start)")
+    f_dispatch.add_argument("--wait", type=float, default=0,
+                            help="seconds to wait for the task to finish "
+                                 "(0 = return at once)")
+    f_dispatch.add_argument("--json", action="store_true",
+                            help="Output as JSON")
+    f_board = fleet_sub.add_parser("board", help="show the Kanban board")
+    f_board.add_argument("fleet", help="fleet id, id prefix, or name")
+    f_board.add_argument("--json", action="store_true",
+                         help="Output as JSON")
+    f_list = fleet_sub.add_parser("list", help="list fleets")
+    f_list.add_argument("--json", action="store_true",
+                        help="Output as JSON")
+    f_review = fleet_sub.add_parser("review", help="show a task's diff")
+    f_review.add_argument("task", help="task id or id prefix")
+    f_review.add_argument("--json", action="store_true",
+                          help="Output as JSON")
+    f_approve = fleet_sub.add_parser(
+        "approve", help="merge a reviewed task into the repo")
+    f_approve.add_argument("task", help="task id or id prefix")
+    f_approve.add_argument("--json", action="store_true",
+                           help="Output as JSON")
+    f_cleanup = fleet_sub.add_parser(
+        "cleanup", help="remove finished tasks' worktrees")
+    f_cleanup.add_argument("fleet", help="fleet id, id prefix, or name")
+    f_cleanup.add_argument("--json", action="store_true",
+                           help="Output as JSON")
 
     trace = sub.add_parser("trace", aliases=CLI_ALIASES["trace"],
         help="Journal trace/replay view: list, show, replay one conversation",
