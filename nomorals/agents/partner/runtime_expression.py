@@ -703,8 +703,18 @@ class RuntimeExpressionMixin:
             path, kind, _ids = found
             try:
                 if kind in ("video", "animation", "gif"):
+                    # The animated-sticker format is the TARGET
+                    # platform's, not the maker's: WhatsApp
+                    # stickers are WebP (a .webm cannot be one —
+                    # the bridge would send it as a document),
+                    # Telegram's animated stickers are .webm.
+                    platform = str(
+                        getattr(message.chat, "platform", "")
+                        or "")
+                    fmt = ("webp" if platform.startswith("whatsapp")
+                           else "webm")
                     produced = str(media_convert.video_to_sticker(
-                        path, out_dir=out_dir))
+                        path, out_dir=out_dir, format=fmt))
                 else:
                     produced = str(media_convert.image_to_sticker(
                         path, out_dir=out_dir))

@@ -1473,6 +1473,61 @@ func specialFormRefusal(viewOnce, ptv bool,
 	return ""
 }
 
+// stickerRefusal is the sticker kind's honest gate, called
+// BEFORE any upload (the specialFormRefusal pattern): a .webm
+// can never be a WhatsApp sticker — WhatsApp stickers are
+// WebP, static or animated — so a .webm sent as kind sticker
+// is refused in words instead of silently landing as a
+// document wearing a content-hash name (the 2026-11-26
+// /sticker-on-WhatsApp incident). A sticker cannot carry
+// view-once either: applyViewOnce only touches Image/Video,
+// so without this the flag would silently drop.
+func stickerRefusal(kind, ext string, viewOnce bool) string {
+	if kind != "sticker" {
+		return ""
+	}
+	if ext == ".webm" {
+		return "a .webm sticker cannot be sent on WhatsApp — " +
+			"WhatsApp stickers are WebP; the maker must " +
+			"produce an animated WebP"
+	}
+	if viewOnce {
+		return "a sticker cannot be sent view-once"
+	}
+	return ""
+}
+
+// webpIsAnimated sniffs a WebP's bytes by walking its RIFF
+// chunks: a VP8X chunk with the animation flag (bit 0x02) or
+// an ANIM chunk means animated. Malformed input reads false
+// (the upload fails on it anyway); the sniff never panics.
+func webpIsAnimated(data []byte) bool {
+	if len(data) < 12 || string(data[0:4]) != "RIFF" ||
+		string(data[8:12]) != "WEBP" {
+		return false
+	}
+	off := 12
+	for off+8 <= len(data) {
+		id := string(data[off : off+4])
+		size := int(data[off+4]) | int(data[off+5])<<8 |
+			int(data[off+6])<<16 | int(data[off+7])<<24
+		if id == "ANIM" {
+			return true
+		}
+		if id == "VP8X" && off+8+1 <= len(data) &&
+			data[off+8]&0x02 != 0 {
+			return true
+		}
+		// Chunks are word-aligned: an odd-sized chunk carries
+		// one pad byte.
+		off += 8 + size
+		if size%2 != 0 {
+			off++
+		}
+	}
+	return false
+}
+
 // applyViewOnce sets the view-once flag on the media message
 // itself (bundle #10) — the flag form this bridge's
 // unwrapInbound recognizes on arrival, and the form current
@@ -1520,6 +1575,15 @@ func (b *bridge) cmdSendMedia(ctx context.Context, cc *clientConn, id string, re
 	mime := extMIME[ext]
 	caption := req.str("caption")
 	ptt := req.boolean("ptt")
+	// The kind the caller sent the media AS (§21): the Python
+	// adapter passes media_kind on every send_media, and a
+	// sticker must reach the bridge as what it is — the
+	// extension alone cannot tell a sticker WebP from a photo
+	// WebP, and a .webm sticker is not a WhatsApp sticker at
+	// all. Honored below: a .webp with kind sticker becomes a
+	// StickerMessage, a .webm with kind sticker is refused
+	// before any upload.
+	mediaKind := req.str("media_kind")
 	// Special forms (parity bundle #10): view_once wraps a
 	// photo/video so the recipient gets one look (the flag form
 	// on the media message — the same shape this bridge's
@@ -1546,6 +1610,10 @@ func (b *bridge) cmdSendMedia(ctx context.Context, cc *clientConn, id string, re
 		b.reply(cc, id, map[string]any{"ok": false, "error": refusal})
 		return
 	}
+	if refusal := stickerRefusal(mediaKind, ext, viewOnce); refusal != "" {
+		b.reply(cc, id, map[string]any{"ok": false, "error": refusal})
+		return
+	}
 	var up whatsmeow.UploadResponse
 	if chat.Server == types.NewsletterServer {
 		up, err = b.cli.UploadNewsletter(ctx, data, mediaType)
@@ -1559,13 +1627,32 @@ func (b *bridge) cmdSendMedia(ctx context.Context, cc *clientConn, id string, re
 	var msg *waE2E.Message
 	switch mediaType {
 	case whatsmeow.MediaImage:
-		msg = &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
-			URL: proto.String(up.URL), DirectPath: proto.String(up.DirectPath),
-			MediaKey: up.MediaKey, Mimetype: proto.String(mime),
-			Caption:    proto.String(caption),
-			FileSHA256: up.FileSHA256, FileEncSHA256: up.FileEncSHA256,
-			FileLength: proto.Uint64(up.FileLength),
-		}}
+		if mediaKind == "sticker" && ext == ".webp" {
+			// A sticker WebP rides as the protocol's
+			// StickerMessage, not a photo: the upload
+			// already used MediaImage (whatsmeow maps
+			// StickerMessage to it), and the mimetype is
+			// image/webp. IsAnimated comes from the bytes,
+			// so an animated WebP animates on the client
+			// instead of freezing on its first frame.
+			// (Width/Height are omitted, the bridge's own
+			// ImageMessage convention.)
+			msg = &waE2E.Message{StickerMessage: &waE2E.StickerMessage{
+				URL: proto.String(up.URL), DirectPath: proto.String(up.DirectPath),
+				MediaKey: up.MediaKey, Mimetype: proto.String("image/webp"),
+				FileSHA256: up.FileSHA256, FileEncSHA256: up.FileEncSHA256,
+				FileLength: proto.Uint64(up.FileLength),
+				IsAnimated: proto.Bool(webpIsAnimated(data)),
+			}}
+		} else {
+			msg = &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
+				URL: proto.String(up.URL), DirectPath: proto.String(up.DirectPath),
+				MediaKey: up.MediaKey, Mimetype: proto.String(mime),
+				Caption:    proto.String(caption),
+				FileSHA256: up.FileSHA256, FileEncSHA256: up.FileEncSHA256,
+				FileLength: proto.Uint64(up.FileLength),
+			}}
+		}
 	case whatsmeow.MediaVideo:
 		msg = &waE2E.Message{VideoMessage: &waE2E.VideoMessage{
 			URL: proto.String(up.URL), DirectPath: proto.String(up.DirectPath),

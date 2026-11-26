@@ -366,15 +366,35 @@ def mp3_to_video(src: Path | str, *, out_dir: Path | str = "",
 
 def video_to_sticker(src: Path | str, *,
                      out_dir: Path | str = "",
-                     runner: Runner | None = None) -> Path:
-    """Video/GIF → an animated sticker: ≤3s of it, 512 wide,
-    WebM/VP9 — Telegram's animated-sticker discipline."""
+                     runner: Runner | None = None,
+                     format: str = "webm") -> Path:
+    """Video/GIF → an animated sticker: ≤3s of it, 512 wide.
+
+    ``format`` is the TARGET platform's animated-sticker format:
+    "webm" (VP9 — Telegram's animated-sticker discipline, the
+    default, so every existing caller is unchanged) or "webp"
+    (animated WebP — WhatsApp's animated-sticker format; a .webm
+    cannot be a WhatsApp sticker at all, and a .webm sent to the
+    WhatsApp bridge lands as a document).  Any other value is a
+    ConversionError — fail closed, never silently produce the
+    wrong form.
+    """
+    if format not in ("webm", "webp"):
+        raise ConversionError(
+            f"unknown sticker format {format!r} — 'webm' or 'webp'")
     src = _require_input(src)
-    dest = _out(src, ".webm", out_dir=out_dir)
-    args = ["-y", "-i", str(src), "-t", "3",
-            "-vf", "fps=30,scale=512:-2:flags=lanczos",
-            "-an", "-c:v", "libvpx-vp9", "-b:v", "400k",
-            "-pix_fmt", "yuva420p", str(dest)]
+    if format == "webp":
+        dest = _out(src, ".webp", out_dir=out_dir)
+        args = ["-y", "-i", str(src), "-t", "3",
+                "-vf", "fps=30,scale=512:-2:flags=lanczos",
+                "-an", "-c:v", "libwebp", "-loop", "0",
+                "-pix_fmt", "yuva420p", str(dest)]
+    else:
+        dest = _out(src, ".webm", out_dir=out_dir)
+        args = ["-y", "-i", str(src), "-t", "3",
+                "-vf", "fps=30,scale=512:-2:flags=lanczos",
+                "-an", "-c:v", "libvpx-vp9", "-b:v", "400k",
+                "-pix_fmt", "yuva420p", str(dest)]
     return _run(runner, args, src, dest)
 
 
