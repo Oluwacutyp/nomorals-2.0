@@ -410,7 +410,7 @@ class TestToolAndCliSurface(_RotationCase):
             reg.call("proxy_rotate", action="stop")
         self.assertIsNone(core_http.get_proxy_resolver())
 
-    def test_registry_tool_count_still_809(self) -> None:
+    def test_registry_tool_count_still_810(self) -> None:
         # No new brain tool was added by this lane (the proxy_rotate
         # tool gained a parameter, not a new registration).
         # 794, not 787: the trendclip port (gapfix163) added 5 tools
@@ -423,7 +423,7 @@ class TestToolAndCliSurface(_RotationCase):
         # after this lane's base (parent re-bump, 2026-11-24).)
         reg = ToolRegistry(context=_ctx(self.tmp))
         reg.register_builtins()
-        self.assertEqual(len(reg._tools), 809)  # trendclip adds 5 tools
+        self.assertEqual(len(reg._tools), 810)  # trendclip adds 5 tools
 
     def _run_cli(self, ctx, **fields):
         base = {"proxy_action": "", "proxy_sources_action": "",

@@ -708,6 +708,6 @@ def test_tool_registry_count_is_804():
 
     registry = ToolRegistry(SimpleNamespace())
     registry.register_builtins()
-    assert len(registry._tools) == 809
+    assert len(registry._tools) == 810
     assert "group_cleanup" in registry._tools
     assert registry.failed_modules() == []

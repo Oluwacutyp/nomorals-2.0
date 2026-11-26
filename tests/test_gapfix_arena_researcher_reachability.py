@@ -59,7 +59,7 @@ class RegistryTests(unittest.TestCase):
     def test_tool_in_live_registry_at_786(self):
         ctx = _ctx()
         registry = _live_registry(ctx)
-        self.assertEqual(len(registry._tools), 809)
+        self.assertEqual(len(registry._tools), 810)
         self.assertIsNotNone(registry.get("arena_researcher"))
         self.assertEqual(registry.failed_modules(), [])
 

@@ -775,14 +775,14 @@ class WiringTest(unittest.TestCase):
             f"mocap call failed: {getattr(outcome, 'error', outcome)}")
 
     def test_tool_count_is_786_after_scene_project(self):
-        # 778 after B.26 shipped the scene_project tool; 779 after B.23 added facemcap. 780 after B.25 added facemesh. 781 after B.27 added vtuber. 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall; 785 after this lane (C.8) added robot; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class; 789 after D5 (walabel) added whatsapp_account_label; 794 after gapfix163 added 5 trendclip tools (trendclip_discover, trendclip_analyze, trendclip_render, trendclip_status, trendclip_queue). 800 after gapfix146 added 6 visiondoc tools (vision_document, document_word, document_html, document_text, document_pdf, document_sheet). 801 after gapfix124 added browser_watch. 802 after this lane (SongRecon surface) added songrecon. 803 after gapfix122 added file. 804 after gapfix129 added group_cleanup. 805 after gapfix130 added group_heist. 806 after gapfix119 added matching. 807 after this lane (agents192) added fleet. 808 after this lane (F3) added control. 809 after this lane (moneyprinter) added make_short.
+        # 778 after B.26 shipped the scene_project tool; 779 after B.23 added facemcap. 780 after B.25 added facemesh. 781 after B.27 added vtuber. 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall; 785 after this lane (C.8) added robot; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class; 789 after D5 (walabel) added whatsapp_account_label; 794 after gapfix163 added 5 trendclip tools (trendclip_discover, trendclip_analyze, trendclip_render, trendclip_status, trendclip_queue). 800 after gapfix146 added 6 visiondoc tools (vision_document, document_word, document_html, document_text, document_pdf, document_sheet). 801 after gapfix124 added browser_watch. 802 after this lane (SongRecon surface) added songrecon. 803 after gapfix122 added file. 804 after gapfix129 added group_cleanup. 805 after gapfix130 added group_heist. 806 after gapfix119 added matching. 807 after this lane (agents192) added fleet. 808 after this lane (F3) added control. 809 after this lane (moneyprinter) added make_short. 810 after this lane (VoiceStudio) added voicestudio.
         # (777 after B.22 shipped the show tool on 147c5b5e;
         # 776 after B.20 shipped cloudcam): no new tool here — the
         # ingest actions ride the existing mocap tool, so the
         # registry count moves past B.22's 777 only by B.26's
         # scene_project.
         registry = self._registry()
-        self.assertEqual(len(registry._tools), 809)
+        self.assertEqual(len(registry._tools), 810)
         self.assertIn("mocap", registry._tools)
         self.assertIn("cloudcam", registry._tools)
 

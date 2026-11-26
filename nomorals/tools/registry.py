@@ -643,7 +643,7 @@ class ToolRegistry:
             "proxy", "proxy_rotation", "proxylab", "pytest_runner", "robot",
             "sandbox_code", "scriptgen",
             "trace_view",
-            "sceneintel", "scene_spawn", "scene_project", "directed", "seer", "shell", "show", "vtuber", "side_chats", "smarthome", "ssh_socks", "traindata", "translate", "vision", "visuals", "voice_live", "web", "weather",
+            "sceneintel", "scene_spawn", "scene_project", "directed", "seer", "shell", "show", "vtuber", "side_chats", "smarthome", "ssh_socks", "traindata", "translate", "vision", "visuals", "voice_live", "voicestudio", "web", "weather",
             "security",
             "wisdom", "social", "whatsapp",
             "services",  # 28 service connectors bridged to the spine

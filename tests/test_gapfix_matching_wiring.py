@@ -267,7 +267,7 @@ class ToolReachabilityTests(unittest.TestCase):
         # this lane (audit N4) added build_swarm; 806 after gapfix119
         # added matching.
         self.assertIn("matching", self.registry._tools)
-        self.assertEqual(len(self.registry._tools), 809)
+        self.assertEqual(len(self.registry._tools), 810)
 
     def test_tool_daily_per_surface(self):
         import tempfile

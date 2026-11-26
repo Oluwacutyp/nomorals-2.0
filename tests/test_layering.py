@@ -374,6 +374,12 @@ MODULE_PINS: dict[str, int] = {
     # the registry loads it dynamically by dotted name, never by
     # static import (its only static importers are tests).
     "nomorals.tools.voice_live": 5,
+    # VoiceStudio lane: tools.voicestudio is a tool surface over the
+    # L4 VoiceStudio client organ (voice.voicestudio) — the AGPL
+    # backend is an external process, driven over its local HTTP API;
+    # the registry loads it dynamically by dotted name, never by
+    # static import (its only static importers are tests).
+    "nomorals.tools.voicestudio": 5,
     # T1.6 (pass #96): the foundation-vs-composition split completed for
     # the remaining agent-composed tool modules. Each is a tool *surface*
     # over an L5 organ — it composes that organ the way tools.deals

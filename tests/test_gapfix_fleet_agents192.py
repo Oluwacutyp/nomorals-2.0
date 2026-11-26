@@ -263,7 +263,7 @@ class FleetToolTest(unittest.TestCase):
         self.fleet = self.registry.get("fleet").fn
 
     def test_tool_count_is_807(self):
-        self.assertEqual(len(self.registry._tools), 809)
+        self.assertEqual(len(self.registry._tools), 810)
 
     def test_tool_create_board_dispatch_review_approve(self):
         created = self.fleet(action="create", repo=str(self.repo),

@@ -873,7 +873,7 @@ def test_registry_count_is_800_and_trendclip_tools_register(tmp_path):
     # trendclip_queue).
     reg = ToolRegistry(context=_ctx(tmp_path))
     reg.register_builtins()
-    assert len(reg._tools) == 809
+    assert len(reg._tools) == 810
     for name in ("trendclip_discover", "trendclip_analyze",
                  "trendclip_render", "trendclip_status", "trendclip_queue"):
         assert name in reg.names(), name

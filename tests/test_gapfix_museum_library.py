@@ -349,7 +349,7 @@ class MuseumLibraryToolTest(unittest.TestCase):
         registry.register_builtins()
         # 785 after C.8 added the robot tool; 786 after gapfix74 added museum_library; 786 after gapfix74
         # added museum_library.
-        self.assertEqual(len(registry._tools), 809)  # trendclip adds 5 tools
+        self.assertEqual(len(registry._tools), 810)  # trendclip adds 5 tools
         self.assertIn("museum_library", registry._tools)
 
     def test_unified_search_reaches_museum_and_library(self) -> None:

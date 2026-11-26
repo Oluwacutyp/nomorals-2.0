@@ -902,7 +902,7 @@ class ChainTests(_SecBase):
 class ToolCountTests(_SecBase):
     def test_tool_count_is_787_after_secprobe(self):
         # 749 after the mocap port (lane 125) + 25 secprobe tools. 775 after B.19 added scene_spawn; 776 after B.20 added cloudcam; 777 after B.22 added show; 779 after this lane (B.23) added facemcap. 780 after this lane (B.25) added facemesh.
-        self.assertEqual(len(self.registry._tools), 809)
+        self.assertEqual(len(self.registry._tools), 810)
         for name in ("scope_load", "scope_check", "param_mine",
                      "param_confirm", "inject_probe", "jwt_attack",
                      "graphql_probe", "graphql_amplify", "race_wave",
