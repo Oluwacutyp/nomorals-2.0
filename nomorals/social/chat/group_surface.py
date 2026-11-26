@@ -4128,6 +4128,8 @@ class GroupSurface:
             return {"ok": False, "reason": "hospital",
                     "hospital": self.hospital_state(
                         group_key, actor, now=now)}
+        if self._target_hidden(group_key, target, now=now):
+            return {"ok": False, "reason": "target_hidden"}
         state = self._extras(group_key).setdefault("rob", {})
         last = float((state.get(actor) or {}).get("last") or 0)
         if now - last < 600:
@@ -5405,6 +5407,17 @@ class GroupSurface:
                     "wait_s": int(wait)}
         return None
 
+    def _target_hidden(self, group_key: str, target: str, *,
+                       now: float) -> bool:
+        """True while the target is lying low in their bunker.
+        A frozen conflict state reads as not hidden — the
+        freeze itself surfaces on conflict paths, never here."""
+        try:
+            return bool(self.conflict.bunker_hidden(
+                group_key, target, now=now))
+        except GroupConflictError:
+            return False
+
     def crime_verb(self, group_key: str, actor: str, target: str,
                    verb: str, *, rng: Any,
                    now: float | None = None) -> dict[str, Any]:
@@ -5419,6 +5432,8 @@ class GroupSurface:
             return ready
         if self.jail_state(group_key, target, now=now):
             return {"ok": False, "reason": "target_jailed"}
+        if self._target_hidden(group_key, target, now=now):
+            return {"ok": False, "reason": "target_hidden"}
         organ = self.conflict
         out = organ.hit_verb(
             group_key, actor, target, verb, rng=rng, now=now,
@@ -5460,6 +5475,8 @@ class GroupSurface:
         ready = self._crime_ready(group_key, actor, now=now)
         if ready:
             return ready
+        if self._target_hidden(group_key, target, now=now):
+            return {"ok": False, "reason": "target_hidden"}
         out = self.conflict.sabotage(
             group_key, actor, target, rng=rng, now=now,
             shielded=self._shielded(group_key, target, now=now))
@@ -5503,9 +5520,8 @@ class GroupSurface:
             if not self.member(group_key, target_id):
                 return {"ok": False, "reason": "target"}
         gang = self.conflict.gang_of(group_key, leader)
-        if target_kind in ("treasury", "bank") and (
-                gang is None or len(gang.get("members") or [])
-                < 5):
+        if target_kind in ("treasury", "bank", "convoy") and (
+                gang is None or len(gang.get("members") or []) < 5):
             return {"ok": False, "reason": "tier",
                     "need": "a gang of 5+ runs the big scores"}
         out = self.conflict.start_heist(
@@ -5759,6 +5775,225 @@ class GroupSurface:
             if lobby.get("status") == "open":
                 return lobby
         return None
+
+    def heist_waiting(self, group_key: str, *,
+                      now: float | None = None) -> str:
+        """Board one-liner for open heists and scores — the
+        ``nm groups`` waiting line and its runtime mirror.  A
+        frozen conflict state reads as nothing waiting."""
+        now = now if now is not None else time.time()
+        if self._conflict_mode(group_key) == "off":
+            return ""
+        try:
+            parts = []
+            if self.heist_open(group_key) is not None:
+                parts.append("heist forming")
+            scores = self.conflict.open_scores(group_key, now=now)
+            if scores:
+                parts.append(
+                    f"score open: "
+                    f"{scores[0].get('name') or scores[0].get('kind')}")
+        except GroupConflictError:
+            return ""
+        return " · ".join(parts)
+
+    # ── heist planning: targets + scouting (§5b heists) ──
+
+    def heist_targets(self, group_key: str, *,
+                      now: float | None = None) -> dict[str, Any]:
+        """The casing board: every score a crew can hit, with
+        its defense on the table — the treasury, every district
+        bank, the open street scores.  Member vaults are named
+        only as a count and a total (a vault is targeted by
+        @member, never listed)."""
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        organ = self.conflict
+        available = self.economy.treasury_balance(group_key) \
+            - self.reserved_treasury(group_key)
+        treasury = organ.target_defense(group_key, "treasury", "",
+                                        now=now) or {}
+        banks = []
+        for district in sorted(DISTRICTS):
+            defense = organ.target_defense(
+                group_key, "bank", district, now=now) or {}
+            banks.append({
+                "district": district,
+                "name": DISTRICTS[district]["name"],
+                "defense": int(defense.get("defense") or 0),
+                "defense_items":
+                    defense.get("defense_items") or [],
+                "hq_defense": int(defense.get("hq_defense") or 0),
+                "notes": defense.get("notes") or []})
+        scores = []
+        for score in organ.open_scores(group_key, now=now):
+            defense = organ.target_defense(
+                group_key, str(score.get("kind") or ""),
+                str(score.get("id") or ""), now=now) or {}
+            scores.append({**score,
+                           "defense":
+                               int(defense.get("defense") or 0),
+                           "notes": defense.get("notes") or []})
+        vaults = 0
+        vault_total = 0
+        for member in (self.store.group(group_key).get("members")
+                       or {}):
+            bal = self.economy.bank_balance(group_key,
+                                            str(member))
+            if bal > 0:
+                vaults += 1
+                vault_total += bal
+        return {"ok": True,
+                "treasury": {
+                    "available": max(0, available),
+                    "defense": int(treasury.get("defense") or 0),
+                    "defense_items":
+                        treasury.get("defense_items") or [],
+                    "hq_defense":
+                        int(treasury.get("hq_defense") or 0),
+                    "notes": treasury.get("notes") or []},
+                "banks": banks, "scores": scores,
+                "vaults": vaults, "vault_total": vault_total,
+                "lobby": self.heist_open(group_key)}
+
+    def heist_scout(self, group_key: str, member: str, kind: str,
+                    target_id: str, *,
+                    now: float | None = None) -> dict[str, Any]:
+        """One member's odds against a target, before any crew
+        forms — the planning read."""
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        if kind == "vault":
+            if target_id == member:
+                return {"ok": False, "reason": "self"}
+            if not self.member(group_key, target_id):
+                return {"ok": False, "reason": "target"}
+        if kind == "bank" and target_id not in DISTRICTS:
+            return {"ok": False, "reason": "district"}
+        out = self.conflict.scout_target(group_key, member, kind,
+                                         target_id, now=now)
+        if out is None:
+            return {"ok": False, "reason": "target"}
+        if kind in ("convoy", "hoard"):
+            for score in self.conflict.open_scores(group_key,
+                                                   now=now):
+                if str(score.get("id")) == target_id:
+                    out["name"] = str(score.get("name") or "")
+                    break
+        return {"ok": True, **out}
+
+    def rob_bank(self, group_key: str, actor: str, district: str,
+                 *, rng: Any, now: float | None = None
+                 ) -> dict[str, Any]:
+        """/rob bank <district>: the lone-wolf score.  One
+        member against a district bank — no crew, no gang,
+        worse odds, a smaller take, jail on a bust."""
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        ready = self._crime_ready(group_key, actor, now=now)
+        if ready:
+            return ready
+        if district not in DISTRICTS:
+            return {"ok": False, "reason": "district"}
+        available = self.economy.treasury_balance(group_key) \
+            - self.reserved_treasury(group_key)
+        out = self.conflict.rob_institution(
+            group_key, actor, "bank", district, rng=rng, now=now,
+            available_treasury=max(0, available))
+        if not out.get("ok"):
+            return out
+        cd = self._extras(group_key).setdefault("crime_cd", {})
+        cd[actor] = {"last": now}
+        if out.get("outcome") == "bust":
+            self.jail_member(group_key, actor,
+                             int(out.get("jail_min") or 30),
+                             reason="caught robbing the bank",
+                             now=now)
+            out["jailed"] = True
+        self._audit(group_key, "rob_bank", user_id=actor,
+                    target=f"bank:{district}",
+                    success=out.get("outcome") == "success",
+                    take=int(out.get("take") or 0))
+        self.store.save()
+        return out
+
+    # ── bunkers (§5b heists) ──
+
+    def bunker_status(self, group_key: str, member: str, *,
+                      now: float | None = None) -> dict[str, Any]:
+        """A member's bunker, if they own one, and whether
+        they are lying low in it right now."""
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        return {"ok": True,
+                "bunker": self.conflict.bunker_of(group_key,
+                                                  member),
+                "hidden": self.conflict.bunker_hidden(
+                    group_key, member, now=now)}
+
+    def bunker_buy(self, group_key: str, member: str, tier: int,
+                   *, now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        out = self.conflict.buy_bunker(group_key, member, tier,
+                                       now=now)
+        if out.get("ok"):
+            self.store.save()
+        return out
+
+    def bunker_stash(self, group_key: str, member: str,
+                     amount: int, *,
+                     now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        out = self.conflict.bunker_stash(group_key, member,
+                                         amount, now=now)
+        if out.get("ok"):
+            self.store.save()
+        return out
+
+    def bunker_take(self, group_key: str, member: str,
+                    amount: int, *,
+                    now: float | None = None) -> dict[str, Any]:
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        out = self.conflict.bunker_take(group_key, member,
+                                        amount, now=now)
+        if out.get("ok"):
+            self.store.save()
+        return out
+
+    def bunker_hide(self, group_key: str, member: str, *,
+                    now: float | None = None) -> dict[str, Any]:
+        """Lie low in the bunker.  A jailed member is already
+        caught — there is nowhere to hide from a cell."""
+        now = now if now is not None else time.time()
+        gate = self._conflict_gate(group_key, "crime")
+        if gate:
+            return gate
+        if self.jail_state(group_key, member, now=now):
+            return {"ok": False, "reason": "jailed",
+                    "jail": self.jail_state(group_key, member,
+                                            now=now)}
+        out = self.conflict.bunker_hide(group_key, member,
+                                        now=now)
+        if out.get("ok"):
+            self.store.save()
+        return out
 
     # ── gangs ──
 
@@ -7198,6 +7433,29 @@ class GroupSurface:
                 self._audit(group_key, "sysdrop_opened",
                             drop=str(drop.get("id") or ""),
                             loot=str(drop.get("kind") or ""))
+        # street scores: spawn + expiry beside the drops (§5b)
+        for score in organ.expire_scores(group_key, now=now):
+            self._audit(group_key, "score_expired",
+                        score=str(score.get("id") or ""))
+        if not shield:
+            spawned = organ.cycle_scores(group_key, rng=rng,
+                                         now=now, cfg=cfg)
+            if spawned is not None:
+                # the announcement rides the cycle's notices
+                # (the cycle only runs on a message) — never
+                # the conflict_feed: the runtime renders only
+                # "line" and "sysdrop" items there, so a score
+                # entry would be swallowed unposted, and the
+                # feed's drop count is exact by test
+                notices.append(notice_line(
+                    "💰", f"a score is open: "
+                          f"<b>{spawned.get('name')}</b> — "
+                          f"{sparks(int(spawned.get('prize') or 0))} "
+                          f"on the table. /heist targets to case "
+                          f"it."))
+                self._audit(group_key, "score_opened",
+                            score=str(spawned.get("id") or ""),
+                            score_kind=str(spawned.get("kind") or ""))
         self.store.save()
         return notices
 

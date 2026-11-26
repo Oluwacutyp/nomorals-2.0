@@ -910,5 +910,5 @@ def test_tool_count_unchanged():
     # re-bases this pin if lane 115 ships first — rebased here: 789
     # after D5 (walabel) added whatsapp_account_label.)
     registry = _registry()
-    assert len(registry._tools) == 804
+    assert len(registry._tools) == 805
     assert "craftlibs" in registry._tools

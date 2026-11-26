@@ -683,6 +683,7 @@ class ToolRegistry:
             "representation",  # "what did you tell X for me?" over the representation ledger
             "group_health",  # churn / growth / topic clusters for WhatsApp group health
             "group_cleanup",  # Telegram member cleanup: scan / rmdeleted / rminactive
+            "group_heist",  # crew heists, solo bank robbery, bunkers (§5b heists)
             "photo_editor",  # Studio photo editor — PSD documents, ladder edits, Studio page (PhotoCraft port)
             "artist",  # artist IDE — scene-before-generation over her own image/video rungs (ArtCraft port)
             "recruitment",  # per-vacancy recruitment jobs + tiering + /status board (B42)

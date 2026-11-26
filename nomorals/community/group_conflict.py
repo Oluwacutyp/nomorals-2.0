@@ -54,6 +54,9 @@ __all__ = [
     "LOOT_KINDS", "WANTED_RUNGS",
     "HQ_TIERS", "HQ_DEFENSE", "hq_tier_of", "hq_defense_bonus",
     "combat_power_of", "heist_odds",
+    "BUNKER_TIERS", "BUNKER_HIDE_COOLDOWN_S",
+    "SCORE_KINDS", "SCORE_NAMES",
+    "TARGET_BASE", "TAKE_FRACTION", "TAKE_CAP",
 ]
 
 
@@ -360,16 +363,56 @@ ARSENAL: dict[str, dict[str, Any]] = {
 DEFENSE_SCOPES = ("treasury", "bank:", "vault:")
 
 #: Base resistance of each heist target before installed gear.
+#: Street scores (§5b heists): ``convoy`` is treasury money in
+#: transit — a bullion van on a district route; ``hoard`` is the
+#: fantasy score — the dragon's hoard, the phantom vault — a
+#: system prize, not town money.
 TARGET_BASE: dict[str, int] = {"treasury": 20, "bank": 12,
-                               "vault": 8}
+                               "vault": 8, "convoy": 14,
+                               "hoard": 18}
 
 #: Heist takes: fraction of the target's funds on a full
 #: success, and the hard cap — a heist is a wound, not an
-#: execution of the whole economy.
+#: execution of the whole economy.  A street score's prize IS
+#: its take (fraction 1.0); the cap bounds the prize itself.
 TAKE_FRACTION: dict[str, float] = {"treasury": 0.12,
-                                   "bank": 0.15, "vault": 0.20}
+                                   "bank": 0.15, "vault": 0.20,
+                                   "convoy": 1.0, "hoard": 1.0}
 TAKE_CAP: dict[str, int] = {"treasury": 1500, "bank": 1200,
-                            "vault": 800}
+                            "vault": 800, "convoy": 900,
+                            "hoard": 400}
+
+#: Street scores (§5b heists): kind → prize roll.  A convoy's
+#: prize is a manifest backed by the treasury (paid through
+#: ``treasury_grant``); a hoard's prize is a system prize paid
+#: as an ``award`` earn — the §35 drops' own mint family, so
+#: the §17 issuance throttle sees it.
+SCORE_KINDS: dict[str, dict[str, Any]] = {
+    "convoy": {"prize": (300, 900)},
+    "hoard": {"prize": (150, 400)},
+}
+#: Fantasy names for the hoard — one is drawn at spawn.
+SCORE_NAMES: dict[str, list[str]] = {
+    "convoy": ["Bullion van"],
+    "hoard": ["the dragon's hoard", "the phantom vault",
+              "the witch's cache", "the sunken chest"],
+}
+
+#: Bunkers (§5b heists): a member-owned hideout.  The stash is
+#: a third pocket — neither wallet nor bank — so no police fine
+#: (wallet %) and no vault raid (bank %) can touch it, and a
+#: hidden member cannot be robbed or hit.  Hide is tier-capped
+#: and carries a 12h cooldown after it ends, so nobody can live
+#: underground.  An upgrade pays only the difference.
+BUNKER_TIERS: dict[int, dict[str, Any]] = {
+    1: {"name": "Bolt-hole", "sparks": 200, "gems": 0,
+        "cap": 500, "hide_s": 1800},
+    2: {"name": "Safehouse", "sparks": 600, "gems": 0,
+        "cap": 2000, "hide_s": 7200},
+    3: {"name": "Bunker", "sparks": 1500, "gems": 2,
+        "cap": 6000, "hide_s": 28800},
+}
+BUNKER_HIDE_COOLDOWN_S = 12 * 3600
 
 #: Items whose use raises police heat beyond the job's base
 #: (the addendum's named example: thermite beats plating but
@@ -572,6 +615,9 @@ CONFLICT_DEFAULTS: dict[str, Any] = {
     "drop_chance": 0.25,        # per cycle pass in budget
     "heist_cooldown_s": 1800,   # per member between heists
     "crime_cooldown_s": 600,    # per member between hit verbs
+    "scores_per_day": 1,        # street scores per day (0 disables)
+    "score_chance": 0.25,       # per cycle pass in budget
+    "score_ttl_s": 21600,       # a score's window (6h)
     "war_escrow": 200,          # sparks per side, from the
                                 # gang treasury (in-group wars)
     "war_round_s": 3600,        # one engagement per round
@@ -742,7 +788,8 @@ def _empty_state() -> dict[str, Any]:
                        "report_credited": {}},
             "drops": {}, "drop_day": {}, "escrow_inter": {},
             "nuke_minted": False, "job_cd": {},
-            "territory_day": "", "cycle_war_at": 0.0}
+            "territory_day": "", "cycle_war_at": 0.0,
+            "bunkers": {}, "scores": {}, "score_day": {}}
 
 
 class GroupConflict:
@@ -853,6 +900,8 @@ class GroupConflict:
                      if b.get("status") == "open")
         total += sum(int(v) for v in
                      state["escrow_inter"].values())
+        total += sum(int(b.get("sparks") or 0)
+                     for b in (state.get("bunkers") or {}).values())
         return total
 
     # ── gear: loadouts, the shop shelf, defenses ──
@@ -1359,6 +1408,16 @@ class GroupConflict:
         if target_kind not in TARGET_BASE:
             return {"ok": False, "reason": "target"}
         state = self._load_state(group_id)
+        if target_kind in ("convoy", "hoard"):
+            score = (state.get("scores") or {}).get(target_id)
+            if score is None:
+                return {"ok": False, "reason": "target"}
+            if score.get("status") != "open":
+                return {"ok": False, "reason": "gone"}
+            if float(score.get("expires") or 0) <= now:
+                score["status"] = "expired"
+                self._save_state(group_id, state)
+                return {"ok": False, "reason": "expired"}
         for lobby in state["heists"].values():
             if lobby.get("status") == "open" and leader in (
                     lobby.get("crew") or []):
@@ -1405,38 +1464,60 @@ class GroupConflict:
                                 now=now)
         return math
 
+    def _member_job_power(self, group_id: str, member: str,
+                          job: str, *,
+                          state: dict[str, Any], now: float
+                          ) -> tuple[int, list[str], float, float]:
+        """One member's contribution to a job: base 2 + gear
+        power (lifestyle affinity applied), the attack items
+        carried, and the heat the kit leaves behind.  The
+        heist math and the solo robbery share this — one
+        formula, never two copies drifting apart."""
+        gang = self.gang_of(group_id, member, state=state)
+        affinity, bonus = [], 0
+        if gang is not None:
+            life = LIFESTYLES[gang["lifestyle"]]
+            affinity = list(life["affinity"])
+            bonus = int(life["affinity_bonus"])
+        items = self.loadout(group_id, member, state=state)
+        offense = 2 + gear_power(
+            items, job, now=now, affinity=affinity,
+            affinity_bonus=bonus)
+        attack_items: list[str] = []
+        heat_items = 0.0
+        cool = 0.0
+        for inst in _live_instances(items, now):
+            iid = str(inst.get("item") or "")
+            spec = ARSENAL.get(iid) or {}
+            if int((spec.get("ratings") or {}).get(
+                    job) or 0) > 0:
+                attack_items.append(iid)
+                heat_items += float(HEAT_ITEMS.get(iid, 0.0))
+                cool += float(COOL_ITEMS.get(iid, 0.0))
+        return offense, attack_items, heat_items, cool
+
     def _heist_math(self, group_id: str, lobby: dict[str, Any],
                     *, state: dict[str, Any], now: float
                     ) -> dict[str, Any]:
         target = dict(lobby.get("target") or {})
         kind = str(target.get("kind") or "vault")
-        job = "heist" if kind in ("treasury", "bank") else "vault"
+        job = "vault" if kind == "vault" else "heist"
         scope = {"treasury": "treasury",
                  "bank": f"bank:{target.get('id')}",
-                 "vault": f"vault:{target.get('id')}"}[kind]
+                 "vault": f"vault:{target.get('id')}",
+                 "convoy": f"score:{target.get('id')}",
+                 "hoard": f"score:{target.get('id')}"}[kind]
         offense = 0
         attack_items: list[str] = []
         heat_items = 0.0
         cool = 0.0
         for member in lobby.get("crew") or []:
-            gang = self.gang_of(group_id, member, state=state)
-            affinity, bonus = [], 0
-            if gang is not None:
-                life = LIFESTYLES[gang["lifestyle"]]
-                affinity = list(life["affinity"])
-                bonus = int(life["affinity_bonus"])
-            items = self.loadout(group_id, member, state=state)
-            offense += 2 + gear_power(
-                items, job, now=now, affinity=affinity,
-                affinity_bonus=bonus)
-            for inst in _live_instances(items, now):
-                iid = str(inst.get("item") or "")
-                spec = ARSENAL.get(iid) or {}
-                if int((spec.get("ratings") or {}).get(
-                        job) or 0) > 0:
-                    attack_items.append(iid)
-                    heat_items += float(HEAT_ITEMS.get(iid, 0.0))
-                    cool += float(COOL_ITEMS.get(iid, 0.0))
+            power, carried, heat, cooled = self._member_job_power(
+                group_id, member, job, state=state, now=now)
+            offense += power
+            attack_items.extend(carried)
+            heat_items += heat
+            cool += cooled
         defenses = self.defenses_at(group_id, scope, state=state)
         defense_items = [str(i.get("item") or "")
                          for i in _live_instances(defenses, now)]
@@ -1448,11 +1529,12 @@ class GroupConflict:
         offense += bonus
         defense -= cut
         # HQ concentration (§36): a gang's headquarters in this
-        # group watches the town's money — treasury and bank
-        # scores face the strongest HQ here; a member vault
-        # faces its own gang's HQ when it stands here.
+        # group watches the town's money — treasury, bank and
+        # convoy scores face the strongest HQ here; a member
+        # vault faces its own gang's HQ when it stands here.
+        # A hoard is nobody's town money, so no HQ watches it.
         hq_bonus = 0
-        if kind in ("treasury", "bank"):
+        if kind in ("treasury", "bank", "convoy"):
             hq_bonus = max(
                 (hq_defense_bonus(g) for g in
                  (state.get("gangs") or {}).values()),
@@ -1467,6 +1549,17 @@ class GroupConflict:
             notes = list(notes) + [
                 f"an HQ watches this score (+{hq_bonus} "
                 "defense)"]
+        if kind == "convoy":
+            score = (state.get("scores") or {}).get(
+                str(target.get("id") or "")) or {}
+            district = str(score.get("district") or "")
+            if district in DISTRICTS:
+                guard = int(float(
+                    DISTRICTS[district]["level"]) * 4)
+                defense += guard
+                notes = list(notes) + [
+                    f"the {DISTRICTS[district]['name']} run is "
+                    f"guarded (+{guard} defense)"]
         stars = 0.0
         for member in lobby.get("crew") or []:
             member_stars, _, _ = self.wanted_stars(
@@ -1513,7 +1606,21 @@ class GroupConflict:
         econ = self.economy
         take = 0
         funds = 0
-        if kind in ("treasury", "bank"):
+        if kind in ("convoy", "hoard"):
+            score = dict((state.get("scores") or {}).get(
+                str(target.get("id") or "")) or {})
+            if score.get("status") != "open" or float(
+                    score.get("expires") or 0) <= now:
+                lobby["status"] = "expired"
+                state["heists"][hid] = lobby
+                self._save_state(group_id, state)
+                return {"ok": False, "reason": "expired"}
+            if kind == "convoy":
+                funds = min(int(score.get("prize") or 0),
+                            max(0, int(available_treasury)))
+            else:
+                funds = int(score.get("prize") or 0)
+        elif kind in ("treasury", "bank"):
             funds = max(0, int(available_treasury))
         else:
             funds = econ.balance(group_id, econ.bank_member(
@@ -1540,11 +1647,40 @@ class GroupConflict:
                     econ.treasury_grant(
                         group_id, member, amount,
                         reason=f"heist take ({kind})", now=now)
+                elif kind == "convoy":
+                    # Treasury money in transit — the grant
+                    # carries an op_id, so a retry of this
+                    # lobby can never pay a member twice.
+                    if not econ.treasury_grant(
+                            group_id, member, amount,
+                            reason="heist take (convoy)",
+                            now=now,
+                            op_id=f"heist:{hid}:{member}"):
+                        return {"ok": False,
+                                "reason": "treasury"}
+                elif kind == "hoard":
+                    # A system prize — the drops' award path, so
+                    # the issuance throttle sees the mint.  An
+                    # earn cap refuses the WHOLE job (the lobby
+                    # stays open for a retry; nothing is
+                    # burned), exactly like a refused drop claim.
+                    entry = econ.award(
+                        group_id, member, amount,
+                        "heist take (hoard)", kind="earn",
+                        ref=f"score:{target.get('id') or ''}",
+                        now=now, op_id=f"heist:{hid}:{member}")
+                    if entry is None:
+                        return {"ok": False, "reason": "cap"}
                 else:
                     econ._move(group_id, econ.bank_member(
                         str(target.get("id") or "")), member,
                         amount, "heist",
                         "heist take (member vault)", now)
+        if kind in ("convoy", "hoard"):
+            score = (state.get("scores") or {}).get(
+                str(target.get("id") or "")) or {}
+            if score:
+                score["status"] = "done"
         # gear wears on the job — both sides
         job = str(math["job"])
         for member in crew:
@@ -1591,6 +1727,383 @@ class GroupConflict:
                 "defense": math["defense"],
                 "notes": math["notes"],
                 "jail_min": 45 if outcome == "bust" else 0}
+
+    # ── bunkers (§5b heists) ──────────────────────────────────
+
+    def bunker_of(self, group_id: str, member: str, *,
+                  state: dict[str, Any] | None = None
+                  ) -> dict[str, Any] | None:
+        """A member's bunker record, or None when they own
+        none."""
+        state = state if state is not None \
+            else self._load_state(group_id)
+        return (state.get("bunkers") or {}).get(member)
+
+    def bunker_hidden(self, group_id: str, member: str, *,
+                      state: dict[str, Any] | None = None,
+                      now: float) -> bool:
+        """True while the member is lying low in their bunker."""
+        bunker = self.bunker_of(group_id, member, state=state)
+        if not bunker:
+            return False
+        return float(bunker.get("hidden_until") or 0) > now
+
+    def buy_bunker(self, group_id: str, member: str, tier: int,
+                   *, now: float) -> dict[str, Any]:
+        """Buy (or upgrade) a bunker.  Sparks sink to the
+        treasury like any gear purchase; gems ride the estate's
+        gated spend.  An upgrade pays only the difference —
+        both legs are checked before either moves, and a failed
+        second leg refunds the first (the ``buy_gear``
+        discipline)."""
+        try:
+            tier = int(tier)
+        except (TypeError, ValueError):
+            return {"ok": False, "reason": "tier"}
+        spec = BUNKER_TIERS.get(tier)
+        if spec is None:
+            return {"ok": False, "reason": "tier"}
+        state = self._load_state(group_id)
+        econ = self.economy
+        current = (state.get("bunkers") or {}).get(member) or {}
+        paid_sparks = int(current.get("paid_sparks") or 0)
+        paid_gems = int(current.get("paid_gems") or 0)
+        sparks_due = max(0, int(spec["sparks"]) - paid_sparks)
+        gems_due = max(0, int(spec["gems"]) - paid_gems)
+        if sparks_due and econ.balance(group_id, member) \
+                < sparks_due:
+            return {"ok": False, "reason": "sparks",
+                    "sparks": sparks_due}
+        if gems_due and self._estate.gems_balance(
+                group_id, member) < gems_due:
+            return {"ok": False, "reason": "gems",
+                    "gems": gems_due}
+        gems_spent = None
+        if gems_due:
+            gems_spent = self._estate._spend_gems(
+                group_id, member, gems_due, kind="spend",
+                reason=f"bunker: {spec['name']}",
+                ref=f"bunker:{tier}", now=now)
+            if gems_spent is None:  # pragma: no cover - raced
+                return {"ok": False, "reason": "gems",
+                        "gems": gems_due}
+        if sparks_due and not econ._move(
+                group_id, member, "", sparks_due, "gear_buy",
+                f"bought {spec['name']}", now):
+            if gems_spent is not None:
+                self._estate.refund_gems(
+                    group_id, member, gems_due,
+                    reason=f"bunker refund: {spec['name']}",
+                    now=now)
+            return {"ok": False, "reason": "sparks",
+                    "sparks": sparks_due}
+        bunkers = state.setdefault("bunkers", {})
+        bunkers[member] = {
+            **current,
+            "tier": tier, "name": str(spec["name"]),
+            "cap": int(spec["cap"]),
+            "sparks": int(current.get("sparks") or 0),
+            "paid_sparks": paid_sparks + sparks_due,
+            "paid_gems": paid_gems + gems_due,
+            "bought": now,
+            "hidden_until": float(
+                current.get("hidden_until") or 0),
+            "hide_ready_at": float(
+                current.get("hide_ready_at") or 0),
+        }
+        self._journal(state, "bunker_buy", now, member=member,
+                      tier=tier)
+        self._save_state(group_id, state)
+        return {"ok": True, "bunker": bunkers[member],
+                "sparks": sparks_due, "gems": gems_due}
+
+    def bunker_stash(self, group_id: str, member: str,
+                     amount: int, *, now: float
+                     ) -> dict[str, Any]:
+        """Wallet sparks into the bunker pocket (capped by
+        tier).  The stash rides onto the treasury member and
+        the member's claim is the bunker record — the
+        reservation accounting counts it, so no other treasury
+        path can spend it.  Stashed sparks are neither wallet
+        nor bank, so no police fine, no vault raid and no
+        wallet robbery can touch them."""
+        state = self._load_state(group_id)
+        bunker = (state.get("bunkers") or {}).get(member)
+        if not bunker:
+            return {"ok": False, "reason": "none"}
+        try:
+            amount = int(amount)
+        except (TypeError, ValueError):
+            return {"ok": False, "reason": "amount"}
+        if amount <= 0:
+            return {"ok": False, "reason": "amount"}
+        cap = int(bunker.get("cap") or 0)
+        room = cap - int(bunker.get("sparks") or 0)
+        if room <= 0:
+            return {"ok": False, "reason": "full", "cap": cap}
+        amount = min(amount, room)
+        if self.economy.balance(group_id, member) < amount:
+            return {"ok": False, "reason": "sparks",
+                    "sparks": amount}
+        if not self.economy._move(
+                group_id, member, "", amount, "bunker_stash",
+                "stashed in the bunker", now):
+            return {"ok": False, "reason": "sparks",
+                    "sparks": amount}
+        bunker["sparks"] = int(bunker.get("sparks") or 0) + amount
+        self._journal(state, "bunker_stash", now, member=member,
+                      amount=amount)
+        self._save_state(group_id, state)
+        return {"ok": True, "amount": amount,
+                "stored": int(bunker["sparks"]), "cap": cap}
+
+    def bunker_take(self, group_id: str, member: str,
+                    amount: int, *, now: float
+                    ) -> dict[str, Any]:
+        """Bunker pocket back to the wallet."""
+        state = self._load_state(group_id)
+        bunker = (state.get("bunkers") or {}).get(member)
+        if not bunker:
+            return {"ok": False, "reason": "none"}
+        try:
+            amount = int(amount)
+        except (TypeError, ValueError):
+            return {"ok": False, "reason": "amount"}
+        if amount <= 0:
+            return {"ok": False, "reason": "amount"}
+        stored = int(bunker.get("sparks") or 0)
+        if stored <= 0:
+            return {"ok": False, "reason": "empty"}
+        amount = min(amount, stored)
+        if not self.economy._move(
+                group_id, "", member, amount, "bunker_take",
+                "bunker withdrawal", now):
+            return {"ok": False, "reason": "treasury"}
+        bunker["sparks"] = stored - amount
+        self._journal(state, "bunker_take", now, member=member,
+                      amount=amount)
+        self._save_state(group_id, state)
+        return {"ok": True, "amount": amount,
+                "stored": int(bunker["sparks"])}
+
+    def bunker_hide(self, group_id: str, member: str, *,
+                    now: float) -> dict[str, Any]:
+        """Lie low in the bunker until the tier's window ends.
+        While hidden the police sweep cannot find the member
+        and no crime verb can reach them.  A 12h cooldown after
+        the window ends keeps the hide a tactic, not a home."""
+        state = self._load_state(group_id)
+        bunker = (state.get("bunkers") or {}).get(member)
+        if not bunker:
+            return {"ok": False, "reason": "none"}
+        if self.bunker_hidden(group_id, member, state=state,
+                              now=now):
+            return {"ok": False, "reason": "hidden",
+                    "until": float(bunker.get("hidden_until") or 0)}
+        ready_at = float(bunker.get("hide_ready_at") or 0)
+        if now < ready_at:
+            return {"ok": False, "reason": "cooldown",
+                    "wait_s": int(ready_at - now)}
+        spec = BUNKER_TIERS[int(bunker.get("tier") or 1)]
+        until = now + float(spec["hide_s"])
+        bunker["hidden_until"] = until
+        bunker["hide_ready_at"] = until + BUNKER_HIDE_COOLDOWN_S
+        self._journal(state, "bunker_hide", now, member=member,
+                      until=until)
+        self._save_state(group_id, state)
+        return {"ok": True, "until": until,
+                "hide_s": int(spec["hide_s"])}
+
+    # ── street scores (§5b heists) ─────────────────────────────
+
+    def cycle_scores(self, group_id: str, *, rng: Any,
+                     now: float, cfg: dict[str, Any]
+                     ) -> dict[str, Any] | None:
+        """Spawn one street score inside the daily budget — the
+        §35 drops' own discipline: at most one open, a per-day
+        budget, a per-pass chance.  Returns the score or None."""
+        state = self._load_state(group_id)
+        day = time.strftime("%Y-%m-%d", time.localtime(now))
+        record = dict(state.get("score_day") or {})
+        if record.get("day") != day:
+            record = {"day": day, "opened": 0}
+        if int(record.get("opened") or 0) >= int(
+                cfg.get("scores_per_day") or 0):
+            return None
+        if any(s.get("status") == "open"
+               for s in (state.get("scores") or {}).values()):
+            return None
+        if float(rng.random()) >= float(
+                cfg.get("score_chance") or 0.25):
+            return None
+        kind = "convoy" if float(rng.random()) < 0.5 else "hoard"
+        low, high = SCORE_KINDS[kind]["prize"]
+        prize = int(rng.randint(low, high))
+        sid = new_short_id("score")
+        score: dict[str, Any] = {
+            "id": sid, "kind": kind, "status": "open",
+            "prize": prize, "created": now,
+            "expires": now + float(cfg.get("score_ttl_s")
+                                   or 21600)}
+        if kind == "convoy":
+            districts = sorted(DISTRICTS)
+            district = str(rng.choice(districts))
+            score["district"] = district
+            score["name"] = (
+                f"Bullion van — "
+                f"{DISTRICTS[district]['name']}")
+        else:
+            score["name"] = str(rng.choice(sorted(
+                SCORE_NAMES["hoard"])))
+        state.setdefault("scores", {})[sid] = score
+        record["opened"] = int(record.get("opened") or 0) + 1
+        state["score_day"] = record
+        self._journal(state, "score_open", now, score=sid,
+                      score_kind=kind, prize=prize)
+        self._save_state(group_id, state)
+        return score
+
+    def expire_scores(self, group_id: str, *,
+                      now: float) -> list[dict[str, Any]]:
+        """Close scores whose window passed (quietly, like
+        drops — the cycle audits them)."""
+        state = self._load_state(group_id)
+        expired = []
+        for score in (state.get("scores") or {}).values():
+            if score.get("status") == "open" and float(
+                    score.get("expires") or 0) <= now:
+                score["status"] = "expired"
+                expired.append(score)
+        if expired:
+            self._save_state(group_id, state)
+        return expired
+
+    def open_scores(self, group_id: str, *,
+                    now: float) -> list[dict[str, Any]]:
+        """The scores a crew can hit right now."""
+        state = self._load_state(group_id)
+        return [dict(s) for s in (state.get("scores") or {})
+                .values()
+                if s.get("status") == "open"
+                and float(s.get("expires") or 0) > now]
+
+    # ── solo robbery + scouting (§5b heists) ───────────────────
+
+    def rob_institution(self, group_id: str, actor: str,
+                        kind: str, target_id: str, *, rng: Any,
+                        now: float, available_treasury: int = 0
+                        ) -> dict[str, Any]:
+        """The lone-wolf score (§5b robberies): one member
+        against a district bank — no crew, no gang, worse odds
+        than a crew heist, a smaller take, and the same jail
+        when it goes wrong.  The treasury itself stays
+        crew-only.  The attempt journals as a crime event, so
+        the bully index sees it."""
+        if kind != "bank" or target_id not in DISTRICTS:
+            return {"ok": False, "reason": "target"}
+        state = self._load_state(group_id)
+        offense, attack_items, heat_items, cool = (
+            self._member_job_power(group_id, actor, "heist",
+                                   state=state, now=now))
+        scope = f"bank:{target_id}"
+        defenses = self.defenses_at(group_id, scope, state=state)
+        defense_items = [str(i.get("item") or "")
+                         for i in _live_instances(defenses, now)]
+        defense = int(TARGET_BASE["bank"]) + sum(
+            int((ARSENAL.get(iid, {}).get("ratings") or {}).get(
+                "heist") or 0) for iid in defense_items)
+        bonus, cut, notes = counter_adjust(
+            sorted(set(attack_items)), defense_items, "heist")
+        offense += bonus
+        defense -= cut
+        hq_bonus = max(
+            (hq_defense_bonus(g) for g in
+             (state.get("gangs") or {}).values()),
+            default=0)
+        defense += hq_bonus
+        if hq_bonus:
+            notes = list(notes) + [
+                f"an HQ watches this score (+{hq_bonus} "
+                "defense)"]
+        stars, _, _ = self.wanted_stars(
+            group_id, actor, state=state, now=now)
+        odds = heist_odds(offense, defense,
+                          heat_stars=float(stars))
+        success = float(rng.random()) < odds
+        take = 0
+        if success:
+            funds = max(0, int(available_treasury))
+            take = min(int(funds * 0.08), 400)
+            if take > 0 and not self.economy.treasury_grant(
+                    group_id, actor, take,
+                    reason="solo bank robbery", now=now,
+                    op_id=f"robbery:{actor}:{int(now)}"):
+                take = 0
+        outcome = "success" if success else "bust"
+        if success and take <= 0:
+            outcome = "empty"
+        heat = 1.0 + float(heat_items) - float(cool)
+        self._journal(
+            state, "crime", now, actor=actor,
+            target=f"bank:{target_id}", verb="robbery",
+            success=bool(success), take=take,
+            actor_total=self.economy.total_balance(
+                group_id, actor),
+            target_total=max(0, int(available_treasury)),
+            shielded=False, heat=max(0.5, heat))
+        self._save_state(group_id, state)
+        return {"ok": True, "outcome": outcome, "take": take,
+                "odds": odds, "offense": offense,
+                "defense": defense, "notes": notes,
+                "jail_min": 0 if success else 30}
+
+    def target_defense(self, group_id: str, kind: str,
+                       target_id: str, *, now: float
+                       ) -> dict[str, Any] | None:
+        """A target's defense with no crew behind the math —
+        what the targets board prints.  None for a kind that
+        does not exist or a score that is gone."""
+        if kind not in TARGET_BASE:
+            return None
+        state = self._load_state(group_id)
+        if kind in ("convoy", "hoard"):
+            score = (state.get("scores") or {}).get(target_id)
+            if score is None or score.get("status") != "open":
+                return None
+        math = self._heist_math(
+            group_id, {"crew": [],
+                       "target": {"kind": kind, "id": target_id}},
+            state=state, now=now)
+        return {"kind": kind, "target": target_id,
+                "defense": int(math["defense"]),
+                "defense_items": math["defense_items"],
+                "hq_defense": int(math["hq_defense"]),
+                "notes": math["notes"]}
+
+    def scout_target(self, group_id: str, member: str, kind: str,
+                     target_id: str, *, now: float
+                     ) -> dict[str, Any] | None:
+        """The odds for ONE member against a target — the
+        planning read before any crew forms.  The same math
+        ``resolve_heist`` runs, one rider; ``needed_offense``
+        is the offense a coin flip needs at this heat."""
+        if kind not in TARGET_BASE:
+            return None
+        state = self._load_state(group_id)
+        if kind in ("convoy", "hoard"):
+            score = (state.get("scores") or {}).get(target_id)
+            if score is None or score.get("status") != "open":
+                return None
+            if float(score.get("expires") or 0) <= now:
+                return None
+        math = self._heist_math(
+            group_id, {"crew": [member],
+                       "target": {"kind": kind, "id": target_id}},
+            state=state, now=now)
+        needed = int(math["defense"]) + int(
+            4.0 * float(math["heat_stars"]))
+        return {**math, "needed_offense": needed,
+                "member_offense": int(math["offense"])}
 
     # ── geared hit verbs (§23 beside /rob) ──
 
@@ -2298,6 +2811,14 @@ class GroupConflict:
             if index <= 0:
                 if record.get("rung"):
                     acted.pop(member, None)
+                continue
+            if self.bunker_hidden(group_id, member, state=state,
+                                  now=now):
+                # Lying low in a bunker: the police cannot find
+                # them this pass.  The episode stays open (the
+                # rung is not advanced), and the hide itself is
+                # tier-capped with a cooldown, so nobody can live
+                # underground.
                 continue
             if stars <= int(record.get("rung") or 0):
                 acted[member] = record

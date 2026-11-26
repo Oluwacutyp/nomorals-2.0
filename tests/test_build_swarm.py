@@ -409,7 +409,7 @@ class RegisterTests(unittest.TestCase):
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
         self.assertIn("build_swarm", registry._tools)
-        self.assertEqual(len(registry._tools), 804)  # trendclip adds 5 tools
+        self.assertEqual(len(registry._tools), 805)  # trendclip adds 5 tools
 
 
 class AgentLoopTests(unittest.TestCase):

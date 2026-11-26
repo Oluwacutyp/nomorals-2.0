@@ -237,7 +237,7 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "balance", "mine", "work", "pay", "gshop", "quests", "treasury",
     "deposit", "withdraw", "rob", "bail", "coinflip",
     "top", "tax", "grant",
-    "gear", "heist", "shoot", "kill", "assassinate", "sabotage",
+    "gear", "heist", "bunker", "shoot", "kill", "assassinate", "sabotage",
     "gang", "war", "police", "bounty", "claimdrop",
     "poll", "vote", "milestones", "contributions", "boards",
     "webshot", "webrec",
@@ -828,6 +828,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "bail": (0, 0),           # /bail — pay the treasury to leave jail now (or pay a hospital bill)
     "gear": (0, None),        # /gear [buy|install|use <item> ...] — your conflict loadout; the arsenal shelf is in /gshop (§23 addendum)
     "heist": (0, None),       # /heist [start treasury|bank <district>|vault @member | join | go] — crew scores vs installed defenses (§23)
+    "bunker": (0, None),      # /bunker [buy 1|2|3 | stash <amount|all> | take <amount|all> | hide] — your hideout: a third pocket the police cannot reach (§5b)
     "shoot": (0, 1),          # /shoot @member (or reply) — geared hit verb: small take, failure is jail (§23)
     "kill": (0, 1),           # /kill @member — needs a real weapon; bigger take + hospital for the target (§23)
     "assassinate": (0, 1),    # /assassinate @member — needs a heavy weapon; the biggest hit (§23)
@@ -4089,10 +4090,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/withdraw 50 | /withdraw all",
             "example": "/withdraw 50",
             "related": "/deposit /balance"},
-    "rob": {"what": "try to steal sparks from a member's WALLET (banked sparks are safe). Success takes 10–25% of their wallet; failure puts YOU in jail for 30 minutes — /bail pays the treasury to get out.",
-            "usage": "/rob @member, or reply to their message with /rob",
+    "rob": {"what": "try to steal sparks from a member's WALLET (banked sparks are safe). Success takes 10–25% of their wallet; failure puts YOU in jail for 30 minutes — /bail pays the treasury to get out. /rob bank <district> is the lone-wolf score against a district bank — no crew, worse odds, a smaller take, jail on a bust.",
+            "usage": "/rob @member, or reply to their message with /rob · /rob bank <district>",
             "example": "/rob @ada",
-            "related": "/bail /deposit /balance"},
+            "related": "/bail /deposit /balance /heist"},
     "bail": {"what": "pay your bail to the group treasury and leave jail immediately (robbery failures land you there). Not jailed but in hospital? /bail pays the hospital bill instead and discharges you.",
             "usage": "/bail",
             "example": "/bail",
@@ -4101,10 +4102,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/gear | /gear buy <item> | /gear install <item> treasury|bank <district>|vault | /gear use <item>",
             "example": "/gear install vault_plating vault",
             "related": "/gshop /heist /gang"},
-    "heist": {"what": "a crew score: 2–5 members combine their gear against a target's installed defenses (the group treasury, a district bank, or a member's banked vault). The odds print before you run it — ratings, counter-pairs and police heat, never a bare coin flip. Success splits the take; partial pays less; a bust jails the whole crew. Big targets need a gang of 5+ behind the crew.",
-            "usage": "/heist start treasury|bank <district>|vault @member · /heist join · /heist go",
+    "heist": {"what": "a crew score: 2–5 members combine their gear against a target's installed defenses (the group treasury, a district bank, or a member's banked vault). The odds print before you run it — ratings, counter-pairs and police heat, never a bare coin flip. Success splits the take; partial pays less; a bust jails the whole crew. Big targets need a gang of 5+ behind the crew. /heist targets cases the board first; /heist scout reads one member's odds against a target. Street scores open on the cycle — a bullion van (real-world, treasury money in transit) and a hoard (fantasy, a system prize) — hit with /heist start convoy|hoard <id>.",
+            "usage": "/heist targets · /heist scout treasury|bank <district>|vault @member|convoy|hoard <id> · /heist start treasury|bank <district>|vault @member|convoy|hoard <id> · /heist join · /heist go",
             "example": "/heist start bank harbour",
-            "related": "/gear /gang /rob"},
+            "related": "/gear /gang /rob /bunker"},
+    "bunker": {"what": "your hideout: a third pocket for sparks that is neither wallet nor bank — no police fine, no vault raid and no wallet robbery can touch what is stashed there. Buy a tier (bolt-hole 200 sparks, safehouse 600, bunker 1,500 + 2 gems), stash and take sparks, and lie low to hide from the police sweep and every crime verb until the tier's window ends (12h cooldown after).",
+            "usage": "/bunker · /bunker buy 1|2|3 · /bunker stash <amount|all> · /bunker take <amount|all> · /bunker hide",
+            "example": "/bunker buy 2",
+            "related": "/heist /rob /gear"},
     "shoot": {"what": "the light hit verb: shoot a member and lift 5–10% of their wallet (cap 100). Your gear against their armor sets the odds, printed on the result. Failure: 10 minutes in jail.",
             "usage": "/shoot @member, or reply to their message with /shoot",
             "example": "/shoot @ada",
@@ -5189,7 +5194,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                             "property", "buyproperty", "sellproperty",
                             "rent", "listproperty", "auctions",
                             "mortgage", "insure",
-                            "gear", "heist", "shoot", "kill",
+                            "gear", "heist", "bunker", "shoot", "kill",
                             "assassinate", "sabotage", "gang", "war",
                             "police", "bounty", "claimdrop",
                             "poll", "vote", "milestones",
@@ -5518,7 +5523,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "top", "tax", "grant", "drop", "claim",
       "property", "buyproperty", "sellproperty", "rent",
       "listproperty", "auctions", "mortgage", "insure",
-      "gear", "heist", "shoot", "kill", "assassinate", "sabotage",
+      "gear", "heist", "bunker", "shoot", "kill", "assassinate", "sabotage",
       "gang", "war", "police", "bounty", "claimdrop",
       "poll", "vote", "milestones", "contributions", "boards",
       "webshot", "webrec",

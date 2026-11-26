@@ -767,10 +767,10 @@ class ApiJobTests(unittest.TestCase):
             self.assertIn((method, path), routes)
             self.assertTrue(routes[(method, path)]["description"])
 
-    def test_tool_count_stays_804(self) -> None:
+    def test_tool_count_stays_805(self) -> None:
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 804)
+        self.assertEqual(len(registry._tools), 805)
 
 
 if __name__ == "__main__":

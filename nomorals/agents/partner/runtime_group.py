@@ -7583,6 +7583,9 @@ class RuntimeGroupMixin:
                        if a.group_id == key])
         if appeals:
             parts.append(f"appeals {appeals}")
+        heist = surface.heist_waiting(key)
+        if heist:
+            parts.append(heist)
         return " · ".join(parts)
 
     # ── group backup / export (§9.8) ──────────────────────────
@@ -16676,6 +16679,13 @@ class RuntimeGroupMixin:
             return err
         surface = self._group_surface()
         actor = str(message.sender_id or message.sender or "")
+        words = str(tail or "").split()
+        if words and words[0].lower() == "bank":
+            if len(words) < 2:
+                return ("usage: /rob bank <district> — the "
+                        "lone-wolf score against a district bank.")
+            return self._rob_bank_reply(surface, key, message,
+                                        actor, words[1].lower())
         target = self._rob_target(surface, key, tail, message)
         if not target:
             return ("usage: reply to a member with /rob, or "
@@ -16699,6 +16709,9 @@ class RuntimeGroupMixin:
                         f"~{max(1, result['wait_s'] // 60)} min.")
             if reason == "empty":
                 return "their wallet is empty — nothing to take."
+            if reason == "target_hidden":
+                return ("they're lying low in their bunker — no one "
+                        "can reach them right now.")
             return "that robbery doesn't work as written."
         from ...social.chat.typography import Card, sparks
 
@@ -16717,6 +16730,40 @@ class RuntimeGroupMixin:
         card.line("You're in jail for 30 minutes.")
         card.stats([("Bail", sparks(result["bail"]), True)])
         card.note("bail goes to the treasury")
+        return self._card(message, card,
+                          [[("🔓 Pay bail", "bail")]])
+
+    def _rob_bank_reply(self, surface, key, message, actor,
+                        district):  # type: ignore[no-untyped-def]
+        """``/rob bank <district>`` — the lone-wolf score."""
+        import random
+
+        from ...social.chat.typography import Card, sparks
+
+        result = surface.rob_bank(key, actor, district,
+                                  rng=random.Random())
+        if not result.get("ok"):
+            return self._conflict_refusal(surface, key, result)
+        outcome = str(result.get("outcome") or "")
+        if outcome == "success":
+            card = Card("economy", title="Got away", icon="🥷")
+            card.line(f"**{sparks(int(result.get('take') or 0))}** "
+                      f"lifted from the {district} bank — solo.")
+            card.stats([("Odds",
+                         f"{int(round(float(result.get('odds') or 0) * 100))}%",
+                         True)])
+            card.note("bank it before someone returns the "
+                      "favour: /deposit all")
+            return self._card(
+                message, card,
+                [[("🏦 Deposit", "deposit all"),
+                  ("🪙 My balance", "balance")]])
+        if outcome == "empty":
+            return ("you got in — the bank holds nothing worth "
+                    "taking right now.")
+        card = Card("economy", title="Caught", icon="🚔")
+        card.line("Caught robbing the bank — you're in jail for "
+                  "30 minutes.")
         return self._card(message, card,
                           [[("🔓 Pay bail", "bail")]])
 
@@ -16792,6 +16839,9 @@ class RuntimeGroupMixin:
             return "not against yourself."
         if reason == "target_jailed":
             return "they're in jail — out of reach for now."
+        if reason == "target_hidden":
+            return ("they're lying low in their bunker — no one "
+                    "can reach them right now.")
         return fallback
 
     def _conflict_target(self, surface, key, tail, message):  # type: ignore[no-untyped-def]
@@ -17049,12 +17099,37 @@ class RuntimeGroupMixin:
         return self._card(message, card,
                           [[("🔓 Pay bail", "bail")]])
 
+    def _heist_target_arg(self, surface, key, words, message,
+                          verb="start"):  # type: ignore[no-untyped-def]
+        """(kind, target_id, usage) for a heist target named in
+        words — treasury | bank <district> | vault @member |
+        convoy <id> | hoard <id>.  (None, \"\", usage) when the
+        words name nothing a crew can hit."""
+        if not words:
+            return None, "", None
+        kind = words[0].lower()
+        if kind == "treasury":
+            return "treasury", "", None
+        if kind == "bank" and len(words) >= 2:
+            return "bank", words[1].lower(), None
+        if kind == "vault":
+            target, _label = self._conflict_target(
+                surface, key, " ".join(words[1:]), message)
+            if not target:
+                return None, "", (f"usage: /heist {verb} vault "
+                                  "@member")
+            return "vault", target, None
+        if kind in ("convoy", "hoard") and len(words) >= 2:
+            return kind, words[1].lower(), None
+        return None, "", None
+
     def _control_heist(self, tail, message):  # type: ignore[no-untyped-def]
-        """``/heist start treasury|bank <district>|vault
-        @member`` · ``/heist join`` · ``/heist go`` — the crew
-        score (§23): the crew's combined loadout against the
-        target's installed defenses, odds printed before and
-        after."""
+        """``/heist targets`` · ``/heist scout <target>`` ·
+        ``/heist start treasury|bank <district>|vault @member|
+        convoy <id>|hoard <id>`` · ``/heist join`` ·
+        ``/heist go`` — the crew score (§23): the crew's
+        combined loadout against the target's installed
+        defenses, odds printed before and after."""
         import random
 
         key, err = self._economy_gate(message)
@@ -17067,31 +17142,51 @@ class RuntimeGroupMixin:
             return self._conflict_refusal(surface, key, gate)
         words = str(tail or "").split()
         head = words[0].lower() if words else ""
+        if head == "targets":
+            out = surface.heist_targets(key)
+            if not out.get("ok"):
+                return self._conflict_refusal(surface, key, out)
+            return self._heist_targets_card(surface, key, message,
+                                            out)
+        if head == "scout":
+            kind, target_id, usage = self._heist_target_arg(
+                surface, key, words[1:], message, verb="scout")
+            if kind is None:
+                return (usage or
+                        "usage: /heist scout treasury · /heist "
+                        "scout bank <district> · /heist scout "
+                        "vault @member · /heist scout "
+                        "convoy|hoard <id>")
+            out = surface.heist_scout(key, user_id, kind,
+                                      target_id)
+            if not out.get("ok"):
+                if out.get("reason") == "district":
+                    from ...community.group_real_estate import DISTRICTS
+                    return ("which bank? districts: "
+                            + ", ".join(
+                                f"{d} ({v['name']})"
+                                for d, v in DISTRICTS.items()))
+                return self._conflict_refusal(surface, key, out)
+            return self._heist_scout_card(surface, key, message,
+                                          kind, target_id, out)
         if head == "start" and len(words) >= 2:
-            kind = words[1].lower()
-            if kind == "treasury":
-                out = surface.heist_start(key, user_id,
-                                          "treasury", "")
-            elif kind == "bank" and len(words) >= 3:
-                out = surface.heist_start(key, user_id, "bank",
-                                          words[2].lower())
-            elif kind == "vault":
-                target, _label = self._conflict_target(
-                    surface, key, " ".join(words[2:]), message)
-                if not target:
-                    return ("usage: /heist start vault @member")
-                out = surface.heist_start(key, user_id, "vault",
-                                          target)
-            else:
-                return ("usage: /heist start treasury · /heist "
+            kind, target_id, usage = self._heist_target_arg(
+                surface, key, words[1:], message)
+            if kind is None:
+                return (usage or
+                        "usage: /heist start treasury · /heist "
                         "start bank <district> · /heist start "
-                        "vault @member")
+                        "vault @member · /heist start "
+                        "convoy|hoard <id>")
+            out = surface.heist_start(key, user_id, kind,
+                                      target_id)
             if not out.get("ok"):
                 if out.get("reason") == "tier":
-                    return ("the big scores — the treasury and "
-                            "the banks — are gang work: they need "
-                            "a gang of 5+ behind the crew. Member "
-                            "vaults take any crew of 2–5.")
+                    return ("the big scores — the treasury, the "
+                            "banks and the bullion vans — are gang "
+                            "work: they need a gang of 5+ behind "
+                            "the crew. Member vaults and hoards "
+                            "take any crew of 2–5.")
                 if out.get("reason") == "district":
                     from ...community.group_real_estate import \
                         DISTRICTS
@@ -17099,6 +17194,12 @@ class RuntimeGroupMixin:
                             + ", ".join(
                                 f"{d} ({v['name']})"
                                 for d, v in DISTRICTS.items()))
+                if out.get("reason") == "gone":
+                    return ("that score is already gone — "
+                            "/heist targets for what's open.")
+                if out.get("reason") == "expired":
+                    return ("that score's window closed — "
+                            "/heist targets for what's open.")
                 return self._conflict_refusal(surface, key, out)
             lobby = out["heist"]
             return self._heist_card(surface, key, message, lobby,
@@ -17146,10 +17247,12 @@ class RuntimeGroupMixin:
                                          case)
         lobby = surface.heist_open(key)
         if lobby is None:
-            return ("no heist is forming. Start one: /heist "
+            return ("no heist is forming. Case the board first "
+                    "(/heist targets), then start one: /heist "
                     "start treasury · /heist start bank "
-                    "<district> · /heist start vault @member — "
-                    "crews of 2–5, gear decides the odds.")
+                    "<district> · /heist start vault @member · "
+                    "/heist start convoy|hoard <id> — crews of "
+                    "2–5, gear decides the odds.")
         return self._heist_card(surface, key, message, lobby,
                                 lead="a crew is forming:")
 
@@ -17191,6 +17294,218 @@ class RuntimeGroupMixin:
               ("heist", "Run it", "heist go")]],
             settings=surface.store.settings(key))
         return self._card(message, card, buttons)
+
+    def _heist_targets_card(self, surface, key, message,
+                            out):  # type: ignore[no-untyped-def]
+        """``/heist targets`` — the casing board."""
+        from ...social.chat.typography import Card, sparks
+
+        treasury = out.get("treasury") or {}
+        card = Card("economy", title="Scores on the board",
+                    icon="🎯")
+        card.line(f"treasury: **{sparks(int(treasury.get('available') or 0))}** "
+                  f"free · defense {int(treasury.get('defense') or 0)}")
+        for bank in out.get("banks") or []:
+            line = (f"{bank.get('name')} bank — defense "
+                    f"{int(bank.get('defense') or 0)}")
+            if int(bank.get("hq_defense") or 0):
+                line += f" · HQ +{int(bank['hq_defense'])}"
+            card.line(line)
+        for score in out.get("scores") or []:
+            card.line(f"{score.get('name')} — "
+                      f"**{sparks(int(score.get('prize') or 0))}** · "
+                      f"defense {int(score.get('defense') or 0)} · "
+                      f"/heist start {score.get('kind')} "
+                      f"{score.get('id')}")
+        if not (out.get("scores") or []):
+            card.line("no street score is open right now — the "
+                      "cycle opens one a day.")
+        card.line(f"member vaults: {int(out.get('vaults') or 0)} "
+                  f"hold {sparks(int(out.get('vault_total') or 0))} "
+                  f"in total — target one with /heist start "
+                  f"vault @member.")
+        if out.get("lobby") is not None:
+            card.line("a crew is forming — /heist join to ride.")
+        return self._card(message, card)
+
+    def _heist_scout_card(self, surface, key, message, kind,
+                          target_id,
+                          out):  # type: ignore[no-untyped-def]
+        """``/heist scout <target>`` — one member's odds."""
+        from ...social.chat.typography import Card
+
+        if kind == "treasury":
+            where = "the group treasury"
+        elif kind == "bank":
+            where = f"the bank in {target_id}"
+        elif kind == "vault":
+            where = (f"{self._estate_member_label(surface, key, target_id)}"
+                     f"'s vault")
+        else:
+            where = str(out.get("name") or target_id)
+        card = Card("economy", title="Scouted", icon="🔭")
+        card.line(f"{where} — your solo read.")
+        card.stats([
+            ("Your offense", str(out.get("member_offense")), True),
+            ("Target defense", str(out.get("defense")), True),
+            ("Solo odds",
+             f"{int(round(float(out.get('odds') or 0) * 100))}%",
+             True),
+            ("Offense for a coin flip",
+             str(out.get("needed_offense")), True)])
+        for note in out.get("notes") or []:
+            card.line(f"⚡ {note}")
+        if out.get("heat_stars"):
+            card.line(f"🚔 police heat on you: "
+                      f"{float(out['heat_stars']):.0f}★ — heat "
+                      f"hardens the target.")
+        card.note("a crew's combined gear is what moves the "
+                  "odds — /heist start to form one.")
+        return self._card(message, card)
+
+    def _bunker_refusal(self, surface, key,
+                        out):  # type: ignore[no-untyped-def]
+        """Bunker-specific refusals; everything shared falls
+        through to the conflict voice."""
+        reason = str(out.get("reason") or "")
+        if reason == "none":
+            return ("you own no bunker yet — /bunker buy 1|2|3 "
+                    "(bolt-hole, safehouse, bunker).")
+        if reason == "tier":
+            return "usage: /bunker buy 1|2|3."
+        if reason == "amount":
+            return "usage: /bunker stash <amount|all> · /bunker take <amount|all>."
+        if reason == "sparks":
+            return "your wallet can't cover that."
+        if reason == "gems":
+            return "you don't hold the gems that tier needs."
+        if reason == "full":
+            return (f"the bunker is full (cap "
+                    f"{int(out.get('cap') or 0)} sparks) — take "
+                    f"some out first.")
+        if reason == "empty":
+            return "nothing stashed to take."
+        if reason == "hidden":
+            return "you're already lying low."
+        if reason == "cooldown":
+            return (f"the hide needs "
+                    f"~{max(1, int(out.get('wait_s') or 0) // 60)} "
+                    f"min before you can lie low again.")
+        return self._conflict_refusal(surface, key, out)
+
+    def _bunker_card(self, surface, key, message, bunker, *,
+                     hidden=False,
+                     lead=""):  # type: ignore[no-untyped-def]
+        """``/bunker`` — the hideout, its stash and its hide."""
+        from ...social.chat.typography import Card, sparks
+
+        if not bunker:
+            card = Card("economy", title="Bunker", icon="🏰")
+            card.line("you own no bunker yet.")
+            card.line("1 · Bolt-hole — 200 sparks, holds 500, "
+                      "hide 30 min.")
+            card.line("2 · Safehouse — 600 sparks, holds 2,000, "
+                      "hide 2 hours.")
+            card.line("3 · Bunker — 1,500 sparks + 2 gems, holds "
+                      "6,000, hide 8 hours.")
+            card.line("stashed sparks are neither wallet nor "
+                      "bank — no fine, no raid, no robbery can "
+                      "touch them.")
+            return self._card(
+                message, card,
+                [[("🏰 Buy a bolt-hole", "bunker buy 1")]])
+        card = Card("economy", title="Bunker", icon="🏰")
+        if lead:
+            card.line(lead)
+        card.line(f"**{bunker.get('name')}** — holds "
+                  f"**{sparks(int(bunker.get('sparks') or 0))}** "
+                  f"of {sparks(int(bunker.get('cap') or 0))}.")
+        if hidden:
+            card.line("🕶️ you're lying low — the police can't "
+                      "find you and no crime can reach you.")
+        return self._card(
+            message, card,
+            [[("🪙 Stash", "bunker stash all"),
+              ("💰 Take", "bunker take all"),
+              ("🕶️ Hide", "bunker hide")]])
+
+    def _control_bunker(self, tail, message):  # type: ignore[no-untyped-def]
+        """``/bunker`` — your hideout: buy, stash, take, hide."""
+        key, err = self._economy_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        user_id = str(message.sender_id or message.sender or "")
+        gate = surface._conflict_gate(key, "crime")
+        if gate:
+            return self._conflict_refusal(surface, key, gate)
+        words = str(tail or "").split()
+        head = words[0].lower() if words else ""
+
+        def _amount(word):
+            if str(word).lower() == "all":
+                return "all"
+            try:
+                return int(word)
+            except (TypeError, ValueError):
+                return None
+
+        if head == "buy" and len(words) >= 2:
+            try:
+                tier = int(words[1])
+            except (TypeError, ValueError):
+                return "usage: /bunker buy 1|2|3."
+            out = surface.bunker_buy(key, user_id, tier)
+            if not out.get("ok"):
+                return self._bunker_refusal(surface, key, out)
+            return self._bunker_card(surface, key, message,
+                                     out["bunker"],
+                                     lead="your bunker is ready.")
+        if head == "stash" and len(words) >= 2:
+            amount = _amount(words[1])
+            if amount is None:
+                return "usage: /bunker stash <amount|all>."
+            if amount == "all":
+                amount = int(surface.economy.balance(
+                    key, user_id))
+            out = surface.bunker_stash(key, user_id, amount)
+            if not out.get("ok"):
+                return self._bunker_refusal(surface, key, out)
+            return self._bunker_card(
+                surface, key, message,
+                surface.conflict.bunker_of(key, user_id),
+                lead=f"stashed {int(out.get('amount') or 0)} "
+                     f"sparks.")
+        if head == "take" and len(words) >= 2:
+            amount = _amount(words[1])
+            if amount is None:
+                return "usage: /bunker take <amount|all>."
+            if amount == "all":
+                held = surface.conflict.bunker_of(key, user_id)
+                amount = int((held or {}).get("sparks") or 0)
+            out = surface.bunker_take(key, user_id, amount)
+            if not out.get("ok"):
+                return self._bunker_refusal(surface, key, out)
+            return self._bunker_card(
+                surface, key, message,
+                surface.conflict.bunker_of(key, user_id),
+                lead=f"took {int(out.get('amount') or 0)} sparks "
+                     f"back to your wallet.")
+        if head == "hide":
+            out = surface.bunker_hide(key, user_id)
+            if not out.get("ok"):
+                return self._bunker_refusal(surface, key, out)
+            return self._bunker_card(
+                surface, key, message,
+                surface.conflict.bunker_of(key, user_id),
+                hidden=True,
+                lead="you're lying low.")
+        out = surface.bunker_status(key, user_id)
+        if not out.get("ok"):
+            return self._conflict_refusal(surface, key, out)
+        return self._bunker_card(surface, key, message,
+                                 out.get("bunker"),
+                                 hidden=bool(out.get("hidden")))
 
     def _heist_result(self, surface, key, message, out):  # type: ignore[no-untyped-def]
         from ...social.chat.typography import Card, sparks

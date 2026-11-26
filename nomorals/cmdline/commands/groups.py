@@ -84,6 +84,9 @@ def _waiting(surface: Any, key: str) -> str:
                    if a.group_id == key])
     if appeals:
         parts.append(f"appeals {appeals}")
+    heist = surface.heist_waiting(key)
+    if heist:
+        parts.append(heist)
     return " · ".join(parts)
 
 

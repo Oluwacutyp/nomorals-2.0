@@ -10541,6 +10541,9 @@ class PartnerRuntime(
         if kind == "heist":
             return self._control_heist(command.tail, message)
 
+        if kind == "bunker":
+            return self._control_bunker(command.tail, message)
+
         if kind == "shoot":
             return self._control_shoot(command.tail, message)
 
