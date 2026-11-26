@@ -625,7 +625,7 @@ class ToolRegistry:
             "backup", "build_app", "captcha", "cipher", "cloudcam",
             "camwall", "facemcap", "facemesh", "code_executor", "compress",
             "connectors", "code_indexer", "code_graph", "codecard",
-            "computer",
+            "computer", "control",
             "database", "deals", "decoder", "decoder_agent", "deliver_report",
             "commerce", "filesend",
             "filesystem", "fleet", "finance", "flight_track", "giftcard", "git", "hashcrack", "imagedb",

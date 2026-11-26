@@ -42,6 +42,7 @@ from .plan import _cmd_plan
 from .museum import _cmd_museum
 from .file import _cmd_file
 from .community import _cmd_community
+from .control import _cmd_control
 from .groups import _cmd_groups
 from .digest import _cmd_digest
 from .doctor import _cmd_doctor, _cmd_models, _cmd_models_doctor, _cmd_setup, _env_update_home
@@ -198,6 +199,7 @@ __all__ = [
     "_cmd_museum",
     "_cmd_file",
     "_cmd_community",
+    "_cmd_control",
     "_cmd_groups",
     "_cmd_digest",
     "_cmd_brain",

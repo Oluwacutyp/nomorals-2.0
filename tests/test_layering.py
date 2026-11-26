@@ -375,6 +375,7 @@ MODULE_PINS: dict[str, int] = {
     # below L5 (the registry loads tool modules by name at runtime).
     "nomorals.tools.agents": 5,        # agent-tool bridge -> agents.*
     "nomorals.tools.fleet": 5,         # fleet tool surface -> agents.fleet
+    "nomorals.tools.control": 5,       # tool surface over hub.control (the F3 control plane)
     "nomorals.tools.code_executor": 5, # plan executor -> agents.coding
     "nomorals.tools.edit_loop": 5,     # coding edit engine (agents.coding composes it)
     "nomorals.tools.decoder_agent": 5, # tool over agents.decoder/context

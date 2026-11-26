@@ -133,6 +133,7 @@ from .commands.security import (
     _cmd_sec,
     _cmd_watch,
 )
+from .commands.control import _cmd_control
 from .commands.search import _cmd_search
 from .commands.serve import _cmd_serve
 from .commands.skills import _cmd_skill_pkg
@@ -530,6 +531,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "goals": _CommandSpec(_cmd_goals),
     "idea": _CommandSpec(_cmd_idea),
     "skill": _CommandSpec(_dispatch_skill),
+    "control": _CommandSpec(_cmd_control),
     "project": _CommandSpec(_cmd_project),
     "plugin": _CommandSpec(_cmd_plugin),
     "mission": _CommandSpec(_cmd_mission),

@@ -12657,6 +12657,9 @@ class PartnerRuntime(
         if kind == "mcp":
             return self._control_mcp(command.tail or arg,
                                      chat_key=chat_key)
+        if kind == "control":
+            return self._control_control(command.tail or arg,
+                                         chat_key=chat_key)
         if kind == "a2a":
             return self._control_a2a(command.tail or arg,
                                      chat_key=chat_key)

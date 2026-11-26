@@ -816,6 +816,18 @@ class RuntimeMemoryMixin:
         from ...tools.mcp_client import control_mcp
         return control_mcp(tail or "", self.settings)
 
+    def _control_control(self, tail: str, *, chat_key: str = "") -> str:
+        """The control plane in chat. Owner-only.
+
+        /control — summary · /control agents — everything Devon has ·
+        /control describe <kind> <name> — one agent's platform view ·
+        /control route <goal> [execute] — rank (and optionally run) the
+        best candidate · /control mcp — gateway servers · /control
+        skills [name] · /control receipts — provenance chain check.
+        """
+        from ...tools.control import control_chat
+        return control_chat(tail or "", self.context)
+
     def _control_a2a(self, tail: str, *, chat_key: str = "") -> str:
         """The A2A client in chat. Owner-only.
 

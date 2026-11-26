@@ -877,6 +877,35 @@ def _parser() -> argparse.ArgumentParser:
                        help="run: execute a specific installed version")
     skill.add_argument("--json", action="store_true", help="Output as JSON")
 
+    control = sub.add_parser("control",
+                             help="Control plane: discover agents, route goals, govern MCP, OpenAPI→MCP, skills, receipts")
+    control.add_argument("action", nargs="?", default="agents",
+                         choices=["agents", "describe", "route", "mcp",
+                                  "mcp-call", "openapi-import", "openapi-call",
+                                  "skills", "receipts"],
+                         help="Action to perform")
+    control.add_argument("name", nargs="?", default="",
+                         help="describe/skill name, or the route goal")
+    control.add_argument("--kind", default="",
+                         help="describe: tool | mcp | a2a | skill | role | mesh_node | job")
+    control.add_argument("--goal", default="",
+                         help="route: the goal in plain words")
+    control.add_argument("--execute", action="store_true",
+                         help="route: run the top allowed candidate")
+    control.add_argument("--server", default="",
+                         help="mcp-call: the MCP server name")
+    control.add_argument("--tool", default="",
+                         help="mcp-call/openapi-call: the tool name")
+    control.add_argument("--args", default="",
+                         help="JSON object of arguments")
+    control.add_argument("--document", default="",
+                         help="openapi: document file path, @path, or inline JSON")
+    control.add_argument("--auth-env", default="",
+                         help="openapi-call: env var holding the credential")
+    control.add_argument("--limit", type=int, default=5,
+                         help="receipts: how many to show")
+    control.add_argument("--json", action="store_true", help="Output as JSON")
+
     project = sub.add_parser("project", aliases=CLI_ALIASES["project"],
                              help="Manage projects")
     project.add_argument("action", nargs="?", default="list",

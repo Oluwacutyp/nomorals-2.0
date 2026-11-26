@@ -1068,6 +1068,16 @@ class APIServer:
         except Exception:  # noqa: BLE001 - webhook routes are additive
             _log.warning("trigger webhook routes not registered", exc_info=True)
 
+        # Control plane (nomorals/hub): GET/POST /control/* — one
+        # discovery/routing surface over the organs that already exist.
+        # Same guarded shape as the trigger routes above.
+        try:
+            from .control_routes import register_control_routes
+
+            register_control_routes(self, context)
+        except Exception:  # noqa: BLE001 - control routes are additive
+            _log.warning("control routes not registered", exc_info=True)
+
         @self.route(
             "POST", "/tools/call",
             description="Call a tool as the principal, with exactly its capability grant",
