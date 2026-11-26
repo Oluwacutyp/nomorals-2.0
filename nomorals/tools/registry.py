@@ -682,6 +682,7 @@ class ToolRegistry:
             "memory",  # spine-native granular memory tools (remember/recall/forget/...)
             "representation",  # "what did you tell X for me?" over the representation ledger
             "group_health",  # churn / growth / topic clusters for WhatsApp group health
+            "group_cleanup",  # Telegram member cleanup: scan / rmdeleted / rminactive
             "photo_editor",  # Studio photo editor — PSD documents, ladder edits, Studio page (PhotoCraft port)
             "artist",  # artist IDE — scene-before-generation over her own image/video rungs (ArtCraft port)
             "recruitment",  # per-vacancy recruitment jobs + tiering + /status board (B42)

@@ -160,9 +160,9 @@ class SongReconSurfaceTests(unittest.TestCase):
     # ── brain tool ────────────────────────────────────────────────
 
     def test_registry_counts_787_with_songrecon(self) -> None:
-        # 802 after this lane (SongRecon surface) added songrecon. 803 after gapfix122 added file.
+        # 802 after this lane (SongRecon surface) added songrecon. 803 after gapfix122 added file. 804 after gapfix129 added group_cleanup.
         reg = self._registry()
-        self.assertEqual(len(reg._tools), 803)
+        self.assertEqual(len(reg._tools), 804)
         self.assertIsNotNone(reg.get("songrecon"))
         self.assertEqual(reg.failed_modules(), [])
 

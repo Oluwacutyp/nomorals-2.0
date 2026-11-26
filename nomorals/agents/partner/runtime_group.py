@@ -13131,6 +13131,15 @@ class RuntimeGroupMixin:
         key, err = self._cleanup_gate(message)
         if err:
             return err
+        # The owner's standing stop halts acts, not reads: the
+        # scan still runs, but a removal from a stopped
+        # platform refuses in words — the stop is sticky and no
+        # command re-opens it except the owner starting the
+        # platform again.
+        if self._cleanup_owner_stopped():
+            return ("telegram is under your standing stop — "
+                    "it stays halted until you start it again; "
+                    "nothing was removed.")
         from ...social.chat.group_cleanup import (
             DEFAULT_INACTIVE_DAYS)
 
@@ -13595,6 +13604,70 @@ class RuntimeGroupMixin:
                          "giveaways) — counted for the room.")
         return "\n".join(lines)
 
+    def _cleanup_owner_stopped(self) -> bool:
+        """Is Telegram under the owner's standing stop?  The
+        live pairing registry is the authority, reached through
+        the pairing supervisor the runtime owns — the same
+        registry the personal-surface commands consult.  A bare
+        mixin (tests) has no supervisor: the stop is then
+        unverifiable and the drive proceeds, exactly like a
+        missing competence gate means no degraded hold
+        (resolve_brain_gate's precedent).  A registry read that
+        raises propagates to the drive's failure-isolated
+        handler — the beat aborts, nothing is kicked."""
+        sup_fn = getattr(self, "_pairing_supervisor", None)
+        if not callable(sup_fn):
+            return False
+        sup = sup_fn()
+        registry = getattr(sup, "registry", None)
+        stopped = getattr(registry, "owner_stopped", None)
+        if not callable(stopped):
+            return False
+        return bool(stopped("telegram"))
+
+    def _cleanup_brain_degraded(self) -> bool:
+        """Is the brain degraded (no model rung answering)?
+        The runtime's competence gate is the authority; a
+        missing gate means no hold, per resolve_brain_gate."""
+        gate_fn = getattr(self, "_get_brain_gate", None)
+        if not callable(gate_fn):
+            return False
+        return bool(gate_fn().degraded_now)
+
+    def _cleanup_auto_hold_reason(self) -> str:
+        """Why this automatic pass must hold, or "": the
+        owner's stop first (his intent outranks the brain
+        state), then the degraded brain."""
+        if self._cleanup_owner_stopped():
+            return "owner stop"
+        if self._cleanup_brain_degraded():
+            return "brain degraded"
+        return ""
+
+    def _cleanup_auto_hold_note(self, surface, key,
+                                reason: str) -> None:
+        """Record a held automatic pass — once per hold
+        episode, in /glog, never in the group."""
+        extras = surface._extras(key)
+        held = extras.get("cleanup_auto_held") or {}
+        if held.get("reason") == reason:
+            return
+        surface._audit(key, "cleanup_auto_held", reason=reason)
+        extras["cleanup_auto_held"] = {
+            "reason": reason, "since": time.time()}
+        surface.store.save()
+
+    def _cleanup_auto_hold_clear(self, surface, key) -> None:
+        """Close a hold episode when the drive runs again:
+        one /glog line, then the marker is gone."""
+        extras = surface._extras(key)
+        held = extras.pop("cleanup_auto_held", None)
+        if not held:
+            return
+        surface._audit(key, "cleanup_auto_resumed",
+                       reason=str(held.get("reason") or ""))
+        surface.store.save()
+
     def _cleanup_auto_drive(self, surface, key, message) -> None:  # type: ignore[no-untyped-def]
         """Automatic deleted-account removal (owner order
         2026-11-04): on the group upkeep beat, in a claimed
@@ -13610,11 +13683,16 @@ class RuntimeGroupMixin:
         default ON, the owner's posture) · the defense autonomy
         switch (automatic admin acts only while it's on, like
         every other automatic enforcement) · the §33 claim ·
-        her verified admin standing on the acting surface · a
-        per-group 6h throttle.  Inactive members are NOT swept
-        here: real people are removed by command only.  The
-        pass is failure-isolated — upkeep never breaks a group
-        turn, and one member's failure never stops the rest."""
+        the owner's standing stop (a stopped platform's upkeep
+        holds — the stop is sticky and the beat never restarts
+        the surface) · the competence gate (a degraded/no-model
+        brain holds automatic admin acts — observe-only,
+        control commands exempt) · her verified admin standing
+        on the acting surface · a per-group 6h throttle.
+        Inactive members are NOT swept here: real people are
+        removed by command only.  The pass is failure-isolated
+        — upkeep never breaks a group turn, and one member's
+        failure never stops the rest."""
         try:
             platform = str(message.chat.platform or "")
             if not platform.startswith("telegram"):
@@ -13629,6 +13707,21 @@ class RuntimeGroupMixin:
                 return
             if not surface.claim_state(key)["claimed"]:
                 return
+            # The personal-surface live gate (owner rebuke
+            # 2026-11-04): the upkeep beat is an automatic act
+            # through his own account, so it holds while the
+            # platform is under his standing stop, and while
+            # the brain is degraded (observe-only).  Both holds
+            # sit BEFORE the throttle stamp, so a held pass
+            # retries on the next beat instead of burning its
+            # 6h window — and both are audited once per hold
+            # episode, never per beat, so a long hold is two
+            # /glog lines, not a flood.
+            hold = self._cleanup_auto_hold_reason()
+            if hold:
+                self._cleanup_auto_hold_note(surface, key, hold)
+                return
+            self._cleanup_auto_hold_clear(surface, key)
             now = time.time()
             if not surface.cleanup_auto_due(
                     key, now=now,

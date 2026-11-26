@@ -718,6 +718,11 @@ class PartnerRuntime(
         # Notifier above all) consult the competence gate through the
         # context the same way — one gate instance, the runtime's own.
         context.extras["brain_gate"] = self._get_brain_gate()
+        # Brain tools that act through the group's own command
+        # methods (group_cleanup) resolve the live runtime through
+        # the context the same way — one runtime, no second wire,
+        # no import of the runtime from the tool layer.
+        context.extras["partner_runtime"] = self
         # Degradation-ladder drain: messages the telegram ladder queued
         # into the KV store while no gateway existed (gateway-less
         # processes) move into this gateway's durable outbox now that a

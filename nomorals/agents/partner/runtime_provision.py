@@ -3429,6 +3429,24 @@ class RuntimeProvisionMixin:
             h.record.created_at))
         return handles
 
+    def _mass_platform_stopped(self, svc: dict, platform: str) -> bool:
+        """Is this platform under the owner's standing stop?
+        The live pairing registry is the authority — the same
+        registry the personal-surface commands consult.  A
+        registry without the method (older fakes) means the stop
+        is unverifiable and the run proceeds; a probe that raises
+        is treated the same way, so a registry hiccup never
+        crashes the command (the refusal below is the only place
+        the stop bites)."""
+        registry = (svc or {}).get("registry")
+        stopped = getattr(registry, "owner_stopped", None)
+        if not callable(stopped):
+            return False
+        try:
+            return bool(stopped(platform))
+        except Exception:  # noqa: BLE001 - unverifiable stop
+            return False
+
     def _control_mass(self, tool: str, tail: str) -> str:
         """/massreact · /pollvote · /chfollow — the §14 mass
         tools over the owner's own paired accounts.
@@ -3543,6 +3561,36 @@ class RuntimeProvisionMixin:
             return ("⚠️ pollvote needs its option: "
                     "/pollvote <poll link> | <option text or "
                     "number> [| count] [| live]")
+        # The owner's standing stop halts acts, not reads: a
+        # dry-run plans with zero platform calls, so it still
+        # runs; a LIVE run through a stopped platform refuses
+        # in words before any account is engaged — and the
+        # refusal is journaled with the accounts it would have
+        # used, like every other refused run.
+        effective_dry = dry_run if dry_run is not None \
+            else arms.live_runs(tool) == 0
+        if not effective_dry and self._mass_platform_stopped(
+                svc, target.platform):
+            import hashlib
+
+            started = time.time()
+            digest = hashlib.sha256(target.raw.encode()).hexdigest()[:6]
+            run_id = f"{tool}-{int(started)}-{digest}"
+            reason = (f"{target.platform} is under your "
+                      "standing stop — it stays halted until "
+                      "you start it again; nothing was done.")
+            journal.append({
+                "kind": "run_refused", "run_id": run_id,
+                "tool": tool, "dry_run": False,
+                "target": target.raw,
+                "platform": target.platform,
+                "started_at": started, "finished_at": started,
+                "note": reason,
+                "accounts": [
+                    {"account": h.id, "offset_s": 0.0, "at": 0.0,
+                     "ok": False, "error": "", "detail": reason}
+                    for h in self._mass_handles(target.platform)]})
+            return f"⚠️ {reason}"
         try:
             run = runner.run(
                 tool, target,
