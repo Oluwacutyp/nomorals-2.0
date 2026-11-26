@@ -1872,8 +1872,6 @@ class TelegramAdapter(ChatAdapter):
         return {"ok": False,
                 "error": "the story post did not land"}
 
-        raise ValueError(f"cannot resolve chat_id={chat_id!r}")
-
     # ── inbound ──────────────────────────────────────────────────────────────
     def preflight(self) -> None:
         """First-run login (once): Telethon's interactive start (phone number

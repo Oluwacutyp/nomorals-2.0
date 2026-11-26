@@ -1325,12 +1325,12 @@ class RuntimeMetaMixin:
         failure reports in words — never silence, never a fake
         image.
         """
-        from ..visuals.annotations import get_board
-        from ..visuals.flight import flight_frames
-        from ..visuals.idle import get_idle_trigger
-        from ..visuals.interactive import page_for_board
-        from ..visuals.render import render_scene as _render_scene
-        from ..visuals.tags import parse_tags, tags_to_annotations
+        from ...visuals.annotations import get_board
+        from ...visuals.flight import flight_frames
+        from ...visuals.idle import get_idle_trigger
+        from ...visuals.interactive import page_for_board
+        from ...visuals.render import render_scene as _render_scene
+        from ...visuals.tags import parse_tags, tags_to_annotations
 
         words = (tail or "").split()
         verb = words[0].lower() if words else "status"
@@ -1450,7 +1450,7 @@ class RuntimeMetaMixin:
             return ("idle trigger: "
                     f"{'on' if trigger.armed else 'off'}, {idle_text}")
         # verb == "status"
-        from ..visuals.bridge import bridge_fingerprint
+        from ...visuals.bridge import bridge_fingerprint
 
         counts: dict[str, int] = {}
         for ann in board.list():

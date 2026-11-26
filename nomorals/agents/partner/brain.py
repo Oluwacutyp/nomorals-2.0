@@ -1215,7 +1215,7 @@ class PartnerBrain:
         proactive_lines: list[str] = []
         if not restricted and self.context.memory is not None:
             try:
-                from ..memory.proactive import surface as _proactive_surface
+                from ...memory.proactive import surface as _proactive_surface
                 proactive_lines = _proactive_surface(
                     message.text, self.context.memory, origin=_origin)
             except Exception as e:  # noqa: never load-bearing

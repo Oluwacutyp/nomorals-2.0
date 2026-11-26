@@ -48,6 +48,7 @@ __all__ = [
     "recent_denials",
     "ACTOR_GROUP_ADMIN",
     "ADMIN_GROUP_TOOLS",
+    "OWNER_ONLY_ACCOUNT_TOOLS",
     "audit_matrix",
 ]
 
@@ -73,17 +74,25 @@ ADMIN_GROUP_TOOLS: frozenset[str] = frozenset({
     "telegram_restrict",
     "telegram_delete",
     "telegram_invite_link",
-    # WhatsApp group admin tools
-    "whatsapp_group_create",
+    # WhatsApp group admin tools — in-room moderation only.
     "whatsapp_group_members",
     "whatsapp_group_rename",
     "whatsapp_group_describe",
     "whatsapp_group_settings",
-    "whatsapp_group_leave",
     "whatsapp_group_invite",
-    "whatsapp_community_create",
     "whatsapp_community_broadcast",
     "whatsapp_community_link",
+})
+
+#: Account-level tools that act through the OWNER's own account but are
+#: not scoped to the admin's room: creating groups/communities/channels,
+#: leaving a group, posting to a channel.  A group admin must never hold
+#: these (they used to sit in ADMIN_GROUP_TOOLS, so any room admin could
+#: spawn groups or post to channels as the owner).  Owner-only.
+OWNER_ONLY_ACCOUNT_TOOLS: frozenset[str] = frozenset({
+    "whatsapp_group_create",
+    "whatsapp_group_leave",
+    "whatsapp_community_create",
     "whatsapp_channel_create",
     "whatsapp_channel_post",
 })
@@ -216,6 +225,13 @@ def check_tool_call(
     if grant.actor == ACTOR_OWNER:
         return True, "owner"
     allowed = grant.may_use_tools
+    if tool_name in OWNER_ONLY_ACCOUNT_TOOLS:
+        reason = (f"denied: {tool_name} acts on the owner's account and "
+                  f"is owner-only ({grant.reason})")
+        if audit is not None:
+            audit.record(actor=grant.actor, chat_kind=chat_kind or "?",
+                         tool_name=tool_name, reason=reason)
+        return False, reason
     if "*" in allowed or tool_name in allowed:
         return True, f"public tool: {tool_name}"
     reason = (

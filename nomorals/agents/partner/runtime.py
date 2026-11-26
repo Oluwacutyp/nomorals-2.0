@@ -1019,7 +1019,7 @@ class PartnerRuntime(
         # effort; a stamp must never break intake.
         try:
             if self._is_owner_pump(message):
-                from ..visuals.idle import get_idle_trigger
+                from ...visuals.idle import get_idle_trigger
 
                 settings = getattr(self.context, "settings", None)
                 home = (getattr(settings, "home", None)

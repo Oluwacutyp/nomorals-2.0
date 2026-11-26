@@ -567,8 +567,8 @@ class ToolCallingLoop:
             ) or call.name in ("games",)
         ):
             try:
-                from ..social_gate import check_tool_call, grant_for
-                from ..group_roles import resolve_group_role, ROLE_ADMIN
+                from ...partner.social_gate import check_tool_call, grant_for
+                from ...partner.group_roles import resolve_group_role
                 ctx = loop_ctx or {}
                 chat_kind = ctx.get("chat_kind", "dm")
                 group_role = "member"

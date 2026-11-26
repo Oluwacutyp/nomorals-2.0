@@ -584,9 +584,17 @@ def run_roster_diff_tick_once(*, context: Any = None,
         surface = default_surface(ws or ".")
     if adapters is None and fetch is None and context is not None:
         try:
-            from ..agents.notifier import resolve_gateway
-
-            gateway = resolve_gateway(context)
+            # Layered: resolve_gateway() (nomorals/agents/notifier, L5)
+            # is a plain attribute lookup — social/chat (L4) must not
+            # import upward for it (the patch's `...agents.notifier`
+            # import adds a new layering violation). The runtime stores
+            # the gateway on context.gateway or in
+            # context.extras["gateway"]; read it here instead.
+            gateway = getattr(context, "gateway", None)
+            if gateway is None:
+                extras = getattr(context, "extras", None)
+                if isinstance(extras, dict):
+                    gateway = extras.get("gateway")
             adapters = list((getattr(gateway, "adapters", None)
                              or {}).items()) if gateway else []
         except Exception as exc:  # noqa: BLE001 - no gateway, no live fetch

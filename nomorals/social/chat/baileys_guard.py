@@ -57,10 +57,30 @@ __all__ = [
 BURST_MAX = 5
 BURST_WINDOW_S = 60.0
 
+#: Account-level warning signals ONLY.  A latched warning stops every
+#: send on the number until the owner clears it, so a pattern must mean
+#: "WhatsApp is acting against THIS account" and never match routine
+#: per-chat errors: a contact who blocked us, a group in
+#: admins-only/"restricted" mode, a ``515`` restart-required after
+#: pairing, a ``401`` logged-out.  Baileys' ``DisconnectReason.forbidden``
+#: (403) is the one status code that really is a ban signal.
 _WARNING_RES = (
-    re.compile(r"\b(banned|ban\b|temporarily banned|blocked|restricted|restriction)\b", re.I),
-    re.compile(r"\b(warning|warned|violat|spam|bulk|automated behaviour|automated behavior)\b", re.I),
-    re.compile(r"\b(401|403|419|515)\b.*\b(auth|session|connect)", re.I),
+    re.compile(r"\b(temporarily\s+banned|permanently\s+banned"
+               r"|account\s+(?:has\s+been\s+|is\s+|was\s+)?"
+               r"(?:banned|blocked|restricted|suspended)"
+               r"|(?:number|phone)\s+(?:has\s+been\s+|is\s+|was\s+)?"
+               r"(?:banned|blocked|suspended)"
+               r"|you\s+(?:are|were|have\s+been)\s+(?:banned|suspended))\b",
+               re.I),
+    re.compile(r"\b(?:automated\s+behaviou?r|unusual\s+activity"
+               r"|bulk\s+(?:messag\w+|behaviou?r|sending)"
+               r"|violat\w+\s+(?:our\s+|the\s+|whatsapp'?s?\s+)?terms"
+               r"|spam\s+(?:detected|reports?|activity|warning))\b", re.I),
+    re.compile(r"\bstate:\s*(?:banned|blocked|restricted|suspended|forbidden)\b",
+               re.I),
+    re.compile(r"\b403\b.*\b(forbidden|auth|session|connect)", re.I),
+    re.compile(r"\bwarning\b.*\b(account|whatsapp)\b|"
+               r"\b(account|whatsapp)\b.*\bwarning\b", re.I),
 )
 
 
