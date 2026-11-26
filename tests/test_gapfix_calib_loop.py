@@ -99,6 +99,79 @@ def test_replay_moves_calibration_state(tmp_path):
     assert gap is not None and gap > 0.2
 
 
+def _seed_tied(db):
+    """8 rows, one slice, created_at tied in three groups — the
+    replay order is fully determined by the (created_at, rowid)
+    tie-break. The success pattern breaks every tie symmetry, so
+    any other order gives a different predicted sequence."""
+    from nomorals.cognition.trajectories import TrajectoryStore
+
+    TrajectoryStore(db)  # ensures the schema exists (as the
+    # production replay does before reading)
+    base = time.time() - 100.0
+    rows = [
+        # (created_at offset, success)
+        (0.0, 1), (0.0, 0), (0.0, 0),
+        (10.0, 1), (10.0, 1), (10.0, 0),
+        (20.0, 0), (20.0, 1),
+    ]
+    for i, (offset, success) in enumerate(rows, start=1):
+        db.execute(
+            "INSERT INTO cog_trajectories (id, task_kind, capability,"
+            " model_id, skill_id, tool, success, latency_s, cost,"
+            " error, failure_class, created_at)"
+            " VALUES (?, 'chat', 'chat', 'model-a', '', '',"
+            " ?, 0.0, 0.0, '', '', ?)",
+            (f"traj_tied{i}", success, base + offset))
+    return base
+
+
+def test_replay_order_tied_timestamps_limit_boundary(tmp_path):
+    """Tied created_at + a limit cutting through a tie group: the
+    replay is oldest-first by (created_at ASC, rowid ASC) — the
+    documented order. The predicted sequence pins the order
+    exactly: each row's prediction is the slice's track record
+    before it, so any other order (including the old query's
+    inverted tie-break) gives a different sequence."""
+    from nomorals.cognition.calibration_loop import build_calibration_store
+
+    ctx = _scheduler_ctx(tmp_path)
+    base = _seed_tied(ctx.db)
+    store, stats = build_calibration_store(ctx.db, limit=5)
+    assert stats["replayed"] == 5
+    recs = store.records("chat", "model-a")
+    assert [r.success for r in recs] == [True, True, False, False, True]
+    assert [r.created_at for r in recs] == [
+        base + 10.0, base + 10.0, base + 10.0, base + 20.0, base + 20.0]
+    assert [r.predicted for r in recs] == pytest.approx(
+        [0.5, 1.0, 1.0, 2 / 3, 0.5])
+    store8, stats8 = build_calibration_store(ctx.db, limit=8)
+    assert stats8["replayed"] == 8
+    recs8 = store8.records("chat", "model-a")
+    assert [r.success for r in recs8] == [
+        True, False, False, True, True, False, False, True]
+    assert [r.created_at for r in recs8] == [
+        base, base, base,
+        base + 10.0, base + 10.0, base + 10.0,
+        base + 20.0, base + 20.0]
+    assert [r.predicted for r in recs8] == pytest.approx(
+        [0.5, 1.0, 0.5, 1 / 3, 0.5, 0.6, 0.5, 3 / 7])
+
+
+def test_replay_sql_has_no_bare_rowid_outside_inner_select():
+    """The outer query must never mention rowid: a bare rowid over
+    the LIMIT subquery is not a real column (fatal on the live
+    box's older SQLite, inverted tie-break on newer). The inner
+    SELECT may name the real table's rowid exactly twice — once as
+    the output column (rowid AS _rid) and once in its own ORDER BY."""
+    from nomorals.cognition.calibration_loop import _REPLAY_SQL
+
+    assert _REPLAY_SQL.count("rowid") == 2
+    outer = _REPLAY_SQL.split("LIMIT ?)", 1)[1]
+    assert "rowid" not in outer
+    assert "ORDER BY created_at ASC, _rid ASC" in _REPLAY_SQL
+
+
 def test_learning_targets_ranked_from_real_rows(tmp_path):
     """The worst slice (failing + overconfident) ranks first; a
     clean slice never outranks it. The loop rebuilds the store; the

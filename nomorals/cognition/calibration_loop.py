@@ -76,6 +76,24 @@ CALIBRATION_LOOP_SPEC = "every 1h"
 #: At most this many trajectory rows replayed per pass (newest first).
 REPLAY_LIMIT = 5000
 
+#: Replay query. The inner SELECT names the real table's ``rowid``
+#: as the plain output column ``_rid``; the outer orders by that
+#: column and NEVER mentions ``rowid``. A bare ``rowid`` over the
+#: LIMIT subquery is not a real column: the live box's older
+#: SQLite refuses it ("no such column: rowid", killing every
+#: hourly tick), and newer SQLite silently inverts the tie-break
+#: (rowid DESC within each created_at group). Semantics are the
+#: documented ones: newest-first by (created_at DESC, rowid
+#: DESC), replayed oldest-first by the same tie-break.
+_REPLAY_SQL = (
+    "SELECT task_kind, capability, model_id, success, created_at"
+    " FROM (SELECT task_kind, capability, model_id, success,"
+    " created_at, rowid AS _rid FROM cog_trajectories"
+    " WHERE created_at >= ?"
+    " ORDER BY created_at DESC, rowid DESC LIMIT ?)"
+    " ORDER BY created_at ASC, _rid ASC"
+)
+
 #: Slices below this many replayed rows get no persisted threshold —
 #: a single failure is a data point, not a verdict.
 DEFAULT_MIN_SAMPLES = 3
@@ -155,14 +173,7 @@ def build_calibration_store(
     TrajectoryStore(db)
     store = CalibrationStore()
     cutoff = time.time() - float(retention_days) * 86400.0
-    rows = db.query(
-        "SELECT task_kind, capability, model_id, success, created_at"
-        " FROM (SELECT task_kind, capability, model_id, success,"
-        " created_at FROM cog_trajectories WHERE created_at >= ?"
-        " ORDER BY created_at DESC, rowid DESC LIMIT ?)"
-        " ORDER BY created_at ASC, rowid ASC",
-        (cutoff, int(limit)),
-    )
+    rows = db.query(_REPLAY_SQL, (cutoff, int(limit)))
     # (task, model) -> [successes, n] over strictly earlier rows:
     # each row's prediction is the slice's track record before it.
     prior: dict[tuple[str, str], list[int]] = {}
