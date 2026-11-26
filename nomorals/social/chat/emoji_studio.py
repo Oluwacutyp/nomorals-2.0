@@ -596,12 +596,19 @@ def mood_design(mood: str) -> dict[str, Any]:
 
 def mood_animation(mood: str, out_dir: Any, *,
                    name: str = "moment", frames: int = 14,
-                   size: int = 320) -> Path:
+                   size: int = 320, palette_name: str | None = None
+                   ) -> Path:
     """A small looping GIF of the mood's design in motion —
     bounce + sway + (for sparkled designs) twinkling confetti.
-    Deterministic per mood."""
+    Deterministic per mood. ``palette_name`` re-colours the
+    render (the studio floor's variants: same face, different
+    colour, so one moment does not pin one file forever) —
+    the seed derives from the recoloured spec, so the
+    confetti differs too."""
     Image, ImageDraw, _Font = _pil()
     spec = mood_design(mood)
+    if palette_name is not None:
+        spec = {**spec, "palette": str(palette_name)}
     palette = PALETTES.get(str(spec.get("palette") or "gold"),
                            PALETTES["gold"])
     rng = random.Random(_seed_for(spec) + 7)

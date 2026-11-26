@@ -77,6 +77,16 @@ class RuntimeExpressionMixin:
         root = self._expression_root()
         library = ExpressionLibrary(root / "expression_library.json")
         settings = getattr(self.context, "settings", None)
+        # The GIF libraries' keys (owner step, once: a FREE key
+        # from the Tenor developer console — or GIPHY's — in
+        # the .env as NM_TENOR_API_KEY=<key>, or
+        # NM_GIPHY_API_KEY=<key> for GIPHY). With a key set,
+        # the moderation moments search Tenor/GIPHY for real
+        # GIFs (see MOMENT_PROVIDER_QUERIES in
+        # social/chat/expression.py) and rotate them; without
+        # one the chain falls through to the studio renders.
+        # Never a shared/public/demo key in code — it would be
+        # rate-limited for everyone the moment it ships.
         tenor = str(getattr(settings, "tenor_api_key", "")
                     or os.environ.get("NM_TENOR_API_KEY", "") or "")
         giphy = str(getattr(settings, "giphy_api_key", "")

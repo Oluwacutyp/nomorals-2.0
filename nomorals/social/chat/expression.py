@@ -2105,6 +2105,73 @@ ADMIN_MOMENTS: frozenset[str] = frozenset({
 ADMIN_MEDIA_KINDS: frozenset[str] = frozenset(
     {"animation", "gif", "image", "video"})
 
+#: Provider search phrases per moment — verified against
+#: Tenor's live index 2026-11-25. Each phrase is a tag/phrase
+#: Tenor actually indexes GIFs under: "shush" → the "Shush Be
+#: Quiet" GIFs (tags shush / be quiet / shh / silence), "kick
+#: out" → the "Get Out Kick" GIFs (tags Kick Out / booted /
+#: Kicked Out), "ban hammer" → the Pudgy Penguins ban-hammer
+#: GIFs (tags ban / banned / banhammer), "speak up" → the
+#: "Speak On It Speak Up" GIFs, "welcome back" → the Welcome
+#: Back GIFs, "watch out" → the "Be Careful Watch Out" GIFs
+#: (tags Watch Out / Be Careful / warning / beware), "slow
+#: sloth" → the "Sloth Slow" GIFs. GIPHY shares the keyword
+#: model, so the same phrases apply there. Moments without an
+#: entry keep the bare tag join ("restrict locked", "purge
+#: delete") — no phrase is claimed without a live index
+#: behind it, and the table holds phrases, never URLs: the
+#: provider still chooses the GIF.
+MOMENT_PROVIDER_QUERIES: dict[str, str] = {
+    "mute": "shush",
+    "kick": "kick out",
+    "ban": "ban hammer",
+    "unmute": "speak up",
+    "unban": "welcome back",
+    "warn": "watch out",
+    "slowmode": "slow sloth",
+}
+
+#: Distinct provider GIFs a moment's shelf grows to before
+#: the fetch discipline stops asking (rotation floor): with
+#: fewer than this many shelved, a fire consults the provider
+#: again for a fresh one; at the floor the shelf rotates on
+#: its own (pick() excludes the room's last two) and no more
+#: searches are spent.
+ROTATION_FLOOR = 3
+
+
+def provider_query_for(moment: str, tags: tuple[str, ...]) -> str:
+    """The provider search phrase for a moment: the proven
+    phrase where one exists, else the tag join."""
+    hit = MOMENT_PROVIDER_QUERIES.get(str(moment or ""))
+    if hit:
+        return hit
+    return " ".join(tags[:2]) or "celebration"
+
+
+def studio_variant_palettes(palette: str) -> list[str]:
+    """Three palettes for the studio floor's variants: the
+    moment's own first, then the next two in the studio's
+    palette order (wrapping) — same face, visibly different
+    GIF, so the no-key floor rotates instead of pinning one
+    file per moment."""
+    from . import emoji_studio
+
+    order = list(emoji_studio.PALETTES)
+    own = str(palette or "gold")
+    if own not in order:
+        return ["gold", "blue", "teal"]
+    start = order.index(own)
+    return [order[(start + k) % len(order)] for k in range(3)]
+
+
+#: Moments whose studio floor is an animation (the reply's
+#: words ride as its caption): the admin moments plus the
+#: celebration list. Everything else renders a sticker.
+ANIMATION_MOMENTS: frozenset[str] = ADMIN_MOMENTS | frozenset({
+    "celebration", "quest_complete", "jackpot", "season_podium",
+    "win", "welcome", "party"})
+
 #: Moments that NEVER carry media, at any setting.  EMPTY —
 #: and the emptiness is a recorded decision, not an omission.
 #: The expression pass put warn here ("a warning is a
@@ -2179,6 +2246,12 @@ class ExpressionService:
             default_reaction_providers() if reaction_providers is None
             else reaction_providers)
         self.bytes_fetcher = bytes_fetcher or _http_bytes
+        #: Moments whose provider shelf is exhausted for this
+        #: process: the provider had nothing new left for the
+        #: moment (same results, all shelved, or a twin) — the
+        #: thin-shelf fetch stops asking until a restart, and
+        #: the shelf rotates as it stands.
+        self._provider_exhausted: set[str] = set()
 
     # -- gating, in the group's own terms ----------------------
     def _allowed(self, moment: str,
@@ -2211,14 +2284,24 @@ class ExpressionService:
             return "animation"
         return kind
 
-    def _fetch_from_providers(self, tags: tuple[str, ...]
+    def _fetch_from_providers(self, tags: tuple[str, ...],
+                              moment: str = ""
                               ) -> dict[str, Any] | None:
         """Walk the healthy seed chain for the moment's first
         good tag; a fetched GIF JOINS the library (the library
-        grows from use, not just from steals)."""
+        grows from use, not just from steals). With a moment,
+        the search uses the moment's proven phrase (see
+        MOMENT_PROVIDER_QUERIES) and prefers a result the
+        library does not already hold — the same search
+        returns the same results every time, so an
+        unfiltered rng.choice re-shelves the same GIF and
+        the rotation never starts."""
         if not self.providers or self.media_dir is None:
             return None
-        query = " ".join(tags[:2]) or "celebration"
+        query = provider_query_for(moment, tags) if moment \
+            else " ".join(tags[:2]) or "celebration"
+        shelved = {str(item.get("origin") or "")
+                   for item in self.library.items} - {""}
         for provider in self.providers:
             name = str(getattr(provider, "name", "?"))
             if not self.health.available(name, now=self.clock()):
@@ -2233,7 +2316,9 @@ class ExpressionService:
             if not results:
                 continue
             self.health.note(name, True, now=self.clock())
-            hit = self.rng.choice(list(results))
+            fresh = [r for r in results
+                     if str(r.get("url") or "") not in shelved]
+            hit = self.rng.choice(fresh or list(results))
             try:
                 path = download_to_library(
                     str(hit["url"]), self.media_dir)
@@ -2243,7 +2328,8 @@ class ExpressionService:
                 continue
             return self.library.add_item(
                 kind=str(hit.get("kind") or "gif"), path=str(path),
-                tags=tags, source=f"provider:{name}")
+                tags=tags, source=f"provider:{name}",
+                origin=str(hit.get("url") or ""))
         return None
 
     # ── her own hand: self-created media (2026-11-07) ───────
@@ -2273,17 +2359,31 @@ class ExpressionService:
             else:
                 mood = (moods[0] if moods else "") or moment
             spec = emoji_studio.mood_design(mood)
-            if moment in ADMIN_MOMENTS or moment in (
-                    "celebration", "quest_complete",
-                    "jackpot", "season_podium", "win",
-                    "welcome", "party"):
+            if moment in ANIMATION_MOMENTS:
                 # An admin moment renders an ANIMATION, not a
                 # sticker: the reply's words ride as its caption,
                 # and the Bot API drops a sticker's caption —
                 # a sticker here would lose the verdict.
-                path = emoji_studio.mood_animation(
-                    mood, self.media_dir, name=f"moment_{moment}")
-                kind = "animation"
+                # The floor renders THREE palette variants, not
+                # one file: mood_animation is deterministic per
+                # mood, so a single render is the same GIF on
+                # every mute/kick/ban forever. Three distinct
+                # files shelved under the moment's tags let
+                # pick() rotate the no-key floor the same way
+                # it rotates provider GIFs.
+                made = []
+                for i, pal in enumerate(
+                        studio_variant_palettes(
+                            str(spec.get("palette") or "gold"))):
+                    path = emoji_studio.mood_animation(
+                        mood, self.media_dir,
+                        name=f"moment_{moment}_v{i + 1}",
+                        palette_name=pal)
+                    made.append(self.library.add_item(
+                        kind="animation", path=str(path),
+                        tags=tags, moods=moods,
+                        source="self:render"))
+                return made[0] if made else None
             else:
                 master = emoji_studio.sticker_master_png(
                     spec, self.media_dir, name=f"moment_{moment}")
@@ -2357,6 +2457,40 @@ class ExpressionService:
             return {"sent": False, "moment": moment,
                     "reason": f"expression error: {exc}"[:120]}
 
+    def _shelf_count(self, tags: tuple[str, ...],
+                     kinds: Any) -> int:
+        """How many library items could serve this moment
+        (tag overlap + the moment's kind filter) — the shelf
+        depth the rotation floor is measured against."""
+        wanted = {str(t).lower() for t in tags or ()}
+        kind_set = {str(k) for k in kinds} if kinds else None
+        n = 0
+        for item in self.library.items:
+            if kind_set and item.get("kind") not in kind_set:
+                continue
+            if wanted & set(item.get("tags") or []):
+                n += 1
+        return n
+
+    def _shelf_is_studio_only(self, tags: tuple[str, ...],
+                              kinds: Any) -> bool:
+        """True when every item that could serve this moment
+        is the studio floor's own output (source
+        ``self:render``) — a shelf holding a real GIF (stocked,
+        stolen, provider-fetched) is never diluted with
+        renders: the floor grows only its own output."""
+        wanted = {str(t).lower() for t in tags or ()}
+        kind_set = {str(k) for k in kinds} if kinds else None
+        found = False
+        for item in self.library.items:
+            if kind_set and item.get("kind") not in kind_set:
+                continue
+            if wanted & set(item.get("tags") or []):
+                found = True
+                if str(item.get("source") or "") != "self:render":
+                    return False
+        return found
+
     def _fire(self, moment: str, *, room: str, platform: str,
               settings: dict[str, Any] | None,
               send: Callable[[Any], Any]) -> dict[str, Any]:
@@ -2371,11 +2505,54 @@ class ExpressionService:
                 < self.cooldown_s):
             return {"sent": False, "moment": moment,
                     "reason": "cooldown — she just expressed here"}
+        kinds = ADMIN_MEDIA_KINDS if is_admin else None
         item = self.library.pick(
-            tags, moods, room=room, rng=self.rng,
-            kinds=ADMIN_MEDIA_KINDS if is_admin else None)
-        if item is None:
-            item = self._fetch_from_providers(tags)
+            tags, moods, room=room, rng=self.rng, kinds=kinds)
+        provider_grew = False
+        if item is None or (
+                self._shelf_count(tags, kinds) < ROTATION_FLOOR
+                and moment not in self._provider_exhausted):
+            # A thin shelf pins one GIF forever: pick() hands
+            # back its only match through its recent-window
+            # fallback, so the provider is consulted exactly
+            # once per moment and the first fetch becomes the
+            # permanent visual. Grow the shelf to the
+            # rotation floor instead — one fresh GIF per fire
+            # — then let pick() rotate among them.
+            before = self._shelf_count(tags, kinds)
+            fresh = self._fetch_from_providers(tags, moment=moment)
+            if fresh is not None and \
+                    self._shelf_count(tags, kinds) <= before:
+                # The provider had nothing new for this
+                # moment (the same results, all shelved, or a
+                # twin of one) — stop asking until a restart;
+                # the shelf rotates as it stands.
+                self._provider_exhausted.add(moment)
+            provider_grew = self._shelf_count(tags, kinds) > before
+            if item is None:
+                item = fresh
+            elif fresh is not None:
+                item = self.library.pick(
+                    tags, moods, room=room, rng=self.rng,
+                    kinds=kinds) or item
+        if item is not None and not provider_grew \
+                and self._shelf_count(tags, kinds) < ROTATION_FLOOR \
+                and moment in ANIMATION_MOMENTS \
+                and self._shelf_is_studio_only(tags, kinds):
+            # No provider GIF joined the shelf (no key, the
+            # provider had nothing new, or its shelf is
+            # exhausted) and the shelf holds only the floor's
+            # own output: grow the studio floor instead. The
+            # variants render under fixed names and dedupe on
+            # later fires, so an old single file stops being
+            # the whole shelf — and the floor never dilutes a
+            # shelf that holds a real GIF, nor a provider
+            # shelf that IS growing.
+            grown = self._self_create(moment, tags, moods)
+            if grown is not None:
+                item = self.library.pick(
+                    tags, moods, room=room, rng=self.rng,
+                    kinds=kinds) or item
         if item is None:
             # Her own hand (owner, 2026-11-07: "She can do
             # this stuffs herself"): when no library piece and
