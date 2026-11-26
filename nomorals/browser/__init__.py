@@ -27,6 +27,18 @@ from .pacing import Pacing, pacing_from_env
 from .concurrency import ConcurrencyError, DomainConcurrency
 from .downloads import DownloadError, DownloadJob, DownloadQueue, sha256_file
 from .flows import BrowserFlow, FlowError, FlowStep, STEP_KINDS
+from .gate_discovery import (
+    GateDiscovery,
+    GateObservation,
+    InteractionReceipt,
+    JobProjection,
+    discover_gates,
+    fold_text,
+    host_of,
+    norm_text,
+    run_gate_pass,
+    settle_kind,
+)
 from .handoff import (
     HandoffError,
     HandoffSession,
@@ -392,4 +404,14 @@ __all__ = [
     "to_skill_manifest",
     "vendor_from_detection",
     "verify_consequential",
+    "GateDiscovery",
+    "GateObservation",
+    "InteractionReceipt",
+    "JobProjection",
+    "discover_gates",
+    "fold_text",
+    "host_of",
+    "norm_text",
+    "run_gate_pass",
+    "settle_kind",
 ]

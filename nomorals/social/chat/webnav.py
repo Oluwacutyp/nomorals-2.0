@@ -37,10 +37,16 @@ import time
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
-from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Protocol
-from urllib.parse import urlsplit
+
+from ...browser.gate_discovery import (
+    GateObservation,
+    JobProjection,
+    discover_gates,
+    host_of,
+    run_gate_pass,
+)
 
 __all__ = [
     "DEFAULT_PRESENTATION",
@@ -114,13 +120,17 @@ class GateBlocked(NavError):
     """An interstitial gate could not be cleared."""
 
     def __init__(self, message: str, *,
-                 gates: list[GateCandidate] | None = None):
+                 gates: list[GateCandidate] | None = None,
+                 projection: JobProjection | None = None):
         super().__init__(message)
         self.gates = list(gates or [])
         #: Challenge-state evidence captured at the failure
         #: site (screenshot + DOM excerpt), when the driver
         #: could take it — None for scripted/probe failures.
         self.evidence: BlockEvidence | None = None
+        #: The contract projection behind the refusal: every
+        #: observation and every attempt receipted.
+        self.projection = projection
 
 
 class WallBlocked(NavError):
@@ -136,30 +146,20 @@ class WallBlocked(NavError):
 
 
 # ── interstitial gates: detection (pure) ──────────────────
+#
+# Detection lives in the browser contract
+# (nomorals/browser/gate_discovery.py) — the tables, the
+# scanner and the discovery algorithm are owned there, so
+# the detector and the clicker can never disagree about a
+# gate again.  This module keeps the public names as thin
+# wrappers over the contract.
 
 
 @dataclass
-class GateCandidate:
-    """One detected gate: what kind, which control clears
-    it, and the hint the driver needs to click it."""
-
-    kind: str                # cookie | consent | age | age_dob
-    label: str               # the control's visible text,
-                             # NORMALISED (classification)
-    selector: str = ""       # css hint, when the page gives one
-    host: str = ""
-    #: The control's ORIGINAL rendered text, kept apart
-    #: from the normalised classification label: the
-    #: clicker searches for THIS (a curly "I’m" is not the
-    #: ASCII "I'm" the classifier folded it to, and
-    #: searching the folded form finds nothing).
-    label_raw: str = ""
-    #: The control sits in the layer that is actually
-    #: BLOCKING the page (a modal / overlay / dialog),
-    #: not in an inline banner or a footer — the pass
-    #: works the blocking layer's control first, because
-    #: a covered control cannot be clicked at all.
-    blocking: bool = False
+class GateCandidate(GateObservation):
+    """One detected gate (webnav's public name for a
+    :class:`GateObservation`): what kind, which control
+    clears it, and the hint the driver needs to click it."""
 
 
 #: Challenge-state evidence: what the page looked like
@@ -273,213 +273,29 @@ _LAYER_TOKENS = frozenset({
 })
 
 
-def _is_layer(a: dict[str, str]) -> bool:
-    """True when an element presents as the layer BLOCKING
-    the page: a dialog/modal by role, by class/id shape,
-    or a fixed/absolute full-viewport box by style.  An
-    inline banner (a bar across one edge) is not a layer —
-    the content behind it is reachable."""
-    if (a.get("role") or "").lower() == "dialog":
-        return True
-    if (a.get("aria-modal") or "").lower() == "true":
-        return True
-    ident = f"{a.get('class', '')} {a.get('id', '')}".lower()
-    tokens = [t for t in re.split(r"[^a-z0-9]+", ident) if t]
-    if any(t in _LAYER_TOKENS or "modal" in t
-           or "overlay" in t for t in tokens):
-        return True
-    style = (a.get("style") or "").lower().replace(" ", "")
-    return (
-        ("position:fixed" in style
-         or "position:absolute" in style)
-        and ("inset:0" in style or (
-            "top:0" in style and "left:0" in style
-            and "bottom:0" in style)))
-
-
-class _ClickScanner(HTMLParser):
-    """Collects clickable controls (buttons, links, inputs,
-    and ARIA role="button" elements) with their text,
-    classes and ids — and whether each sits inside the
-    blocking layer (see :func:`_is_layer`), so the pass
-    can aim at the control that actually covers the page
-    instead of the first gate-shaped button in DOM
-    order."""
-
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.controls: list[dict[str, str]] = []
-        self.forms_with_dob = False
-        self._open: dict[str, str] | None = None
-        self._text: list[str] = []
-        self._stack: list[tuple[str, bool]] = []
-
-    def handle_starttag(self, tag: str,
-                        attrs: list[tuple[str, str | None]]
-                        ) -> None:
-        a = {k: (v or "") for k, v in attrs}
-        layer = _is_layer(a)
-        # An ARIA button is a button: custom consent/age
-        # controls are often a div/span with role="button",
-        # and a scanner that only sees <button> never even
-        # offers them to the pass.
-        if tag in ("button", "a") or (
-                tag == "input"
-                and a.get("type", "").lower()
-                in ("button", "submit", "")) or (
-                (a.get("role") or "").lower() == "button"):
-            self._open = {
-                "tag": tag,
-                "id": a.get("id", ""),
-                "class": a.get("class", ""),
-                "role": a.get("role", ""),
-                "value": a.get("value", ""),
-                "text": "",
-                "blocking": "1" if layer or any(
-                    up for _, up in self._stack) else "",
-            }
-            self._text = []
-            if tag == "input" and a.get("value"):
-                self._finish()
-        if tag not in _VOID_TAGS:
-            self._stack.append((tag, layer))
-        if tag == "input":
-            hint = " ".join((a.get("name", ""), a.get("id", ""),
-                             a.get("placeholder", ""))).lower()
-            if any(k in hint for k in
-                   ("birth", "dob", "age", "year")) and \
-                    a.get("type", "").lower() in (
-                        "date", "number", "text", ""):
-                self.forms_with_dob = True
-
-    def handle_data(self, data: str) -> None:
-        if self._open is not None:
-            self._text.append(data)
-
-    def handle_endtag(self, tag: str) -> None:
-        if self._open is not None and \
-                tag == self._open["tag"]:
-            self._finish()
-        # Pop the element stack up to the matching open
-        # tag (tolerant of the mis-nesting real pages ship).
-        for i in range(len(self._stack) - 1, -1, -1):
-            if self._stack[i][0] == tag:
-                del self._stack[i:]
-                break
-
-    def _finish(self) -> None:
-        assert self._open is not None
-        self._open["text"] = " ".join(
-            " ".join(self._text).split())
-        self.controls.append(self._open)
-        self._open = None
-        self._text = []
-
-
-def _selector_for(control: dict[str, str]) -> str:
-    if control.get("id"):
-        return f"#{control['id']}"
-    classes = (control.get("class") or "").split()
-    if classes:
-        return "." + ".".join(classes[:2])
-    return ""
-
-
 def _host_of(url: str) -> str:
     with suppress(Exception):
         return (urlsplit(url).hostname or "").lower()
     return ""
 
 
-def detect_gates(html: str, url: str = "") -> list[GateCandidate]:
+def detect_gates(html: str, url: str = "",
+                 frames: Any = ()) -> list[GateCandidate]:
+
     """Detect interstitial gates on a page.  Pure: the same
-    HTML always gives the same candidates.  Order matters:
-    the BLOCKING layer's control first (a covered control
+    HTML always gives the same candidates.  ``frames`` is a
+    sequence of (name, html) for the page's iframes — a gate
+    living in a frame is a real gate.  Order matters: the
+    BLOCKING layer's control first (a covered control
     cannot be clicked at all), and within a tier the
     age-gate confirm outranks generic consent/cookie
     controls — a page can stack them, and the pass works
     them in this order."""
-    text = str(html or "")
-    low = text.lower()
-    host = _host_of(url)
-    scanner = _ClickScanner()
-    # A torn page scans as whatever was collected.
-    with suppress(Exception):
-        scanner.feed(text)
-    controls = scanner.controls
-
-    def norm(s: str) -> str:
-        # Fold typographic quotes/dashes: real gate buttons
-        # ship "I’m 18 or older" with a curly apostrophe,
-        # which must still read as the age confirm it is.
-        s = str(s).lower()
-        for fancy, plain in (("’", "'"), ("‘", "'"),
-                             ("“", '"'), ("”", '"'),
-                             ("–", "-"), ("—", "-")):
-            s = s.replace(fancy, plain)
-        return " ".join(s.split())
-
-    labels = [(c, norm(c["text"] or c["value"]),
-               " ".join((c["text"] or c["value"]).split()))
-              for c in controls]
-
-    by_kind: dict[str, GateCandidate] = {}
-
-    def add(kind: str, control: dict[str, str],
-            label: str, label_raw: str = "") -> None:
-        cand = GateCandidate(
-            kind=kind, label=label,
-            selector=_selector_for(control), host=host,
-            label_raw=label_raw or label,
-            blocking=bool(control.get("blocking")))
-        old = by_kind.get(kind)
-        # One candidate per kind; the blocking layer's
-        # control replaces a same-kind control that merely
-        # sits on the page (a footer age link is not the
-        # age gate when a modal is standing).
-        if old is None or (cand.blocking
-                           and not old.blocking):
-            by_kind[kind] = cand
-
-    # ── age gates ──
-    age_context = any(m in low for m in _AGE_MARKERS)
-    site_labels = SITE_AGE_LABELS.get(host, ())
-    for control, label, raw in labels:
-        if not label:
-            continue
-        if label in _AGE_LABELS or label in site_labels or \
-                any(a in label for a in _AGE_LABELS) or (
-                age_context and label in _AGE_BARE_LABELS):
-            add("age", control, label, raw)
-    if "age" not in by_kind and age_context and \
-            scanner.forms_with_dob:
-        # A date-of-birth form is an age gate Devon will not
-        # invent an answer for.
-        by_kind["age_dob"] = GateCandidate(
-            kind="age_dob", label="date-of-birth form",
-            host=host)
-
-    # ── consent walls ──
-    consent_context = any(m in low for m in _CONSENT_MARKERS)
-    if consent_context:
-        for control, label, raw in labels:
-            if label in _CONSENT_LABELS or \
-                    label.startswith("accept"):
-                add("consent", control, label, raw)
-
-    # ── cookie banners ──
-    cookie_context = any(m in low for m in _COOKIE_MARKERS)
-    if cookie_context and "consent" not in by_kind:
-        for control, label, raw in labels:
-            if label in _COOKIE_LABELS:
-                add("cookie", control, label, raw)
-
-    order = {"age": 0, "age_dob": 0, "consent": 1, "cookie": 2}
-    found = sorted(
-        by_kind.values(),
-        key=lambda g: (not g.blocking,
-                       order.get(g.kind, 3)))
-    return found
+    return [GateCandidate(
+        kind=o.kind, label=o.label, selector=o.selector,
+        host=o.host, blocking=o.blocking, visible=o.visible,
+        frame=o.frame, source=o.source, raw_label=o.raw_label)
+        for o in discover_gates(html, url, frames)]
 
 
 # ── bot walls: typing (pure) ──────────────────────────────
@@ -573,14 +389,19 @@ class GateAction:
 
 
 class GateMemory:
-    """Session memory of cleared gates, keyed by host+kind,
-    so repeat captures don't re-fight a gate the browser
-    already carries clearance for."""
+    """Session memory of cleared gates, keyed by host+kind:
+    a JOURNAL of what the browser already carries
+    clearance for — never a skip signal.  A detected gate
+    is always verified gone, memory or not (finding 7:
+    remembered consent used to suppress re-detection, so a
+    gate standing again was shot over)."""
 
     def __init__(self) -> None:
         self._cleared: set[tuple[str, str]] = set()
 
-    def remember(self, action: GateAction) -> None:
+    def remember(self, action: Any) -> None:
+        """Record a cleared gate (a GateAction or a
+        GateObservation — both carry .host/.kind)."""
         self._cleared.add((action.host, action.kind))
 
     def knows(self, host: str, kind: str) -> bool:
@@ -593,30 +414,36 @@ def _emit(on_step: StepHook | None, text: str) -> None:
             on_step(text)
 
 
-def _gate_is_gone(probe: PageProbe, gate: GateCandidate,
-                    *, budget_s: float = 3.0,
-                    step_s: float = 0.4) -> bool:
-    """Bounded outcome wait: is this gate gone yet?  A
-    gate is gone when the probe can SEE it is gone (a
-    live visibility check — a hidden dialog is gone even
-    though its HTML is still in the DOM) or, for probes
-    without a visibility seam, when a fresh detection
-    finds no same-kind candidate.  Polls for up to
-    ``budget_s`` instead of one fixed 600 ms glance, so
-    a slow CMP transition is not misread as a refusal."""
-    visible = getattr(probe, "gate_visible", None)
-    deadline = time.monotonic() + max(0.1, budget_s)
-    while True:
-        if callable(visible):
-            with suppress(Exception):
-                if not visible(gate):
-                    return True
-        elif not any(g.kind == gate.kind for g in
-                     detect_gates(probe.html(), probe.url())):
-            return True
-        if time.monotonic() >= deadline:
-            return False
-        probe.wait(step_s)
+def _cleared_actions(projection: JobProjection
+                     ) -> list[GateAction]:
+    """The cleared gates of a contract projection, as the
+    legacy GateAction list callers already use."""
+    return [GateAction(kind=r.observation.kind,
+                       label=r.observation.label,
+                       host=r.observation.host)
+            for r in projection.receipts
+            if r.outcome == "cleared"]
+
+
+def _run_gate_pass(probe: PageProbe, *,
+                   memory: GateMemory | None = None,
+                   on_step: StepHook | None = None,
+                   rounds: int = 3) -> JobProjection:
+    """Run the contract pass; raise GateBlocked unless the
+    page is open.  The refusal message is the projection's
+    honest diagnostics — what was actually clicked/found
+    and what was not."""
+    projection = run_gate_pass(
+        probe, memory=memory, on_step=on_step, rounds=rounds)
+    if projection.final_state == "open":
+        return projection
+    remaining = [GateCandidate(
+        kind=o.kind, label=o.label, selector=o.selector,
+        host=o.host, blocking=o.blocking, visible=o.visible,
+        frame=o.frame, source=o.source, raw_label=o.raw_label)
+        for o in projection.remaining]
+    raise GateBlocked(projection.diagnostics(),
+                      gates=remaining, projection=projection)
 
 
 def run_interstitial_pass(
@@ -625,103 +452,17 @@ def run_interstitial_pass(
         on_step: StepHook | None = None,
         rounds: int = 3) -> list[GateAction]:
     """Clear cookie/consent/age gates, then VERIFY none is
-    still standing.  A click counts as handled only when
-    the gate verifiably clears; a click that refuses or
-    doesn't clear is a failed attempt on THAT control, and
-    the pass moves to the next candidate (the blocking
-    layer's control) instead of dying on — or retrying —
-    a covered, unrelated button.  Raises GateBlocked
-    honestly when no candidate clears — including
-    date-of-birth forms, which Devon does not invent an
-    answer for.
-
-    Live evidence outranks remembered consent: a gate
-    that is standing NOW is worked NOW, whatever another
-    context cleared before (memory is journal only — the
-    pass still records clears into it, but never skips a
-    live gate on its say-so)."""
-    actions: list[GateAction] = []
-    failed: dict[tuple[str, str], str] = {}
-    for _round in range(max(1, rounds)):
-        gates = detect_gates(probe.html(), probe.url())
-        if not gates:
-            return actions
-        progressed = False
-        hidden_only = True
-        for gate in gates:
-            if gate.kind == "age_dob":
-                raise GateBlocked(
-                    "the page asks for a date of birth to "
-                    "verify age — Devon does not invent one, "
-                    "so the gate stays up",
-                    gates=gates)
-            key = (gate.kind, gate.label)
-            if key in failed:
-                hidden_only = False
-                continue
-            visible = getattr(probe, "gate_visible", None)
-            if callable(visible):
-                with suppress(Exception):
-                    if not visible(gate):
-                        # Detected in the HTML but not
-                        # rendered: a hidden template, not a
-                        # standing gate.  No click, no action,
-                        # no failure — the pass moves on.
-                        continue
-            hidden_only = False
-            _emit(on_step, f"clearing a {gate.kind} gate")
-            if not probe.click_gate(gate):
-                detail = str(getattr(
-                    probe, "last_click_error", "") or "")
-                failed[key] = (
-                    f"the {gate.kind} gate "
-                    f"({gate.label!r}) would not click"
-                    + (f" ({detail})" if detail else ""))
-                continue
-            if _gate_is_gone(probe, gate):
-                action = GateAction(
-                    kind=gate.kind, label=gate.label,
-                    host=gate.host or _host_of(probe.url()))
-                actions.append(action)
-                if memory is not None:
-                    memory.remember(action)
-                progressed = True
-                continue
-            failed[key] = (
-                f"the {gate.kind} gate "
-                f"({gate.label!r}) was clicked but "
-                "stayed up")
-        if hidden_only:
-            # Every candidate this round was a hidden
-            # template, not a standing gate.
-            return actions
-        if not progressed:
-            break
-    remaining = detect_gates(probe.html(), probe.url())
-    visible = getattr(probe, "gate_visible", None)
-    if callable(visible) and remaining:
-        # A hidden template is not a standing gate.
-        kept: list[GateCandidate] = []
-        for gate in remaining:
-            with suppress(Exception):
-                if visible(gate):
-                    kept.append(gate)
-        remaining = kept
-    if remaining:
-        kinds = ", ".join(g.kind for g in remaining)
-        message = (
-            f"gate(s) still standing after the pass: "
-            f"{kinds} — the capture would be a photo of "
-            "the gate, so nothing was shot")
-        if failed:
-            message = (
-                f"gate(s) still standing after the pass: "
-                f"{kinds} — tried: "
-                f"{'; '.join(failed.values())} — the "
-                "capture would be a photo of the gate, so "
-                "nothing was shot")
-        raise GateBlocked(message, gates=remaining)
-    return actions
+    still standing — via the browser gate-discovery
+    contract (:mod:`nomorals.browser.gate_discovery`).
+    Every attempt is receipted; a click counts as handled
+    only when the gate verifiably clears.  Raises
+    GateBlocked honestly when no candidate clears —
+    including date-of-birth forms, which Devon does not
+    invent an answer for.  Session memory is a journal
+    only and never skips a detected gate."""
+    projection = _run_gate_pass(
+        probe, memory=memory, on_step=on_step, rounds=rounds)
+    return _cleared_actions(projection)
 
 
 @dataclass
@@ -1312,10 +1053,11 @@ class _PlaywrightProbe:
 
     def __init__(self, page: Any) -> None:
         self._page = page
-        #: The last click failure's reason, for the pass's
-        #: honest message — a swallowed exception is never
-        #: the answer; the driver keeps its reason here.
-        self.last_click_error: str = ""
+        #: What the last click_gate actually used
+        #: (strategy / frame) — the contract's receipt reads
+        #: it, so the receipt names the real target, never
+        #: the label the detector guessed at.
+        self.last_click: dict[str, Any] | None = None
 
     def url(self) -> str:
         return str(self._page.url or "")
@@ -1345,112 +1087,97 @@ class _PlaywrightProbe:
         self._page.wait_for_timeout(
             int(max(0.0, seconds) * 1000))
 
-    def _find_visible(self, gate: GateCandidate) -> Any:
-        """The gate's control, resolved by IDENTITY
-        (accessible role/name, then literal text) — never
-        by a class-only hint alone.  Returns a visible
-        locator or None."""
-        page = self._page
-        label = (gate.label_raw or gate.label or "").strip()
-        if label:
-            for finder in (
-                    lambda: page.get_by_role(
-                        "button", name=label, exact=False),
-                    lambda: page.locator(
-                        f"text={label}").first):
-                with suppress(Exception):
-                    loc = finder()
-                    if loc.count() and loc.is_visible():
-                        return loc
-        return None
-
-    def gate_visible(self, gate: GateCandidate) -> bool:
-        """True when the gate's control is actually
-        rendered and visible — a dialog that stays in the
-        DOM after being hidden is NOT visible, and is not
-        a standing gate."""
-        if self._find_visible(gate) is not None:
-            return True
-        if gate.selector:
-            with suppress(Exception):
-                loc = self._page.locator(
-                    gate.selector).first
-                if loc.count() and loc.is_visible():
-                    return True
-        for frame in self._page.frames:
-            if frame == self._page.main_frame:
+    def frames(self) -> list[tuple[str, str]]:
+        """(name, html) per iframe — the discovery seam
+        (finding 5: a gate living in a frame is a real
+        gate).  A frame that will not give its HTML is
+        skipped, never a reason to stop the pass."""
+        out: list[tuple[str, str]] = []
+        try:
+            frames = list(self._page.frames or [])
+        except Exception:  # noqa: BLE001 - frames best effort
+            return out
+        for frame in frames:
+            try:
+                if frame == self._page.main_frame:
+                    continue
+                name = str(getattr(frame, "name", "") or
+                           getattr(frame, "url", "") or "")
+                out.append((name, str(frame.content() or "")))
+            except Exception:  # noqa: BLE001 - one bad frame
                 continue
-            label = (gate.label_raw or gate.label
-                     or "").strip()
-            if not label:
-                continue
-            with suppress(Exception):
-                loc = frame.locator(
-                    f"text={label}").first
-                if loc.count() and loc.is_visible():
-                    return True
-        return False
+        return out
 
     def click_gate(self, gate: GateCandidate) -> bool:
         page = self._page
-        self.last_click_error = ""
-        # 1. Identity first: the control whose accessible
-        # name IS the detected label (original text, curly
-        # apostrophes and all).
-        loc = self._find_visible(gate)
-        if loc is not None:
-            try:
-                loc.click(timeout=3_000)
-                return True
-            except Exception as exc:  # noqa: BLE001 - the
-                # reason is kept, not swallowed
-                self.last_click_error = (
-                    f"{type(exc).__name__}: {exc}"[:200])
-                return False
-        # 2. The selector hint — only when the element it
-        # finds is the detected control: its visible text
-        # must match the label.  A class-only hint plus
-        # `.first` once clicked the preferences button
-        # instead of the accept button; it never does
-        # that again.
+        label = gate.label.strip()
+        raw = (getattr(gate, "raw_label", "") or "").strip()
+        self.last_click = None
+
+        def _try(locator: Any, strategy: str,
+                 frame: str = "") -> bool:
+            with suppress(Exception):
+                if locator.count() and locator.is_visible():
+                    locator.click(timeout=3_000)
+                    summary = strategy
+                    if frame:
+                        summary += f" in frame {frame!r}"
+                    self.last_click = {"strategy": strategy,
+                                       "frame": frame,
+                                       "summary": summary}
+                    return True
+            return False
+
+        # 1. The selector hint the detector collected,
+        # scoped to the observation's frame — the detector
+        # picked THIS control, so the click must not land
+        # on a same-class control elsewhere (finding 1).
         if gate.selector:
-            try:
-                cand = page.locator(gate.selector).first
-                if cand.count() and cand.is_visible():
-                    text = ""
-                    with suppress(Exception):
-                        text = str(
-                            cand.inner_text() or "")
-                    norm = " ".join(text.lower().split())
-                    want = " ".join(
-                        (gate.label_raw or gate.label
-                         or "").lower().split())
-                    if want and (want in norm
-                                 or norm in want):
-                        cand.click(timeout=3_000)
+            if gate.frame:
+                for frame in page.frames:
+                    if frame == page.main_frame:
+                        continue
+                    fname = str(getattr(frame, "name", "") or
+                                getattr(frame, "url", "") or "")
+                    if fname != gate.frame:
+                        continue
+                    if _try(frame.locator(gate.selector).first,
+                            f"selector {gate.selector}",
+                            frame=fname):
                         return True
-                    self.last_click_error = (
-                        "selector hint matched a different "
-                        f"control ({text[:60]!r})")
-            except Exception as exc:  # noqa: BLE001
-                if not self.last_click_error:
-                    self.last_click_error = (
-                        f"{type(exc).__name__}: {exc}"[:200])
+            elif _try(page.locator(gate.selector).first,
+                      f"selector {gate.selector}"):
+                return True
+        # 2. Role/text lookup, raw form first then folded —
+        # the page spells "I'm" with a curly quote, the
+        # detector folds it; the clicker must try both
+        # (finding 2).
+        forms = [raw, label] if raw and raw != label \
+            else [label or raw]
+        for form in forms:
+            if not form:
+                continue
+            for finder, strategy in (
+                    (lambda form=form: page.get_by_role(
+                        "button", name=form, exact=False),
+                     f"role button name={form!r}"),
+                    (lambda form=form: page.locator(f"text={form}").first,
+                     f"text {form!r}")):
+                with suppress(Exception):
+                    if _try(finder(), strategy):
+                        return True
         # 3. Frames — consent managers live in iframes.
-        label = (gate.label_raw or gate.label or "").strip()
         for frame in page.frames:
             if frame == page.main_frame:
                 continue
-            with suppress(Exception):
-                loc = frame.locator(
-                    f"text={label}").first if label else None
-                if loc is not None and loc.count() and \
-                        loc.is_visible():
-                    loc.click(timeout=3_000)
+            fname = str(getattr(frame, "name", "") or
+                        getattr(frame, "url", "") or "")
+            for form in forms:
+                if not form:
+                    continue
+                if _try(frame.locator(f"text={form}").first,
+                        f"text {form!r}", frame=fname):
                     return True
-        if not self.last_click_error:
-            self.last_click_error = (
-                "no visible control matched the gate")
         return False
 
     def click_checkbox(self) -> bool:
@@ -1858,6 +1585,10 @@ class NavOutcome:
     #: loses every rung reports every rung it tried.
     rung_outcomes: dict[str, str] = field(
         default_factory=dict)
+    #: The gate-discovery projection for the gates the
+    #: passes met: every observation and every attempt
+    #: receipted — the honest diagnostics ride here.
+    gate_projection: JobProjection | None = None
 
     @property
     def touched(self) -> bool:
@@ -2276,8 +2007,9 @@ class NavSession:
             raise NavError(
                 f"the page would not load: {exc}") from exc
         self.settle()
-        gates = run_interstitial_pass(
+        gate_proj = _run_gate_pass(
             probe, memory=memory, on_step=on_step)
+        gates = _cleared_actions(gate_proj)
         if gates:
             steps.extend(g.kind for g in gates)
             self.settle()
@@ -2294,15 +2026,19 @@ class NavSession:
         if wall:
             steps.append(wall)
             self.settle()
-            more = run_interstitial_pass(
+            more_proj = _run_gate_pass(
                 probe, memory=memory, on_step=on_step)
+            more = _cleared_actions(more_proj)
+            gate_proj = JobProjection.merge(gate_proj,
+                                            more_proj)
             if more:
                 gates = gates + more
                 steps.extend(g.kind for g in more)
                 self.settle()
         return NavOutcome(
             final_url=probe.url(), title=probe.title(),
-            gates=gates, wall=wall, steps=steps)
+            gates=gates, wall=wall, steps=steps,
+            gate_projection=gate_proj)
 
     # -- capture + record primitives --
     @_driven
@@ -2624,7 +2360,7 @@ def format_takeover_message(ask: TakeoverAsk, grant: Any) -> str:
     feature; without it there is nothing the owner can
     open.  ``grant`` is a browser/takeover TakeoverGrant
     (duck-typed: ``url`` + ``needs_public_base``)."""
-    host = _host_of(ask.url) or ask.url
+    host = host_of(ask.url) or ask.url
     tried = "; ".join(ask.attempts) or "the standard passes"
     text = (
         f"I hit a wall on {host} ({ask.wall}) and I can't "

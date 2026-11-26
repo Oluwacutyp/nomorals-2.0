@@ -186,6 +186,14 @@ class CaptureResult:
     #: Flow captures only: which step this shot is
     #: ("landing", or the step label/URL that led here).
     step: str = ""
+    #: One receipt per gate interaction the navigation pass
+    #: attempted (from the gate-discovery contract) — a
+    #: success never drops a failure.
+    gate_receipts: list[dict[str, Any]] = field(
+        default_factory=list)
+    #: The pass's honest diagnostics: what was actually
+    #: clicked/found and what was not.
+    gate_diagnostics: str = ""
 
 
 # ── request grammar ──────────────────────────────────────────
@@ -522,13 +530,18 @@ def nav_renderer(url: str, opts: ShotOptions, *,
                 full_page=opts.full_page)
     finally:
         session.__exit__()
+    projection = nav.gate_projection
     return CaptureResult(
         data=data, title=nav.title, final_url=nav.final_url,
         rung="playwright", pdf=opts.pdf,
         gates_cleared=[g.kind for g in nav.gates],
         wall_via=nav.wall or "",
         presentation=nav.presentation,
-        presentations_tried=list(nav.presentations_tried))
+        presentations_tried=list(nav.presentations_tried),
+        gate_receipts=[r.to_dict() for r in projection.receipts]
+        if projection is not None else [],
+        gate_diagnostics=projection.diagnostics()
+        if projection is not None else "")
 
 
 def capture_flow(url: str, opts: ShotOptions, *,
