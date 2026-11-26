@@ -9727,6 +9727,18 @@ class PartnerRuntime(
             # false "bug on my end" after a successful send (the
             # self-sending shape: /vision, /code, /search, /swarm,
             # /evolve, long reports — nav audit, Devon half).
+            # modnoreply: a send-during-dispatch answer must also
+            # leave an ANSWER CLAIM in the shared ledger, so the
+            # sibling's failover sweep (step 1) can prove it. The
+            # text-reply path records its claim in
+            # _send_control_reply; this branch is the "" shape, so
+            # without this call a theatre answer (mute/kick/ban)
+            # is unprovable and the sweep re-executes it on the
+            # sibling once the claim expires. Recording never
+            # raises and never eats the reply.
+            if message is not None:
+                with contextlib.suppress(Exception):  # bookkeeping never eats a reply
+                    self._record_command_answer(message)
             return reply
         from ...social.chat.expression import (
             MEDIA_DELIVERED_KINDS,
@@ -12929,6 +12941,30 @@ class PartnerRuntime(
         message. Bot surfaces keep their text byte-identical;
         degenerate-brain gating upstream is untouched.
         """
+        # modnoreply: orchestrator status notes never go to a
+        # GROUP. A planning/done note ("multi-part goal — the
+        # orchestrator is planning it:", "orchestrator: done …")
+        # is internal narration about Devon's own work, and a
+        # /help must never trigger a planning-status post in a
+        # group — the turn is still consumed and the job still
+        # runs; the result goes to the journal. The prefixes are
+        # defined once in coremind (ORCHESTRATOR_STATUS_PREFIXES)
+        # and shared here so the two suppression points cannot
+        # drift apart. Lazily imported: the module-level import
+        # direction is runtime -> coremind already, but this
+        # method is hot and the import stays local.
+        if message.chat.kind == ChatKind.GROUP:
+            try:
+                from ..coremind import is_orchestrator_status_text
+
+                if is_orchestrator_status_text(reply):
+                    _log.info(
+                        "mind reply suppressed in group %s: "
+                        "orchestrator status note is journal-only",
+                        message.chat.key)
+                    return
+            except Exception:  # noqa: BLE001 - suppression never eats a turn
+                pass
         if is_personal_platform(message.chat.platform):
             reply = scrub_narration(reply)
             if not str(reply or "").strip():

@@ -490,6 +490,71 @@ _ACCOUNT_SERVICE_DENYLIST = frozenset({
 
 _MULTI_JOINERS = re.compile(r"\b(and|then|after that|also|while you'?re at it|plus)\b", re.I)
 
+#: Orchestrator status-note prefixes (modnoreply; same shape as
+#: helpdup2 Q2-2): the internal narration CoreMind posts when a
+#: multi-part job starts and when it finishes. These notes are
+#: journal-only in groups — the runtime's _send_mind_reply and
+#: CoreMind's own _start_run both suppress them there, reading
+#: this one constant so the two points cannot drift apart.
+#: Defined here, not in the runtime: the text is CoreMind's.
+ORCHESTRATOR_STATUS_PREFIXES = (
+    "multi-part goal — the orchestrator is planning it:",
+    "orchestrator: ",
+)
+
+
+def is_orchestrator_status_text(text: Any) -> bool:
+    """True when ``text`` is an orchestrator status note (modnoreply)
+    — a planning note or a done note about Devon's own work. The
+    runtime imports this to suppress such notes in groups."""
+    stripped = str(text or "").strip()
+    return any(stripped.startswith(prefix)
+               for prefix in ORCHESTRATOR_STATUS_PREFIXES)
+
+
+def _is_group_ref(ref: Any) -> bool:
+    """True when a chat ref names a group room (modnoreply). The ref
+    may carry kind==GROUP — or, for refs rebuilt from a chat key
+    (which drops kind, defaulting DM), a Telegram-family negative
+    chat id."""
+    try:
+        from ..social.chat import ChatKind
+
+        if getattr(ref, "kind", None) == ChatKind.GROUP:
+            return True
+    except Exception:  # noqa: BLE001 - fall through to the id shape
+        pass
+    platform = str(getattr(ref, "platform", "") or "")
+    chat_id = str(getattr(ref, "chat_id", "") or "")
+    return platform.startswith("telegram") and chat_id.startswith("-")
+
+
+def _is_group_key(runtime: Any, chat_key: str) -> bool:
+    """True when a bare chat key names a group room the runtime
+    has seen (modnoreply). _ref_from_key drops kind, and the
+    Telegram negative-id fallback in _is_group_ref cannot see a
+    WhatsApp group key ("whatsapp:120363...@g.us") — the live
+    defect's own surface. The group surface's store is the
+    record: a room the intake has seen is there under its own
+    key (Telegram family siblings included — the store reads one
+    claim state per room across telegram / telegram-bot /
+    telegram-personal). A DM key never lands in that store, so a
+    DM job can never be mistaken for a group one."""
+    try:
+        surface = runtime._group_surface()
+        data = surface.store.data
+    except Exception:  # noqa: BLE001 - no surface/store, not a group
+        return False
+    key = str(chat_key or "")
+    if key in data:
+        return True
+    plat, _, cid = key.partition(":")
+    if plat in ("telegram", "telegram-bot", "telegram-personal") and cid:
+        for prefix in ("telegram", "telegram-bot", "telegram-personal"):
+            if f"{prefix}:{cid}" in data:
+                return True
+    return False
+
 #: Narrative writing — routes to BookForge, NEVER the coding builder.
 #: "write me a story/book/poem", "create a bedtime story".  "book report"
 #: is excluded (homework, not a book).
@@ -2358,12 +2423,28 @@ class CoreMind:
                     text = (note if (ok and note)
                             else f"✅ done: {kind} {job_id}" if ok
                             else f"❌ that job failed: {note}")
-                    sent = self.runtime._send_long(ref.platform, ref, text)
-                    if sent == 0 and text.strip():
-                        # The job finished but its report never reached the
-                        # chat — a silent drop would look like completion.
-                        _log.error("coremind notify %s: 0 chunks delivered to %s",
-                                   job_id, chat_key)
+                    # modnoreply: an orchestrator status note is
+                    # journal-only in a group — the job still
+                    # completes and journals; only the chat
+                    # notification is held, so a group /help never
+                    # sees the planning/done narration or any
+                    # provider failure detail it carries. The check
+                    # is on the chat KEY, not the rebuilt ref:
+                    # _ref_from_key drops kind and the negative-id
+                    # fallback cannot see a WhatsApp group key.
+                    if is_orchestrator_status_text(text) and \
+                            _is_group_key(self.runtime, chat_key):
+                        _log.info(
+                            "coremind notify %s suppressed in group "
+                            "%s: orchestrator status note is "
+                            "journal-only", job_id, chat_key)
+                    else:
+                        sent = self.runtime._send_long(ref.platform, ref, text)
+                        if sent == 0 and text.strip():
+                            # The job finished but its report never reached the
+                            # chat — a silent drop would look like completion.
+                            _log.error("coremind notify %s: 0 chunks delivered to %s",
+                                       job_id, chat_key)
                 except Exception:  # noqa: BLE001
                     _log.exception("coremind notify failed")
         with self._lock:

@@ -388,6 +388,19 @@ class RuntimeExpressionMixin:
             if not isinstance(out, dict):
                 return text
             if out.get("sent"):
+                # modnoreply: the media WAS the reply, so mark the
+                # delivery — the #32 no-empty law in handle_control
+                # reads this mark, and without it a landed theatre
+                # answer is followed by a false "bug on my end".
+                # Success only: a failed fire returns the text +
+                # reason below (non-empty, no fallback, no mark).
+                _mark = getattr(self, "_note_control_delivery", None)
+                if callable(_mark):
+                    try:
+                        _mark()
+                    except Exception:  # noqa: BLE001 - marking never breaks a send
+                        _log.debug("admin theatre delivery mark failed",
+                                   exc_info=True)
                 return "" if caption else text
             reason = str(out.get("reason") or "no media available")
             return (f"{text}\n(no {moment} visual here: {reason})")
