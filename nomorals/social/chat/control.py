@@ -1026,6 +1026,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "hub": (0, None),        # /hub [song <topic…> [style]|video <q…>|podcast <q…>|status]
     "podcast": (1, None),    # /podcast <query…> — find→download→transcribe→chapters
     "dj": (0, 1),           # /dj [trending|<genre>|desk …] — radio show w/ voice breaks + the playable DJ desk (grid, cues, pads, loops, EQ, FX, crates, recording)
+    "mix": (0, None),      # /mix [new|add|order|curve|card|render|send|share|load] — shareable DJ mixes from the queue (mix_surface)
     "produce": (0, None),   # /produce [spotify-url|vibe words…] — compose original music (taste-aware)
     "like": (0, None),       # /like [notes…] — last production was good
     "dislike": (0, None),    # /dislike [notes…] — last production missed
@@ -5036,6 +5037,17 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/dj [trending|<genre>] · /dj desk [fetch|live|eq|fx|fader|keylock|jog|crate|wave|record|provision]",
             "example": "/dj uk-drill",
             "related": "/music · /play · /podcast"},
+    "mix": {"what": "Shareable DJ mixes: build a mix from the play queue, "
+                    "edit the tracklist and the energy arc, render it as "
+                    "one continuous WAV and send it to any chat as audio "
+                    "or a voice note. The mix is a descriptor — same "
+                    "descriptor, same mix every time; an edit makes a new "
+                    "version with a new fingerprint. Renders real audio "
+                    "only when the track files exist; otherwise the plan "
+                    "is shown and the missing tracks are named.",
+            "usage": "/mix new <title> · /mix add <track> · /mix order <n> <m> · /mix curve <late_peak|linear|wave|flat> · /mix card · /mix render · /mix send <platform:chat_id> [--voice] · /mix share · /mix load <json>",
+            "example": "/mix new late night drive",
+            "related": "/dj · /music · /play"},
     "produce": {"what": "Producer: analyzes a Spotify track's musical DNA "
                         "(tempo, key, energy, mood) and composes an ORIGINAL "
                         "piece in its lane — motivic writing, classical "
@@ -5130,7 +5142,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                         "translate", "tl", "sentence"]),
     ("decoding & crypto", ["decode", "cookies", "cookielab", "structure", "cipher",
                            "monitor", "investigate", "breach"]),
-    ("media system", ["music", "distribute", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
+    ("media system", ["music", "distribute", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "dj", "mix", "produce", "like", "dislike", "cookies",
                       "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "g2p", "vtuber", "sham", "musicnote", "smarthome", "camwall", "robot",
                       "steal", "sticker", "convert", "gif", "emoji", "customemoji", "emojiart", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
@@ -5398,7 +5410,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "skills", "delegate", "workflow", "plan", "grill-me", "computer"]),
     ("media system — music · playback · video · podcast",
      ["music", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
-      "distribute", "dj", "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "produce", "like", "dislike",
+      "distribute", "dj", "mix", "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "produce", "like", "dislike",
       "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "g2p", "vtuber", "sham", "musicnote", "smarthome", "camwall", "robot",
       "steal", "sticker", "convert", "gif", "emoji", "customemoji",
       "emojiart", "react", "create",
@@ -6041,6 +6053,7 @@ LIST_ONELINERS: dict[str, str] = {
     "dislike": "last production missed — with notes: /dislike [notes…]",
     "distribute": "release walk-through: /distribute [song.wav] | legal",
     "dj": "radio show with voice breaks + the playable DJ desk: /dj [trending|<genre>] · /dj desk fetch|live|eq|fx|crate|record",
+    "mix": "shareable DJ mixes from the queue: /mix new <title> · add · order · curve · card · render · send <chat> [--voice] · share",
     "download": "any-URL media downloader: /download <url> [video|audio|image|gif] [best|1080p|720p|480p|360p]",
     "tiktok": "TikTok downloader (no-watermark route first, labeled honestly): /tiktok <url> [audio]",
     "ttdl": "alias of /tiktok: /ttdl <url> [audio]",

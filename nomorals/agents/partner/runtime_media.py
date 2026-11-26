@@ -6,6 +6,7 @@ import contextlib
 import contextvars
 import os
 import re
+from pathlib import Path
 from typing import Any
 
 from ...core.logging_setup import get_logger
@@ -18,6 +19,32 @@ _AUDIO_EXTS = {".mp3", ".m4a", ".aac", ".ogg", ".opus", ".flac",
                ".wav"}
 _VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".m4v"}
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+
+
+class _MixGatewaySender:
+    """``mix_surface.Sender`` over the chat gateway: audio and voice
+    notes ride ``gateway.send_file`` with the matching kind."""
+
+    def __init__(self, gateway: Any) -> None:
+        self._gateway = gateway
+
+    def send_audio(self, chat: Any, path: str, **kwargs: Any) -> Any:
+        from ...social.chat.base import ChatRef
+
+        ref = ChatRef.parse(str(chat))
+        return self._gateway.send_file(
+            ref.platform, ref.key, path, kind="audio",
+            caption=f"🎧 {Path(path).name}",
+        )
+
+    def send_voice(self, chat: Any, path: str, **kwargs: Any) -> Any:
+        from ...social.chat.base import ChatRef
+
+        ref = ChatRef.parse(str(chat))
+        return self._gateway.send_file(
+            ref.platform, ref.key, path, kind="voice",
+            caption=f"🎧 {Path(path).name}",
+        )
 
 
 def _send_kind_for(path: str) -> str:
@@ -4623,6 +4650,29 @@ class RuntimeMediaMixin:
             except Exception as e:
                 record_failure("runtime_media.RuntimeMediaMixin._control_dj", e)
         return text
+
+    def _control_mix(self, tail: str, chat_key: str = "") -> str:
+        """``/mix`` — shareable DJ mixes built from the queue.
+
+        The surface lives in :mod:`nomorals.media.mix_chat`; this is
+        the thin adapter that injects the gateway sender (audio /
+        voice note) and the mixes workdir. ``/mix send`` delivers
+        through the same gateway the DJ drops use.
+        """
+        from ...media.mix_chat import control_mix
+
+        chat = self._ref_from_key(chat_key) if chat_key else None
+        if chat is None:
+            return "run /mix from a chat — mixes live in the chat they were built in."
+        workdir = None
+        settings = getattr(getattr(self, "context", None), "settings", None)
+        home = getattr(settings, "home", "") if settings is not None else ""
+        if home:
+            workdir = str(Path(home) / ".devon" / "mixes")
+        return control_mix(
+            tail, chat_key=chat_key, sender=_MixGatewaySender(self.gateway),
+            context=self.context, workdir=workdir,
+        )
 
     def _control_produce(self, tail: str, chat_key: str = "") -> str:
         """ /produce — the Producer composes an ORIGINAL piece.

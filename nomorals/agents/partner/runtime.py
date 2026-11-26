@@ -12077,6 +12077,8 @@ class PartnerRuntime(
             return self._control_podcast(command.tail or arg, chat_key=chat_key)
         if kind == "dj":
             return self._control_dj(command.tail or arg, chat_key=chat_key)
+        if kind == "mix":
+            return self._control_mix(command.tail or arg, chat_key=chat_key)
         if kind == "produce":
             return self._control_produce(command.tail or arg,
                                          chat_key=chat_key)

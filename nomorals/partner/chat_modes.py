@@ -418,8 +418,9 @@ def get_chat_settings(chat_key: str, path: str = "") -> dict[str, Any]:
 # - "say" is NOT voice: it is dual-use (send-as-her + speak-as-voice);
 #   gating it would block the send use. /speak is the pure voice path.
 # - "dj" maps to music (a music show), even though it has voice breaks.
+# - "mix" maps to music too (a mix built from the queue).
 
-_MUSIC_COMMANDS = frozenset({"music", "play", "dj"})
+_MUSIC_COMMANDS = frozenset({"music", "play", "dj", "mix"})
 _VOICE_COMMANDS = frozenset({
     "tts", "stt", "voice", "vnote", "speak", "voices", "clonevoice",
     "sing", "audio",
