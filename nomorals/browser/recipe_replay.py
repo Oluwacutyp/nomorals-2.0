@@ -122,6 +122,7 @@ def replay_recipe(recipe: Recipe, *, driver: Any,
                   goal: str = "",
                   on_progress: Callable[[dict[str, Any]], None] | None = None,
                   cancel_requested: Callable[[], bool] | None = None,
+                  wait_while_paused: Callable[[], bool] | None = None,
                   store: Any = None,
                   match_threshold: float = MATCH_THRESHOLD,
                   cookie_estate: Any = None,
@@ -217,6 +218,14 @@ def replay_recipe(recipe: Recipe, *, driver: Any,
             except Exception:  # noqa: BLE001 - a broken poll never
                 # kills a healthy replay; the loop's own rule.
                 cancel_requested = None
+        if wait_while_paused is not None:
+            try:
+                if not wait_while_paused():
+                    # A cancel arrived while the owner had the mouse.
+                    stopped_reason = "cancelled: owner request"
+                    break
+            except Exception:  # noqa: BLE001 - fail-open like cancel
+                wait_while_paused = None
         if step.kind == "wait" and step.wait_ms > 0:
             time.sleep(min(step.wait_ms, int(_MAX_WAIT_S * 1000)) / 1000.0)
         try:

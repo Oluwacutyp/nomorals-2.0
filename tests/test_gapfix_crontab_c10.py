@@ -10,7 +10,7 @@ exercisable without creating a job: ``/schedule cron`` and
 ``nm schedule cron`` validate + describe + preview an expression.
 
 No new brain tool: the schedule surface already exists, this is a verb
-on it — the registry stays at 786.
+on it — the registry stays at 787.
 """
 
 import io
@@ -305,9 +305,9 @@ def test_cli_cron_refuses():
 
 # ── registry pin: no new tool ────────────────────────────────────────────
 
-def test_tool_count_still_800():
+def test_tool_count_still_801():
     from nomorals.tools.registry import ToolRegistry
 
     registry = ToolRegistry(SimpleNamespace())
     registry.register_builtins()
-    assert len(registry._tools) == 800
+    assert len(registry._tools) == 801

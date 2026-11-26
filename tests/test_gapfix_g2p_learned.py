@@ -19,7 +19,7 @@ What is pinned here:
 - the weights on disk are the shapes the Rust model trained with
   (hidden 256 throughout; the Rust source comments saying 64/128
   are stale — the .npy headers say 256);
-- wiring: the ``tonal_g2p`` tool is registered (786 tools), its
+- wiring: the ``tonal_g2p`` tool is registered (787 tools), its
   new ``arpabet`` action answers with the source named, ``nm g2p``
   works from the terminal, and ``/g2p`` answers in chat.
 """
@@ -158,8 +158,8 @@ class TestWiring:
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
         # 781 after this lane (B.27) added vtuber. 782 after this
-        # lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall; 785 after this lane (C.8) added robot; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class; 789 after D5 (walabel) added whatsapp_account_label; 794 after gapfix163 added 5 trendclip tools (trendclip_discover, trendclip_analyze, trendclip_render, trendclip_status, trendclip_queue). 800 after gapfix146 added 6 visiondoc tools (vision_document, document_word, document_html, document_text, document_pdf, document_sheet).
-        assert len(registry._tools) == 800
+        # lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall; 785 after this lane (C.8) added robot; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class; 789 after D5 (walabel) added whatsapp_account_label; 794 after gapfix163 added 5 trendclip tools (trendclip_discover, trendclip_analyze, trendclip_render, trendclip_status, trendclip_queue). 800 after gapfix146 added 6 visiondoc tools (vision_document, document_word, document_html, document_text, document_pdf, document_sheet). 801 after gapfix124 added browser_watch.
+        assert len(registry._tools) == 801
         assert "tonal_g2p" in registry._tools
 
     def test_tool_tonal_g2p_arpabet_action(self):

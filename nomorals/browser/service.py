@@ -3506,6 +3506,17 @@ class BrowserService:
             raise BrowserError(str(exc)) from exc
         #: session name -> active rendered tab id (for tab switching).
         self._active_rendered: dict[str, str] = {}
+        #: Viewable browser (gapfix124): every service registers its
+        #: live tabs in the process-wide session registry, so
+        #: /browser watch can see per-job services too — not just the
+        #: two objects the old probe knew. Weak refs: a collected
+        #: service drops out by itself; registration never raises.
+        try:
+            from .sessions import register_service
+
+            register_service(self, label=self._mission_id)
+        except Exception:  # noqa: BLE001 - registration never breaks init
+            pass
 
     # -- pacing ------------------------------------------------------------------
     @property

@@ -573,6 +573,35 @@ class TakeoverManager:
                 _log.debug("takeover handoff resume failed", exc_info=True)
         self._audit("resumed", grant, {"via": via})
 
+    def hand_back(self, grant: TakeoverGrant, *, note: str = "") -> bool:
+        """Hand a takeover back to the agent outside the wall flow.
+
+        Owner-initiated session takeovers (``/browser takeover
+        <session>``) have no solver thread waiting on
+        :meth:`wait_for_resolution`, so the watcher thread that owns
+        the grant calls this when the owner taps Done (already
+        resumed — a no-op) or when the grant expires: the handoff
+        resumes and Devon drives again instead of staying paused
+        forever. Returns True when nothing is left paused. A handoff
+        already RESUMED/DONE is a no-op True; a resume that cannot
+        run (never paused) is a False with the grant still closed.
+        """
+        handoff = grant.handoff
+        state = getattr(handoff, "state", "") if handoff is not None else ""
+        if state in ("resumed", "done"):
+            return True
+        with self._lock:
+            grant.closed = True
+        if handoff is None:
+            return True
+        try:
+            handoff.resume(note=note or "handed back")
+        except Exception:  # noqa: BLE001 - resume errors are data
+            _log.debug("takeover hand_back resume failed", exc_info=True)
+            return False
+        self._audit("hand_back", grant, {"note": note})
+        return True
+
     # -- live view server -----------------------------------------------------------
     def ensure_server(self) -> ThreadingHTTPServer:
         """Start the stream server (once). Binds the configured address."""
@@ -666,3 +695,75 @@ class TakeoverManager:
                 fh.write(json.dumps(entry, sort_keys=True) + "\n")
         except OSError:
             _log.debug("takeover audit write failed", exc_info=True)
+
+
+def watch_grant(manager: TakeoverManager, grant: TakeoverGrant,
+                *, resume: Any = None) -> None:
+    """Daemon watcher for an owner-initiated takeover grant.
+
+    Waits for hand-back (owner taps Done) the way the wall flow
+    does; on expiry it hands the grant back AND calls ``resume``
+    (the parked run job's bound ``resume``), so a takeover can
+    never strand Devon paused forever. Never raises — a dead
+    watcher must not kill the command that started it."""
+    import threading
+
+    def _wait() -> None:
+        try:
+            res = manager.wait_for_resolution(
+                grant, cleared_check=lambda: grant.done)
+        except Exception:  # noqa: BLE001 - watcher never raises
+            res = None
+        if res is not None and res.cleared:
+            if callable(resume):
+                try:
+                    resume()
+                except Exception:  # noqa: BLE001 - never gates
+                    _log.debug("takeover watcher resume failed",
+                               exc_info=True)
+            return
+        try:
+            manager.hand_back(
+                grant, note="takeover link expired — handed back")
+        except Exception:  # noqa: BLE001 - watcher never raises
+            _log.debug("takeover watcher hand_back failed", exc_info=True)
+        if callable(resume):
+            try:
+                resume()
+            except Exception:  # noqa: BLE001 - resume never gates
+                _log.debug("takeover watcher resume failed", exc_info=True)
+
+    try:
+        thread = threading.Thread(target=_wait, daemon=True,
+                                  name="watch-takeover")
+        thread.start()
+    except Exception:  # noqa: BLE001 - watcher never gates
+        _log.debug("session takeover watcher failed to start",
+                   exc_info=True)
+
+
+# One takeover manager per data dir per process. The runtime's
+# ``/browser takeover`` and the brain tool's ``browser_watch`` both
+# issue grants — they must land on the SAME manager, or the two
+# surfaces would serve different live pages, list different grants,
+# and fight over the stream port. First builder wins its notifier
+# (in production that is the runtime's Telegram notifier, built at
+# startup before any tool call); later callers share the instance.
+_shared_managers: dict[str, TakeoverManager] = {}
+_shared_lock = threading.Lock()
+
+
+def shared_manager(config: TakeoverConfig | None = None, *,
+                   data_dir: str | Path | None = None,
+                   notifier: Any = None) -> TakeoverManager:
+    """The process-wide takeover manager for ``data_dir``."""
+    from pathlib import Path as _Path
+
+    key = str(_Path(data_dir).expanduser()) if data_dir else ""
+    with _shared_lock:
+        mgr = _shared_managers.get(key)
+        if mgr is None:
+            mgr = TakeoverManager(config, data_dir=data_dir,
+                                  notifier=notifier)
+            _shared_managers[key] = mgr
+        return mgr

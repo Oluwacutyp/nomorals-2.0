@@ -2206,3 +2206,124 @@ def register(registry: Any) -> None:
                     and _is_engine_dead(exc)):
                 return _http_fallback(exc)
             raise ToolError(f"browser {action} failed: {classify(exc).message}") from exc
+
+    @registry.register(
+        "browser_watch",
+        description=(
+            "the viewable-browser surface: list Devon's live browser "
+            "sessions, open an owner takeover on one (returns a "
+            "one-time link to drive the live page — hand it to the "
+            "owner in chat), or check takeover status. A takeover "
+            "parks any run driving the tab at its next step and "
+            "resumes it when the owner taps Done or the link "
+            "expires. There is NO live-view action here: attaching a "
+            "live view needs a chat adapter, so use /browser watch "
+            "in chat for that. Plain-HTTP tabs have no live page to "
+            "drive and are refused honestly."
+        ),
+        capability=Capability.NET_BROWSER,
+        parameters={
+            "action": "str — list|takeover|status",
+            "session": "str — for takeover: session name, tab id, URL or title substring (see list)",
+        },
+    )
+    def browser_watch(action: str, session: str = "") -> dict[str, Any]:
+        from ..browser.sessions import (
+            describe_sessions,
+            find_live_tab,
+            is_driveable_tab,
+            live_sessions,
+        )
+        from ..browser.takeover import TakeoverConfig, shared_manager, watch_grant
+
+        verb = (action or "").strip().lower()
+        if verb not in ("list", "takeover", "status"):
+            raise ToolError(
+                "browser_watch action must be list|takeover|status")
+        if verb == "list":
+            return {"action": "list",
+                    "sessions": describe_sessions(live_sessions())}
+        if settings is None:
+            raise ToolError("browser_watch needs settings (no context)")
+        resolve = getattr(settings, "resolve", None)
+        if not callable(resolve):
+            raise ToolError("browser_watch needs settings.resolve")
+        mgr = shared_manager(
+            TakeoverConfig.from_settings(settings),
+            data_dir=resolve("data/takeover"))
+        if verb == "status":
+            grants = mgr.active_grants()
+            return {"action": "status",
+                    "active_takeovers": [
+                        {"session_id": g["session_id"],
+                         "task_label": g["task_label"],
+                         "signal_kind": g["signal_kind"],
+                         "expires_in_s": g["expires_in_s"],
+                         "needs_public_base": g["needs_public_base"]}
+                        for g in grants]}
+        want = (session or "").strip()
+        rec = find_live_tab(want) if want else None
+        if rec is None:
+            sessions = live_sessions()
+            if not want:
+                err = "no live session given — say which one to take over."
+            else:
+                err = "no live session " + repr(want) + "."
+            return {"action": "takeover", "ok": False, "error": err,
+                    "sessions": describe_sessions(sessions)}
+        tab = rec["tab"]
+        if not is_driveable_tab(tab):
+            return {"action": "takeover", "ok": False,
+                    "error": ("session " + repr(rec["display"])
+                              + " is an HTTP tab — there is no live "
+                              "page to drive. Start a rendered run "
+                              "first: /browser run "
+                              + (rec["url"] or "<url>"))}
+        for grant in mgr.active_grants():
+            if grant.get("task_label") == "takeover " + rec["session"]:
+                return {"action": "takeover", "ok": False,
+                        "error": ("takeover is already active on "
+                                  "session " + repr(rec["display"])
+                                  + " (expires in "
+                                  + str(grant["expires_in_s"]) + "s)")}
+        pause = rec.get("pause")
+        resume = rec.get("resume")
+        parked = False
+        if callable(pause):
+            try:
+                parked = bool(pause())
+            except Exception:  # noqa: BLE001 - pause never gates
+                parked = False
+        try:
+            from ..browser.service import RenderedTabTakeoverAdapter
+
+            grant = mgr.request_takeover(
+                session_id="watch-takeover-"
+                + str(int(time.time() * 1000)),
+                url=rec["url"],
+                task_label="takeover " + rec["session"],
+                signal_kind="owner_takeover", attempts=[],
+                resume_state={"step": 0, "url": rec["url"]},
+                tab=RenderedTabTakeoverAdapter(tab),
+                owner_chat="")
+        except Exception as exc:  # noqa: BLE001 - grant errors are data
+            if parked and callable(resume):
+                try:
+                    resume()
+                except Exception:  # noqa: BLE001 - resume never gates
+                    _log.debug("browser_watch takeover resume failed",
+                               exc_info=True)
+            return {"action": "takeover", "ok": False,
+                    "error": "takeover failed: " + str(exc)[:400]}
+        watch_grant(mgr, grant, resume=resume)
+        return {"action": "takeover", "ok": True,
+                "takeover_url": grant.url,
+                "session": rec["display"],
+                "url": rec["url"],
+                "parked_run": parked,
+                "needs_public_base": bool(
+                    getattr(grant, "needs_public_base", False)),
+                "note": ("Hand this link to the owner in chat — drive "
+                         "the live page, then tap \"Done, take over\". "
+                         "Devon resumes the run the moment they tap "
+                         "Done.")}

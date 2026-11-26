@@ -438,6 +438,9 @@ class RuntimeReachMixin:
             rest = parts[1].strip() if len(parts) > 1 else ""
             return self._control_browser_watch(
                 rest, chat_key=chat_key, message=message)
+        if parts and parts[0].lower() == "unwatch":
+            return self._control_browser_unwatch(
+                chat_key=chat_key, message=message)
         if parts and parts[0].lower() == "run":
             rest = parts[1].strip() if len(parts) > 1 else ""
             return self._control_browser_run(
@@ -458,6 +461,8 @@ class RuntimeReachMixin:
                     "       /browser forms <url> — forms + fields\n"
                     "       /browser takeover [url] — takeover sessions "
                     "(owner-only)\n"
+                    "       /browser takeover <session> — take over a "
+                    "live session yourself (owner-only)\n"
                     "       /browser run <url> [goal] — drive a live tab "
                     "with the agent loop (owner-only, background job)\n"
                     "       /browser run status [job] — job progress\n"
@@ -468,15 +473,21 @@ class RuntimeReachMixin:
                     "       /browser deny <id> — stop that run at the "
                     "step (owner-only)\n"
                     "       /browser watch [session] — attach a live view "
-                    "to a running browser session (owner-only)")
+                    "to a running browser session (owner-only)\n"
+                    "       /browser unwatch — detach the live view "
+                    "(owner-only)")
         verb, url = parts[0].lower(), parts[1].strip()
         if verb not in ("open", "text", "links", "forms", "headings"):
             return ("usage: /browser open|text|links|forms|headings <url>\n"
                     "       /browser takeover [url] — takeover sessions "
                     "(owner-only)\n"
+                    "       /browser takeover <session> — take over a "
+                    "live session yourself (owner-only)\n"
                     "       /browser run <url> [goal] — agent loop on a "
                     "live tab (owner-only, background job)\n"
                     "       /browser run status [job] — job progress\n"
+                    "       /browser watch [session] | unwatch — live "
+                    "view (owner-only)\n"
                     "       /browser approve|deny <id> — answer a paused "
                     "run's consequential step (owner-only)")
         if not url.startswith(("http://", "https://")):
@@ -576,10 +587,14 @@ class RuntimeReachMixin:
         """
         mgr = getattr(self, "_takeover_manager_inst", None)
         if mgr is None:
-            from ...browser.takeover import TakeoverConfig, TakeoverManager
+            from ...browser.takeover import TakeoverConfig, shared_manager
 
             cfg = TakeoverConfig.from_settings(self.settings)
-            mgr = TakeoverManager(
+            # One manager per data dir per process (shared_manager):
+            # the brain tool's browser_watch issues grants on this
+            # same manager, so its links are served and listed by
+            # the same server /browser takeover sees.
+            mgr = shared_manager(
                 cfg,
                 data_dir=self.settings.resolve("data/takeover"),
                 notifier=self._takeover_notifier())
@@ -628,6 +643,9 @@ class RuntimeReachMixin:
                     f"  {g['session_id']} — {g['task_label']} "
                     f"({g['signal_kind']}, {exp}){warn}")
             return "\n".join(lines)
+        if not rest.startswith(("http://", "https://")):
+            return self._control_browser_takeover_session(
+                rest, chat_key=chat_key, message=message)
         url = rest.split()[0]
         if not url.startswith(("http://", "https://")):
             return "give a full URL starting with http:// or https://"
@@ -677,6 +695,123 @@ class RuntimeReachMixin:
                              "port-forward is set up.")
             return "\n".join(lines)
         return f"takeover failed: {outcome.message}"[:500]
+
+    def _control_browser_takeover_session(self, ref: str, *,
+                                          chat_key: str = "",
+                                          message: Any = None) -> str:
+        """Owner-only: ``/browser takeover <session>``.
+
+        Take over a LIVE session by name — the one the owner is
+        watching, or any live session. This is the owner-initiated
+        half the wall flow never had: the takeover manager issues a
+        one-time expiring link for the session's real tab (the same
+        live page and pause semantics as a wall takeover), the link
+        goes to the owner's Telegram AND is returned here, and a
+        daemon watcher hands the session back the moment the owner
+        taps Done — or when the grant expires, so Devon never stays
+        parked forever. A run job driving the tab is parked at its
+        next step boundary first (``BrowserRunJob.pause``); a tab
+        with no driving loop is simply yours until Done. Plain-HTTP
+        tabs have no live page to drive and are refused honestly —
+        start a rendered run first.
+        """
+        if message is None or not self._is_operator(message):
+            return "takeover is owner-only — run it from the owner's chat."
+        from ...browser.sessions import (
+            describe_sessions,
+            find_live_tab,
+            is_driveable_tab,
+            live_sessions,
+        )
+
+        want = (ref or "").strip()
+        rec = find_live_tab(want) if want else None
+        if rec is None:
+            sessions = live_sessions()
+            if not sessions:
+                return ("no live browser session to take over — "
+                        "sessions exist while a drive is running. "
+                        "Start one with /browser run <url> first.")
+            return (f"no live session {want!r}.\n"
+                    + describe_sessions(sessions)
+                    + "\n— say /browser takeover <name>.")
+        tab = rec["tab"]
+        if not is_driveable_tab(tab):
+            return (f"session {rec['display']!r} is an HTTP tab — "
+                    "there's no live page to drive. Start a rendered "
+                    "run first: /browser run "
+                    f"{rec['url'] or '<url>'}")
+        mgr = self._takeover_manager()
+        for grant in mgr.active_grants():
+            if grant.get("task_label") == f"takeover {rec['session']}":
+                return (f"takeover is already active on session "
+                        f"{rec['display']!r} (expires in "
+                        f"{grant['expires_in_s']}s) — the link was "
+                        "sent to your Telegram when it opened.")
+        parked = False
+        # The session record carries the driving run's bound
+        # pause/resume (None when no loop drives the tab). Parking
+        # goes through the record — the chat verb owns no job
+        # manager, and the record is the one place both surfaces
+        # agree on.
+        pause = rec.get("pause")
+        resume = rec.get("resume")
+        if callable(pause):
+            try:
+                parked = bool(pause())
+            except Exception:  # noqa: BLE001 - pause never gates
+                parked = False
+        try:
+            from ...browser.service import RenderedTabTakeoverAdapter
+
+            grant = mgr.request_takeover(
+                session_id=f"watch-takeover-{int(time.time() * 1000)}",
+                url=rec["url"], task_label=f"takeover {rec['session']}",
+                signal_kind="owner_takeover", attempts=[],
+                resume_state={"step": 0, "url": rec["url"]},
+                tab=RenderedTabTakeoverAdapter(tab),
+                owner_chat=chat_key or "")
+        except Exception as exc:  # noqa: BLE001 - grant errors are data
+            if parked and callable(resume):
+                try:
+                    resume()
+                except Exception:  # noqa: BLE001 - resume never gates
+                    _log.debug("session takeover resume failed",
+                               exc_info=True)
+            return f"takeover failed: {exc}"[:500]
+        try:
+            self._takeover_notifier()(
+                f"You're driving Devon's browser — {rec['url']} "
+                f"(session {rec['display']}). Devon is parked on it "
+                "until you tap Done in the page.",
+                grant.url)
+        except Exception:  # noqa: BLE001 - notify failure is reported
+            _log.warning("session takeover notify failed", exc_info=True)
+        self._watch_takeover_grant(mgr, grant, resume=resume)
+        lines = [f"takeover open: {grant.url}",
+                 "I also sent this link to your Telegram — drive the "
+                 "live page, then tap \"Done, take over\"."]
+        if parked:
+            lines.append("Devon parked the run at its next step — "
+                         "she resumes the moment you tap Done.")
+        else:
+            lines.append("Nothing is driving this tab right now — "
+                         "it's yours until you tap Done.")
+        if getattr(grant, "needs_public_base", False):
+            lines.append("⚠️ No public takeover URL is configured "
+                         "(NM_TAKEOVER_BASE_URL) — this link works on "
+                         "the host network only until a tunnel / "
+                         "port-forward is set up.")
+        return "\n".join(lines)
+
+    def _watch_takeover_grant(self, mgr: Any, grant: Any,
+                              *, resume: Any = None) -> None:
+        """Daemon watcher for an owner-initiated takeover grant —
+        delegates to :func:`browser.takeover.watch_grant`, which
+        resumes the parked run job on Done or expiry."""
+        from ...browser.takeover import watch_grant
+
+        watch_grant(mgr, grant, resume=resume)
 
     def _browser_run_approver(self, *, task_label: str,
                               owner_chat: str) -> Any:
@@ -1042,6 +1177,16 @@ class RuntimeReachMixin:
             from ...browser.loop_wiring import build_wired_agent_loop
 
             service = self._browser_service_for_run_job(job.job_id)
+            # Attach this job's takeover hooks to the service record
+            # BEFORE the tab opens: /browser watch and /browser
+            # takeover <session> (chat and brain tool alike) park
+            # the run through the record, never via a job manager
+            # they do not own.
+            from ...browser.sessions import register_service
+
+            register_service(
+                service, label=f"browser-run-{job.job_id}",
+                pause=job.pause, resume=job.resume)
             tab = service.open_rendered_tab(
                 f"browser-run-{job.job_id}", url)
             memory = ChallengeMemory(
@@ -1062,7 +1207,8 @@ class RuntimeReachMixin:
                 vision_brain=_run_brain(),
                 on_progress=job.note_progress,
                 on_wall_outcome=job.wall_event,
-                cancel_requested=job.cancel_requested)
+                cancel_requested=job.cancel_requested,
+                wait_while_paused=job.wait_while_paused)
             result = loop.run(url, goal=goal)
             _attach_approval_receipt(result, approver)
             return result
@@ -1096,6 +1242,13 @@ class RuntimeReachMixin:
             from ...browser.recipe_replay import replay_recipe
 
             service = self._browser_service_for_run_job(job.job_id)
+            # Same takeover hooks as the model runner: the record
+            # carries this job's pause/resume before the tab opens.
+            from ...browser.sessions import register_service
+
+            register_service(
+                service, label=f"browser-run-{job.job_id}",
+                pause=job.pause, resume=job.resume)
             tab = service.open_rendered_tab(
                 f"browser-run-{job.job_id}", url)
             approver = self._browser_run_approver(
@@ -1106,6 +1259,7 @@ class RuntimeReachMixin:
                 approve=approver, slots=params, goal=goal,
                 on_progress=job.note_progress,
                 cancel_requested=job.cancel_requested,
+                wait_while_paused=job.wait_while_paused,
                 store=self._browser_recipe_store(),
                 cookie_estate=service.cookie_estate)
             _attach_approval_receipt(result, approver)

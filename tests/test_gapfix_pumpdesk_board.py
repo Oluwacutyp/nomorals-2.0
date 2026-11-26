@@ -288,7 +288,7 @@ def test_tool_board_open_watch_mint(monkeypatch, tmp_path):
     desk = _seed_board_desk(tmp_path)
     reg = ToolRegistry(SimpleNamespace())
     reg.register_builtins()
-    assert len(reg._tools) == 800  # no new tool — board rides pumpdesk
+    assert len(reg._tools) == 801  # no new tool — board rides pumpdesk
     out = reg.call("pumpdesk", action="board").value
     assert [r["symbol"] for r in out["rows"]] == ["CAND", "COLD",
                                                  "GATED", "THIN"]

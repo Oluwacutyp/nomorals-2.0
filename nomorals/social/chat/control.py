@@ -477,7 +477,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "checkmail": (0, 2),     # /checkmail [read <n> | code | forget] — read your temp inbox
     "vnumber": (0, 2),       # /vnumber [new [country] | status | forget] — temp/SMS number
     "checksms": (0, 1),      # /checksms [code | forget] — read SMS on your temp number
-    "browser": (1, None),    # /browser open|text|links|forms|headings <url> | takeover [url] | run <url> [goal] (owner-only)
+    "browser": (1, None),    # /browser open|text|links|forms|headings <url> | takeover [url|<session>] | run <url> [goal] | watch [session] | unwatch (owner-only)
     "paper": (0, None),      # /paper start|status|stop|list — simulated trading, never real money
     "people": (0, None),     # /people list|show|add|note — the people spine
     "commitments": (0, None),  # /commitments list|add|kept|broken|cancel|overdue|due|reliability|verify
@@ -1188,8 +1188,10 @@ _HELP_TEXT = "\n".join(
         "  — reachability wave (capabilities that had no command) —",
         "  /browser open|text|links|forms|headings <url>   the browser tool, in chat",
         "  /browser takeover [url]   takeover sessions — status / open (owner-only)",
+        "  /browser takeover <session>   take over a live session yourself — park the run, drive the tab, hand it back (owner-only)",
         "  /browser run <url> [goal]  drive a live tab with the agent loop — auto-escalates walls (owner-only, background job)",
         "  /browser run status [job]  job progress — steps, wall outcome, final URL",
+        "  /browser watch [session] | unwatch   attach / detach a live view of a running browser session (owner-only)",
         "  /paper start <symbol> [market] [capital] | status [session|symbol] | stop | list",
         "   paper trading — simulated, never real money",
         "  /people list [n] | show <name> | add <name> | note <name> <text>",
@@ -6020,7 +6022,7 @@ LIST_ONELINERS: dict[str, str] = {
     "checkmail": "read your temp inbox: /checkmail [read <n> | code | forget]",
     "vnumber": "temp number: /vnumber new [country] gets a virtual number for SMS codes, per-user",
     "checksms": "read SMS on your temp number: /checksms [code | forget]",
-    "browser": "the browser tool in chat: /browser open|text|links|forms|headings <url> | takeover [url] | run <url> [goal] (owner-only, background job) | run status [job] | watch [session] — attach a live view to a running browser session (owner-only)",
+    "browser": "the browser tool in chat: /browser open|text|links|forms|headings <url> | takeover [url] | takeover <session> — take over a live session yourself, park the run and drive the tab (owner-only) | run <url> [goal] (owner-only, background job) | run status [job] | watch [session] — attach a live view to a running browser session (owner-only) | unwatch — detach the live view",
     "provision": "self-provisioning: /provision [service] — Devon fetches a missing API key herself (login or account creation; key validated + vaulted, request retried); /provision login <service> <username> hands her an existing login",
     "models": "install every missing model: /models installs all of them (character voice/face, DJ madmom, voice STT/TTS, image, small-ML) that fit this box; /models status shows installed vs missing; /models learners shows the journal-trained learners' status (owner only)",
     "mcp": "the MCP client: /mcp status shows which external servers are enabled and connected; /mcp tools [server] lists a server's tools; /mcp call <server> <tool> [json-args] calls one (Context7, GitHub, Playwright, Serena, Graphify, Blender, since-cutoff, bestax, Upload-Post, Human Pages, Sato Hub, Ceki — opt-in in config, owner only)",

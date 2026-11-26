@@ -281,6 +281,7 @@ class AgentLoop:
                  on_progress: Callable[[dict[str, Any]], None] | None = None,
                  on_blocked: Callable[[Observation, str], str] | None = None,
                  cancel_requested: Callable[[], bool] | None = None,
+                 wait_while_paused: Callable[[], bool] | None = None,
                  escalator: Any = None) -> None:
         self.driver = driver
         self.decide_llm = decide_llm
@@ -303,6 +304,14 @@ class AgentLoop:
         #: job runner to ``BrowserRunJob.cancel_requested``. None
         #: means the loop runs unobserved, exactly as before.
         self.cancel_requested = cancel_requested
+        #: Owner-takeover pause hook: a zero-arg callable the loop
+        #: calls at step boundaries; it blocks until the owner hands
+        #: the browser back and returns False when the run should
+        #: stop instead (a cancel arrived while paused). Wired by
+        #: the browser job runner to
+        #: ``BrowserRunJob.wait_while_paused``. None means the loop
+        #: never pauses, exactly as before.
+        self.wait_while_paused = wait_while_paused
         #: Perception escalator (vision_marks.PerceptionEscalator),
         #: injected by the wiring layer with a live ``see`` (the
         #: brain's vision rung) and a screenshot source. None = the
@@ -502,6 +511,31 @@ class AgentLoop:
                          "continuing unobserved", exc_info=True)
             return False
 
+    def _pause_wait(self) -> bool:
+        """Wait out an owner-takeover pause. Fail-open like the cancel
+        poll: a hook that raises is recorded once in the browser
+        failure ledger, the poll is disarmed for the rest of the run,
+        and the run continues exactly as an unpaused loop behaves —
+        a broken pause read must never kill a healthy run. Returns
+        False when the run should stop (a cancel arrived while
+        paused)."""
+        hook = self.wait_while_paused
+        if hook is None:
+            return True
+        try:
+            return bool(hook())
+        except Exception as exc:  # noqa: BLE001 - fail-open poll
+            self.wait_while_paused = None
+            try:
+                from .failures import record_failure
+
+                record_failure("browser.agent.pause_poll", exc)
+            except Exception:  # noqa: BLE001 - ledger never gates
+                pass
+            _log.warning("browser agent pause poll failed; "
+                         "continuing unpaused", exc_info=True)
+            return True
+
     def run(self, start_url: str, *, goal: str = "") -> dict[str, Any]:
         armed = self.cancel_requested is not None
         if self._cancel_seen():
@@ -532,6 +566,13 @@ class AgentLoop:
                 # Step boundary: the previous action completed and
                 # was verified; no page operation is in flight, so
                 # stopping here corrupts nothing.
+                cancelled = True
+                self.stopped_reason = "cancelled: owner request"
+                break
+            if not self._pause_wait():
+                # A cancel arrived while the owner had the mouse:
+                # stop like a cancel, never resume into a
+                # half-driven page.
                 cancelled = True
                 self.stopped_reason = "cancelled: owner request"
                 break

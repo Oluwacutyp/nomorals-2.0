@@ -299,6 +299,13 @@ class _LocalBackend:
     def sessions(self) -> list[str]:
         return self._svc.list_sessions()
 
+    def live(self) -> dict[str, Any]:
+        """Live tabs in THIS process (the CLI's own browser service
+        and any other service in the process)."""
+        from ...browser.sessions import live_view
+
+        return live_view()
+
 
 class _DaemonBackend:
     """Persistent-daemon flow: every op is a socket round trip, no restore."""
@@ -515,6 +522,12 @@ class _DaemonBackend:
         self._republish(events)
         return result["sessions"]
 
+    def live(self) -> dict[str, Any]:
+        """Live tabs in the DAEMON process (its own browser service)."""
+        result, events = self._client.call("live", {})
+        self._republish(events)
+        return result
+
 
 def _backend(args: Any, context: Any):
     """Daemon when it's up (opt-in via ``daemon start``), else the default."""
@@ -530,7 +543,7 @@ def _backend(args: Any, context: Any):
 
 
 def _cmd_browse(args: Any, context: Any) -> int:
-    """Route ``nm browse <open|tabs|text|md|links|shot|download|history|close|sessions|daemon>``."""
+    """Route ``nm browse <open|tabs|text|md|links|shot|download|history|close|sessions|live|daemon>``."""
     from ...browser import BrowserError, DaemonError
 
     words = list(getattr(args, "task", None) or [])
@@ -549,7 +562,7 @@ def _cmd_browse(args: Any, context: Any) -> int:
               "       nm browse rtab open <url> | rtab tabs|shot|fill|fill-form|set-date|fields|eval|storage|persist|click|submit|wait|wait-url|wait-text|wait-state|wait-idle|select|check|captcha|extract|download|upload|wait-field|switch|active\n"
               "       nm browse pacing [get] | nm browse pacing set preset=human|off|profile | enabled=true delay-ms=400 jitter-ms=300\n"
               "       nm browse shot [--out PATH] | nm browse download <url> [--organize]\n"
-              "       nm browse history | nm browse close | nm browse sessions\n"
+              "       nm browse history | nm browse close | nm browse sessions | nm browse live\n"
               "       nm browse daemon start|stop|status",
               file=sys.stderr)
         return 2
@@ -603,6 +616,8 @@ def _cmd_browse(args: Any, context: Any) -> int:
             return _browse_close(args, context)
         if verb == "sessions":
             return _browse_sessions(args, context)
+        if verb == "live":
+            return _browse_live(args, context)
         print(f"unknown browse verb: {verb}", file=sys.stderr)
         return 2
     except (BrowserError, DaemonError) as exc:
@@ -772,6 +787,24 @@ def _browse_sessions(args: Any, context: Any) -> int:
         print(name)
     if not names:
         print("no sessions")
+    return 0
+
+
+def _browse_live(args: Any, context: Any) -> int:
+    """``nm browse live`` — live tabs in this process (the daemon's
+    when it is up, else the CLI's own). Devon's runtime sessions
+    live in her process, not this one — those are watched with
+    ``/browser watch`` in chat, and the reply says so when there
+    is nothing live here."""
+    backend = _backend(args, context)
+    result = backend.live()
+    if getattr(args, "json", False):
+        print(json.dumps(result, indent=2))
+        return 0
+    print(result["live"])
+    if not result["sessions"]:
+        print("Devon's own runtime sessions live in her process — "
+              "watch those with /browser watch in chat.")
     return 0
 
 

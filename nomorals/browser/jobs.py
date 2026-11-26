@@ -268,6 +268,52 @@ class BrowserRunJob:
         """Runners poll this: True once a cancel has been requested."""
         return self._cancel_requested.is_set()
 
+    # -- owner takeover pause -------------------------------------------------
+    # Same shape as cancellation, opposite outcome: the run parks at
+    # its next step boundary while the owner drives the tab, then
+    # resumes where it left off. A cancel that arrives while paused
+    # still wins — the run stops instead of resuming.
+    _paused: threading.Event = field(
+        default_factory=threading.Event, repr=False, compare=False)
+
+    def pause(self) -> bool:
+        """Park the run at its next step boundary (owner takeover).
+
+        Returns False when the run is already terminal (nothing to
+        park). A step already in flight finishes and verifies first,
+        so pausing corrupts nothing."""
+        with self._lock:
+            if self.status in _TERMINAL:
+                return False
+            self._paused.set()
+        self.note("paused",
+                  "⏸ run parked — the owner is driving the browser.")
+        self._changed()
+        return True
+
+    def resume(self) -> bool:
+        """Clear a takeover pause. Returns False when never paused."""
+        was = self._paused.is_set()
+        self._paused.clear()
+        if was:
+            self.note("resumed", "▶ run resumed after owner takeover.")
+            self._changed()
+        return was
+
+    def paused(self) -> bool:
+        """True while an owner takeover holds the run parked."""
+        return self._paused.is_set()
+
+    def wait_while_paused(self) -> bool:
+        """Block until unpaused. False = a cancel arrived while paused
+        (the run should stop); True = resumed normally (or never
+        paused). Runners call this at step boundaries."""
+        while self._paused.is_set():
+            if self._cancel_requested.is_set():
+                return False
+            self._paused.wait(0.25)
+        return not self._cancel_requested.is_set()
+
     def _changed(self) -> None:
         """Notify the manager a recordable transition just landed."""
         hook = self._on_change
@@ -738,6 +784,35 @@ class BrowserJobManager:
                 "job_id": job.job_id, "status": status,
                 "cancel_state": job.cancel_state,
                 "takes_effect": takes_effect}
+
+    def pause(self, job_id_or_prefix: str) -> dict[str, Any]:
+        """Park a run at its next step boundary (owner takeover).
+
+        Typed result, never a bool: ``state`` is one of
+        ``not_found`` / ``already_terminal`` / ``paused``. The
+        loop's step boundary waits; a step already in flight
+        finishes first. The run resumes via :meth:`resume` — never
+        on its own."""
+        job = self.get(job_id_or_prefix)
+        if job is None:
+            return {"ok": False, "state": "not_found",
+                    "job_id": str(job_id_or_prefix or "")}
+        parked = job.pause()
+        return {"ok": True,
+                "state": "paused" if parked else "already_terminal",
+                "job_id": job.job_id, "status": job.status}
+
+    def resume(self, job_id_or_prefix: str) -> dict[str, Any]:
+        """Clear a takeover pause. ``state`` is ``not_found`` /
+        ``resumed`` / ``not_paused``."""
+        job = self.get(job_id_or_prefix)
+        if job is None:
+            return {"ok": False, "state": "not_found",
+                    "job_id": str(job_id_or_prefix or "")}
+        was = job.resume()
+        return {"ok": True,
+                "state": "resumed" if was else "not_paused",
+                "job_id": job.job_id, "status": job.status}
 
     def get(self, job_id_or_prefix: str) -> BrowserRunJob | None:
         """Exact id, or a unique prefix (``run status br-abc`` works)."""

@@ -169,6 +169,7 @@ def build_wired_agent_loop(*, tab: Any,
                            on_progress: Any = None,
                            on_wall_outcome: Any = None,
                            cancel_requested: Any = None,
+                           wait_while_paused: Any = None,
                            vision_brain: Any = None,
                            escalator: Any = None) -> AgentLoop:
     """Build an ``AgentLoop`` whose wall path is fully wired.
@@ -184,7 +185,10 @@ def build_wired_agent_loop(*, tab: Any,
     ``cancel_requested`` (optional) is the cooperative cancel poll
     handed to the loop — the browser job runner passes its job's
     ``cancel_requested`` so a cancel stops the run at its next step
-    boundary. ``vision_brain`` (optional) is the brain whose vision
+    boundary. ``wait_while_paused`` (optional) is the owner-takeover
+    pause wait — the runner passes its job's ``wait_while_paused``
+    so a takeover parks the run at its next step boundary instead
+    of fighting the owner for the mouse. ``vision_brain`` (optional) is the brain whose vision
     rung (``describe_image``) becomes the perception escalator's
     ``see``: the loop then escalates to Set-of-Mark vision when the
     text snapshot cannot find the target, instead of deciding
@@ -208,6 +212,7 @@ def build_wired_agent_loop(*, tab: Any,
         dry_run=dry_run, max_steps=max_steps,
         on_trace=on_trace, on_progress=on_progress,
         on_blocked=handler, cancel_requested=cancel_requested,
+        wait_while_paused=wait_while_paused,
         escalator=escalator)
     return loop
 

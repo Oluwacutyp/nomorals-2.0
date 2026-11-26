@@ -578,6 +578,11 @@ def _handle_op(svc: BrowserService, op: str, params: dict[str, Any]) -> Any:
     if op == "sessions":
         return {"sessions": svc.list_sessions()}
 
+    if op == "live":
+        from .sessions import live_view
+
+        return live_view()
+
     name = (params.get("session") or "").strip() or "cli"
 
     if op == "open":

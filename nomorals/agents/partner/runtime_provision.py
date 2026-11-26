@@ -561,22 +561,30 @@ class RuntimeProvisionMixin:
     # ── /browser watch (on-demand LiveView attach) ───────────────────
 
     def _watchable_sessions(self) -> dict[str, Any]:
-        """Sessions a LiveView can attach to RIGHT NOW: tabs this
-        runtime is driving (provisioning registry) plus the takeover
-        browser service's open sessions. Tabs inside per-job browser
-        services are separate objects and are NOT visible here — the
-        /browser watch reply says so rather than pretending."""
-        out: dict[str, Any] = dict(self._provision_state()["watch_tabs"])
+        """Sessions a LiveView can attach to RIGHT NOW: every live tab
+        in this process, from the shared session registry (provisioning
+        drives, takeover tabs, per-job ``/browser run`` services,
+        webshot, planner — any BrowserService). This runtime's
+        provisioning tabs are merged in by name. The old probe only
+        knew two objects and called ``SessionHandle.active_tab`` as a
+        method (it is a ``@property``), so its takeover-service half
+        raised ``TypeError`` on every call and silently returned
+        nothing — the registry probes the property correctly."""
+        out: dict[str, Any] = {}
         try:
-            svc = self._browser_service_for_takeover()
-            for name, handle in (getattr(svc, "_sessions", {}) or {}).items():
+            from ...browser.sessions import live_sessions
+
+            for rec in live_sessions():
+                name = rec["display"]
                 if name not in out:
-                    tab = handle.active_tab()
-                    if tab is not None:
-                        out[name] = tab
-        except Exception:  # noqa: BLE001 - probe is best-effort
-            _log.debug("watch: takeover session probe failed",
+                    out[name] = rec["tab"]
+        except Exception:  # noqa: BLE001 - registry probe is best-effort
+            _log.debug("watch: shared session registry probe failed",
                        exc_info=True)
+        for name, tab in dict(
+                self._provision_state()["watch_tabs"]).items():
+            if name not in out:
+                out[name] = tab
         return out
 
     # ── pairing-with-code account pool (§15) ────────────────────────
@@ -4420,24 +4428,32 @@ class RuntimeProvisionMixin:
                                message: Any = None) -> str:
         """``/browser watch [session]`` — attach a LiveView to a live
         browser session so the owner can watch Devon's work on demand,
-        not only when a task starts. Owner-only."""
+        not only when a task starts. Owner-only. Every live session in
+        this process is watchable (shared session registry) — including
+        per-job ``/browser run`` services, which the old probe could
+        not see. On-demand watches get a 200-frame cap (the per-task
+        default of 25 would go dark on a long watch); the throttle
+        still bounds chat spam. ``/browser unwatch`` detaches."""
         if message is None or not self._is_operator(message):
             return "watch is owner-only — run it from the owner's chat."
         sessions = self._watchable_sessions()
         if not sessions:
             return ("no live browser session to watch right now — "
                     "sessions exist while a drive is running "
-                    "(provisioning, takeover, browser runs on the "
-                    "runtime's own service). Per-job browser sessions "
-                    "live in their own service objects and can't be "
-                    "attached from here.")
+                    "(provisioning, takeover, browser runs, webshot). "
+                    "Start one with /browser run <url> first.")
         want = (tail or "").strip()
         name = want if want in sessions else (
             next(iter(sessions)) if len(sessions) == 1 else "")
         if not name:
-            return ("which session? live right now: "
-                    + ", ".join(sorted(sessions))
-                    + " — say /browser watch name.")
+            try:
+                from ...browser.sessions import describe_sessions, live_sessions
+                listing = describe_sessions(live_sessions())
+            except Exception:  # noqa: BLE001 - names alone are enough
+                listing = ("live right now: "
+                           + ", ".join(sorted(sessions)))
+            return (f"which session?\n{listing}\n"
+                    "say /browser watch <name>.")
         chat = getattr(message, "chat", None)
         adapter = self._adapter_for(str(getattr(chat, "platform", "") or ""))
         if adapter is None or chat is None:
@@ -4451,13 +4467,35 @@ class RuntimeProvisionMixin:
                 old.detach()
             except Exception as exc:  # noqa: BLE001
                 record_failure("runtime_provision._control_browser_watch", exc)
+        tab = sessions[name]
         view = LiveView.attach(
-            sessions[name], chat, adapter,
-            task_label=f"watching: {name}")
+            tab, chat, adapter,
+            task_label=f"watching: {name}", max_shots=200)
         if view is None:
             return (f"couldn't attach a live view to session {name!r} "
                     "(the tab can't take screenshots).")
         state["watch_views"][chat_key] = view
+        framed = callable(getattr(tab, "screenshot", None))
+        extra = ("" if framed else
+                 " Text updates only — this tab has no screenshots; "
+                 "a rendered run (/browser run <url>) shows frames.")
         return (f"live view attached to session {name!r} — I'll keep "
                 "posting frames to this chat as she works. It detaches "
-                "when the session's task finishes.")
+                "when the session ends, or with /browser unwatch."
+                + extra)
+
+    def _control_browser_unwatch(self, *, chat_key: str = "",
+                                 message: Any = None) -> str:
+        """``/browser unwatch`` — detach this chat's LiveView. Owner-only."""
+        if message is None or not self._is_operator(message):
+            return "unwatch is owner-only — run it from the owner's chat."
+        state = self._provision_state()
+        old = state["watch_views"].pop(chat_key, None)
+        if old is None:
+            return "no live view attached in this chat."
+        try:
+            old.detach()
+        except Exception as exc:  # noqa: BLE001 - detach is best-effort
+            record_failure("runtime_provision._control_browser_unwatch",
+                           exc)
+        return "live view detached — the browser keeps running."

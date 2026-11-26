@@ -6860,6 +6860,7 @@ def _parser() -> argparse.ArgumentParser:
                      "nm browse shot [--out PATH] | nm browse download <url> [--organize]\n"
                      "nm browse rtab open <url> [--proxy P] | rtab tabs|shot|fill|click|submit|wait|extract|download\n"
                      "nm browse close | nm browse sessions\n"
+                     "nm browse live — live tabs in this process (the daemon's, when it is up)\n"
                      "nm browse daemon start|stop|status"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -7342,6 +7343,7 @@ def _parser() -> argparse.ArgumentParser:
                      "nm browse tabs|text|md|links|history [--session S]\n"
                      "nm browse shot [--out PATH] | nm browse download <url>\n"
                      "nm browse close | nm browse sessions\n"
+                     "nm browse live — live tabs in this process (the daemon's, when it is up)\n"
                      "nm browse daemon start|stop|status"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

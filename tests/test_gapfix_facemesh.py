@@ -477,7 +477,7 @@ def test_tool_count_is_786_after_facemesh():
     from nomorals.tools.registry import ToolRegistry
     registry = ToolRegistry(SimpleNamespace())
     registry.register_builtins()
-    assert len(registry._tools) == 800
+    assert len(registry._tools) == 801
     assert "facemesh" in registry._tools
 
 
