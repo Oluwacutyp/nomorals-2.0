@@ -349,7 +349,7 @@ class MuseumLibraryToolTest(unittest.TestCase):
         registry.register_builtins()
         # 785 after C.8 added the robot tool; 786 after gapfix74 added museum_library; 786 after gapfix74
         # added museum_library.
-        self.assertEqual(len(registry._tools), 788)  # goal-class adds goal_class
+        self.assertEqual(len(registry._tools), 789)  # D5 (walabel) adds whatsapp_account_label
         self.assertIn("museum_library", registry._tools)
 
     def test_unified_search_reaches_museum_and_library(self) -> None:

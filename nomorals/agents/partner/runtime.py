@@ -740,7 +740,11 @@ class PartnerRuntime(
             from ...tools.social import set_gateway as _bind_social_gateway
             _bind_social_gateway(self.gateway)
             from ...tools.whatsapp import set_gateway as _bind_wa_gateway
+            from ...tools.whatsapp import set_pairing_supervisor_factory as _bind_wa_pairing
             _bind_wa_gateway(self.gateway)
+            # D5: the brain's account-label tool reaches the pool
+            # through this runtime's pairing supervisor.
+            _bind_wa_pairing(lambda: self._pairing_supervisor())
         except Exception as e:
             record_failure("runtime.PartnerRuntime.__init__:329", e)
 

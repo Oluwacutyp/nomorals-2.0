@@ -176,6 +176,13 @@ def pairing_state(context: Any, *, svc: dict[str, Any] | None = None,
             "platform": rec.platform,
             "identity": rec.identity,
             "label": rec.label,
+            # D5: the label's WhatsApp-side outcome rides the state
+            # row, so every web render shows it without a second
+            # read — "" | "pending" | "set" | "failed", the refusal
+            # in label_error, the definition id in label_id.
+            "label_state": rec.label_state or "",
+            "label_error": rec.label_error or "",
+            "label_id": rec.label_id or "",
             "status": rec.status,
             "primary": bool(rec.primary),
             "port": rec.port,
@@ -270,14 +277,79 @@ def pairing_action(context: Any, payload: dict[str, Any], *,
                 return fail("usage: pair_whatsapp needs the number "
                             "in international format, e.g. "
                             "2348012345678")
+            digits = "".join(c for c in number if c.isdigit())
+            prior = next((r for r in registry.all()
+                          if r.platform == "whatsapp"
+                          and r.identity == digits), None)
+            old_label = (prior.label if prior else "") or ""
             rec = sup.pair_whatsapp(number, label)
             # A fresh pair is an owner start: any earlier stop
             # order for the platform is revoked (chat parity).
             registry.set_owner_stopped("whatsapp", False)
+            note = ("bridge launched — the pairing code appears in "
+                    "state as soon as WhatsApp issues it; approve it "
+                    "on the phone")
+            if label.strip() and old_label \
+                    and rec.label == old_label \
+                    and old_label != label.strip():
+                # D5: a re-pair never overwrites a label — say so,
+                # and name the explicit rename.
+                note += (f". Kept the existing label “{old_label}” — "
+                         "rename it with the rename action.")
+            elif rec.label:
+                note += (f". Label “{rec.label}” — set as part of "
+                         "this link; it applies in WhatsApp once the "
+                         "account links.")
+            return done(account=rec.id, note=note)
+        if action == "rename":
+            # D5: the explicit rename (chat /pair rename parity).
+            rec = _find(registry, str(payload.get("id") or ""))
+            if rec is None:
+                return fail("which account? the state lists them")
+            new_label = str(payload.get("label") or "").strip()
+            if not new_label:
+                return fail("usage: rename needs the new label")
+            rec = registry.set_label(rec.id, new_label)
+            if rec.platform == "whatsapp" \
+                    and rec.status == "linked":
+                verdict = sup.apply_account_label(rec)
+                if verdict.get("ok"):
+                    return done(
+                        account=rec.id,
+                        note=f"{rec.id} is now “{rec.label}” — set "
+                             "in WhatsApp")
+                return done(
+                    account=rec.id,
+                    note=f"{rec.id} is now “{rec.label}” in Devon — "
+                         "but WhatsApp refused the label: "
+                         f"{verdict.get('error')}")
+            if rec.platform == "whatsapp":
+                return done(
+                    account=rec.id,
+                    note=f"{rec.id} is now “{rec.label}” — it "
+                         "applies in WhatsApp when the account links")
             return done(account=rec.id,
-                        note="bridge launched — the pairing code "
-                             "appears in state as soon as WhatsApp "
-                             "issues it; approve it on the phone")
+                        note=f"{rec.id} is now “{rec.label}”")
+        if action == "apply_label":
+            # D5: apply (or retry) the stored label to WhatsApp now
+            # (chat /pair label parity).
+            rec = _find(registry, str(payload.get("id") or ""))
+            if rec is None:
+                return fail("which account? the state lists them")
+            if rec.platform != "whatsapp":
+                return fail("only WhatsApp accounts carry a "
+                            "WhatsApp label — Telegram names are "
+                            "Devon's own")
+            if not (rec.label or "").strip():
+                return fail("that account has no label — rename it "
+                            "first")
+            verdict = sup.apply_account_label(rec)
+            if verdict.get("ok"):
+                return done(
+                    account=rec.id,
+                    note=f"label “{rec.label}” set in WhatsApp")
+            return fail(f"label “{rec.label}” could not be set in "
+                        f"WhatsApp: {verdict.get('error')}")
         if action == "pair_telegram":
             number = str(payload.get("number") or "")
             label = str(payload.get("label") or "")
@@ -338,7 +410,8 @@ def pairing_action(context: Any, payload: dict[str, Any], *,
                              f"for {rec.id}")
         return fail(f"unknown pairing action {action!r} — known: "
                     "pair_whatsapp, pair_telegram, tgcode, tgpass, "
-                    "start, stop, restart, remove, use, toggle")
+                    "start, stop, restart, remove, use, toggle, "
+                    "rename, apply_label")
     except (PairingUnavailable, ValueError) as exc:
         # The supervisor's / pairer's plain words are the answer,
         # exactly as chat relays them.

@@ -100,13 +100,13 @@ def _cli(args: argparse.Namespace, ctx: Any) -> tuple[int, str]:
 
 class ToolCountTests(unittest.TestCase):
     def test_tool_count_is_786_after_goalclass(self):
-        # 785 after C.8 added robot; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class.
+        # 785 after C.8 added robot; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class; 789 after D5 (walabel) added whatsapp_account_label.
         # added goal_class.
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 788)
+        self.assertEqual(len(registry._tools), 789)
         self.assertIn("goal_class", registry._tools)
-        self.assertEqual(len(registry.schemas()), 788)
+        self.assertEqual(len(registry.schemas()), 789)
 
 
 class BuiltinRegistryTests(unittest.TestCase):

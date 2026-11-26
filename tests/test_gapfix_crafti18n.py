@@ -906,8 +906,9 @@ def test_devon_runtime_still_green():
 
 def test_tool_count_unchanged():
     # This lane adds no tool: the craftlibs tool's i18n action
-    # grows in place.  (Lane 115's count pins at 734; the parent
-    # re-bases this pin if lane 115 ships first.)
+    # grows in place.  (Lane 115's count pins at 786; the parent
+    # re-bases this pin if lane 115 ships first — rebased here: 789
+    # after D5 (walabel) added whatsapp_account_label.)
     registry = _registry()
-    assert len(registry._tools) == 734
+    assert len(registry._tools) == 789
     assert "craftlibs" in registry._tools

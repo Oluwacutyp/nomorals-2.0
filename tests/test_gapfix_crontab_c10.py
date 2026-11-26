@@ -305,9 +305,9 @@ def test_cli_cron_refuses():
 
 # ── registry pin: no new tool ────────────────────────────────────────────
 
-def test_tool_count_still_788():
+def test_tool_count_still_789():
     from nomorals.tools.registry import ToolRegistry
 
     registry = ToolRegistry(SimpleNamespace())
     registry.register_builtins()
-    assert len(registry._tools) == 788
+    assert len(registry._tools) == 789

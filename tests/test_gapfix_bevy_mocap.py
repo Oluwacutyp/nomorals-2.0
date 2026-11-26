@@ -35,7 +35,7 @@ defect the first drive had), the show seam (face-only show,
 overlay, unknown bone recorded once), and the wiring (tool
 count pinned at 786 — 777 after B.22 added show; 778 after
 B.26 added scene_project; 779 after this lane (B.23) added
-facemcap; 780 after this lane (B.25) added facemesh; 781 after this lane (B.27) added vtuber; 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall; 785 after this lane (C.8) added robot; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class — plus the
+facemcap; 780 after this lane (B.25) added facemesh; 781 after this lane (B.27) added vtuber; 782 after this lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall; 785 after this lane (C.8) added robot; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class; 789 after D5 (walabel) added whatsapp_account_label — plus the
 CLI and the chat verb).
 """
 
@@ -697,7 +697,7 @@ def _tool(registry, **kwargs):
 def test_tool_count_is_786_after_facemcap():
     registry = ToolRegistry(SimpleNamespace())
     registry.register_builtins()
-    assert len(registry._tools) == 788
+    assert len(registry._tools) == 789
     assert "facemcap" in registry._tools
 
 

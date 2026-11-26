@@ -158,8 +158,8 @@ class TestWiring:
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
         # 781 after this lane (B.27) added vtuber. 782 after this
-        # lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall; 785 after this lane (C.8) added robot; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class.
-        assert len(registry._tools) == 788
+        # lane (C.2) registered tonal_g2p; 783 after this lane (C.1) added smarthome; 784 after this lane (C.4) added camwall; 785 after this lane (C.8) added robot; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class; 789 after D5 (walabel) added whatsapp_account_label.
+        assert len(registry._tools) == 789
         assert "tonal_g2p" in registry._tools
 
     def test_tool_tonal_g2p_arpabet_action(self):

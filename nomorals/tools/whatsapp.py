@@ -22,11 +22,50 @@ _log = get_logger(__name__)
 
 _gateway: Any = None
 
+#: The pairing supervisor the account-label tool reads/writes (D5):
+#: bound once at runtime boot next to ``set_gateway`` — the brain's
+#: label tool reaches the pool through the supervisor, never through
+#: a second registry copy.  Tests bind a fake supervisor here.
+_pairing_supervisor_factory: Any = None
+
 
 def set_gateway(gateway: Any) -> None:
     """Bind the chat gateway. Called once at runtime boot."""
     global _gateway
     _gateway = gateway
+
+
+def set_pairing_supervisor_factory(factory: Any) -> None:
+    """Bind the factory that returns the pairing supervisor (D5):
+    ``lambda: runtime._pairing_supervisor()`` in production, a fake
+    supervisor in tests.  None clears the binding — the tool then
+    fails closed instead of touching a registry it cannot see."""
+    global _pairing_supervisor_factory
+    _pairing_supervisor_factory = factory
+
+
+def _pairing_supervisor() -> Any:
+    factory = _pairing_supervisor_factory
+    if factory is None:
+        raise RuntimeError(
+            "pairing supervisor not bound — the account-label tool "
+            "needs the runtime's pairing supervisor")
+    return factory()
+
+
+def _find_paired(registry: Any, ref: str) -> Any | None:
+    """Resolve an account reference the way chat does: the exact id,
+    else a unique identity / id-suffix match."""
+    ref = (ref or "").strip()
+    if not ref:
+        return None
+    rec = registry.get(ref)
+    if rec is not None:
+        return rec
+    digits = "".join(c for c in ref if c.isdigit())
+    matches = [r for r in registry.all()
+               if r.identity == digits or r.id.endswith(ref)]
+    return matches[0] if len(matches) == 1 else None
 
 
 def _require_gateway() -> Any:
@@ -367,3 +406,81 @@ def register(registry: Any) -> None:
     )
     def whatsapp_channel_post(channel: str, text: str) -> dict[str, Any]:
         return _wa_admin("channel_post", chat=channel, text=text)
+
+    # ── account labels (D5: link-time naming) ───────────────────────
+
+    @registry.register(
+        "whatsapp_account_label",
+        description=(
+            "Name or rename a paired WhatsApp account's label "
+            "('label my WhatsApp personal', 'call Devon's own "
+            "WhatsApp devon'). With no label, reports the account's "
+            "current label and its WhatsApp-side state (pending / "
+            "set / failed with the refusal). With a label, renames "
+            "it explicitly — a re-pair never overwrites one — and a "
+            "linked account applies the new name to WhatsApp at "
+            "once, reporting a refusal honestly instead of claiming "
+            "it set. Owner-only."
+        ),
+        capability=Capability.SOCIAL_BULK,
+        parameters={
+            "type": "object",
+            "properties": {
+                "account": {"type": "string",
+                            "description": "paired account id "
+                            "(whatsapp:<digits>) or number"},
+                "label": {"type": "string",
+                          "description": "new label; empty reports "
+                          "the current one"},
+            },
+            "required": ["account"],
+        },
+    )
+    def whatsapp_account_label(account: str,
+                               label: str = "") -> dict[str, Any]:
+        try:
+            sup = _pairing_supervisor()
+        except RuntimeError as exc:
+            return {"ok": False, "error": str(exc)}
+        rec = _find_paired(sup.registry, account)
+        if rec is None:
+            return {"ok": False,
+                    "error": f"no paired account {account!r} — "
+                             "/pair lists them"}
+        clean = (label or "").strip()
+        if not clean:
+            return {"ok": True, "account": rec.id,
+                    "platform": rec.platform,
+                    "label": rec.label or "",
+                    "label_state": rec.label_state or "",
+                    "label_error": rec.label_error or "",
+                    "label_id": rec.label_id or "",
+                    "status": rec.status}
+        try:
+            rec = sup.registry.set_label(rec.id, clean)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        out: dict[str, Any] = {
+            "ok": True, "account": rec.id,
+            "platform": rec.platform, "label": rec.label,
+            "label_state": rec.label_state or "",
+            "label_error": rec.label_error or "",
+            "label_id": rec.label_id or "", "status": rec.status,
+            "whatsapp_applied": False, "whatsapp_error": ""}
+        if rec.platform != "whatsapp":
+            out["note"] = ("Telegram accounts carry no WhatsApp "
+                           "label; the name is Devon's own.")
+            return out
+        if rec.status != "linked":
+            out["note"] = ("applies in WhatsApp when the account "
+                           "links")
+            return out
+        verdict = sup.apply_account_label(rec)
+        out["label_state"] = verdict.get("label_state",
+                                         rec.label_state or "")
+        out["label_error"] = verdict.get("error", "")
+        out["label_id"] = verdict.get("label_id", rec.label_id or "")
+        out["whatsapp_applied"] = bool(verdict.get("ok"))
+        out["whatsapp_error"] = "" if verdict.get("ok") else str(
+            verdict.get("error") or "")
+        return out

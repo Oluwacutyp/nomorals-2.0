@@ -42,6 +42,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
 from collections import deque
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -562,6 +563,23 @@ class AccountRecord:
     platform: str            # "whatsapp" | "telegram"
     identity: str            # WA: international digits; TG: user id/phone
     label: str = ""
+    #: The WhatsApp-side outcome of the account's label (D5): "" =
+    #: no label was ever named; "pending" = named at link time, not
+    #: yet applied to WhatsApp; "set" = the bridge confirmed the
+    #: label definition (its id in ``label_id``); "failed" = the last
+    #: attempt was refused, the reason in ``label_error``.  Additive
+    #: with defaults — registries written before this field load
+    #: unchanged, exactly like ``last_error`` above.
+    label_state: str = ""
+    #: The last refusal for the account's label, in the bridge's own
+    #: words ("labels are a Business feature …") — '' when the label
+    #: is unattempted or set.
+    label_error: str = ""
+    #: The WhatsApp label definition's id once the bridge has minted
+    #: (or reused) one: a later rename reuses THIS definition (an
+    #: edit with the same id + the new name) instead of minting a
+    #: duplicate, and carries the definition's current color.
+    label_id: str = ""
     creds_dir: str = ""      # WA: this account's bridge creds directory
     port: int = 0            # WA: this account's bridge port
     status: str = "registered"   # registered|pairing|linked|down|stopped
@@ -661,6 +679,28 @@ def status_react_pick(rec: AccountRecord,
     while pool[idx] == str(rec.status_react_last or ""):
         idx = (idx + 1) % len(pool)
     return pool[idx], (idx + 1) % len(pool)
+
+
+def label_state_line(rec: AccountRecord) -> str:
+    """One shared line for an account's label state (D5) — the
+    wording every surface (chat /pair, the pairing page, the web
+    state) uses, so the label's fate never reads differently in
+    two places.  "" when the account was never named: an unnamed
+    account has no label story to tell."""
+    label = (rec.label or "").strip()
+    if not label:
+        return ""
+    state = (rec.label_state or "").strip().lower()
+    if state == "set":
+        return f"label “{label}” — set in WhatsApp"
+    if state == "failed":
+        reason = (rec.label_error or "").strip()
+        line = f"label “{label}” — WhatsApp refused it"
+        return f"{line}: {reason}" if reason else line
+    if state == "pending":
+        return (f"label “{label}” — pending, applies in WhatsApp "
+                "when the account links")
+    return f"label “{label}”"
 
 
 class PairingRegistry:
@@ -827,6 +867,54 @@ class PairingRegistry:
             for other in self._accounts.values():
                 if other.platform == rec.platform:
                     other.primary = other.id == rec.id
+            self._save()
+            return rec
+
+    def set_label(self, account_id: str, label: str) -> AccountRecord:
+        """Name (or rename) an account's label — the EXPLICIT rename
+        (D5: ``/pair rename``, the web ``rename`` action, the
+        ``whatsapp_account_label`` tool).  The only path that ever
+        overwrites an existing label: a re-pair keeps the old one
+        unless it routes here.  The definition id is KEPT, so the
+        rename reuses the WhatsApp definition instead of minting a
+        duplicate; the state goes back to "pending" (the new name
+        still has to land in WhatsApp) and any old refusal clears.
+        Empty names and unknown accounts raise — a typo must never
+        read as success."""
+        clean = (label or "").strip()
+        if not clean:
+            raise ValueError(
+                "a label needs a name — /pair rename <id> <label>")
+        with self._lock:
+            rec = self._accounts.get(account_id)
+            if rec is None:
+                raise ValueError(f"no paired account {account_id}")
+            rec.label = clean
+            if rec.platform == "whatsapp":
+                # WhatsApp only: the new name still has to land in
+                # WhatsApp (state "pending", old refusal cleared).
+                # Telegram has no WhatsApp-side application, so its
+                # label state stays empty — the name IS the story.
+                rec.label_state = "pending"
+                rec.label_error = ""
+            self._save()
+            return rec
+
+    def set_label_outcome(self, account_id: str, state: str, *,
+                          label_id: str | None = None,
+                          error: str = "") -> AccountRecord | None:
+        """Record the WhatsApp-side outcome of the account's label
+        (D5): "set" with the definition's id, or "failed" with the
+        refusal in plain words.  None when the account is gone —
+        the caller already decided what that means."""
+        with self._lock:
+            rec = self._accounts.get(account_id)
+            if rec is None:
+                return None
+            rec.label_state = state
+            if label_id is not None:
+                rec.label_id = label_id
+            rec.label_error = error or ""
             self._save()
             return rec
 
@@ -1732,7 +1820,9 @@ class BridgeSupervisor:
                         "WhatsApp closed the pairing: "
                         + lf.group(1).strip())
                 if "connected as" in text:
-                    self.registry.set_status(account_id, "linked")
+                    # The link landed — the record flips AND a
+                    # pending label is applied (D5: _on_linked).
+                    self._on_linked(account_id)
         except Exception:  # noqa: BLE001 - a dead stream ends the
             pass                    # drain; the exit is handled
         self._finish_dead(account_id, proc)
@@ -1988,7 +2078,8 @@ class BridgeSupervisor:
 
     # ── pairing ─────────────────────────────────────────────────────
     def pair_whatsapp(self, number: str, label: str = "",
-                      *, engine: str | None = None) -> AccountRecord:
+                      *, engine: str | None = None,
+                      rename: bool = False) -> AccountRecord:
         digits = re.sub(r"\D", "", number or "")
         if len(digits) < 7:
             raise ValueError(
@@ -2004,18 +2095,30 @@ class BridgeSupervisor:
         rec = self.registry.get(rec_id)
         created = rec is None
         prior_status = "" if created else rec.status
+        clean_label = (label or "").strip()
         if created:
             creds = self.sessions_root / f"wa-{digits}"
             rec = AccountRecord(
                 id=rec_id, platform="whatsapp", identity=digits,
-                label=(label or "").strip(), creds_dir=str(creds),
+                label=clean_label, creds_dir=str(creds),
+                label_state="pending" if clean_label else "",
                 port=self._alloc_port(), status="pairing",
                 created_at=time.time())
             self.registry.upsert(rec)
         else:
             rec.status = "pairing"
-            if label:
-                rec.label = label.strip()
+            if clean_label:
+                # D5: an existing label SURVIVES a re-pair.  A new
+                # name lands only when the account never had one
+                # (first naming) or the owner explicitly renames
+                # (rename=True — the /pair rename path).  A
+                # different name on a plain re-pair is kept out
+                # here; the caller tells the owner how to rename.
+                if not rec.label or (
+                        rec.label != clean_label and rename):
+                    rec.label = clean_label
+                    rec.label_state = "pending"
+                    rec.label_error = ""
             self.registry.upsert(rec)
         was_running = self._alive(rec.id)
         if was_running:
@@ -2261,6 +2364,150 @@ class BridgeSupervisor:
         if obj is None:
             return "down"
         return "linked" if obj.get("state") == "open" else "down"
+
+    def _bridge_cmd(self, rec: AccountRecord, cmd: str,
+                    payload: dict[str, Any], *,
+                    timeout: float = 10.0) -> dict[str, Any]:
+        """One admin command over the bridge protocol (D5): the same
+        newline-JSON wire the adapter's ``_admin_cmd`` speaks, on a
+        fresh one-shot socket like :meth:`_status_reply` — the
+        supervisor's only bridge channel.  The reply is matched by
+        its correlation id; broadcasts the bridge sends first are
+        skipped, never mistaken for the answer.  Transport failure
+        is a verdict dict, never a raise: a dead bridge is the
+        commonest honest reason a label cannot land."""
+        if rec.platform != "whatsapp" or not rec.port:
+            return {"ok": False,
+                    "error": "no bridge port for this account"}
+        req_id = uuid.uuid4().hex[:12]
+        line = json.dumps({"id": req_id, "cmd": cmd, **payload}) + "\n"
+        try:
+            with socket.create_connection(
+                    ("127.0.0.1", rec.port),
+                    timeout=timeout) as sock:
+                sock.sendall(line.encode("utf-8"))
+                sock.settimeout(timeout)
+                buf = ""
+                deadline = time.time() + timeout
+                while time.time() < deadline:
+                    try:
+                        chunk = sock.recv(4096)
+                    except TimeoutError:
+                        break
+                    if not chunk:
+                        break
+                    buf += chunk.decode("utf-8", "replace")
+                    while "\n" in buf:
+                        raw, buf = buf.split("\n", 1)
+                        if not raw.strip():
+                            continue
+                        try:
+                            obj = json.loads(raw)
+                        except ValueError:
+                            continue
+                        if isinstance(obj, dict) \
+                                and obj.get("id") == req_id:
+                            return obj
+                    if len(buf) > 65536:
+                        break
+        except OSError as exc:
+            return {"ok": False,
+                    "error": ("whatsapp bridge not reachable on port "
+                              f"{rec.port} ({exc})")}
+        return {"ok": False, "error": "bridge response timeout"}
+
+    def apply_account_label(
+            self, rec: AccountRecord, *,
+            timeout: float = 10.0) -> dict[str, Any]:
+        """Apply the account's registry label as a WhatsApp label
+        definition on the account itself (D5) — the bridge's own
+        ``labels`` / ``label_edit`` verbs, the same ones
+        :meth:`WhatsAppClient.edit_label` speaks.  The read comes
+        first: a definition already carrying this name is REUSED
+        (no duplicate minted), and a stored definition id found
+        under another name is a RENAME — the edit carries that id
+        plus the definition's current color, exactly as
+        ``edit_label`` demands.  "set" is earned only by a reply
+        carrying the definition's id (the ``edit_label`` proof
+        rule); anything else records "failed" with the bridge's
+        own reason on the record and returns it.  The link itself
+        never depends on this — a failed label leaves the account
+        exactly as linked as it was.  A no-label / non-WhatsApp
+        record is a no-op verdict, never a write."""
+        label = (rec.label or "").strip()
+        if rec.platform != "whatsapp" or not label:
+            return {"ok": False, "error": "no account label to apply"}
+        read = self._bridge_cmd(rec, "labels", {}, timeout=timeout)
+        definitions = []
+        if read.get("ok") and isinstance(read.get("labels"), list):
+            definitions = [row for row in read["labels"]
+                           if isinstance(row, dict)]
+        for row in definitions:
+            name = str(row.get("name") or "")
+            if name == label or name.casefold() == label.casefold():
+                found_id = str(row.get("id") or "")
+                if found_id:
+                    self.registry.set_label_outcome(
+                        rec.id, "set", label_id=found_id)
+                    return {"ok": True, "label_id": found_id,
+                            "label": label, "label_state": "set",
+                            "reused": True}
+        color: Any = None
+        if rec.label_id:
+            for row in definitions:
+                if str(row.get("id") or "") == rec.label_id:
+                    color = row.get("color")
+                    break
+        payload: dict[str, Any] = {
+            "label_id": rec.label_id or "", "name": label,
+            "deleted": False}
+        if isinstance(color, int) and not isinstance(color, bool):
+            payload["color"] = color
+        verdict = self._bridge_cmd(rec, "label_edit", payload,
+                                   timeout=timeout)
+        if verdict.get("ok"):
+            label_id = str(verdict.get("label_id") or "")
+            if not label_id:
+                return self._label_failed(
+                    rec, "the bridge accepted the label but returned "
+                         "no id for it — the write is unproven")
+            self.registry.set_label_outcome(rec.id, "set",
+                                            label_id=label_id)
+            return {"ok": True, "label_id": label_id,
+                    "label": label, "label_state": "set"}
+        return self._label_failed(
+            rec, str(verdict.get("error") or
+                     "the bridge refused the label"))
+
+    def _label_failed(self, rec: AccountRecord,
+                      reason: str) -> dict[str, Any]:
+        """Record a refused label attempt (D5) and return the same
+        verdict the caller reports: state "failed", the reason in
+        plain words, the link untouched."""
+        self.registry.set_label_outcome(rec.id, "failed", error=reason)
+        return {"ok": False, "error": reason,
+                "label": (rec.label or "").strip(),
+                "label_state": "failed"}
+
+    def _on_linked(self, account_id: str) -> None:
+        """The link just landed (D5): record it, then apply a
+        pending account label over the bridge's own label verbs.
+        Only "pending" / "failed" labels are attempted here — a
+        "set" label is already WhatsApp's truth, and re-applying
+        it on every reconnect would resurrect a definition the
+        owner deleted in WhatsApp on purpose.  A failed apply
+        records its reason on the record; the link stands either
+        way.  Never raises: a label attempt must not break the
+        link it rides on."""
+        self.registry.set_status(account_id, "linked")
+        try:
+            rec = self.registry.get(account_id)
+            if rec is not None and (rec.label or "").strip() \
+                    and (rec.label_state or "").strip().lower() \
+                    in ("pending", "failed"):
+                self.apply_account_label(rec)
+        except Exception:  # noqa: BLE001 - the link is the fact;
+            pass            # a label attempt never breaks it
 
     # ── identity + adoption (orphanfix) ─────────────────────────
     @staticmethod
@@ -2612,7 +2859,10 @@ class PoolSupervision:
             # shrug.  Unverifiable: today's passive behavior.
             if sup.adopt(rec) is not None:
                 if rec.status != "linked":
-                    self.registry.set_status(rec.id, "linked")
+                    # A survivor answering as this account: the
+                    # link is earned back AND a pending label is
+                    # applied (D5: _on_linked).
+                    sup._on_linked(rec.id)
                     return {"account": rec.id,
                             "change": "probe found the bridge linked"}
                 return None

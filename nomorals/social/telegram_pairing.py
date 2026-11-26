@@ -218,7 +218,8 @@ class TelegramPairer:
         return flow
 
     # ── the flow ────────────────────────────────────────────────────
-    def start(self, phone: str, label: str = "") -> AccountRecord:
+    def start(self, phone: str, label: str = "",
+              *, rename: bool = False) -> AccountRecord:
         digits = re.sub(r"\D", "", phone or "")
         if len(digits) < 7:
             raise PairingFlowError(
@@ -229,16 +230,24 @@ class TelegramPairer:
         now = self._clock()
         rec = self.registry.get(rec_id)
         stem = self._session_stem(digits)
+        clean_label = (label or "").strip()
         if rec is None:
             rec = AccountRecord(
                 id=rec_id, platform="telegram", identity=digits,
-                label=(label or "").strip(), session_path=stem,
+                label=clean_label, session_path=stem,
                 status="pairing", created_at=now)
         else:
             rec.status = "pairing"
             rec.session_path = stem
-            if label:
-                rec.label = label.strip()
+            if clean_label:
+                # D5, the WhatsApp rule's mirror: an existing label
+                # survives a re-pair; only a first naming or an
+                # explicit rename (rename=True) writes a new one.
+                # (No label_state here: that tracks the WhatsApp
+                # -side application, which Telegram has none of.)
+                if not rec.label or (
+                        rec.label != clean_label and rename):
+                    rec.label = clean_label
         self.registry.upsert(rec)
         self._drop_flow(rec_id)  # a restarted flow replaces the old
         client = self._factory(stem, api_id, api_hash)

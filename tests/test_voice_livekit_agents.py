@@ -699,7 +699,7 @@ class TestAgentToolWiring(unittest.TestCase):
 
         self.assertIn("face_watch", inspect.signature(fn).parameters)
 
-    def test_tool_count_still_788(self):
+    def test_tool_count_still_789(self):
         """No new brain tool was added — agent mode and face watch
         are modes of the existing tools, so the count stays at 786
         after the swarm ship added build_swarm (was 785 at the
@@ -710,7 +710,7 @@ class TestAgentToolWiring(unittest.TestCase):
 
         registry = ToolRegistry(_NS())
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 788)  # goal-class adds goal_class
+        self.assertEqual(len(registry._tools), 789)  # D5 (walabel) adds whatsapp_account_label
         schemas = {s["name"]: s for s in registry.schemas()}
         self.assertIn("agent", str(schemas["voice_live_start"]))
         self.assertIn("face_watch", str(schemas["video_live_start"]))

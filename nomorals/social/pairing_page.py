@@ -24,7 +24,7 @@ import html
 import time
 from typing import Any
 
-from .pairing import PERSONAL_TOGGLES, PairingRegistry
+from .pairing import PERSONAL_TOGGLES, PairingRegistry, label_state_line
 
 
 def _esc(value: Any) -> str:
@@ -75,12 +75,14 @@ def pairing_page_html(registry: PairingRegistry, *,
             "<code>/pair telegram &lt;number&gt;</code>.</p>")
     for rec in rows:
         label = f" “{_esc(rec.label)}”" if rec.label else ""
+        state_line = label_state_line(rec)
         parts.append(
             f"<h2>{_esc(rec.id)}{label}</h2>"
             f"<p>{_esc(rec.platform)} · status: "
             f"<b>{_esc(rec.status)}</b>"
             + (f" · primary for {_esc(rec.platform)}"
                if rec.primary else "")
+            + (f" · {_esc(state_line)}" if state_line else "")
             + "</p>")
         toggles = ", ".join(
             f"{name} {'on' if rec.toggle(name) else 'off'}"

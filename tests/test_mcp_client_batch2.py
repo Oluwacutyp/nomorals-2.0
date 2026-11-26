@@ -314,13 +314,13 @@ class Batch2OverrideTransportTests(unittest.TestCase):
 
 
 class Batch2ToolSurfaceTests(unittest.TestCase):
-    def test_no_new_brain_tool_registry_stays_788(self):
-        # 788, not 787: the goal-class ship's goal_class tool landed
+    def test_no_new_brain_tool_registry_stays_789(self):
+        # 789, not 788: the D5 (walabel) ship's whatsapp_account_label tool landed
         # after this pin's base (parent re-bump, 2026-11-25).
         context = SimpleNamespace(settings=Settings())
         registry = ToolRegistry(context=context)
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 788)  # goal-class adds goal_class
+        self.assertEqual(len(registry._tools), 789)  # D5 (walabel) adds whatsapp_account_label
         for name in ("mcp_call", "mcp_list_tools", "mcp_status"):
             self.assertIsNotNone(registry.get(name), name)
 

@@ -2476,6 +2476,14 @@ class RuntimeProvisionMixin:
         /pair tgcode id code           complete a Telegram pairing
         /pair tgpass id password       its 2FA password, when asked
         /pair code id                    re-show a live code
+        /pair rename id label            rename an account's label
+                                           (the explicit rename — a
+                                           re-pair never overwrites
+                                           one; a linked WhatsApp
+                                           account applies it at once)
+        /pair label id                   apply the account's label
+                                           to WhatsApp now (retry a
+                                           refused one)
         /pair start|stop|restart id      supervise that session
         /pair remove id                  forget the account
         /pair use id                     name a platform's default
@@ -2526,7 +2534,7 @@ class RuntimeProvisionMixin:
         the owner's explicit act, and the pool is his accounts.
         """
         from ...social.pairing import PairingStoreError, \
-            PairingUnavailable
+            PairingUnavailable, label_state_line
 
         try:
             sup = self._pairing_supervisor()
@@ -2578,6 +2586,12 @@ class RuntimeProvisionMixin:
                                   "left)")
                 if row.get("last_error"):
                     extra += f" · ⚠️ {row['last_error']}"
+                if rec is not None:
+                    # D5: the label's fate rides the account line —
+                    # set / pending / refused with the reason.
+                    state_line = label_state_line(rec)
+                    if state_line:
+                        extra += f" · {state_line}"
                 account_lines.append(
                     f"{row['id']}{label} — {row['status']}"
                     f" (bridge {row['process']}){extra}")
@@ -2718,6 +2732,14 @@ class RuntimeProvisionMixin:
                         "number in international format, e.g. "
                         "2348012345678")
             label = " ".join(parts[2:])
+            # D5: the label this re-pair must NOT overwrite — a
+            # plain re-pair keeps the old name, and the reply says
+            # so (plus how to rename on purpose).
+            digits = "".join(c for c in parts[1] if c.isdigit())
+            prior = next((r for r in sup.registry.all()
+                          if r.platform == "whatsapp"
+                          and r.identity == digits), None)
+            old_label = (prior.label if prior else "") or ""
             try:
                 rec = sup.pair_whatsapp(parts[1], label)
             except (PairingUnavailable, ValueError) as exc:
@@ -2726,6 +2748,20 @@ class RuntimeProvisionMixin:
                 # reply, never the runtime's "blew up" traceback
                 # digest.
                 return f"⚠️ {exc}"
+            if label.strip() and old_label \
+                    and rec.label == old_label \
+                    and old_label != label.strip():
+                label_note = (
+                    f"\n🏷️ kept the existing label “{old_label}” — "
+                    "a re-pair never overwrites it. Rename it with "
+                    f"/pair rename {rec.id} <label>.")
+            elif rec.label:
+                label_note = (
+                    f"\n🏷️ label “{rec.label}” — set as part of "
+                    "this link; it applies in WhatsApp once the "
+                    "account links.")
+            else:
+                label_note = ""
             # A fresh pair is an owner start: any earlier stop
             # order for the platform is revoked.
             self._set_platform_owner_stopped("whatsapp", False)
@@ -2741,12 +2777,14 @@ class RuntimeProvisionMixin:
                 if got:
                     code, _age = got
                     reply = (
-                        f"📟 pairing code for +{rec.identity}: "
-                        f"**{code}**\nOn that phone: WhatsApp → "
+                        f"📟 pairing code for +{rec.identity}"
+                        + (f" (“{rec.label}”)" if rec.label else "")
+                        + f": **{code}**\nOn that phone: WhatsApp → "
                         "Linked Devices → Link a device → “Link with "
                         "phone number instead” → enter the code. It "
                         "expires in a few minutes — once linked, the "
                         "account is a live Devon session.")
+                    reply += label_note
                     if surface_note:
                         reply += f"\n⚠️ {surface_note}"
                     return reply
@@ -2760,6 +2798,7 @@ class RuntimeProvisionMixin:
             reply = (f"bridge started for +{rec.identity} "
                      f"({rec.id}) — WhatsApp hasn't issued the code "
                      f"yet. /pair code {rec.id} in a few seconds.")
+            reply += label_note
             if surface_note:
                 reply += f"\n⚠️ {surface_note}"
             return reply
@@ -2794,6 +2833,60 @@ class RuntimeProvisionMixin:
                         f"whatsapp {rec.identity} for a fresh one)")
             return (f"📟 {rec.id}: **{code}** "
                     f"({int(age)}s old — type it into Linked Devices)")
+        if sub == "rename":
+            # D5: the EXPLICIT rename — the only path that ever
+            # overwrites an existing label.  A linked WhatsApp
+            # account applies the new name at once and the reply
+            # carries the WhatsApp verdict honestly; an unlinked
+            # one keeps it pending until the link lands.
+            rec = self._pair_find(sup, parts[1] if len(parts) > 1
+                                  else "")
+            if rec is None:
+                return "which account? /pair lists them."
+            new_label = " ".join(parts[2:]).strip()
+            if not new_label:
+                return (f"usage: /pair rename {rec.id} <label> — "
+                        "the new name for this account")
+            try:
+                rec = sup.registry.set_label(rec.id, new_label)
+            except ValueError as exc:
+                return f"⚠️ {exc}"
+            if rec.platform == "whatsapp" and rec.status == "linked":
+                verdict = sup.apply_account_label(rec)
+                if verdict.get("ok"):
+                    return (f"🏷️ {rec.id} is now “{rec.label}” — "
+                            "set in WhatsApp.")
+                return (f"🏷️ {rec.id} is now “{rec.label}” in "
+                        "Devon — but WhatsApp refused the label: "
+                        f"{verdict.get('error')}. The name stands "
+                        "here; retry with /pair label "
+                        f"{rec.id} once WhatsApp allows it.")
+            if rec.platform == "whatsapp":
+                return (f"🏷️ {rec.id} is now “{rec.label}” — it "
+                        "applies in WhatsApp when the account links.")
+            return f"🏷️ {rec.id} is now “{rec.label}”."
+        if sub == "label":
+            # D5: apply (or retry) the account's stored label to
+            # WhatsApp now — the recovery for a refused label.
+            rec = self._pair_find(sup, parts[1] if len(parts) > 1
+                                  else "")
+            if rec is None:
+                return "which account? /pair lists them."
+            if rec.platform != "whatsapp":
+                line = label_state_line(rec)
+                return (f"🏷️ {rec.id} — "
+                        f"{line or 'no label named'}. Telegram "
+                        "accounts carry no WhatsApp label; the name "
+                        "is Devon's own.")
+            if not (rec.label or "").strip():
+                return (f"🏷️ {rec.id} has no label — name it with "
+                        f"/pair rename {rec.id} <label> first.")
+            verdict = sup.apply_account_label(rec)
+            if verdict.get("ok"):
+                return (f"🏷️ {rec.id} — label “{rec.label}” set "
+                        "in WhatsApp.")
+            return (f"⚠️ {rec.id} — label “{rec.label}” could not "
+                    f"be set in WhatsApp: {verdict.get('error')}")
         if sub == "telegram":
             if len(parts) < 2:
                 return ("usage: /pair telegram number [label] — the "
@@ -2809,10 +2902,13 @@ class RuntimeProvisionMixin:
             # A fresh pair is an owner start: any earlier stop
             # order for the platform is revoked.
             self._set_platform_owner_stopped("telegram", False)
+            label_note = (f" Label “{rec.label}”." if rec.label
+                          else "")
             return (f"📟 login code sent to the Telegram account "
-                    f"+{rec.identity} ({rec.id}). When the code "
-                    f"arrives (Telegram service message or SMS), "
-                    f"send it back like this:\n/pair tgcode {rec.id} the-code-from-telegram\n"
+                    f"+{rec.identity} ({rec.id}).{label_note} When "
+                    f"the code arrives (Telegram service message or "
+                    f"SMS), send it back like this:\n/pair tgcode "
+                    f"{rec.id} the-code-from-telegram\n"
                     "The flow lives ten minutes; the code itself is "
                     "never stored anywhere.")
         if sub in ("tgcode", "tgpass"):
