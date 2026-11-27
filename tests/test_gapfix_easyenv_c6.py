@@ -572,4 +572,4 @@ class TestToolCount:
 
         count = len(ToolRegistry(SimpleNamespace()).register_builtins()
                     ._tools)
-        assert count == 810
+        assert count == 811

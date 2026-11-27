@@ -321,7 +321,7 @@ class Batch2ToolSurfaceTests(unittest.TestCase):
         context = SimpleNamespace(settings=Settings())
         registry = ToolRegistry(context=context)
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 810)  # trendclip adds 5 tools
+        self.assertEqual(len(registry._tools), 811)  # trendclip adds 5 tools
         for name in ("mcp_call", "mcp_list_tools", "mcp_status"):
             self.assertIsNotNone(registry.get(name), name)
 

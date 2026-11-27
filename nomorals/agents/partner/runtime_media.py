@@ -8869,6 +8869,208 @@ class RuntimeMediaMixin:
             return (f"{render_line}\n"
                     f"(couldn't queue the draft: {exc})")
 
+    @staticmethod
+    def _animato_opts(toks: list[str]) -> dict[str, Any]:
+        """Parse /animato tail tokens into {name|idea, --options}.
+
+        Value options: --project/--niche/--style/--voice/--music/
+        --channel/--schedule/--publish. Flag: --private. The first
+        positional is the project name (``new``); for ``spark`` all
+        positionals joined are the idea.
+        """
+        opts: dict[str, Any] = {}
+        rest: list[str] = []
+        value_opts = {"project", "niche", "style", "voice", "music",
+                      "channel", "schedule", "publish"}
+        i = 0
+        while i < len(toks):
+            tok = toks[i]
+            if tok == "--private":
+                opts["private"] = True
+            elif (tok.startswith("--") and tok[2:] in value_opts
+                    and i + 1 < len(toks)):
+                opts[tok[2:]] = toks[i + 1]
+                i += 1
+            else:
+                rest.append(tok)
+            i += 1
+        if rest:
+            opts["name"] = rest[0]
+            opts["idea"] = " ".join(rest).strip("\"'").strip()
+        return opts
+
+    def _control_animato(self, tail: str) -> str:
+        """Animato Studio in chat: spark → build → share.
+
+        /animato new <name> [--niche N] [--style S] [--voice V]
+            [--music M] [--channel C] [--schedule S]
+        /animato list                          — studio projects
+        /animato show <project>                — project detail
+        /animato spark "<idea>" [--project NAME] [--publish youtube]
+            [--private]                        — run one episode end to end
+        /animato queue <project> "<topic>"     — queue an episode idea
+        /animato post <project> <episode> [--private]
+        /animato export <project> <episode>    — hand back the file
+        /animato status [--project NAME]       — episode status
+        """
+        import shlex
+
+        ref = (tail or "").strip()
+        if not ref:
+            return ("🎬 /animato — Animato Studio: spark an idea into a "
+                    "finished video.\n"
+                    "/animato new <name> — start a series project\n"
+                    "/animato spark \"<idea>\" [--project NAME] "
+                    "[--publish youtube] — run one episode\n"
+                    "/animato list · /animato show <project> · "
+                    "/animato status\n"
+                    "/animato queue <project> \"<topic>\" · "
+                    "/animato post <project> <episode> · "
+                    "/animato export <project> <episode>")
+        try:
+            toks = shlex.split(ref)
+        except ValueError:
+            toks = ref.split()
+        if not toks:
+            return "usage: /animato new|list|show|spark|queue|post|export|status ..."
+        action = toks[0].lower()
+        rest = toks[1:]
+        from ...media.contentops.studio import StudioRunner
+
+        runner = StudioRunner()
+        if action == "list":
+            projects = runner.store.list()
+            if not projects:
+                return ("no studio projects yet — "
+                        "/animato new <name> to start one")
+            lines = ["🎬 studio projects:"]
+            for p in projects:
+                lines.append(f"• {p.slug} ({p.niche}) — "
+                             f"{len(p.episodes)} episodes, "
+                             f"{len(p.topic_queue)} queued")
+            return "\n".join(lines)
+        if action == "new":
+            if not rest:
+                return "usage: /animato new <name>"
+            opts = self._animato_opts(rest)
+            try:
+                project = runner.store.create(
+                    opts["name"], niche=opts.get("niche", "did_you_know"),
+                    style=opts.get("style", ""), voice=opts.get("voice", "edge"),
+                    music=opts.get("music", ""), channel=opts.get("channel", ""),
+                    schedule=opts.get("schedule", ""))
+            except ValueError as exc:
+                return f"animato: {exc}"
+            return (f"created studio project {project.slug} "
+                    f"({project.niche} — {project.name})")
+        if action == "show":
+            if not rest:
+                return "usage: /animato show <project>"
+            try:
+                project = runner.store.load(rest[0])
+            except FileNotFoundError as exc:
+                return f"animato: {exc}"
+            lines = [f"{project.slug} — {project.name}",
+                     f"niche: {project.niche}  style: "
+                     f"{project.style or '(default)'}  voice: {project.voice}",
+                     f"music: {project.music or '(none)'}  channel: "
+                     f"{project.channel or '(not set)'}  schedule: "
+                     f"{project.schedule or '(not set)'}"]
+            if project.topic_queue:
+                lines.append("queued topics:")
+                lines.extend(f"• {t}" for t in project.topic_queue)
+            if project.episodes:
+                lines.append("episodes:")
+                for e in project.episodes[-10:]:
+                    lines.append(f"• {e.id}  {e.status}  {e.topic[:50]}")
+            return "\n".join(lines)
+        if action == "queue":
+            if len(rest) < 2:
+                return "usage: /animato queue <project> \"<topic>\""
+            try:
+                project = runner.store.queue_topic(
+                    rest[0], " ".join(rest[1:]).strip("\"'").strip())
+            except FileNotFoundError as exc:
+                return f"animato: {exc}"
+            return (f"queued in {project.slug} "
+                    f"({len(project.topic_queue)} queued)")
+        if action == "spark":
+            opts = self._animato_opts(rest)
+            idea = opts.get("idea", "")
+            if not idea:
+                return ("usage: /animato spark \"<idea>\" "
+                        "[--project NAME] [--publish youtube]")
+            slug = opts.get("project", "")
+            try:
+                if slug:
+                    project = runner.store.load(slug)
+                else:
+                    from ...media.contentops.studio import slugify
+
+                    slug = slugify(idea)
+                    try:
+                        project = runner.store.load(slug)
+                    except FileNotFoundError:
+                        project = runner.store.create(
+                            idea, niche="did_you_know",
+                            style=opts.get("style", ""),
+                            voice=opts.get("voice", "edge"))
+            except FileNotFoundError as exc:
+                return f"animato: {exc}"
+            if opts.get("style"):
+                project.style = opts["style"]
+            if opts.get("voice"):
+                project.voice = opts["voice"]
+            result = runner.spark(project, idea,
+                                  publish=opts.get("publish", ""),
+                                  private=bool(opts.get("private")))
+            if not result.get("ok"):
+                return "animato: " + "; ".join(result.get("notes", [])
+                                               or ["spark failed"])
+            out = (f"🎬 episode {result['episode_id']} → "
+                   f"{result['video_path']}")
+            if result.get("published"):
+                out += f"\nposted: {result['published']}"
+            return out
+        if action == "post":
+            if len(rest) < 2:
+                return "usage: /animato post <project> <episode> [--private]"
+            try:
+                result = runner.publish_episode(
+                    rest[0], rest[1], private="--private" in rest)
+            except (FileNotFoundError, KeyError) as exc:
+                return f"animato: {exc}"
+            if not result.get("ok"):
+                return f"animato: {result.get('reason', 'publish failed')}"
+            return (f"posted episode {result['episode_id']} → "
+                    f"{result.get('video_id', '')}")
+        if action == "export":
+            if len(rest) < 2:
+                return "usage: /animato export <project> <episode>"
+            try:
+                result = runner.export_episode(rest[0], rest[1])
+            except (FileNotFoundError, KeyError) as exc:
+                return f"animato: {exc}"
+            if not result.get("ok"):
+                return f"animato: {result.get('reason', 'export failed')}"
+            return result["path"]
+        if action == "status":
+            opts = self._animato_opts(rest)
+            slug = opts.get("project", "")
+            try:
+                projects = ([runner.store.load(slug)] if slug
+                            else runner.store.list())
+            except FileNotFoundError as exc:
+                return f"animato: {exc}"
+            rows = [(p.slug, e) for p in projects for e in p.episodes]
+            if not rows:
+                return ("no episodes yet — "
+                        "/animato spark \"<idea>\" to make one")
+            return "\n".join(
+                f"{s}  {e.id}  {e.status}  {e.topic[:50]}"
+                for s, e in rows[-20:])
+        return "usage: /animato new|list|show|spark|queue|post|export|status ..."
+
     def _control_clip(self, tail: str) -> str:
         """TrendClip in chat: find what's hot, cut it into a vertical clip.
 

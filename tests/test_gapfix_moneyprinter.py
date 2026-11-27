@@ -435,7 +435,7 @@ def test_retime_without_run_artifacts(tmp_path):
 def test_make_short_tool_registered():
     registry = ToolRegistry()
     registry.register_builtins()
-    assert len(registry._tools) == 810
+    assert len(registry._tools) == 811
     assert "make_short" in registry._tools
     spec = registry._tools["make_short"]
     assert "Edge TTS" in spec.description

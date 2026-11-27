@@ -770,7 +770,7 @@ class ApiJobTests(unittest.TestCase):
     def test_tool_count_stays_810(self) -> None:
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 810)
+        self.assertEqual(len(registry._tools), 811)
 
 
 if __name__ == "__main__":

@@ -13140,6 +13140,8 @@ class PartnerRuntime(
                                          message=message)
         if kind == "shorts":
             return self._control_shorts(command.tail or arg)
+        if kind == "animato":
+            return self._control_animato(command.tail or arg)
         if kind == "clip":
             return self._control_clip(command.tail or arg)
         if kind == "trend":

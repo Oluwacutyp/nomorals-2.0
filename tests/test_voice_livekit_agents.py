@@ -710,7 +710,7 @@ class TestAgentToolWiring(unittest.TestCase):
 
         registry = ToolRegistry(_NS())
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 810)  # trendclip adds 5 tools
+        self.assertEqual(len(registry._tools), 811)  # trendclip adds 5 tools
         schemas = {s["name"]: s for s in registry.schemas()}
         self.assertIn("agent", str(schemas["voice_live_start"]))
         self.assertIn("face_watch", str(schemas["video_live_start"]))

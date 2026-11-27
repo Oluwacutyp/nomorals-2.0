@@ -141,6 +141,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "vision": ["v"],
     "imggen": ["ig"],
     "shorts": ["sh"],
+    "animato": ["an"],
     "video": ["vid"],
     "voice": ["vc"],
     "mocap": [],
@@ -4837,6 +4838,56 @@ def _parser() -> argparse.ArgumentParser:
     sh_hero.add_argument("--lora", action="append", default=None,
                          help="LoRA name or path, optionally NAME:WEIGHT; "
                               "repeatable")
+
+    animato = sub.add_parser("animato", aliases=CLI_ALIASES["animato"],
+        help="Animato Studio: spark → build → share a video series",
+        description=("nm animato new <name> [--niche N] [--style S] [--voice V] [--music M] [--channel C] [--schedule S]\n"
+                     "nm animato list [--json] | nm animato show <project> [--json]\n"
+                     "nm animato spark \"<idea>\" [--project NAME] [--publish youtube] [--private]\n"
+                     "nm animato queue <project> \"<topic>\"\n"
+                     "nm animato post <project> <episode> [--private]\n"
+                     "nm animato export <project> <episode>\n"
+                     "nm animato status [--project NAME]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    an_sub = animato.add_subparsers(dest="animato_action", required=True)
+    an_new = an_sub.add_parser("new", help="create a studio project")
+    an_new.add_argument("name", help="project name")
+    an_new.add_argument("--niche", default="did_you_know",
+                        help="shorts-factory niche (default: did_you_know)")
+    an_new.add_argument("--style", default="")
+    an_new.add_argument("--voice", default="edge")
+    an_new.add_argument("--music", default="")
+    an_new.add_argument("--channel", default="")
+    an_new.add_argument("--schedule", default="")
+    an_list = an_sub.add_parser("list", help="list studio projects")
+    an_list.add_argument("--json", action="store_true")
+    an_show = an_sub.add_parser("show", help="show one project")
+    an_show.add_argument("name", help="project slug")
+    an_show.add_argument("--json", action="store_true")
+    an_spark = an_sub.add_parser("spark", help="run one episode end to end")
+    an_spark.add_argument("idea", help="the spark: an idea, in plain words")
+    an_spark.add_argument("--project", default="",
+                          help="project slug (default: ad-hoc project from the idea)")
+    an_spark.add_argument("--publish", default="",
+                          help="youtube = post straight to the channel (default: export only)")
+    an_spark.add_argument("--private", action="store_true",
+                          help="publish as private instead of public")
+    an_spark.add_argument("--style", default="")
+    an_spark.add_argument("--voice", default="")
+    an_q = an_sub.add_parser("queue", help="queue an episode topic")
+    an_q.add_argument("name", help="project slug")
+    an_q.add_argument("topic", help="episode idea to queue")
+    an_post = an_sub.add_parser("post", help="publish a rendered episode to YouTube")
+    an_post.add_argument("name", help="project slug")
+    an_post.add_argument("episode", help="episode id (or prefix)")
+    an_post.add_argument("--private", action="store_true")
+    an_exp = an_sub.add_parser("export", help="hand back a rendered episode's file")
+    an_exp.add_argument("name", help="project slug")
+    an_exp.add_argument("episode", help="episode id (or prefix)")
+    an_st = an_sub.add_parser("status", help="episode status")
+    an_st.add_argument("--project", default="")
+    an_st.add_argument("--json", action="store_true")
 
     video = sub.add_parser("video", aliases=CLI_ALIASES["video"],
         help="Devon Studio: neural + motion-graphics video generation",

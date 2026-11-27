@@ -36,6 +36,29 @@ try:  # pipeline.py lands with the sibling stream; stay importable until then
 except ImportError:  # noqa: BLE001
     __all__: list[str] = []
 
+# studio.py: the Animato Studio organ over the pipeline — one persistent
+# project per series + the spark → build → share runner.
+try:
+    from .studio import (  # type: ignore[no-redef]
+        CastMember,
+        Episode,
+        StudioProject,
+        StudioRunner,
+        StudioStore,
+        slugify,
+    )
+
+    __all__ += [
+        "CastMember",
+        "Episode",
+        "StudioProject",
+        "StudioRunner",
+        "StudioStore",
+        "slugify",
+    ]
+except ImportError:  # noqa: BLE001
+    pass
+
 # niches/ plugin registry (sibling stream) — re-exported for convenience.
 from .niches import (  # noqa: E402
     NicheError,

@@ -962,6 +962,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "unirig": (0, None),     # /unirig <mesh path-or-url> [out] [--seed N] — mesh -> rigged character via UniRig (GPU-gated, owner-only)
     "blender": (0, None),    # /blender status|scene|look|code <bpy>|import <glb|fbx> — steer the operator's live Blender (owner-only)
     "shorts": (0, None),     # /shorts make|status|resume|niches|calendar|ledger|estimate
+    "animato": (0, None),    # /animato new|list|show|spark|queue|post|export|status
     "clip": (0, None),      # /clip <url>|render|status|queue — trendclip: find what's hot, cut a vertical clip
     "trend": (1, None),     # /trend <query> — trending videos for a topic, ranked by views-per-hour
     "trendops": (0, None),   # /trendops formats|apply|capture|propose|remove
@@ -4671,6 +4672,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/shorts make <niche> \"<topic>\" [--now] | /shorts niches | /shorts status | /shorts calendar | /shorts ledger",
               "example": "/shorts make motivation \"discipline beats motivation\" --now",
               "related": "/imggen /say"},
+    "animato": {"what": "Animato Studio: one persistent project per video series — spark an idea in, get a finished video out, posted to YouTube or handed back as the file.",
+              "usage": "/animato new <name> | /animato spark \"<idea>\" [--project NAME] [--publish youtube] | /animato list | /animato show <project> | /animato queue <project> \"<topic>\" | /animato post <project> <episode> | /animato export <project> <episode> | /animato status",
+              "example": "/animato spark \"why the moon looks bigger on the horizon\" --publish youtube",
+              "related": "/shorts /video /director"},
     "clip": {"what": "TrendClip: take a trending video, transcribe it locally, score its moments (deterministic formula + the brain) and cut a vertical 1080x1920 clip with word captions — manual publish only.",
               "usage": "/clip <url> [--strategy gaming|conversation|educational|comedy|craft] [--no-brain] | /clip render <job> <pick> [--layout balanced|punch|clean] | /clip status [job] | /clip queue <job> [platforms]",
               "example": "/clip https://www.youtube.com/watch?v=... --strategy gaming",
@@ -5175,7 +5180,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("decoding & crypto", ["decode", "cookies", "cookielab", "structure", "cipher",
                            "monitor", "investigate", "breach"]),
     ("media system", ["music", "distribute", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "dj", "mix", "produce", "like", "dislike", "cookies",
-                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "clip", "trend", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "g2p", "vtuber", "sham", "songrecon", "musicnote", "smarthome", "camwall", "robot",
+                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "animato", "clip", "trend", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "g2p", "vtuber", "sham", "songrecon", "musicnote", "smarthome", "camwall", "robot",
                       "steal", "sticker", "convert", "gif", "emoji", "customemoji", "emojiart", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "models", "mcp", "control", "a2a", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion",
@@ -5443,7 +5448,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("media system — music · playback · video · podcast",
      ["music", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
       "distribute", "dj", "mix", "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "produce", "like", "dislike",
-      "shorts", "clip", "trend", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "g2p", "vtuber", "sham", "songrecon", "musicnote", "smarthome", "camwall", "robot",
+      "shorts", "animato", "clip", "trend", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "mocap", "cloudcam", "live", "project", "facemcap", "facemesh", "g2p", "vtuber", "sham", "songrecon", "musicnote", "smarthome", "camwall", "robot",
       "steal", "sticker", "convert", "gif", "emoji", "customemoji",
       "emojiart", "react", "create",
       "awoo", "baka", "bite", "blush", "bonk", "bored",
@@ -5947,6 +5952,7 @@ LIST_ONELINERS: dict[str, str] = {
     "api": "external API connectors (weather, fx, github, …)",
     "connectors": "manage the service connectors: list, status, connect",
     "shorts": "short-form content empire: make, queue, post vertical videos",
+    "animato": "Animato Studio: spark an idea into a finished video, posted or exported",
     "clip": "trendclip: cut a trending video into a vertical clip (local transcribe + scored moments)",
     "trend": "what's hot: trending videos for any topic, ranked by views-per-hour",
     "trendops": "trend-driven video editing: cut footage to a trending format",
