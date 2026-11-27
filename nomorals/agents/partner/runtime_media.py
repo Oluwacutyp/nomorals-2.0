@@ -8912,6 +8912,8 @@ class RuntimeMediaMixin:
         /animato post <project> <episode> [--private]
         /animato export <project> <episode>    — hand back the file
         /animato status [--project NAME]       — episode status
+        /animato autopost start|stop|status|run [--project NAME] [--force]
+            — the scheduled mission: due projects post themselves
         """
         import shlex
 
@@ -8926,7 +8928,9 @@ class RuntimeMediaMixin:
                     "/animato status\n"
                     "/animato queue <project> \"<topic>\" · "
                     "/animato post <project> <episode> · "
-                    "/animato export <project> <episode>")
+                    "/animato export <project> <episode>\n"
+                    "/animato autopost start|stop|status|run "
+                    "[--project NAME] [--force]")
         try:
             toks = shlex.split(ref)
         except ValueError:
@@ -9069,7 +9073,64 @@ class RuntimeMediaMixin:
             return "\n".join(
                 f"{s}  {e.id}  {e.status}  {e.topic[:50]}"
                 for s, e in rows[-20:])
-        return "usage: /animato new|list|show|spark|queue|post|export|status ..."
+        if action == "autopost":
+            from ...media.contentops.autopost import (
+                AutopostStore,
+                autopost_status,
+                run_autopost,
+            )
+
+            sub = (rest[0].lower() if rest else "status")
+            opts = self._animato_opts(rest[1:])
+            store = AutopostStore(runner.store.root)
+            if sub == "start":
+                store.set_enabled(True)
+                return ("animato autopost started — due projects post "
+                        "themselves every 30 minutes")
+            if sub == "stop":
+                store.set_enabled(False)
+                return ("animato autopost stopped — the schedule will "
+                        "not fire (manual run with --force still works)")
+            if sub == "status":
+                result = autopost_status(runner=runner, store=store)
+                lines = [f"autopost: {'on' if result['enabled'] else 'off'}"]
+                for row in result["projects"]:
+                    state = ("DUE" if row["due"] else
+                             f"last {row['last_status'] or 'never'} "
+                             f"{row['last_run_at'] or ''}").strip()
+                    lines.append(f"• {row['project']} ({row['schedule']}) — "
+                                 f"{row['queued_topics']} queued, {state}")
+                for run in result["recent"]:
+                    lines.append(f"• {run['at']} {run['project']} "
+                                 f"{run['status']} {run.get('topic', '')[:40]}"
+                                 + (f" — {run['reason']}"
+                                    if run.get('reason') else ""))
+                return "\n".join(lines)
+            if sub == "run":
+                result = run_autopost(
+                    runner=runner, store=store,
+                    project=opts.get("project", ""),
+                    force=bool(opts.get("force")))
+                if not result.get("ok"):
+                    return f"animato: {result.get('reason', 'autopost run failed')}"
+                if not result.get("enabled") and not opts.get("force"):
+                    return ("autopost is off — /animato autopost start "
+                            "to run the schedule")
+                lines = [f"autopost: ran {result['ran']} project(s), "
+                         f"{result['posted']} posted, "
+                         f"{result['failed']} failed, "
+                         f"{result['skipped']} skipped"]
+                for o in result["outcomes"]:
+                    lines.append(f"• {o['project']} {o['status']} "
+                                 f"{o.get('topic', '')[:40]}"
+                                 + (f" → {o['video_id']}"
+                                    if o.get('video_id') else "")
+                                 + (f" — {o['reason']}"
+                                    if o.get('reason') else ""))
+                return "\n".join(lines)
+            return ("usage: /animato autopost "
+                    "start|stop|status|run [--project NAME] [--force]")
+        return "usage: /animato new|list|show|spark|queue|post|export|status|autopost ..."
 
     def _control_clip(self, tail: str) -> str:
         """TrendClip in chat: find what's hot, cut it into a vertical clip.

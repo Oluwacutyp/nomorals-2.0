@@ -10,9 +10,12 @@
     nm animato post <project> <episode> [--private]
     nm animato export <project> <episode>
     nm animato status [project]
+    nm animato autopost start|stop|status|run [--project NAME] [--force]
 
 A spark runs one episode end to end through the shorts factory and
 either posts it straight to YouTube or hands back the finished file.
+The autopost mission runs the same loop on each project's schedule
+and posts itself — start it once, it runs every 30 minutes.
 Nothing here raises a traceback — failures print cleanly.
 """
 
@@ -218,6 +221,74 @@ def _cmd_status(args: argparse.Namespace, context) -> int:
         return _err(str(exc))
 
 
+def _cmd_autopost(args: argparse.Namespace, context) -> int:
+    from ...media.contentops.autopost import (
+        AutopostStore,
+        autopost_status,
+        run_autopost,
+    )
+
+    try:
+        runner = _runner()
+        store = AutopostStore(runner.store.root)
+        action = (args.autopost_action or "").strip().lower()
+        if action == "start":
+            store.set_enabled(True)
+            return _ok("animato autopost started — due projects post "
+                       "themselves every 30 minutes")
+        if action == "stop":
+            store.set_enabled(False)
+            return _ok("animato autopost stopped — the schedule will "
+                       "not fire (manual `autopost run --force` still works)")
+        if action == "status":
+            result = autopost_status(runner=runner, store=store)
+            if args.json:
+                print(json.dumps(result, indent=2, default=str))
+                return 0
+            print(f"autopost: {'on' if result['enabled'] else 'off'}")
+            for row in result["projects"]:
+                state = ("DUE" if row["due"] else
+                         f"last {row['last_status'] or 'never'} "
+                         f"{row['last_run_at'] or ''}").strip()
+                print(f"  {row['project']:24} {row['schedule']:28} "
+                      f"{row['queued_topics']} queued  {state}")
+            for run in result["recent"]:
+                print(f"  {run['at']}  {run['project']:24} "
+                      f"{run['status']:8} {run.get('topic', '')[:40]}"
+                      f"{' — ' + run['reason'] if run.get('reason') else ''}")
+            return 0
+        if action == "run":
+            result = run_autopost(
+                runner=runner, store=store,
+                project=(getattr(args, "project", "") or "").strip(),
+                force=bool(args.force))
+            if args.json:
+                print(json.dumps(result, indent=2, default=str))
+                return 0 if result.get("ok") else 1
+            if not result.get("ok"):
+                return _err(result.get("reason", "autopost run failed"))
+            if not result.get("enabled") and not args.force:
+                return _ok("autopost is off — `animato autopost start` "
+                           "to run the schedule")
+            print(f"autopost: ran {result['ran']} project(s), "
+                  f"{result['posted']} posted, {result['failed']} failed, "
+                  f"{result['skipped']} skipped")
+            for o in result["outcomes"]:
+                line = (f"  {o['project']:24} {o['status']:8} "
+                        f"{o.get('topic', '')[:40]}")
+                if o.get("video_id"):
+                    line += f"  → {o['video_id']}"
+                if o.get("reason"):
+                    line += f"  — {o['reason']}"
+                print(line)
+            return 0
+        return _err(f"unknown autopost action {action!r}")
+    except FileNotFoundError as exc:
+        return _err(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return _err(str(exc))
+
+
 HANDLERS = {
     "new": _cmd_new,
     "list": _cmd_list,
@@ -227,6 +298,7 @@ HANDLERS = {
     "post": _cmd_post,
     "export": _cmd_export,
     "status": _cmd_status,
+    "autopost": _cmd_autopost,
 }
 
 

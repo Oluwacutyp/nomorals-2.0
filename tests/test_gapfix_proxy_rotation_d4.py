@@ -423,7 +423,7 @@ class TestToolAndCliSurface(_RotationCase):
         # after this lane's base (parent re-bump, 2026-11-24).)
         reg = ToolRegistry(context=_ctx(self.tmp))
         reg.register_builtins()
-        self.assertEqual(len(reg._tools), 811)  # trendclip adds 5 tools
+        self.assertEqual(len(reg._tools), 812)  # trendclip adds 5 tools
 
     def _run_cli(self, ctx, **fields):
         base = {"proxy_action": "", "proxy_sources_action": "",

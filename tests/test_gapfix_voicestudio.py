@@ -488,7 +488,7 @@ def _tool_fn():
 
 def test_tool_registered_810():
     spec, registry = _tool_fn()
-    assert len(registry._tools) == 811
+    assert len(registry._tools) == 812
     assert "base_url" not in spec.parameters
     assert "url" not in spec.parameters
 

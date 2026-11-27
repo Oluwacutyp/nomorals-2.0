@@ -645,4 +645,4 @@ class TestToolCount:
         # lane's base pinned 785; rebumped at N3 ship time).
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        assert len(registry._tools) == 811  # D5 (walabel) adds whatsapp_account_label
+        assert len(registry._tools) == 812  # D5 (walabel) adds whatsapp_account_label

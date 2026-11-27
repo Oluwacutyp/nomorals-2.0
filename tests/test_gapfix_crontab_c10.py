@@ -310,4 +310,4 @@ def test_tool_count_still_810():
 
     registry = ToolRegistry(SimpleNamespace())
     registry.register_builtins()
-    assert len(registry._tools) == 811
+    assert len(registry._tools) == 812

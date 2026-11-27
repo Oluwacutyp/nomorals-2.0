@@ -4847,7 +4847,8 @@ def _parser() -> argparse.ArgumentParser:
                      "nm animato queue <project> \"<topic>\"\n"
                      "nm animato post <project> <episode> [--private]\n"
                      "nm animato export <project> <episode>\n"
-                     "nm animato status [--project NAME]"),
+                     "nm animato status [--project NAME]\n"
+                     "nm animato autopost start|stop|status|run [--project NAME] [--force] [--json]"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     an_sub = animato.add_subparsers(dest="animato_action", required=True)
@@ -4888,6 +4889,15 @@ def _parser() -> argparse.ArgumentParser:
     an_st = an_sub.add_parser("status", help="episode status")
     an_st.add_argument("--project", default="")
     an_st.add_argument("--json", action="store_true")
+    an_ap = an_sub.add_parser("autopost", help="scheduled auto-post mission")
+    an_ap.add_argument("autopost_action",
+                       choices=["start", "stop", "status", "run"],
+                       help="start/stop the schedule, show state, run due now")
+    an_ap.add_argument("--project", default="",
+                       help="narrow a run to one project slug")
+    an_ap.add_argument("--force", action="store_true",
+                       help="run even while stopped / slot not open")
+    an_ap.add_argument("--json", action="store_true")
 
     video = sub.add_parser("video", aliases=CLI_ALIASES["video"],
         help="Devon Studio: neural + motion-graphics video generation",

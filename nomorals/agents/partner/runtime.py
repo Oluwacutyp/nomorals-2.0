@@ -4167,6 +4167,18 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("shorts publisher job not registered:"
                                  " %s", exc)
+                # Animato auto-post (port step 2): the studio's
+                # projects run their own schedules and post
+                # themselves — every 30 minutes the sweep renders
+                # and posts due episodes through YouTube. Routine:
+                # outcomes live in the mission journal and
+                # `animato autopost status`, not job alerts.
+                try:
+                    from ...media.contentops.autopost import ensure_animato_autopost_job
+                    ensure_animato_autopost_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("animato autopost job not registered:"
+                                 " %s", exc)
                 # Price sources: the quote-provider health loop
                 # (every 6h — one bounded real quote probe per
                 # keyless provider; keyed providers never probed;

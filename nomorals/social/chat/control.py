@@ -962,7 +962,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "unirig": (0, None),     # /unirig <mesh path-or-url> [out] [--seed N] — mesh -> rigged character via UniRig (GPU-gated, owner-only)
     "blender": (0, None),    # /blender status|scene|look|code <bpy>|import <glb|fbx> — steer the operator's live Blender (owner-only)
     "shorts": (0, None),     # /shorts make|status|resume|niches|calendar|ledger|estimate
-    "animato": (0, None),    # /animato new|list|show|spark|queue|post|export|status
+    "animato": (0, None),    # /animato new|list|show|spark|queue|post|export|status|autopost
     "clip": (0, None),      # /clip <url>|render|status|queue — trendclip: find what's hot, cut a vertical clip
     "trend": (1, None),     # /trend <query> — trending videos for a topic, ranked by views-per-hour
     "trendops": (0, None),   # /trendops formats|apply|capture|propose|remove
@@ -4673,7 +4673,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "example": "/shorts make motivation \"discipline beats motivation\" --now",
               "related": "/imggen /say"},
     "animato": {"what": "Animato Studio: one persistent project per video series — spark an idea in, get a finished video out, posted to YouTube or handed back as the file.",
-              "usage": "/animato new <name> | /animato spark \"<idea>\" [--project NAME] [--publish youtube] | /animato list | /animato show <project> | /animato queue <project> \"<topic>\" | /animato post <project> <episode> | /animato export <project> <episode> | /animato status",
+              "usage": "/animato new <name> | /animato spark \"<idea>\" [--project NAME] [--publish youtube] | /animato list | /animato show <project> | /animato queue <project> \"<topic>\" | /animato post <project> <episode> | /animato export <project> <episode> | /animato status | /animato autopost start|stop|status|run [--project NAME] [--force]",
               "example": "/animato spark \"why the moon looks bigger on the horizon\" --publish youtube",
               "related": "/shorts /video /director"},
     "clip": {"what": "TrendClip: take a trending video, transcribe it locally, score its moments (deterministic formula + the brain) and cut a vertical 1080x1920 clip with word captions — manual publish only.",

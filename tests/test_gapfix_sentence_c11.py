@@ -477,10 +477,10 @@ class WiringTests(unittest.TestCase):
     def test_tool_count_still_810(self):
         # No new brain tool in this lane: the sentence surface is
         # `nm sentence` + `/sentence` over the shared engine.
-        # 785 after C.8 added the robot tool; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class. 804 after gapfix129 added group_cleanup. 805 after gapfix130 added group_heist. 806 after gapfix119 added matching. 807 after this lane (agents192) added fleet. 808 after this lane (F3) added control. 809 after this lane (moneyprinter) added make_short. 810 after this lane (VoiceStudio) added voicestudio; 811 after this lane (Animato) added animato_spark.
+        # 785 after C.8 added the robot tool; 786 after this lane (audit N4) added build_swarm; 787 after gapfix74 added museum_library; 788 after this lane (goal-class) added goal_class. 804 after gapfix129 added group_cleanup. 805 after gapfix130 added group_heist. 806 after gapfix119 added matching. 807 after this lane (agents192) added fleet. 808 after this lane (F3) added control. 809 after this lane (moneyprinter) added make_short. 810 after this lane (VoiceStudio) added voicestudio; 811 after this lane (Animato) added animato_spark; 812 after this lane (Animato autopost) added animato_autopost.
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 811)
+        self.assertEqual(len(registry._tools), 812)
 
     def test_cli_split(self):
         from nomorals.cmdline.dispatch import main

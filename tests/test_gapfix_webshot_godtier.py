@@ -985,7 +985,7 @@ def test_webrec_handler_long_clamp_names_300s(
 def test_tool_count_still_810_no_new_tool():
     registry = ToolRegistry(SimpleNamespace())
     registry.register_builtins()
-    assert len(registry._tools) == 811
+    assert len(registry._tools) == 812
     assert "robot" in registry._tools
 
 
