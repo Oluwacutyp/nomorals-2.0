@@ -3204,8 +3204,19 @@ class RuntimeGroupMixin:
              "none of them."),
             "/glog — the group audit log (I keep it; I only show "
             "it when an admin asks)",
+            "/setlog <channel id> — designate the log channel: "
+            "nothing is ever posted there; an admin asks in that "
+            "channel with /glog to pull the log. /unsetlog "
+            "removes it; /log and /nolog choose which categories "
+            "the pull shows.",
             "/strikes — the defense strike ledger: who is on "
             "the ladder, and how close the rungs are",
+            "/lock <type> [action] — lock a content type "
+            "(stickers, links, games, polls, photos, voice, "
+            "forwards and the rest): the hit deletes, warns, "
+            "mutes, kicks or bans, and strikes the shared "
+            "ladder. /unlock <type> opens it again; /locks "
+            "lists the state.",
             "/joinq — the join queue: requests the acceptance "
             "rules held for a human, decided here or on the "
             "notice's buttons; the door rules themselves live "
@@ -3916,16 +3927,28 @@ class RuntimeGroupMixin:
         return False
 
     def _control_glog(self, arg, message) -> str:  # type: ignore[no-untyped-def]
+        from ...social.chat.base import ChatKind
+
         key = self._group_key_or_none(message)
+        if key is None and message is not None \
+                and message.chat.kind == ChatKind.CHANNEL:
+            # A log channel is a CHANNEL chat, not a group —
+            # _group_key_or_none only knows groups.  The pull
+            # view lives in _glog_pull, not in a second command.
+            key = message.chat.key
         if key is None:
             return "that's a group command — run it inside the group."
         if not self._group_admin_ok(message):
             return "the group log is for admins."
+        surface = self._group_surface()
+        if message is not None \
+                and message.chat.kind == ChatKind.CHANNEL:
+            return self._glog_pull(arg, message, key, surface)
         try:
             n = int(str(arg or "10").strip() or 10)
         except ValueError:
             n = 10
-        entries = self._group_surface().audit(
+        entries = surface.audit(
             key, limit=max(1, min(n, 50)))
         if not entries:
             return "nothing in the group log yet."
@@ -3936,6 +3959,368 @@ class RuntimeGroupMixin:
                              for entry in entries))
         card.note("held by me, shown on demand")
         return self._card(message, card)
+
+    def _glog_pull(self, arg, message, channel_key, surface
+                   ) -> str:  # type: ignore[no-untyped-def]
+        """The pull-only read: /glog asked inside a designated
+        log channel shows the designating group's held log,
+        filtered by the group's enabled categories.  Nothing is
+        ever posted to the channel — this ask is the only way
+        the log leaves the hold."""
+        from ...social.chat.group_surface import (
+            LOG_CHANNEL_CATEGORIES,
+            log_category_of,
+        )
+        from ...social.chat.typography import Card
+
+        groups = surface.groups_designating_log_channel(channel_key)
+        if not groups:
+            return ("this channel isn't any group's log channel — "
+                    "designate it from the group first: "
+                    "/setlog <channel id>.")
+        if len(groups) > 1:
+            return ("several groups log here — ask in the group "
+                    "itself to read one: " + ", ".join(groups)
+                    + ".")
+        gkey = groups[0]
+        try:
+            n = int(str(arg or "10").strip() or 10)
+        except ValueError:
+            n = 10
+        n = max(1, min(n, 50))
+        block = (surface.store.settings(gkey).get("log_channel")
+                 or {})
+        cats = block.get("categories") or {}
+        enabled = [c for c in LOG_CHANNEL_CATEGORIES
+                   if cats.get(c, True)]
+        entries = surface.audit(gkey, limit=200)
+        shown = [e for e in entries
+                 if log_category_of(str(e.get("kind") or ""))
+                 in (None, *enabled)]
+        shown = shown[-n:]
+        if not shown:
+            return ("nothing in the log for the categories this "
+                    "group shows (" + ", ".join(enabled) + ") — "
+                    "the log itself still holds everything; turn "
+                    "a category back on with /log <category> in "
+                    "the group.")
+        card = Card("settings", title="Group log", icon="📋")
+        card.board("\n".join(_audit_line(entry)
+                             for entry in shown))
+        card.note(f"pulled from {gkey} — showing "
+                  f"{', '.join(enabled)}; unfiled kinds always "
+                  "show. Held by me, shown on demand — nothing "
+                  "is ever posted here.")
+        return self._card(message, card)
+
+    def _log_channel_update(self, surface, key, **fields):  # type: ignore[no-untyped-def]
+        """Mutate the log-channel block through the store's own
+        settings machinery (defaults-merged, persisted)."""
+        import copy as _copy
+
+        current = surface.store.settings(key)
+        block = _copy.deepcopy(current.get("log_channel") or {})
+        block.update(fields)
+        surface.update_settings(key, log_channel=block)
+        return block
+
+    def _normalize_log_channel(self, group_key, raw):  # type: ignore[no-untyped-def]
+        """A log-channel designation into a full chat key, or
+        None when it doesn't parse.  platform:id is kept (wa
+        normalizes to whatsapp); a bare -100… id or bare digits
+        ride the group's own platform; anything else (a @name,
+        a word) has no key to resolve to."""
+        raw = str(raw or "").strip()
+        if not raw:
+            return None
+        if ":" in raw:
+            head, tail = raw.split(":", 1)
+            head = head.strip().lower()
+            if head in ("telegram-bot", "telegram",
+                        "telegram-personal", "whatsapp", "wa",
+                        "discord") and tail.strip():
+                if head == "wa":
+                    head = "whatsapp"
+                return f"{head}:{tail.strip()}"
+            return None
+        if raw.lstrip("-").isdigit():
+            platform = str(group_key or "").partition(":")[0]
+            return f"{platform}:{raw}"
+        return None
+
+    def _control_setlog(self, arg, message) -> str:  # type: ignore[no-untyped-def]
+        """Designate this group's log channel (Rose §4,
+        pull-only): /setlog <channel id> — nothing is ever
+        posted to it; an admin asks in that channel with /glog
+        to pull the log.  Bare /setlog reports the current
+        designation.  Every change is audited."""
+        key, err = self._mod_gate(message)
+        if key is None:
+            return err
+        surface = self._group_surface()
+        raw = str(arg or "").strip()
+        current = (surface.store.settings(key).get("log_channel")
+                   or {})
+        old = str(current.get("channel") or "")
+        if not raw:
+            if old:
+                return (f"log channel: {old} — nothing is ever "
+                        "posted there; an admin asks in that "
+                        "channel with /glog to pull the log. "
+                        "/unsetlog removes it; /log and /nolog "
+                        "choose which categories the pull shows.")
+            return ("no log channel set — /setlog <channel id> "
+                    "designates one (the channel's id, or "
+                    "platform:id). Nothing is ever posted to it; "
+                    "an admin asks in that channel with /glog to "
+                    "pull the log.")
+        channel = self._normalize_log_channel(key, raw)
+        if channel is None:
+            return ("I need the channel's id — a bare number like "
+                    "-1001234567890, or platform:id like "
+                    "telegram-bot:-1001234567890. A @name alone "
+                    "doesn't resolve to a channel I can match.")
+        if channel == key:
+            return ("that's this group, not a channel — the log "
+                    "channel is a separate channel the log is "
+                    "pulled from.")
+        actor = str(message.sender_id or message.sender or "")
+        self._log_channel_update(surface, key, channel=channel)
+        surface._audit(key, "log_channel_set", action="setlog",
+                       old=old, new=channel, by=actor)
+        surface.store.save()
+        return (f"log channel: {channel} — nothing is ever "
+                "posted there. An admin asks in that channel "
+                "with /glog to pull this group's log; /log and "
+                "/nolog choose which categories the pull shows.")
+
+    def _control_unsetlog(self, arg, message) -> str:  # type: ignore[no-untyped-def]
+        """Remove the log-channel designation.  The held log
+        stays held; /glog in the group still reads it."""
+        key, err = self._mod_gate(message)
+        if key is None:
+            return err
+        surface = self._group_surface()
+        old = str((surface.store.settings(key).get("log_channel")
+                   or {}).get("channel") or "")
+        if not old:
+            return "no log channel set — nothing to remove."
+        actor = str(message.sender_id or message.sender or "")
+        self._log_channel_update(surface, key, channel="")
+        surface._audit(key, "log_channel_unset",
+                       action="unsetlog", old=old, new="",
+                       by=actor)
+        surface.store.save()
+        return (f"log channel removed ({old}) — the log stays "
+                "held; /glog in the group still reads it.")
+
+    #: Short names for the log categories (/log and /nolog).
+    _LOG_CATEGORY_ALIASES = {
+        "mod": "moderation", "def": "defense",
+        "defence": "defense", "econ": "economy",
+        "rep": "reports", "set": "settings",
+        "setting": "settings",
+    }
+
+    def _control_log_category(self, arg, message, *, enable):  # type: ignore[no-untyped-def]
+        """Flip one pull-view category (/log shows it, /nolog
+        hides it).  A category is a presentation filter only —
+        the held log keeps everything either way.  Bare /log
+        reports the states."""
+        key, err = self._mod_gate(message)
+        if key is None:
+            return err
+        from ...social.chat.group_surface import (
+            LOG_CHANNEL_CATEGORIES,
+        )
+
+        surface = self._group_surface()
+        block = (surface.store.settings(key).get("log_channel")
+                 or {})
+        cats = dict(block.get("categories") or {})
+        verb = "log" if enable else "nolog"
+        raw = str(arg or "").strip().lower()
+        if not raw:
+            states = ", ".join(
+                f"{c}: {'on' if cats.get(c, True) else 'off'}"
+                for c in LOG_CHANNEL_CATEGORIES)
+            return (f"log categories — {states}. "
+                    f"/{verb} <category> flips one.")
+        cat = self._LOG_CATEGORY_ALIASES.get(raw, raw)
+        if cat not in LOG_CHANNEL_CATEGORIES:
+            return ("I don't log a category called "
+                    f"{arg!r} — the categories are: "
+                    + ", ".join(LOG_CHANNEL_CATEGORIES) + ".")
+        old = bool(cats.get(cat, True))
+        if old == enable:
+            return (f"{cat} is already "
+                    f"{'shown' if enable else 'hidden'} in the "
+                    "log-channel pull view.")
+        cats[cat] = enable
+        actor = str(message.sender_id or message.sender or "")
+        self._log_channel_update(surface, key, categories=cats)
+        surface._audit(key, "log_category", action=verb,
+                       rule=cat, old="on" if old else "off",
+                       new="on" if enable else "off", by=actor)
+        surface.store.save()
+        return (f"{cat} is now "
+                f"{'shown' if enable else 'hidden'} in the "
+                "log-channel pull view — the held log itself "
+                "still keeps everything.")
+
+    def _control_log(self, arg, message) -> str:  # type: ignore[no-untyped-def]
+        return self._control_log_category(arg, message,
+                                          enable=True)
+
+    def _control_nolog(self, arg, message) -> str:  # type: ignore[no-untyped-def]
+        return self._control_log_category(arg, message,
+                                          enable=False)
+
+    #: Short names for the lock kinds (/lock and /unlock).
+    _LOCK_ALIASES = {
+        "sticker": "stickers", "gif": "gifs",
+        "photo": "photos", "video": "videos",
+        "file": "documents", "forward": "forwards",
+        "channel": "channel_posts", "video_note": "video_notes",
+        "videonote": "video_notes", "link": "links",
+        "url": "links", "game": "games", "poll": "polls",
+        "email": "emails", "phone": "phones",
+        "anonchannel": "channel_posts",
+    }
+
+    def _control_lock(self, arg, message) -> str:  # type: ignore[no-untyped-def]
+        """Lock a content type (Rose locks): /lock <type>
+        [action] — the type joins the media-locks block, so the
+        hit rides stage 3c and the shared strike spine.  Without
+        an action the group's block action applies; with one,
+        that kind carries its own.  A silent action is accepted
+        and runs as its loud equivalent until Silent Actions
+        lands, and the reply says so."""
+        key, err = self._mod_gate(message)
+        if key is None:
+            return err
+        from ...social.chat.group_defense import (
+            LOCK_ALL_ACTIONS,
+            LOCK_SILENT_MAP,
+            MEDIA_LOCK_KINDS,
+            MEDIA_LOCK_LABELS,
+        )
+
+        surface = self._group_surface()
+        words = str(arg or "").split()
+        if not words:
+            return ("usage: /lock <type> [action] — the types "
+                    "are: "
+                    + ", ".join(MEDIA_LOCK_LABELS[k]
+                                for k in MEDIA_LOCK_KINDS)
+                    + ". The action is delete, warn, delete_warn, "
+                      "mute, kick or ban (sban/smute/skick/swarn "
+                      "run as their loud equivalent until Silent "
+                      "Actions lands); without one, the group's "
+                      "block action applies. /locks lists the "
+                      "state.")
+        kind = self._LOCK_ALIASES.get(words[0].lower(),
+                                      words[0].lower())
+        action = words[1].lower() if len(words) > 1 else ""
+        if len(words) > 2:
+            return ("usage: /lock <type> [action] — one type, "
+                    "one action.")
+        if kind != "all" and kind not in MEDIA_LOCK_KINDS:
+            return (f"I don't lock {words[0]!r} — the types are: "
+                    + ", ".join(MEDIA_LOCK_LABELS[k]
+                                for k in MEDIA_LOCK_KINDS) + ".")
+        if action and action not in LOCK_ALL_ACTIONS:
+            return (f"{action!r} isn't a lock action — delete, "
+                    "warn, delete_warn, mute, kick, ban, or the "
+                    "silent sban/smute/skick/swarn.")
+        block = (surface.store.settings(key).get("defense") or {}
+                 ).get("media_locks") or {}
+        block_action = str(block.get("action") or "delete_warn")
+        kinds = list(MEDIA_LOCK_KINDS) \
+            if kind == "all" else [kind]
+        overrides = dict(block.get("actions") or {})
+        for k in kinds:
+            if action and action != block_action:
+                overrides[k] = action
+            elif action:
+                overrides.pop(k, None)
+        self._defense_update(
+            surface, key, "media_locks",
+            **{k: True for k in kinds}, actions=overrides)
+        actor = str(message.sender_id or message.sender or "")
+        surface._audit(key, "lock_set",
+                       action=action or block_action, rule=kind,
+                       old="open", new="locked", by=actor)
+        surface.store.save()
+        names = ", ".join(MEDIA_LOCK_LABELS[k] for k in kinds)
+        eff = action or block_action
+        loud = LOCK_SILENT_MAP.get(eff, eff)
+        reply = f"{names} locked ({loud})."
+        if eff in LOCK_SILENT_MAP:
+            reply += (" Silent for now — it runs as its loud "
+                      "equivalent until Silent Actions lands.")
+        return reply
+
+    def _control_unlock(self, arg, message) -> str:  # type: ignore[no-untyped-def]
+        """Open a locked content type again: /unlock <type> —
+        the toggle goes off and any per-kind action for it is
+        cleared with it."""
+        key, err = self._mod_gate(message)
+        if key is None:
+            return err
+        from ...social.chat.group_defense import (
+            MEDIA_LOCK_KINDS,
+            MEDIA_LOCK_LABELS,
+        )
+
+        surface = self._group_surface()
+        words = str(arg or "").split()
+        if not words:
+            return ("usage: /unlock <type> — the types are: "
+                    + ", ".join(MEDIA_LOCK_LABELS[k]
+                                for k in MEDIA_LOCK_KINDS)
+                    + ". /locks lists the state.")
+        kind = self._LOCK_ALIASES.get(words[0].lower(),
+                                      words[0].lower())
+        if kind != "all" and kind not in MEDIA_LOCK_KINDS:
+            return (f"I don't lock {words[0]!r} — the types are: "
+                    + ", ".join(MEDIA_LOCK_LABELS[k]
+                                for k in MEDIA_LOCK_KINDS) + ".")
+        kinds = list(MEDIA_LOCK_KINDS) \
+            if kind == "all" else [kind]
+        block = (surface.store.settings(key).get("defense") or {}
+                 ).get("media_locks") or {}
+        overrides = dict(block.get("actions") or {})
+        for k in kinds:
+            overrides.pop(k, None)
+        self._defense_update(
+            surface, key, "media_locks",
+            **{k: False for k in kinds}, actions=overrides)
+        actor = str(message.sender_id or message.sender or "")
+        surface._audit(key, "lock_unset", action="unlock",
+                       rule=kind, old="locked", new="open",
+                       by=actor)
+        surface.store.save()
+        names = ", ".join(MEDIA_LOCK_LABELS[k] for k in kinds)
+        return f"{names} open — members can send them again."
+
+    def _control_locks(self, arg, message) -> str:  # type: ignore[no-untyped-def]
+        """List this group's locks: the locked kinds and the
+        action each carries (admins)."""
+        key, err = self._mod_gate(message)
+        if key is None:
+            return err
+        from ...social.chat.group_defense import (
+            describe_media_locks,
+        )
+
+        surface = self._group_surface()
+        block = (surface.store.settings(key).get("defense") or {}
+                 ).get("media_locks") or {}
+        return (f"locks for this group: "
+                f"{describe_media_locks(block)}. "
+                "/lock <type> [action] locks one, /unlock <type> "
+                "opens it, /gsettings medialock does the same.")
 
     def _control_gsettings(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         key = self._group_key_or_none(message)
@@ -4077,6 +4462,10 @@ class RuntimeGroupMixin:
                 f"{_duration_text(int(s.get('mute_default_s') or 0)) if s.get('mute_default_s') else 'ask'}",
                 f"media locks: "
                 f"{_describe_media_locks(d.get('media_locks') or {})}",
+                f"log channel: "
+                f"{(s.get('log_channel') or {}).get('channel') or 'none'}"
+                f" (pull-only — /setlog sets it; /log and /nolog "
+                f"choose the categories the pull shows)",
                 f"scamlink: "
                 f"{'on' if d_sl.get('enabled', True) else 'off'}"
                 f" (≤{d_sl.get('max_links', 3)} links per message"
@@ -4423,9 +4812,14 @@ class RuntimeGroupMixin:
                 "`/gsettings antiedit on|off` · "
                 "`/gsettings antiedit mode log|callout`",
                 "`/gsettings medialock <kind> on|off` · "
+                "`/gsettings medialock <kind> <action>` · "
                 "`/gsettings medialock all on|off` · "
                 "`/gsettings medialock action "
-                "delete|warn|delete_warn`",
+                "delete|warn|delete_warn|mute|kick|ban`",
+                "`/setlog <channel id>` · `/unsetlog` · "
+                "`/log <category>` · `/nolog <category>` · "
+                "`/lock <type> [action]` · `/unlock <type>` · "
+                "`/locks`",
                 "`/gsettings theme house|clean|board` · "
                 "`/gsettings class game board|clean|default`",
                 "`/gsettings stamp on|off` · "
@@ -4900,9 +5294,10 @@ class RuntimeGroupMixin:
             if out is not None:
                 return out
             return ("usage: /gsettings medialock <kind> on|off · "
+                    "/gsettings medialock <kind> <action> · "
                     "/gsettings medialock all on|off · "
                     "/gsettings medialock action "
-                    "delete|warn|delete_warn · "
+                    "delete|warn|delete_warn|mute|kick|ban · "
                     "/gsettings medialock status")
         # ── presentation grammar (DESIGN §27) ───────────────────
         if head == "theme" and rest.lower() in (
@@ -9148,6 +9543,10 @@ class RuntimeGroupMixin:
                 f"{'on' if (d.get('antiedit') or {}).get('enabled', True) else 'off'}",
                 f"media locks: "
                 f"{_describe_media_locks(d.get('media_locks') or {})}",
+                f"log channel: "
+                f"{(s.get('log_channel') or {}).get('channel') or 'none'}"
+                f" (pull-only — /setlog sets it; /log and /nolog "
+                f"choose the categories the pull shows)",
                 f"scamlink "
                 f"{'on' if (d.get('scamlink') or {}).get('enabled', True) else 'off'}"
                 f" (≤{(d.get('scamlink') or {}).get('max_links', 3)}"
@@ -9206,6 +9605,24 @@ class RuntimeGroupMixin:
                  _toggle("medialock-channel-posts", "Channel posts",
                          "medialock channel_posts",
                          bool(ml.get("channel_posts")))],
+                [_toggle("medialock-links", "Links",
+                         "medialock links",
+                         bool(ml.get("links"))),
+                 _toggle("medialock-games", "Games",
+                         "medialock games",
+                         bool(ml.get("games")))],
+                [_toggle("medialock-polls", "Polls",
+                         "medialock polls",
+                         bool(ml.get("polls"))),
+                 _toggle("medialock-rtl", "RTL text",
+                         "medialock rtl",
+                         bool(ml.get("rtl")))],
+                [_toggle("medialock-emails", "Emails",
+                         "medialock emails",
+                         bool(ml.get("emails"))),
+                 _toggle("medialock-phones", "Phones",
+                         "medialock phones",
+                         bool(ml.get("phones")))],
                 [_toggle("scamlink", "Scamlink", "scamlink",
                          bool((d.get('scamlink') or {})
                               .get('enabled', True)))],
@@ -9264,8 +9681,10 @@ class RuntimeGroupMixin:
                 "`autonomy on|off` · `anticrash on|off|delete|flag`",
                 "`antichannel|antitag|antidelete|antiedit on|off`"
                 " · `antitag N` · `antidelete mode log|callout`",
-                "`medialock <kind> on|off` · `medialock all on|off`"
-                " · `medialock action delete|warn|delete_warn`",
+                "`medialock <kind> on|off` · `medialock <kind> "
+                "<action>` · `medialock all on|off`"
+                " · `medialock action "
+                "delete|warn|delete_warn|mute|kick|ban`",
                 "`flood N` · `links DOMAINS|off` · "
                 "`filter add|remove WORD` · `filter clear` · "
                 + filter_action_offer,
@@ -12586,15 +13005,17 @@ class RuntimeGroupMixin:
         return None
 
     def _apply_media_lock_grammar(self, surface, key, words):  # type: ignore[no-untyped-def]
-        """The media-lock grammar (DESIGN §4), shared by
-        /gsettings (words after the `medialock` head) and the
-        console's defense section.  Forms: `<kind> on|off` ·
-        `all on|off` · `action delete|warn|delete_warn` ·
-        `status`.  Returns the reply line, or None when the
-        words don't parse (the caller shows usage).  An unknown
-        kind names the kinds that exist instead of silently
-        doing nothing."""
+        """The media-lock grammar (DESIGN §4 + Rose locks),
+        shared by /gsettings (words after the `medialock`
+        head) and the console's defense section.  Forms:
+        `<kind> on|off` · `<kind> <action>` · `all on|off` ·
+        `action <action>` · `status`.  Returns the reply line,
+        or None when the words don't parse (the caller shows
+        usage).  An unknown kind names the kinds that exist
+        instead of silently doing nothing."""
         from ...social.chat.group_defense import (
+            LOCK_ALL_ACTIONS,
+            LOCK_SILENT_MAP,
             MEDIA_LOCK_KINDS,
             MEDIA_LOCK_LABELS,
             describe_media_locks,
@@ -12610,25 +13031,38 @@ class RuntimeGroupMixin:
             return (f"media locks for {key}: "
                     f"{describe_media_locks(block)}.")
         if low[0] == "action" and len(low) == 2:
-            if low[1] in ("delete", "warn", "delete_warn"):
+            if low[1] in LOCK_ALL_ACTIONS:
                 self._defense_update(surface, key, "media_locks",
                                      action=low[1])
-                return (f"media lock action: {low[1]} — locked "
-                        "media is deleted, warned, or both.")
+                loud = LOCK_SILENT_MAP.get(low[1], low[1])
+                note = (" — silent for now: it runs as its loud "
+                        "equivalent until Silent Actions lands"
+                        if low[1] in LOCK_SILENT_MAP else "")
+                return (f"media lock action: {loud} — locked "
+                        "content is handled that way." + note)
             return None
         aliases = {"sticker": "stickers", "gif": "gifs",
                    "photo": "photos", "video": "videos",
                    "file": "documents", "forward": "forwards",
                    "channel": "channel_posts",
                    "video_note": "video_notes",
-                   "videonote": "video_notes"}
+                   "videonote": "video_notes",
+                   "link": "links", "url": "links",
+                   "game": "games", "poll": "polls",
+                   "email": "emails", "phone": "phones",
+                   "anonchannel": "channel_posts"}
         kind = aliases.get(low[0], low[0])
         if len(low) == 2 and low[1] in ("on", "off"):
             if low[0] == "all":
+                fields = {k: low[1] == "on"
+                          for k in MEDIA_LOCK_KINDS}
+                if low[1] == "off":
+                    # All off clears the per-kind actions too —
+                    # an override for a lock that is off is a
+                    # surprise waiting for the next /lock.
+                    fields["actions"] = {}
                 self._defense_update(
-                    surface, key, "media_locks",
-                    **{k: low[1] == "on"
-                       for k in MEDIA_LOCK_KINDS})
+                    surface, key, "media_locks", **fields)
                 return ("all media locks "
                         f"{'on' if low[1] == 'on' else 'off'}.")
             if kind not in MEDIA_LOCK_KINDS:
@@ -12641,6 +13075,32 @@ class RuntimeGroupMixin:
             state = "locked" if low[1] == "on" else "open"
             return (f"{MEDIA_LOCK_LABELS[kind]} {state} in this "
                     "group.")
+        if len(low) == 2 and low[1] in LOCK_ALL_ACTIONS:
+            # `<kind> <action>`: lock the kind with its own
+            # action — the same write /lock makes.
+            if kind not in MEDIA_LOCK_KINDS:
+                known = ", ".join(
+                    MEDIA_LOCK_LABELS[k] for k in MEDIA_LOCK_KINDS)
+                return (f"I don't lock {w[0]!r} — the kinds are: "
+                        f"{known}.")
+            block = (surface.store.settings(key).get("defense")
+                     or {}).get("media_locks") or {}
+            block_action = str(block.get("action")
+                               or "delete_warn")
+            overrides = dict(block.get("actions") or {})
+            if low[1] != block_action:
+                overrides[kind] = low[1]
+            else:
+                overrides.pop(kind, None)
+            self._defense_update(
+                surface, key, "media_locks",
+                **{kind: True}, actions=overrides)
+            loud = LOCK_SILENT_MAP.get(low[1], low[1])
+            note = (" — silent for now: it runs as its loud "
+                    "equivalent until Silent Actions lands"
+                    if low[1] in LOCK_SILENT_MAP else "")
+            return (f"{MEDIA_LOCK_LABELS[kind]} locked "
+                    f"({loud}) in this group." + note)
         return None
 
     def _cleanup_gate(self, message):  # type: ignore[no-untyped-def]

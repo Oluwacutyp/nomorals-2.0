@@ -16,7 +16,9 @@ degrades to warn + audit, never a fake execution).
 """
 from __future__ import annotations
 
+import re
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -33,16 +35,25 @@ DEFAULTS: dict[str, Any] = {
                    "callout_to": "admins"},
     "antiedit": {"enabled": True, "mode": "log",
                  "callout_to": "admins"},
-    # Media locks (DESIGN §4): one toggle per media kind, all
-    # OFF by default — an unconfigured group sees no change.
+    # Media locks (DESIGN §4 + Rose locks): one toggle per kind,
+    # all OFF by default — an unconfigured group sees no change.
     # The sensor itself is on; with every lock off it never
-    # fires.  `action` is the antichannel vocabulary.
+    # fires.  `action` is the block action (the antichannel
+    # vocabulary, extended with mute/kick/ban); `actions` holds
+    # per-kind overrides — a kind's own action wins over the
+    # block's.  Silent variants (sban/smute/skick/swarn) are
+    # config-only until Silent Actions lands: the sensor maps
+    # them to their loud equivalent and says so in the signal.
     "media_locks": {"enabled": True, "action": "delete_warn",
                     "stickers": False, "gifs": False,
                     "voice": False, "video_notes": False,
                     "photos": False, "videos": False,
                     "audio": False, "documents": False,
-                    "forwards": False, "channel_posts": False},
+                    "forwards": False, "channel_posts": False,
+                    "links": False, "games": False,
+                    "polls": False, "rtl": False,
+                    "emails": False, "phones": False,
+                    "actions": {}},
     "scamlink": {"enabled": True, "action": "delete_warn",
                  "suspicious": "flag", "max_links": 3,
                  "young_days": 30},
@@ -52,10 +63,18 @@ DEFAULTS: dict[str, Any] = {
 
 
 #: The media kinds a lock can cover (DESIGN §4 names the first
-#: five; the rest are the family the envelope expresses).
+#: five; the rest are the family the envelope expresses).  The
+#: Rose extension adds the text/content kinds: links (a URL in
+#: the text or a url/text_link entity), games (a Telegram game
+#: or dice message), polls (a poll message), rtl (right-to-left
+#: text), emails (an address in the text), phones (a phone
+#: number in the text).  There is deliberately no `bot` lock:
+#: the adapters drop bot senders at intake, so the surface
+#: never sees a bot message for a lock to fire on.
 MEDIA_LOCK_KINDS: tuple[str, ...] = (
     "stickers", "gifs", "voice", "video_notes", "photos",
     "videos", "audio", "documents", "forwards", "channel_posts",
+    "links", "games", "polls", "rtl", "emails", "phones",
 )
 
 #: Display labels for the lock kinds (grammar + panels).
@@ -64,6 +83,30 @@ MEDIA_LOCK_LABELS: dict[str, str] = {
     "video_notes": "video notes", "photos": "photos",
     "videos": "videos", "audio": "audio", "documents": "files",
     "forwards": "forwards", "channel_posts": "channel posts",
+    "links": "links", "games": "games", "polls": "polls",
+    "rtl": "RTL text", "emails": "email addresses",
+    "phones": "phone numbers",
+}
+
+#: The actions a lock can carry.  The block action and every
+#: per-kind override come from this vocabulary; anything else
+#: degrades to delete_warn, never to a crash and never to
+#: silently not locking.
+LOCK_ACTIONS: tuple[str, ...] = (
+    "delete", "warn", "delete_warn", "mute", "kick", "ban",
+)
+
+#: Silent-action variants (Rose Silent Actions): config-only
+#: until that phase lands — a lock configured with one behaves
+#: as its loud equivalent, and the hit's signal says so.
+LOCK_SILENT_ACTIONS: tuple[str, ...] = (
+    "sban", "smute", "skick", "swarn",
+)
+LOCK_ALL_ACTIONS: tuple[str, ...] = (
+    LOCK_ACTIONS + LOCK_SILENT_ACTIONS)
+LOCK_SILENT_MAP: dict[str, str] = {
+    "sban": "ban", "smute": "mute", "skick": "kick",
+    "swarn": "warn",
 }
 
 #: Raw envelope media kinds → canonical lock kinds.  Producers
@@ -572,6 +615,80 @@ def _is_channel_post(env: MessageEnvelope) -> bool:
             in f"{env.chat_key} {env.sender_id}")
 
 
+#: Bare-URL pattern for the links lock (the scamlink
+#: extractor's shape: url/text_link entities first, bare URLs
+#: in the text second).
+_URL_RE = re.compile(r"https?://[^\s<>\"')\]]+")
+_EMAIL_RE = re.compile(
+    r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+#: A phone number in the text: an optional +, then digits with
+#: separators — the 9-digit floor in the matcher keeps dates
+#: and short numbers out.
+_PHONE_RE = re.compile(r"\+?\d[\d\s().-]{7,}\d")
+
+
+def _text_lock_kinds(env: MessageEnvelope) -> list[str]:
+    """The text/content lock kinds this message carries, in
+    MEDIA_LOCK_KINDS order.  Links come from the platform's own
+    url/text_link entities first, then bare URLs in the text
+    (the scamlink extractor's order); games/polls ride the
+    envelope flags the adapters stamp; RTL is a strong
+    right-to-left character (Hebrew/Arabic ranges via the
+    Unicode bidi class); emails and phones are conservative
+    text patterns — a phone needs 9+ digits, so dates and short
+    numbers never trip it."""
+    text = str(env.text or "")
+    found: list[str] = []
+    if any(str(e.get("type") or "").lower()
+           in ("url", "text_link")
+           for e in (env.entities or [])) \
+            or _URL_RE.search(text):
+        found.append("links")
+    if getattr(env, "game", False):
+        found.append("games")
+    if getattr(env, "poll", False):
+        found.append("polls")
+    if any(unicodedata.bidirectional(ch) in ("R", "AL")
+           for ch in text):
+        found.append("rtl")
+    if _EMAIL_RE.search(text):
+        found.append("emails")
+    for match in _PHONE_RE.finditer(text):
+        if sum(c.isdigit() for c in match.group(0)) >= 9:
+            found.append("phones")
+            break
+    order = {k: i for i, k in enumerate(MEDIA_LOCK_KINDS)}
+    return sorted(set(found), key=lambda k: order[k])
+
+
+def _lock_hit(block: dict[str, Any] | None, kind: str,
+              extra: dict[str, Any] | None = None
+              ) -> tuple[str, dict[str, Any]]:
+    """(action, signal) for one lock hit: the kind's own action
+    wins over the block's; a silent variant maps to its loud
+    equivalent and the signal keeps the configured form, so the
+    audit record shows what the admin asked for and what ran.
+    An unknown action degrades to delete_warn, never to a crash
+    and never to silently not locking."""
+    merged = dict(DEFAULTS["media_locks"])
+    merged.update(block or {})
+    action = str(merged.get("action") or "delete_warn").lower()
+    overrides = merged.get("actions") or {}
+    if isinstance(overrides, dict):
+        own = str(overrides.get(kind) or "").lower()
+        if own:
+            action = own
+    signal: dict[str, Any] = {"kind": kind}
+    if extra:
+        signal.update(extra)
+    if action in LOCK_SILENT_MAP:
+        signal["silent_action"] = action
+        action = LOCK_SILENT_MAP[action]
+    if action not in LOCK_ACTIONS:
+        action = "delete_warn"
+    return action, signal
+
+
 def locked_media_kinds(block: dict[str, Any] | None) -> list[str]:
     """The kinds this group's media-locks block has switched on,
     in MEDIA_LOCK_KINDS order.  Unknown keys are ignored — a
@@ -583,29 +700,58 @@ def locked_media_kinds(block: dict[str, Any] | None) -> list[str]:
 
 def describe_media_locks(block: dict[str, Any] | None) -> str:
     """One state line for the panels and the dashboard: the
-    locked kinds + the action, or the open state."""
+    locked kinds + the action, or the open state.  A kind with
+    its own action names it; a silent action names its loud
+    equivalent, and the line says it runs loud until Silent
+    Actions lands."""
     merged = dict(DEFAULTS["media_locks"])
     merged.update(block or {})
     locked = locked_media_kinds(merged)
     if not locked:
         return "none locked — everything open"
     action = str(merged.get("action") or "delete_warn").lower()
-    labels = ", ".join(MEDIA_LOCK_LABELS[k] for k in locked)
-    return f"{labels} locked ({action})"
+    silent_any = action in LOCK_SILENT_MAP
+    if silent_any:
+        action = LOCK_SILENT_MAP[action]
+    if action not in LOCK_ACTIONS:
+        action = "delete_warn"
+    overrides = merged.get("actions") or {}
+    labels: list[str] = []
+    for k in locked:
+        own = ""
+        if isinstance(overrides, dict):
+            own = str(overrides.get(k) or "").lower()
+        loud = LOCK_SILENT_MAP.get(own, own)
+        if own and own in LOCK_ALL_ACTIONS and loud != action:
+            labels.append(f"{MEDIA_LOCK_LABELS[k]} ({loud})")
+            if own in LOCK_SILENT_MAP:
+                silent_any = True
+        else:
+            if own in LOCK_SILENT_MAP:
+                silent_any = True
+            labels.append(MEDIA_LOCK_LABELS[k])
+    out = f"{', '.join(labels)} locked ({action})"
+    if silent_any:
+        out += (" — silent actions run as their loud equivalent "
+                "until Silent Actions lands")
+    return out
 
 
 def check_media_locks(env: MessageEnvelope, cfg: DefenseConfig, *,
                       linked_chat_id: str = "",
                       sender_is_admin: bool = False,
                       ) -> SensorHit | None:
-    """Media locks (DESIGN §4): a locked kind in this group is
-    one hit — the first locked kind wins, so the pipeline
-    strikes once per message.  Admins are exempt (antitag
-    shape); the group's OWN linked channel is exempt (the
-    antichannel rule — automatic forwards and the explicit
+    """Media locks (DESIGN §4 + Rose locks): a locked kind in
+    this group is one hit — the first locked kind wins, so the
+    pipeline strikes once per message.  Admins are exempt
+    (antitag shape); the group's OWN linked channel is exempt
+    (the antichannel rule — automatic forwards and the explicit
     linked id are the feature, not the attack, and a member
     manually forwarding the linked channel's post is still a
     forward, so only the channel-posts kind exempts on the id).
+    Each hit carries its kind's own action (or the block's),
+    with a silent variant mapped to its loud equivalent — the
+    mapping lives in _lock_hit, so no call site can forget it.
     An unknown action degrades to delete_warn, never to a
     crash and never to silently not locking."""
     if sender_is_admin:
@@ -613,9 +759,6 @@ def check_media_locks(env: MessageEnvelope, cfg: DefenseConfig, *,
     block = cfg.media_locks or {}
     if not block.get("enabled", True):
         return None
-    action = str(block.get("action") or "delete_warn").lower()
-    if action not in ("delete", "warn", "delete_warn"):
-        action = "delete_warn"
     locked = locked_media_kinds(block)
     if not locked:
         return None
@@ -636,16 +779,26 @@ def check_media_locks(env: MessageEnvelope, cfg: DefenseConfig, *,
         return None
     kind = _media_lock_kind(env)
     if kind and kind in locked:
+        action, signal = _lock_hit(block, kind)
         return SensorHit(
             "media_locks",
             f"{MEDIA_LOCK_LABELS[kind]} are locked in this group",
-            action, {"kind": kind})
+            action, signal)
+    for tkind in _text_lock_kinds(env):
+        if tkind in locked:
+            action, signal = _lock_hit(block, tkind)
+            return SensorHit(
+                "media_locks",
+                f"{MEDIA_LOCK_LABELS[tkind]} are locked in this "
+                "group",
+                action, signal)
     if fwd.get("is_forwarded") and "forwards" in locked:
+        action, signal = _lock_hit(
+            block, "forwards",
+            {"origin_kind": str(fwd.get("origin_kind") or "")})
         return SensorHit(
             "media_locks", "forwards are locked in this group",
-            action, {"kind": "forwards",
-                     "origin_kind": str(
-                         fwd.get("origin_kind") or "")})
+            action, signal)
     if "channel_posts" in locked and _is_channel_post(env) \
             and not (linked_chat_id and sender_chat
                      and sender_chat == str(linked_chat_id)):
@@ -654,11 +807,13 @@ def check_media_locks(env: MessageEnvelope, cfg: DefenseConfig, *,
         # rides the sender id, not the forward header, so a
         # member manually forwarding it still meets the
         # forwards lock above.
+        action, signal = _lock_hit(
+            block, "channel_posts",
+            {"sender_chat_id": sender_chat})
         return SensorHit(
             "media_locks",
             "channel posts are locked in this group",
-            action, {"kind": "channel_posts",
-                     "sender_chat_id": sender_chat})
+            action, signal)
     return None
 
 

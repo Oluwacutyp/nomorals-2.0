@@ -133,7 +133,7 @@ class RegistryTests(unittest.TestCase):
                 self.assertEqual(cmd.kind, kind)
 
     def test_new_kinds_owner_only_public_count_unchanged(self) -> None:
-        # Owner-only by absence from PUBLIC_COMMANDS — the 279 pin
+        # Owner-only by absence from PUBLIC_COMMANDS — the 287 pin
         # does NOT move for owner-only verbs (the brief's 279 -> 282
         # was stale: public commands are what the pin counts).
         for kind in NEW_KINDS:
@@ -141,7 +141,7 @@ class RegistryTests(unittest.TestCase):
                 self.assertNotIn(kind, PUBLIC_COMMANDS)
                 self.assertFalse(caller_may_run(kind, False))
                 self.assertTrue(caller_may_run(kind, True))
-        self.assertEqual(len(PUBLIC_COMMANDS), 279)
+        self.assertEqual(len(PUBLIC_COMMANDS), 287)
 
     def test_new_kinds_in_help_and_catalog(self) -> None:
         text = help_text()

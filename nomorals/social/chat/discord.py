@@ -83,7 +83,9 @@ def _discord_envelope(message: Any, text: str) -> dict[str, Any]:
             "quote_depth": 1 if getattr(message, "reference",
                                          None) else 0,
             "quoted_chars": 0, "sticker": sticker,
-            "raw_len": len(text)}
+            "raw_len": len(text),
+            # A poll message, when discord.py reports one.
+            "poll": bool(getattr(message, "poll", None))}
 
 
 def _discord_raw_envelope(data: dict[str, Any], text: str
@@ -115,7 +117,9 @@ def _discord_raw_envelope(data: dict[str, Any], text: str
     return {"entities": entities, "mentions": mentions,
             "media": media, "forward": None, "quote_depth": 0,
             "quoted_chars": 0, "sticker": None,
-            "raw_len": len(text)}
+            "raw_len": len(text),
+            # A poll message, when the gateway payload carries one.
+            "poll": bool(data.get("poll"))}
 
 
 class DiscordAdapter(ChatAdapter):

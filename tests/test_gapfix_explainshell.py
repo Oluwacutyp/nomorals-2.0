@@ -751,4 +751,4 @@ class TestWiring:
         from nomorals.social.chat.control import PUBLIC_COMMANDS
 
         assert "explain" in PUBLIC_COMMANDS
-        assert len(PUBLIC_COMMANDS) == 279
+        assert len(PUBLIC_COMMANDS) == 287

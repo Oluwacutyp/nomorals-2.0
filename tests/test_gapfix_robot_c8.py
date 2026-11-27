@@ -510,7 +510,7 @@ class WiringTests(unittest.TestCase):
         from nomorals.social.chat.control import PUBLIC_COMMANDS
 
         self.assertNotIn("robot", PUBLIC_COMMANDS)
-        self.assertEqual(len(PUBLIC_COMMANDS), 279)
+        self.assertEqual(len(PUBLIC_COMMANDS), 287)
 
     def test_cli_alias_and_parser(self) -> None:
         from nomorals.cmdline.parser import CLI_ALIASES, _parser

@@ -464,7 +464,13 @@ def _wa_envelope(obj: dict[str, Any], text: str) -> dict[str, Any]:
             "media": media, "forward": forward,
             "quote_depth": 1 if obj.get("reply_to") else 0,
             "quoted_chars": len(str(obj.get("quoted_text") or "")),
-            "sticker": sticker, "raw_len": len(text)}
+            "sticker": sticker, "raw_len": len(text),
+            # A poll message, when the bridge reports one
+            # (Baileys pollMessage, or a normalized poll field).
+            # WhatsApp has no game messages — the key stays
+            # absent and the sensor reads it as no game.
+            "poll": bool(obj.get("poll")
+                         or obj.get("pollMessage"))}
 
 
 def _wa_quoted_media(obj: dict[str, Any]) -> dict[str, Any] | None:

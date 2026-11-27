@@ -66,7 +66,7 @@ class MuseumShelfRegistrationTest(unittest.TestCase):
         self.assertNotIn("museum", PUBLIC_COMMANDS)
         self.assertFalse(caller_may_run("museum", False))
         self.assertTrue(caller_may_run("museum", True))
-        self.assertEqual(len(PUBLIC_COMMANDS), 279)
+        self.assertEqual(len(PUBLIC_COMMANDS), 287)
 
     def test_parse_control(self) -> None:
         cmd = parse_control("/museum library-books")

@@ -651,4 +651,4 @@ class TestChatAndCli:
         assert "fmt" in PUBLIC_COMMANDS
         assert CONTROL_COMMANDS["fmt"] == (1, None)
         assert "fmt" in COMMAND_DETAILS
-        assert len(PUBLIC_COMMANDS) == 279
+        assert len(PUBLIC_COMMANDS) == 287

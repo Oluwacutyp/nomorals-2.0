@@ -486,7 +486,7 @@ class TestWiring(unittest.TestCase):
     def test_public_commands_unmoved(self) -> None:
         from nomorals.social.chat.control import PUBLIC_COMMANDS
 
-        self.assertEqual(len(PUBLIC_COMMANDS), 279)
+        self.assertEqual(len(PUBLIC_COMMANDS), 287)
 
     def test_nl_question_matches_known_pages_only(self) -> None:
         from nomorals.tools.wiki import parse_wiki_question

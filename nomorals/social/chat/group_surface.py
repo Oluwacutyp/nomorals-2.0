@@ -150,6 +150,95 @@ BOT_PLATFORMS = ("telegram-bot", "telegram-personal")
 _ACTION_RANK = {"allow": 0, "warn": 1, "delete": 2, "mute": 3,
                 "acceptance_restrict": 3, "kick": 4, "ban": 5}
 
+#: Log channels (pull-only, Rose §4): the categories a
+#: group's pull view filters by.  Every designation shows the
+#: group's own categories; the held log itself keeps
+#: everything, and /glog in the group is unchanged.
+LOG_CHANNEL_CATEGORIES: tuple[str, ...] = (
+    "moderation", "defense", "joins", "economy", "reports",
+    "settings",
+)
+LOG_CHANNEL_DEFAULTS: dict[str, Any] = {
+    "channel": "",
+    "categories": {c: True for c in LOG_CHANNEL_CATEGORIES},
+}
+
+#: Audit kind → pull-view category.  The map is a PRESENTATION
+#: filter only: a kind with no entry here is ALWAYS shown, so
+#: nothing hides by accident — a new audit kind lands in the
+#: pull view until someone deliberately files it.  Kinds are
+#: filed by what the entry IS: defense = an automatic sensor
+#: fired; moderation = an action was taken (by hand or by the
+#: ladder); joins = people coming, going or held at the door;
+#: economy = money, property, conflict and games; reports =
+#: flags and reputation; settings = configuration changed.
+_LOG_CATEGORY_KINDS: dict[str, frozenset[str]] = {
+    "moderation": frozenset({
+        "admin_action", "admin_action_failed",
+        "moderation_executed", "moderation_unexecuted",
+        "member_muted", "member_unmuted", "member_banned",
+        "member_unbanned", "member_kicked", "member_restored",
+        "member_appealed", "message_pinned", "message_unpinned",
+        "message_purged", "slowmode_changed", "slowmode",
+        "cleanup_removal", "cleanup_report", "undonotice",
+    }),
+    "defense": frozenset({
+        "anticrash", "anticrash_flag", "antichannel", "antitag",
+        "antidelete", "antiedit", "flood", "scamlink",
+        "scamlink_suspect", "media_locks", "strike",
+    }),
+    "joins": frozenset({
+        "join", "join_request", "join_approved", "join_declined",
+        "member_left", "member_left_crowd",
+        "member_left_crowd_ban", "member_joined",
+        "invite_revoked", "invite_recreated", "raid_end",
+        "raid_auto_end", "welcome", "goodbye",
+    }),
+    "economy": frozenset({
+        "fine", "tax", "payment", "deposit", "withdrawal",
+        "rob", "rob_failed", "bunker", "drop", "drop_claim",
+        "quest", "milestone", "shop", "grant", "approve",
+        "bounty", "claimdrop", "steal", "sabotage",
+        "assassinate", "kill", "shoot", "contribution",
+        "review", "casino", "slots", "lottery", "giveaway",
+        "heist",
+    }),
+    "reports": frozenset({
+        "report", "massreport", "flag", "rep", "reputation",
+        "appeal", "report_dismissed", "report_resolved",
+    }),
+    "settings": frozenset({
+        "settings_changed", "rules_changed", "gsettings",
+        "system_claim", "log_channel_set", "log_channel_unset",
+        "log_category", "lock_set", "lock_unset", "lock_action",
+        "presentation", "theme", "escalation", "cleanup",
+        "backup", "roster_diff", "p5", "digest_policy",
+        "expression",
+    }),
+}
+_LOG_CATEGORY_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("treasury_", "economy"), ("economy_", "economy"),
+    ("heist_", "economy"), ("gang_", "economy"),
+    ("war_", "economy"), ("conflict_", "economy"),
+    ("police_", "economy"), ("property_", "economy"),
+    ("game_", "economy"), ("poll_", "economy"),
+    ("bet_", "economy"), ("acceptance_", "joins"),
+    ("raid_", "joins"),
+)
+
+
+def log_category_of(kind: str) -> str | None:
+    """The pull-view category one audit kind belongs to, or
+    None when it is unfiled — unfiled kinds are always shown."""
+    kind = str(kind or "")
+    for category, kinds in _LOG_CATEGORY_KINDS.items():
+        if kind in kinds:
+            return category
+    for prefix, category in _LOG_CATEGORY_PREFIXES:
+        if kind.startswith(prefix):
+            return category
+    return None
+
 
 def _deep_merge(base: dict[str, Any], stored: dict[str, Any]
                 ) -> dict[str, Any]:
@@ -208,6 +297,14 @@ def _default_settings() -> dict[str, Any]:
                                         # automatic admin (§17):
                                         # autonomy + sensors +
                                         # escalation spine
+        "log_channel": copy.deepcopy(LOG_CHANNEL_DEFAULTS),
+                                        # Rose log channel
+                                        # (pull-only): the channel
+                                        # this group's held audit
+                                        # log is pulled from, and
+                                        # which categories the pull
+                                        # view shows.  Nothing is
+                                        # ever posted to it.
         "estate": copy.deepcopy(ESTATE_DEFAULTS),
                                         # real estate (§17/§20):
                                         # market cut, sell-back,
@@ -2661,11 +2758,16 @@ class GroupSurface:
                        "delete" if "delete" in hit.action
                        else "warn")
 
-        # ── stage 3c: media locks (DESIGN §4) ──────────────────
+        # ── stage 3c: media locks (DESIGN §4 + Rose locks) ─────
         # The admin's per-kind toggles over the envelope: a
         # locked kind is one hit — audited always, landed never
         # on the owner ladder (§19, the antichannel shape), and
-        # struck once on the shared spine.
+        # struck once on the shared spine.  The hit's action is
+        # the kind's own (or the block's): delete/warn ride the
+        # old shape, mute/kick/ban append the platform action
+        # itself — _execute_group_action runs it, or audits the
+        # unexecution when the adapter cannot (WhatsApp has no
+        # per-person mute; Discord has no admin surface here).
         hit = check_media_locks(
             env, cfg, linked_chat_id=linked_for_env,
             sender_is_admin=sender_is_admin)
@@ -2678,7 +2780,15 @@ class GroupSurface:
                         **({"role_exempt": role}
                            if role_exempt else {}))
             if not role_exempt:
-                if "delete" in hit.action:
+                if hit.action in ("mute", "kick", "ban"):
+                    action = {
+                        "kind": hit.action, "rule": hit.rule,
+                        "reason": hit.reason, "user_id": user_id,
+                        "group_id": group_key}
+                    if hit.action == "mute":
+                        action["minutes"] = cfg.mute_minutes
+                    actions.append(action)
+                elif "delete" in hit.action:
                     actions.append({
                         "kind": "delete", "rule": hit.rule,
                         "reason": hit.reason, "user_id": user_id,
@@ -2689,7 +2799,10 @@ class GroupSurface:
                         "reason": hit.reason, "user_id": user_id,
                         "group_id": group_key})
             strike("media_locks", hit.rule,
-                   "delete" if "delete" in hit.action else "warn")
+                   hit.action if hit.action in (
+                       "mute", "kick", "ban")
+                   else "delete" if "delete" in hit.action
+                   else "warn")
 
         blocked = any(a.get("kind") in ("delete", "kick", "ban")
                       for a in actions)
@@ -8737,6 +8850,25 @@ class GroupSurface:
     def channel_keys(self) -> list[str]:
         return sorted(k for k in self.store.data
                       if self.is_channel(k))
+
+    def groups_designating_log_channel(
+            self, channel_key: str) -> list[str]:
+        """The groups that designated this channel as their log
+        channel (pull-only): the reverse lookup for a /glog
+        asked INSIDE the channel.  Sorted, so a channel
+        designated by several groups reads deterministically."""
+        wanted = str(channel_key or "")
+        if not wanted:
+            return []
+        found = []
+        for key in self.store.data:
+            if self.is_channel(key):
+                continue
+            block = (self.store.settings(key).get("log_channel")
+                     or {})
+            if str(block.get("channel") or "") == wanted:
+                found.append(key)
+        return sorted(found)
 
     def channel_title(self, key: str) -> str:
         entry = self.store.data.get(key) or {}

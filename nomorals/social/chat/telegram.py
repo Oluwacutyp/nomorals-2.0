@@ -5817,7 +5817,12 @@ def _bot_message_envelope(msg: dict[str, Any], text: str
     return {"entities": entities, "mentions": mentions,
             "media": media, "forward": forward,
             "quote_depth": depth, "quoted_chars": quoted,
-            "sticker": sticker_env, "raw_len": len(text)}
+            "sticker": sticker_env, "raw_len": len(text),
+            # A game (HTML5 game or dice roll) or a poll: the
+            # locks the defense sensor reads.  Absent fields
+            # stay False — never invented.
+            "game": bool(msg.get("game") or msg.get("dice")),
+            "poll": bool(msg.get("poll"))}
 
 
 def _mtproto_envelope(message: Any, text: str) -> dict[str, Any]:
@@ -5940,7 +5945,13 @@ def _mtproto_envelope(message: Any, text: str) -> dict[str, Any]:
     return {"entities": entities, "mentions": mentions,
             "media": media, "forward": forward,
             "quote_depth": depth, "quoted_chars": 0,
-            "sticker": sticker_env, "raw_len": len(text)}
+            "sticker": sticker_env, "raw_len": len(text),
+            # A game (Telethon .game, or a dice roll — the
+            # MessageMediaDice shape) or a poll: the locks the
+            # defense sensor reads.  Absent stays False.
+            "game": bool(getattr(message, "game", None)
+                         or media_cls == "MessageMediaDice"),
+            "poll": bool(getattr(message, "poll", None))}
 
 
 class TelegramBotAdapter(ChatAdapter):

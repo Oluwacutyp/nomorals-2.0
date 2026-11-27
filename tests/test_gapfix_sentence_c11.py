@@ -537,10 +537,10 @@ class WiringTests(unittest.TestCase):
                       mixin._control_sentence("", "test"))
 
     def test_sentence_not_on_public_menu(self):
-        # Owner-only verb: PUBLIC_COMMANDS stays 279.
+        # Owner-only verb: PUBLIC_COMMANDS stays 287.
         from nomorals.social.chat.control import PUBLIC_COMMANDS
 
-        self.assertEqual(len(PUBLIC_COMMANDS), 279)
+        self.assertEqual(len(PUBLIC_COMMANDS), 287)
         self.assertNotIn("sentence", PUBLIC_COMMANDS)
 
     def test_sentence_has_one_list_group_and_help(self):

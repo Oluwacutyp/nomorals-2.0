@@ -143,6 +143,13 @@ class MessageEnvelope:
     quoted_chars: int = 0
     sticker: dict[str, Any] | None = None
     raw_len: int = 0
+    #: A Telegram game/dice message, a poll message — stamped
+    #: by the adapters that see them (Bot API/MTProto game +
+    #: poll; WhatsApp/Discord poll).  Absent is False, never
+    #: invented: a lock over games/polls fires only where the
+    #: platform reports the type.
+    game: bool = False
+    poll: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -154,6 +161,7 @@ class MessageEnvelope:
             "quote_depth": self.quote_depth,
             "quoted_chars": self.quoted_chars,
             "sticker": self.sticker, "raw_len": self.raw_len,
+            "game": self.game, "poll": self.poll,
         }
 
 
@@ -232,6 +240,8 @@ def normalize_envelope(raw: dict[str, Any] | None, *,
         quoted_chars=max(0, int(raw.get("quoted_chars") or 0)),
         sticker=sticker,
         raw_len=max(0, int(raw.get("raw_len") or len(body))),
+        game=bool(raw.get("game")),
+        poll=bool(raw.get("poll")),
     )
 
 

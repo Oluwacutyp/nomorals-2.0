@@ -10707,6 +10707,27 @@ class PartnerRuntime(
         if kind == "glog":
             return self._control_glog(arg, message)
 
+        if kind == "setlog":
+            return self._control_setlog(arg, message)
+
+        if kind == "unsetlog":
+            return self._control_unsetlog(arg, message)
+
+        if kind == "log":
+            return self._control_log(arg, message)
+
+        if kind == "nolog":
+            return self._control_nolog(arg, message)
+
+        if kind == "lock":
+            return self._control_lock(arg, message)
+
+        if kind == "unlock":
+            return self._control_unlock(arg, message)
+
+        if kind == "locks":
+            return self._control_locks(arg, message)
+
         if kind == "strikes":
             return self._control_strikes(arg, message)
 

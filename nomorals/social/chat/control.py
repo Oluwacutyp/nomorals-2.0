@@ -213,6 +213,8 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "tts", "stt", "look", "image", "lens", "decode", "dns", "whois",
     "cipher", "wisdom", "think",
     "rules", "member", "lookup", "glog", "gsettings", "strikes",
+    "setlog", "unsetlog", "log", "nolog", "lock", "unlock",
+    "locks",
     "recheck", "joinq", "console", "groups", "ghealth", "digest", "community", "gbackup",
     "undonotice",
     "flag", "rep", "repclear", "repdismiss",
@@ -799,6 +801,13 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "member": (0, 1),         # /member [@name] — group member card: tenure, activity, identity changes (P1)
     "lookup": (0, 1),         # /lookup <id|@username> — the account dossier: ID, account-age estimate, phone when visible, groups, username/name history, economy + moderation record (DM + group)
     "glog": (0, 1),           # /glog [n] — the group's held audit log (admins; P1)
+    "setlog": (0, 1),         # /setlog [channel id] — designate the log channel (pull-only; admins)
+    "unsetlog": (0, 0),       # /unsetlog — remove the log-channel designation (admins)
+    "log": (0, 1),            # /log [category] — show a category in the log-channel pull view (admins)
+    "nolog": (0, 1),          # /nolog [category] — hide a category from the log-channel pull view (admins)
+    "lock": (1, 2),           # /lock <type> [action] — lock a content type (admins; Rose locks)
+    "unlock": (1, 1),         # /unlock <type> — open a locked content type again (admins)
+    "locks": (0, 0),          # /locks — list this group's locks (admins)
     "strikes": (0, 1),        # /strikes [@member] — the defense strike ledger: who's on the ladder (admins; §17)
     "recheck": (0, 0),        # /recheck — a restricted member's “check me again”: re-runs the join criteria live (§28)
     "joinq": (0, None),       # /joinq [approve|decline <id>|all] — the admin join queue: requests + raid holds (§28)
@@ -3993,6 +4002,34 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/glog [n]",
             "example": "/glog 10",
             "related": "/gsettings /member"},
+    "setlog": {"what": "designate this group's log channel (admins): the channel the held audit log is pulled from. Nothing is ever posted to it — an admin asks in that channel with /glog to read the log, filtered by the enabled categories. Bare /setlog reports the current designation.",
+            "usage": "/setlog [channel id]",
+            "example": "/setlog -1001234567890",
+            "related": "/glog /unsetlog /log /nolog"},
+    "unsetlog": {"what": "remove the log-channel designation (admins). The held log stays held; /glog in the group still reads it.",
+            "usage": "/unsetlog",
+            "example": "/unsetlog",
+            "related": "/setlog /glog"},
+    "log": {"what": "show a category in the log-channel pull view (admins): moderation, defense, joins, economy, reports or settings. A category is a presentation filter only — the held log keeps everything either way. Bare /log reports the states.",
+            "usage": "/log [category]",
+            "example": "/log moderation",
+            "related": "/nolog /setlog /glog"},
+    "nolog": {"what": "hide a category from the log-channel pull view (admins): moderation, defense, joins, economy, reports or settings. The held log keeps everything either way — the category is only hidden from the pull. Bare /nolog reports the states.",
+            "usage": "/nolog [category]",
+            "example": "/nolog economy",
+            "related": "/log /setlog /glog"},
+    "lock": {"what": "lock a content type in this group (admins): stickers, links, games, polls, photos, voice, forwards and the rest. A locked type is struck on the shared spine and handled by its action — delete, warn, delete_warn, mute, kick or ban (sban/smute/skick/swarn run as their loud equivalent until Silent Actions lands). Without an action, the group's block action applies.",
+            "usage": "/lock <type> [action]",
+            "example": "/lock links delete",
+            "related": "/unlock /locks /gsettings"},
+    "unlock": {"what": "open a locked content type again (admins): the toggle goes off and any per-kind action for it is cleared with it.",
+            "usage": "/unlock <type>",
+            "example": "/unlock links",
+            "related": "/lock /locks /gsettings"},
+    "locks": {"what": "list this group's locks (admins): the locked content types and the action each carries.",
+            "usage": "/locks",
+            "example": "/locks",
+            "related": "/lock /unlock /gsettings"},
     "strikes": {"what": "the defense strike ledger: every sensor and every manual warn lands on one per-member ladder (mute at the warn limit, removal and ban above it, 7-day window). No argument lists who's on the ladder; a member shows their record.",
             "usage": "/strikes [@name]",
             "example": "/strikes @ada",
@@ -5195,7 +5232,9 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                           "doctor",
                           "update", "pull", "deploy", "restart"]),
     ("groups & communities", ["rules", "member", "lookup", "glog", "gsettings",
-                            "strikes", "recheck", "joinq", "console",
+                            "strikes", "setlog", "unsetlog", "log", "nolog",
+                            "lock", "unlock", "locks",
+                            "recheck", "joinq", "console",
                             "groups", "ghealth", "digest", "community", "gbackup",
                             "undonotice", "flag", "rep", "repclear",
                             "repdismiss",
@@ -5525,6 +5564,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["update", "pull", "deploy", "restart"]),
     ("groups & communities",
      ["rules", "member", "lookup", "glog", "gsettings", "strikes",
+      "setlog", "unsetlog", "log", "nolog", "lock", "unlock", "locks",
       "recheck", "joinq", "console", "groups", "ghealth", "digest", "community", "gbackup",
       "undonotice",
       "flag", "rep", "repclear", "repdismiss",
