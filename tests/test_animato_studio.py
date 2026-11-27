@@ -62,12 +62,12 @@ class FakePipeline:
         self._n = 0
 
     def plan(self, niche, topic, *, style="", footage="", voice="",
-             music=""):
+             music="", cast=None):
         self._n += 1
         job = FakeJob(f"job_fake{self._n}", topic)
         self.planned.append({"niche": niche, "topic": topic, "style": style,
                              "footage": footage, "voice": voice,
-                             "music": music})
+                             "music": music, "cast": list(cast or [])})
         return job
 
     def preflight(self, job):
@@ -470,3 +470,162 @@ def test_tool_registers_animato_spark():
     assert fn is animato_spark
     assert kw["capability"] == "media"
     assert kw["examples"]
+
+
+# ── port step 4: character-consistency hardening ─────────────────────
+
+
+def _write_png(path: Path, color: tuple = (200, 30, 40)) -> Path:
+    from PIL import Image
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (64, 64), color).save(path)
+    return path
+
+
+def test_resolve_cast_lock_ok_skips_voice_only_members(tmp_path):
+    from nomorals.media.contentops.studio import resolve_cast_lock
+
+    ref = _write_png(tmp_path / "ada.png")
+    lock, error = resolve_cast_lock([
+        CastMember(name="Ada", voice="ada_warm", face_ref=str(ref)),
+        CastMember(name="Ben", voice="edge"),  # no reference: no lock
+    ])
+    assert error == ""
+    assert [m["name"] for m in lock] == ["Ada"]
+    assert lock[0]["face_ref"] == str(ref)
+    assert lock[0]["voice"] == "ada_warm"
+    lock2, error2 = resolve_cast_lock([])
+    assert (lock2, error2) == ([], "")
+
+
+def test_resolve_cast_lock_missing_reference_fails_closed(tmp_path):
+    from nomorals.media.contentops.studio import resolve_cast_lock
+
+    lock, error = resolve_cast_lock([
+        CastMember(name="Ada", face_ref=str(tmp_path / "ghost.png"))])
+    assert lock == []
+    assert "Ada" in error and "not found" in error
+
+
+def test_resolve_cast_lock_unreadable_reference_fails_closed(tmp_path):
+    from nomorals.media.contentops.studio import resolve_cast_lock
+
+    bad = tmp_path / "corrupt.png"
+    bad.write_bytes(b"this is not an image at all")
+    lock, error = resolve_cast_lock([CastMember(name="Ada", face_ref=str(bad))])
+    assert lock == []
+    assert "Ada" in error and "not a readable image" in error
+    directory = tmp_path / "refs"
+    directory.mkdir()
+    lock, error = resolve_cast_lock([
+        CastMember(name="Ada", face_ref=str(directory))])
+    assert lock == []
+    assert "not a file" in error
+
+
+def test_store_add_cast_adds_and_replaces_by_name(tmp_path):
+    from nomorals.media.contentops.studio import resolve_cast_lock
+
+    store = StudioStore(tmp_path / "studio")
+    store.create("Stories")
+    ref = _write_png(tmp_path / "ada.png")
+    project = store.add_cast(
+        "stories", CastMember(name="Ada", face_ref=str(ref)))
+    assert project.cast[0].name == "Ada"
+    assert Path(project.cast[0].face_ref).is_absolute()
+    # same name replaces (a re-shot reference), it never duplicates
+    ref2 = _write_png(tmp_path / "ada2.png", (10, 200, 30))
+    project = store.add_cast(
+        "stories", CastMember(name="Ada", voice="ada_warm",
+                              face_ref=str(ref2)))
+    assert len(project.cast) == 1
+    assert project.cast[0].voice == "ada_warm"
+    assert project.cast[0].face_ref == str(ref2)
+    assert store.load("stories").cast[0].face_ref == str(ref2)
+    lock, error = resolve_cast_lock(store.load("stories").cast)
+    assert error == "" and lock[0]["face_ref"] == str(ref2)
+
+
+def test_spark_passes_cast_lock_into_every_episode(tmp_path):
+    pipeline = FakePipeline(tmp_path / "runs")
+    runner = _runner(tmp_path, pipeline=pipeline)
+    ref = _write_png(tmp_path / "ada.png")
+    ref2 = _write_png(tmp_path / "ben.png", (10, 200, 30))
+    project = runner.store.create(
+        "Stories", cast=[CastMember(name="Ada", face_ref=str(ref)),
+                         CastMember(name="Ben", face_ref=str(ref2))])
+    first = runner.spark(project, "Ada opens the lighthouse door")
+    second = runner.spark(project, "Ben climbs the lighthouse stairs")
+    assert first["ok"] is True and second["ok"] is True
+    # the SAME lock reaches the render for every episode of the series
+    assert len(pipeline.planned) == 2
+    for planned in pipeline.planned:
+        assert [m["name"] for m in planned["cast"]] == ["Ada", "Ben"]
+        assert planned["cast"][0]["face_ref"] == str(ref)
+        assert planned["cast"][1]["face_ref"] == str(ref2)
+    assert first["rungs"]["cast"] == "locked: Ada, Ben"
+    assert second["rungs"]["cast"] == "locked: Ada, Ben"
+
+
+def test_spark_missing_reference_fails_closed_before_planning(tmp_path):
+    pipeline = FakePipeline(tmp_path / "runs")
+    runner = _runner(tmp_path, pipeline=pipeline)
+    project = runner.store.create(
+        "Stories", cast=[CastMember(
+            name="Ada", face_ref=str(tmp_path / "ghost.png"))])
+    result = runner.spark(project, "Ada opens the lighthouse door")
+    assert result["ok"] is False
+    assert "Ada" in result["rungs"]["cast"]
+    assert "not found" in result["rungs"]["cast"]
+    assert pipeline.planned == []  # nothing planned, no render spend
+    saved = runner.store.load("stories")
+    assert saved.episodes[0].status == "failed"
+    assert "not found" in saved.episodes[0].error
+    assert saved.episodes[0].video_path == ""
+
+
+def test_spark_voice_only_cast_renders_exactly_as_before(tmp_path):
+    pipeline = FakePipeline(tmp_path / "runs")
+    runner = _runner(tmp_path, pipeline=pipeline)
+    project = runner.store.create(
+        "Stories", cast=[CastMember(name="Ada", voice="ada_warm")])
+    result = runner.spark(project, "hello")
+    assert result["ok"] is True
+    assert pipeline.planned[0]["cast"] == []
+    assert "cast" not in result["rungs"]
+
+
+def test_cli_cast_adds_member_and_rejects_missing_file(
+        tmp_path, monkeypatch, capsys):
+    import nomorals.media.contentops.studio as studio_mod
+    from nomorals.cmdline.commands.animato import cmd_animato
+
+    monkeypatch.setattr(studio_mod, "DEFAULT_STUDIO_ROOT",
+                        tmp_path / "studio")
+    assert cmd_animato(_cli_args("new", name="Stories"), None) == 0
+    ref = _write_png(tmp_path / "ada.png")
+    assert cmd_animato(_cli_args(
+        "cast", name="stories", member="Ada", voice="ada_warm",
+        face_ref=str(ref), character_id=""), None) == 0
+    out = capsys.readouterr().out
+    assert "Ada" in out and "stories" in out
+    assert cmd_animato(_cli_args(
+        "cast", name="stories", member="Ghost",
+        face_ref=str(tmp_path / "ghost.png")), None) == 1
+    assert "no face reference image" in capsys.readouterr().err
+    assert cmd_animato(_cli_args("show", name="stories"), None) == 0
+    assert "Ada" in capsys.readouterr().out
+
+
+def test_parser_accepts_animato_cast():
+    from nomorals.cmdline import _parser
+
+    parser = _parser()
+    args = parser.parse_args(
+        ["animato", "cast", "stories", "Ada",
+         "--voice", "ada_warm", "--face-ref", "/tmp/ada.png"])
+    assert args.animato_action == "cast"
+    assert args.name == "stories"
+    assert args.member == "Ada"
+    assert args.face_ref == "/tmp/ada.png"

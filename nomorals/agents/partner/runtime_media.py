@@ -8909,6 +8909,9 @@ class RuntimeMediaMixin:
         /animato spark "<idea>" [--project NAME] [--publish youtube]
             [--private]                        — run one episode end to end
         /animato queue <project> "<topic>"     — queue an episode idea
+        /animato cast <project> <name> [--voice V] [--face-ref PATH]
+            — add a cast member; the face reference locks that
+            character's face into every scene of every episode
         /animato post <project> <episode> [--private]
         /animato export <project> <episode>    — hand back the file
         /animato status [--project NAME]       — episode status
@@ -8927,6 +8930,7 @@ class RuntimeMediaMixin:
                     "/animato list · /animato show <project> · "
                     "/animato status\n"
                     "/animato queue <project> \"<topic>\" · "
+                    "/animato cast <project> <name> [--face-ref PATH] · "
                     "/animato post <project> <episode> · "
                     "/animato export <project> <episode>\n"
                     "/animato autopost start|stop|status|run "
@@ -9001,6 +9005,50 @@ class RuntimeMediaMixin:
                 return f"animato: {exc}"
             return (f"queued in {project.slug} "
                     f"({len(project.topic_queue)} queued)")
+        if action == "cast":
+            if len(rest) < 2:
+                return ("usage: /animato cast <project> <name> "
+                        "[--voice V] [--face-ref PATH]")
+            from ...media.contentops.studio import CastMember
+
+            voice = "edge"
+            face_ref = ""
+            character_id = ""
+            member = ""
+            i = 1
+            while i < len(rest):
+                tok = rest[i]
+                if tok in ("--voice", "--face-ref", "--character-id") \
+                        and i + 1 < len(rest):
+                    if tok == "--voice":
+                        voice = rest[i + 1]
+                    elif tok == "--face-ref":
+                        face_ref = rest[i + 1]
+                    else:
+                        character_id = rest[i + 1]
+                    i += 2
+                elif not member:
+                    member = tok
+                    i += 1
+                else:
+                    i += 1
+            if not member:
+                return ("usage: /animato cast <project> <name> "
+                        "[--voice V] [--face-ref PATH]")
+            if face_ref:
+                from pathlib import Path
+
+                if not Path(face_ref).expanduser().is_file():
+                    return f"animato: no face reference image at {face_ref!r}"
+            try:
+                project = runner.store.add_cast(
+                    rest[0], CastMember(name=member, voice=voice,
+                                        face_ref=face_ref,
+                                        character_id=character_id))
+            except FileNotFoundError as exc:
+                return f"animato: {exc}"
+            return (f"cast {member} → {project.slug} (voice: {voice}"
+                    f"{', ref: ' + face_ref if face_ref else ', no reference'})")
         if action == "spark":
             opts = self._animato_opts(rest)
             idea = opts.get("idea", "")

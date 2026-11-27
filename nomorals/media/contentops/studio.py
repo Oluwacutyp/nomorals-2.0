@@ -17,11 +17,13 @@ a failed publish is reported, never claimed, and the finished video is
 still handed back as the export.
 
 Seams for the later port steps (kept clean, not built here): the
-``schedule`` field is what the auto-post mission (step 2) will read,
-``topic_queue`` is what the series templates (step 3) will fill, and
+``schedule`` field is what the auto-post mission (step 2) reads,
+``topic_queue`` is what the series templates (step 3) fill, and
 ``face_ref`` on the cast is what character-consistency hardening
-(step 4) will lock on. The GitHub-studio export (step 5) will read the
-manifest this module writes.
+(step 4) locks on — resolved by :func:`resolve_cast_lock` and
+carried into the render by :meth:`StudioRunner.spark`. The
+GitHub-studio export (step 5) will read the manifest this module
+writes.
 """
 
 from __future__ import annotations
@@ -81,6 +83,70 @@ def new_episode_id() -> str:
     return "ep_" + uuid.uuid4().hex[:10]
 
 
+#: image suffixes a face reference may carry
+_FACE_REF_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+
+
+def _member_field(member: Any, key: str) -> str:
+    """One cast field off a CastMember or a plain dict."""
+    if isinstance(member, dict):
+        return str(member.get(key) or "")
+    return str(getattr(member, key, "") or "")
+
+
+def resolve_cast_lock(cast: list) -> tuple[list[dict], str]:
+    """Validate a project's cast face references into a render lock.
+
+    Returns ``(lock, error)`` — ``lock`` is a list of ``{"name",
+    "voice", "character_id", "face_ref"}`` dicts with absolute
+    reference paths, in cast order; ``error`` is ``""`` on success
+    and a plain named reason otherwise. A member with no ``face_ref``
+    is skipped (a voice-only member needs no lock). A member whose
+    reference is missing, not a file, empty, wrong-suffixed, or
+    unreadable as an image fails the WHOLE lock — the run must not
+    render that character as someone else, or as nobody. Without
+    Pillow only existence/size/suffix are checked; with it the file
+    must also decode as an image.
+    """
+    lock: list[dict] = []
+    for member in cast or []:
+        name = _member_field(member, "name")
+        face_ref = _member_field(member, "face_ref")
+        if not face_ref.strip():
+            continue
+        p = Path(face_ref).expanduser()
+        if not p.is_absolute():
+            p = Path.cwd() / p
+        if not p.exists():
+            return [], (f"face reference for {name!r} not found: "
+                        f"{face_ref!r}")
+        if not p.is_file():
+            return [], (f"face reference for {name!r} is not a file: "
+                        f"{face_ref!r}")
+        if p.stat().st_size == 0:
+            return [], (f"face reference for {name!r} is empty: "
+                        f"{face_ref!r}")
+        if p.suffix.lower() not in _FACE_REF_EXTS:
+            return [], (f"face reference for {name!r} is not an image "
+                        f"file: {face_ref!r}")
+        try:
+            from PIL import Image
+        except ImportError:
+            Image = None  # type: ignore[assignment]
+        if Image is not None:
+            try:
+                with Image.open(p) as img:
+                    img.verify()
+            except Exception as exc:
+                return [], (f"face reference for {name!r} is not a "
+                            f"readable image: {face_ref!r} ({exc})")
+        lock.append({"name": name,
+                     "voice": _member_field(member, "voice") or "edge",
+                     "character_id": _member_field(member, "character_id"),
+                     "face_ref": str(p)})
+    return lock, ""
+
+
 @dataclass
 class CastMember:
     """One character in a project's cast.
@@ -88,8 +154,10 @@ class CastMember:
     ``voice`` is the voice the render speaks as (``"edge"`` = free Edge
     TTS first, catalogue on failure; anything else = a catalogue voice
     name). ``face_ref`` is the reference image for this character —
-    recorded now, locked on by character-consistency hardening (port
-    step 4); it does not change the step-1 render.
+    resolved and locked into every scene's render by
+    character-consistency hardening (port step 4): a missing or
+    unreadable reference fails the spark closed before any render
+    spend, it is never silently dropped or replaced.
     """
 
     name: str
@@ -251,6 +319,31 @@ class StudioStore:
         self.save(project)
         return project
 
+    def add_cast(self, slug: str, member: CastMember) -> StudioProject:
+        """Add a cast member (same name replaces); returns the project.
+
+        The face reference is stored as an absolute path at write
+        time, so the lock is unambiguous when the episode renders
+        later. Existence/readability is checked at spark time
+        (:func:`resolve_cast_lock`), not here — a member may be
+        cast before its reference image lands.
+        """
+        project = self.load(slug)
+        if member.face_ref:
+            member.face_ref = str(
+                Path(member.face_ref).expanduser().resolve())
+        for i, existing in enumerate(project.cast):
+            if isinstance(existing, CastMember) \
+                    and existing.name == member.name:
+                project.cast[i] = member
+                break
+        else:
+            project.cast.append(member)
+        self.save(project)
+        _log.info("studio: cast %s → %s (%s)", slug, member.name,
+                  member.face_ref or "no reference")
+        return project
+
 
 def _load_post_copy(pipeline: Any, job: Any) -> dict:
     """Title/description/hashtags the pipeline wrote for this job."""
@@ -351,12 +444,27 @@ class StudioRunner:
         episode = Episode(id=new_episode_id(), topic=topic,
                           created_at=_utcnow())
         project.episodes.append(episode)
+        # The cast lock resolves BEFORE plan() — a broken reference
+        # fails the episode before any render spend, and a locked
+        # cast is carried into the job so every scene renders from
+        # its reference. A member with no face_ref needs no lock.
+        lock, lock_error = resolve_cast_lock(project.cast)
+        if lock_error:
+            episode.status = "failed"
+            episode.error = lock_error
+            self.store.save(project)
+            return {"ok": False, "project": project.slug,
+                    "episode_id": episode.id, "job_id": "", "run_id": "",
+                    "video_path": "", "published": {},
+                    "rungs": {"cast": f"failed: {lock_error}"},
+                    "notes": [f"cast reference failed — fix this first: "
+                              f"{lock_error}"]}
         voice = (project.cast[0].voice if project.cast
                  else project.voice) or "edge"
         try:
             job = self.pipeline.plan(project.niche, topic, style=project.style,
                                      footage=project.footage, voice=voice,
-                                     music=project.music)
+                                     music=project.music, cast=lock)
         except Exception as exc:  # noqa: BLE001 — planning must not raise
             episode.status = "failed"
             episode.error = str(exc)
@@ -368,6 +476,9 @@ class StudioRunner:
                     "notes": [f"could not plan the episode: {exc}"]}
         episode.job_id = job.id
         rungs["plan"] = f"job {job.id}"
+        if lock:
+            rungs["cast"] = ("locked: " +
+                             ", ".join(m["name"] for m in lock))
         try:
             preflight = self.pipeline.preflight(job)
         except Exception as exc:  # noqa: BLE001

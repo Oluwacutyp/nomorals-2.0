@@ -97,9 +97,11 @@ class FakeTTS:
 
 
 class FakeStudio:
-    def __init__(self, fail_on: int = -1):
+    def __init__(self, fail_on: int = -1, fail_img2img: bool = False):
         self.fail_on = fail_on
+        self.fail_img2img = fail_img2img
         self.count = 0
+        self.img2img_refs: list[str] = []
 
     def generate(self, prompt, **kwargs):
         CALLS.append("studio.generate")
@@ -111,6 +113,21 @@ class FakeStudio:
         dest = kwargs.get("save_to")
         os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
         Image.new("RGB", (64, 113), (20, 30, 60)).save(dest)
+        return [dest]
+
+    def img2img(self, image_path, prompt, **kwargs):
+        """Reference-conditioned still: the cast-lock rung."""
+        CALLS.append("studio.img2img")
+        assert prompt.strip(), "empty visual prompt"
+        assert os.path.isfile(image_path), \
+            f"reference missing: {image_path}"
+        if self.fail_img2img:
+            raise RuntimeError("simulated img2img outage")
+        self.img2img_refs.append(str(image_path))
+        from PIL import Image
+        dest = kwargs.get("save_to")
+        os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
+        Image.new("RGB", (64, 113), (200, 30, 40)).save(dest)
         return [dest]
 
 
@@ -418,3 +435,165 @@ def test_estimator_shape_and_honesty(tmp_path):
         sum(r["time_low_s"] for r in est["stages"]), 1)
     assert "guess" in est["stages"][2]["basis"]  # no past runs → guesses
     assert any("$0" in n for n in est["notes"])
+
+
+# ── port step 4: character-consistency hardening ─────────────────────
+
+CAST_SCRIPT = """HOOK: Ada tells the lighthouse story.
+[SCENE 1]
+SAY: Ada opens the lighthouse door and steps into the storm.
+SHOW: a woman opening a lighthouse door, rain
+[SCENE 2]
+SAY: Ben climbs the lighthouse stairs behind her.
+SHOW: a man climbing stone stairs
+[SCENE 3]
+SAY: The light sweeps across the sea.
+SHOW: a lighthouse beam over dark water
+TITLE: Ada's Lighthouse
+DESCRIPTION: A keeper, a storm, and a light that never goes out.
+"""
+
+
+def _cast_refs(tmp_path):
+    from PIL import Image
+
+    ada = tmp_path / "ada.png"
+    ben = tmp_path / "ben.png"
+    Image.new("RGB", (64, 64), (200, 30, 40)).save(ada)
+    Image.new("RGB", (64, 64), (10, 200, 30)).save(ben)
+    return [{"name": "Ada", "voice": "ada_warm", "character_id": "",
+             "face_ref": str(ada)},
+            {"name": "Ben", "voice": "edge", "character_id": "",
+             "face_ref": str(ben)}]
+
+
+def test_job_cast_round_trip(tmp_path):
+    pipe = make_pipeline(tmp_path)
+    cast = _cast_refs(tmp_path)
+    job = pipe.plan("history", "round trip", cast=cast)
+    assert job.cast == cast
+    loaded = pipe.jobs.load(job.id)
+    assert loaded.to_dict() == job.to_dict()
+    assert loaded.cast[0]["name"] == "Ada"
+    # a job persisted before the lock existed (no "cast" key at all)
+    # loads with an empty cast, not an error
+    old_path = pipe.jobs.dir / "job_old.json"
+    old_path.write_text(json.dumps(
+        {"id": "job_old", "niche": "history", "topic": "old",
+         "status": "queued", "attempts": 0, "platforms": [],
+         "run_id": "", "created_at": "", "updated_at": "",
+         "posted_at": "", "error": None}), encoding="utf-8")
+    assert pipe.jobs.load("job_old").cast == []
+
+
+@needs_ffmpeg
+def test_locked_run_renders_every_scene_from_the_reference(tmp_path):
+    CALLS.clear()
+    cast = _cast_refs(tmp_path)
+    studio = FakeStudio()
+    pipe = make_pipeline(tmp_path, brain=FakeBrain(text=CAST_SCRIPT),
+                         studio=studio)
+    job = pipe.plan("history", "Ada's lighthouse", cast=cast)
+    result = pipe.run(job)
+    assert result.ok, result.error
+
+    # every scene rendered from a reference — never plain text-to-image
+    assert "studio.generate" not in CALLS
+    assert CALLS.count("studio.img2img") == 3
+    assert studio.img2img_refs == [
+        cast[0]["face_ref"],  # scene 1 names Ada
+        cast[1]["face_ref"],  # scene 2 names Ben
+        cast[0]["face_ref"],  # scene 3 names nobody → the lead, Ada
+    ]
+
+    run_dir = tmp_path / "runs" / result.run_id
+    frames = json.loads((run_dir / "frames.json").read_text())
+    assert len(frames) == 3
+    assert [f["reference_character"] for f in frames] == ["Ada", "Ben", "Ada"]
+    assert all(f["reference"] for f in frames)
+    assert all(f["source"] == "stills" for f in frames)
+    # the lock is on the manifest, so the run is auditable later
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["cast"] == cast
+    # continuity evidence: each locked frame scored against its reference
+    continuity = json.loads((run_dir / "continuity.json").read_text())
+    assert continuity["cast"] == ["Ada", "Ben"]
+    assert len(continuity["scenes"]) == 3
+    assert all(0.0 <= s["score"] <= 1.0 for s in continuity["scenes"])
+    assert 0.0 <= continuity["mean"] <= 1.0
+    assert all("continuity_score" in f for f in frames)
+
+
+@needs_ffmpeg
+def test_unlocked_run_uses_plain_stills(tmp_path):
+    CALLS.clear()
+    pipe = make_pipeline(tmp_path, brain=FakeBrain(text=CAST_SCRIPT))
+    job = pipe.plan("history", "Ada's lighthouse")
+    result = pipe.run(job)
+    assert result.ok, result.error
+    assert "studio.img2img" not in CALLS
+    assert "studio.generate" in CALLS
+    run_dir = tmp_path / "runs" / result.run_id
+    frames = json.loads((run_dir / "frames.json").read_text())
+    assert all("reference" not in f for f in frames)
+    assert not (run_dir / "continuity.json").exists()
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["cast"] == []
+
+
+@needs_ffmpeg
+def test_reference_render_failure_fails_the_stage_without_fallback(tmp_path):
+    CALLS.clear()
+    cast = _cast_refs(tmp_path)
+    pipe = make_pipeline(tmp_path, brain=FakeBrain(text=CAST_SCRIPT),
+                         studio=FakeStudio(fail_img2img=True))
+    job = pipe.plan("history", "Ada's lighthouse", cast=cast)
+    result = pipe.run(job)
+    assert not result.ok
+    assert result.error.stage == "visuals"
+    assert result.error.code == "IMGGEN_FAILED"
+    assert "reference" in result.error.message
+    # no silent fallback: the plain stills rung never ran
+    assert "studio.generate" not in CALLS
+
+
+@needs_ffmpeg
+def test_locked_cast_never_uses_stock(tmp_path):
+    CALLS.clear()
+    stock_calls: list[str] = []
+
+    def _fake_stock_fetch(query, out_dir):
+        stock_calls.append(query)
+        os.makedirs(out_dir, exist_ok=True)
+        clip = os.path.join(out_dir, "clip.mp4")
+        import subprocess
+
+        subprocess.run(
+            [shutil.which("ffmpeg"), "-y", "-v", "error", "-f", "lavfi",
+             "-i", "testsrc=size=320x568:rate=15:duration=2", clip],
+            check=True, timeout=120)
+        return {"ok": True, "path": clip, "provider": "fake-stock",
+                "source_url": "https://example.invalid/clip.mp4"}
+
+    cast = _cast_refs(tmp_path)
+    # unlocked + stock available → stock footage is used
+    pipe = make_pipeline(tmp_path, brain=FakeBrain(text=CAST_SCRIPT),
+                         stock_fetch=_fake_stock_fetch)
+    job = pipe.plan("history", "Ada's lighthouse", footage="auto")
+    assert pipe.run(job).ok
+    assert stock_calls, "stock fetch never ran on the unlocked job"
+    # locked + the same stock available → stock is never touched;
+    # a stranger's face would break the cast
+    stock_calls.clear()
+    CALLS.clear()
+    pipe = make_pipeline(tmp_path, brain=FakeBrain(text=CAST_SCRIPT),
+                         studio=FakeStudio(), stock_fetch=_fake_stock_fetch)
+    job = pipe.plan("history", "Ada's lighthouse", footage="auto",
+                    cast=cast)
+    result = pipe.run(job)
+    assert result.ok, result.error
+    assert stock_calls == []
+    run_dir = tmp_path / "runs" / result.run_id
+    frames = json.loads((run_dir / "frames.json").read_text())
+    assert all(f["source"] == "stills" for f in frames)
+    assert all(f["reference"] for f in frames)

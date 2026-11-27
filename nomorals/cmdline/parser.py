@@ -4847,6 +4847,7 @@ def _parser() -> argparse.ArgumentParser:
                      "nm animato queue <project> \"<topic>\"\n"
                      "nm animato post <project> <episode> [--private]\n"
                      "nm animato export <project> <episode>\n"
+                     "nm animato cast <project> <name> [--voice V] [--face-ref PATH] [--character-id ID]\n"
                      "nm animato status [--project NAME]\n"
                      "nm animato templates [--json]\n"
                      "nm animato template <genre> <project> \"<seed>\" [--count N]\n"
@@ -4881,6 +4882,17 @@ def _parser() -> argparse.ArgumentParser:
     an_q = an_sub.add_parser("queue", help="queue an episode topic")
     an_q.add_argument("name", help="project slug")
     an_q.add_argument("topic", help="episode idea to queue")
+    an_cast = an_sub.add_parser(
+        "cast", help="add a cast member (locks their face into every scene)")
+    an_cast.add_argument("name", help="project slug")
+    an_cast.add_argument("member", help="character name")
+    an_cast.add_argument("--voice", default="edge",
+                         help="voice for this character (default: edge)")
+    an_cast.add_argument("--face-ref", default="",
+                         help="reference image path — locks the face into "
+                              "every scene of every episode")
+    an_cast.add_argument("--character-id", default="",
+                         help="Character id, when the member is a Character")
     an_post = an_sub.add_parser("post", help="publish a rendered episode to YouTube")
     an_post.add_argument("name", help="project slug")
     an_post.add_argument("episode", help="episode id (or prefix)")

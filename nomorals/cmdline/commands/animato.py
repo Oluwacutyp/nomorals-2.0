@@ -9,6 +9,10 @@
     nm animato queue <project> "<topic>"
     nm animato post <project> <episode> [--private]
     nm animato export <project> <episode>
+    nm animato cast <project> <name> [--voice V] [--face-ref PATH]
+                [--character-id ID]  — add a cast member; the face
+                reference locks that character's face into every
+                scene of every episode (port step 4)
     nm animato status [project]
     nm animato templates [--json]
     nm animato template <genre> <project> "<seed>" [--count N]
@@ -155,6 +159,37 @@ def _cmd_spark(args: argparse.Namespace, context) -> int:
     except FileNotFoundError as exc:
         return _err(str(exc))
     except Exception as exc:  # noqa: BLE001
+        return _err(str(exc))
+
+
+def _cmd_cast(args: argparse.Namespace, context) -> int:
+    """Add (or replace by name) a cast member on a project.
+
+    The face reference is validated here — a missing file is a
+    plain error at add time, not a failed episode later. The spark
+    re-validates (the file may have moved since) and fails closed.
+    """
+    from pathlib import Path
+
+    from ...media.contentops.studio import CastMember
+
+    face_ref = (getattr(args, "face_ref", "") or "").strip()
+    if face_ref and not Path(face_ref).expanduser().is_file():
+        return _err(f"no face reference image at {face_ref!r}")
+    try:
+        runner = _runner()
+        project = runner.store.add_cast(
+            _project_arg(args) or args.name,
+            CastMember(name=args.member, voice=args.voice or "edge",
+                       face_ref=face_ref,
+                       character_id=args.character_id or ""))
+        member = next(c for c in project.cast if c.name == args.member)
+        return _ok(f"cast {member.name} → {project.slug} "
+                   f"(voice: {member.voice}"
+                   f"{', ref: ' + member.face_ref if member.face_ref else ', no reference'})")
+    except FileNotFoundError as exc:
+        return _err(str(exc))
+    except Exception as exc:  # noqa: BLE001 - CLI surfaces as text
         return _err(str(exc))
 
 
@@ -344,6 +379,7 @@ HANDLERS = {
     "show": _cmd_show,
     "spark": _cmd_spark,
     "queue": _cmd_queue,
+    "cast": _cmd_cast,
     "post": _cmd_post,
     "export": _cmd_export,
     "status": _cmd_status,

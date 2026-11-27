@@ -191,6 +191,10 @@ class Job:
     footage: str = ""  # "" = generated stills; "stock"|"auto" = stock first
     voice: str = ""  # "" = catalogue voice; "edge" = Edge TTS first
     music: str = ""  # music-bed preset (see _shims.MUSIC_BED_PRESETS); "" = ambient bed
+    cast: list = field(default_factory=list)  # the cast lock:
+    # [{name, voice, character_id, face_ref}] with absolute reference
+    # paths (see contentops.studio.resolve_cast_lock); [] = render
+    # without a reference, exactly as before.
     status: str = "queued"  # queued|rendering|ready|posted|failed
     attempts: int = 0
     platforms: list = field(default_factory=list)
@@ -474,6 +478,24 @@ def _visual_plan_raw(plugin: Any, script_text: str) -> Any:
         return None
 
 
+def _match_reference(cast: list, scene: dict) -> dict | None:
+    """Which cast member's reference locks this scene.
+
+    The scene's SAY/SHOW text naming a member wins; otherwise the
+    lead (first member). ``None`` when there is no cast. The rule is
+    deterministic and recorded per frame, so a series can be audited
+    scene by scene.
+    """
+    if not cast:
+        return None
+    text = f"{scene.get('say', '')} {scene.get('show', '')}".lower()
+    for member in cast:
+        name = (member.get("name", "") or "").strip().lower()
+        if name and name in text:
+            return member
+    return cast[0]
+
+
 def normalise_visual_prompts(plugin: Any, scenes: list[dict]) -> list[str]:
     """``plugin.visual_strategy`` → one image prompt per scene.
 
@@ -714,11 +736,12 @@ class ShortPipeline:
     def plan(self, niche: str, topic: str, *,
              platforms: list | None = None,
              style: str = "", footage: str = "", voice: str = "",
-             music: str = "") -> Job:
+             music: str = "", cast: list | None = None) -> Job:
         """Create a queued :class:`Job` (no rendering yet)."""
         job = Job(id=new_job_id(), niche=niche, topic=topic,
                   style=style, footage=footage, voice=voice,
                   music=music,
+                  cast=[dict(c) for c in (cast or [])],
                   platforms=list(platforms or []),
                   created_at=_utcnow())
         self.jobs.save(job)
@@ -773,6 +796,7 @@ class ShortPipeline:
             "run_id": job.run_id, "job_id": job.id,
             "niche": job.niche, "topic": job.topic,
             "footage": job.footage, "voice": job.voice,
+            "cast": [dict(c) for c in (getattr(job, "cast", None) or [])],
             "platforms": list(job.platforms),
             "created_at": _utcnow(),
             "stages": {s: {"status": "pending", "ms": 0, "attempts": 0,
@@ -1276,8 +1300,12 @@ class ShortPipeline:
         frames_dir = run_dir / "frames"
         frames_dir.mkdir(exist_ok=True)
         records: list[dict] = []
+        # A locked cast never uses stock: stock footage of a stranger
+        # would break the cast the lock exists to keep. Locked scenes
+        # render generated stills from their reference, every time.
+        cast = list(getattr(ctx.get("job"), "cast", None) or [])
         use_stock = (getattr(ctx.get("job"), "footage", "") or ""
-                     ).strip() in ("stock", "auto")
+                     ).strip() in ("stock", "auto") and not cast
         for i, (scene, prompt) in enumerate(zip(scenes, prompts)):
             dest = str(frames_dir / f"scene_{i:03d}.png")
             record = None
@@ -1287,13 +1315,18 @@ class ShortPipeline:
                 # to a generated still, and the record says which.
                 record = self._visual_stock(i, scene, prompt, dest, run_dir)
             if record is None:
-                record = self._visual_still(i, scene, prompt, dest)
+                record = self._visual_still(
+                    i, scene, prompt, dest,
+                    reference=_match_reference(cast, scene))
             record["effect"] = motions[i][0]
             record["zoom_direction"] = motions[i][1]
             records.append(record)
             _log.info("pipeline %s: visual %d/%d → %s (%s)",
                       ctx["manifest"]["run_id"], i + 1, len(scenes),
                       record["path"], record.get("source", "stills"))
+        if cast:
+            # Evidence the reference shaped the frames — never a gate.
+            self._measure_continuity(records, run_dir, cast)
         (run_dir / "frames.json").write_text(
             json.dumps(records, indent=2), encoding="utf-8")
         ctx["frames"] = records
@@ -1302,23 +1335,97 @@ class ShortPipeline:
                    os.path.relpath(r["path"], run_dir)
                    for i, r in enumerate(records)}}
 
-    def _visual_still(self, i: int, scene: dict, prompt: str,
-                      dest: str) -> dict:
-        """One scene's generated still (the pre-existing visual path)."""
+    def _measure_continuity(self, records: list[dict], run_dir: Path,
+                            cast: list) -> None:
+        """Score each locked frame against its reference (evidence).
+
+        ``videogen.consistency.boundary_metric`` measures a frame
+        against its reference (colour/palette/structure, 0..1).
+        Scores land on the frame records and in ``continuity.json``.
+        A low score means the frame drifted from the reference in
+        look — it is a measurement, not a verdict: a scene's
+        composition differs from a face photo by nature, so the
+        number is read beside the reference, never as pass/fail.
+        Pillow/numpy missing (or any measurement error) skips the
+        measurement with a warning — the run is never failed for it.
+        """
         try:
-            saved = self.studio.generate(
-                prompt, save_to=dest,
-                width=768, height=1344)  # 9:16-ish; studio filters
+            from PIL import Image
+
+            from ..videogen.consistency import boundary_metric
         except Exception as exc:  # noqa: BLE001
-            _log.exception("visuals: scene %d failed", i)
-            raise StageError(
-                "visuals", "IMGGEN_FAILED",
-                f"image {i + 1} failed: "
-                f"{type(exc).__name__}: {exc}",
-                hint="the native checkpoint may be missing or the "
-                     "profile too small for imggen — check `nm imggen`, "
-                     "then resume() (finished scenes are kept)",
-                retriable=True) from None
+            _log.warning("continuity: unmeasured (%s)", exc)
+            return
+        scored: list[dict] = []
+        for rec in records:
+            ref = rec.get("reference") or ""
+            path = rec.get("path") or ""
+            if not ref or not path:
+                continue
+            try:
+                ref_img = Image.open(ref).convert("RGB")
+                frame_img = Image.open(path).convert("RGB")
+                score = float(boundary_metric(ref_img, frame_img)["score"])
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("continuity: scene %s unmeasured (%s)",
+                             rec.get("scene"), exc)
+                continue
+            rec["continuity_score"] = round(score, 3)
+            scored.append({"scene": rec.get("scene"),
+                           "character": rec.get("reference_character"),
+                           "reference": ref, "score": round(score, 3)})
+        try:
+            (run_dir / "continuity.json").write_text(json.dumps(
+                {"cast": [m.get("name", "") for m in cast],
+                 "scenes": scored,
+                 "mean": (round(sum(s["score"] for s in scored)
+                                / len(scored), 3) if scored else None)},
+                indent=2), encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("continuity: could not write report (%s)", exc)
+
+    def _visual_still(self, i: int, scene: dict, prompt: str,
+                      dest: str, reference: dict | None = None) -> dict:
+        """One scene's generated still (the pre-existing visual path).
+
+        With a ``reference`` (a cast-lock member: ``{"name",
+        "face_ref", ...}``) the still renders from that reference
+        image via img2img — the same face seed drives every scene,
+        so the cast stays the same face episode after episode. A
+        reference render that fails fails the STAGE: falling back to
+        a plain text-to-image still would silently drop the lock and
+        ship a stranger's face.
+        """
+        if reference:
+            ref_path = str(reference.get("face_ref") or "")
+            try:
+                saved = self.studio.img2img(ref_path, prompt, save_to=dest)
+            except Exception as exc:  # noqa: BLE001
+                _log.exception("visuals: scene %d reference render failed",
+                               i)
+                raise StageError(
+                    "visuals", "IMGGEN_FAILED",
+                    f"image {i + 1} failed (reference {ref_path!r}): "
+                    f"{type(exc).__name__}: {exc}",
+                    hint="the cast reference could not render — check "
+                         "the reference image, then resume() (finished "
+                         "scenes are kept)",
+                    retriable=True) from None
+        else:
+            try:
+                saved = self.studio.generate(
+                    prompt, save_to=dest,
+                    width=768, height=1344)  # 9:16-ish; studio filters
+            except Exception as exc:  # noqa: BLE001
+                _log.exception("visuals: scene %d failed", i)
+                raise StageError(
+                    "visuals", "IMGGEN_FAILED",
+                    f"image {i + 1} failed: "
+                    f"{type(exc).__name__}: {exc}",
+                    hint="the native checkpoint may be missing or the "
+                         "profile too small for imggen — check `nm imggen`, "
+                         "then resume() (finished scenes are kept)",
+                    retriable=True) from None
         path = saved[0] if isinstance(saved, (list, tuple)) else saved
         path = str(path or dest)
         if not os.path.exists(path):
@@ -1327,8 +1434,12 @@ class ShortPipeline:
                              hint="check the imggen pipeline, then "
                                   "resume()",
                              retriable=True)
-        return {"scene": i, "prompt": prompt, "path": path,
-                "say": scene.get("say", ""), "source": "stills"}
+        record: dict = {"scene": i, "prompt": prompt, "path": path,
+                        "say": scene.get("say", ""), "source": "stills"}
+        if reference:
+            record["reference"] = str(reference.get("face_ref") or "")
+            record["reference_character"] = reference.get("name", "")
+        return record
 
     def _visual_stock(self, i: int, scene: dict, prompt: str, dest: str,
                       run_dir: Path) -> dict | None:
