@@ -61,6 +61,7 @@ from ...community.group_real_estate import (
 )
 from ...community.welcome_moderation import (
     BanList,
+    CaptchaGate,
     ModerationConfig,
     Moderator,
     WelcomeConfig,
@@ -193,6 +194,9 @@ _LOG_CATEGORY_KINDS: dict[str, frozenset[str]] = {
         "member_left_crowd_ban", "member_joined",
         "invite_revoked", "invite_recreated", "raid_end",
         "raid_auto_end", "welcome", "goodbye",
+        "captcha_held", "captcha_verified", "captcha_failed",
+        "captcha_blocked", "captcha_hold", "captcha_decision",
+        "captcha_skipped",
     }),
     "economy": frozenset({
         "fine", "tax", "payment", "deposit", "withdrawal",
@@ -268,9 +272,15 @@ def _default_settings() -> dict[str, Any]:
                                         # service messages after
                                         # handling (hygiene, §P1)
         "rules": [],
-        "captcha_mode": "off",          # off | button (P1 wiring
-                                        # of CaptchaGate lands with
-                                        # the button router)
+        "captcha_mode": "off",          # off | button | math |
+                                        # question — the join
+                                        # captcha (Rose CAPTCHA);
+                                        # "off" leaves the door as
+                                        # it always was
+        "captcha_questions": [],        # [{question, answer}] for
+                                        # question mode, asked in
+                                        # order; empty = the mode
+                                        # has nothing to ask with
         "moderation": {
             "flood_max": 6,
             "flood_window_s": 10.0,
@@ -667,6 +677,29 @@ def _board_unavailable_detail(parsed: dict[str, Any]) -> str:
 
 def _slug(group_key: str) -> str:
     return str(group_key).replace(":", "_").replace("/", "_")
+
+
+class _CaptchaExpectedChecker:
+    """A CaptchaChecker that compares the answer against the
+    expected answer stored on the group's captcha record for
+    that member.  One per group: the gate asks it with the
+    member's user id, it looks the record up live — so button,
+    math and question modes all verify through the same gate
+    with no per-mode checker."""
+
+    def __init__(self, surface: GroupSurface, group_key: str
+                 ) -> None:
+        self._surface = surface
+        self._group_key = group_key
+
+    def check(self, user_id: str, answer: str) -> bool:
+        entry = self._surface.store.group(self._group_key)
+        rec = (entry.get("captcha") or {}).get(str(user_id)) or {}
+        expected = rec.get("expected")
+        if expected is None:
+            return False
+        return (str(answer).strip().lower()
+                == str(expected).strip().lower())
 
 
 class GroupSurface:
@@ -1333,7 +1366,12 @@ class GroupSurface:
         if count_join:
             recent.append(now)
             state["recent_joins"] = recent[-64:]
-            if len(recent) >= int(cfg.get("raid_burst") or 8):
+            # An explicit 0 burst disables the sensor: the
+            # plain `or 8` would read 0 as "unset" and arm on
+            # 8 joins anyway.
+            burst = cfg.get("raid_burst")
+            burst = 8 if burst is None else int(burst)
+            if burst > 0 and len(recent) >= burst:
                 state["raid_until"] = now + float(
                     cfg.get("raid_cooldown_s") or 600)
         else:
@@ -1560,12 +1598,61 @@ class GroupSurface:
                 out["welcome"] = True
                 self.store.save()
                 return out
+            if str(cfg.get("mode") or "open") == "request":
+                # Request mode holds walk-ins too: a clean join
+                # waits for an admin's approval instead of
+                # walking in — the queue is the door, not the
+                # request form alone.  No welcome, no ledger
+                # rights until an admin releases them.
+                req = self._queue_record(
+                    entry, kind="hold", user_id=user_id,
+                    facts=facts, missing=[],
+                    reasons=["waiting for an admin's approval"],
+                    now=now)
+                self._set_restricted(
+                    entry, user_id, missing=[],
+                    reasons=["waiting for an admin's approval"],
+                    via="approval", action="", grace_until=None,
+                    now=now)
+                self._audit(group_key, "acceptance_approval_hold",
+                            user_id=user_id, request=req["id"])
+                out.update({
+                    "verdict": "restricted", "missing": [],
+                    "reasons": ["waiting for an admin's approval"],
+                    "request_id": req["id"],
+                    "actions": [{"kind": "acceptance_restrict",
+                                 "user_id": user_id,
+                                 "rule": "acceptance"}]})
+                self.store.save()
+                return out
             if raid and str(cfg.get("mode") or "open") == "open":
                 # Raid posture: open behaves as request — a clean
                 # join is HELD (restricted, releasable from the
-                # queue) instead of waved through.
+                # queue) instead of waved through, unless the
+                # group configured another raid action.
                 from .group_acceptance import FIX_LINES
 
+                raid_action = str(cfg.get("raid_action") or "hold")
+                if raid_action == "kick":
+                    self._audit(group_key, "raid_kick",
+                                user_id=user_id)
+                    out.update({
+                        "verdict": "kick", "missing": [],
+                        "reasons": [FIX_LINES["raid_hold"]],
+                        "actions": [{"kind": "kick",
+                                     "user_id": user_id,
+                                     "rule": "acceptance"}]})
+                    self.store.save()
+                    return out
+                if raid_action == "captcha":
+                    # No queue, no restriction — the caller
+                    # captcha-holds them; the verdict carries
+                    # the reason the door stayed shut.
+                    out.update({
+                        "verdict": "captcha", "missing": [],
+                        "reasons": [FIX_LINES["raid_hold"]]})
+                    self.store.save()
+                    return out
                 req = self._queue_record(
                     entry, kind="hold", user_id=user_id,
                     facts=facts, missing=[],
@@ -1750,11 +1837,28 @@ class GroupSurface:
                 "grace_minutes": int(cfg.get("grace_minutes") or 60)}
 
     def acceptance_queue(self, group_key: str) -> list[dict[str, Any]]:
-        """Pending queue records, oldest first (FIFO fairness)."""
+        """Pending queue records, oldest first (FIFO fairness).
+        Captcha holds ride the same queue (kind "captcha", id
+        cap-<user_id>) so an admin sees one door, not two."""
         entry = self.store.group(group_key)
         records = [r for r in
                    (entry.get("join_requests") or {}).values()
                    if r.get("state") == "pending"]
+        for uid, rec in (entry.get("captcha") or {}).items():
+            mode = str(rec.get("mode") or "button")
+            attempts = int(rec.get("attempts") or 0)
+            records.append({
+                "id": f"cap-{uid}", "kind": "captcha",
+                "user_id": str(uid),
+                "username": str(rec.get("username") or ""),
+                "name": str(rec.get("name") or ""),
+                "missing": [],
+                "reasons": [f"captcha ({mode}) pending"
+                            + (f" — {attempts} failed attempt(s)"
+                               if attempts else "")],
+                "unknown": [], "state": "pending",
+                "ts": float(rec.get("created") or 0),
+                "decided_by": ""})
         return sorted(records, key=lambda r: float(r.get("ts") or 0))
 
     def acceptance_decide(self, group_key: str, req_id: str, *,
@@ -1765,9 +1869,38 @@ class GroupSurface:
         record} — execute tells the caller what to perform:
         join_request (adapter approve/decline), release
         (unrestrict a held member), kick (remove a held member),
-        or nothing (already decided / unknown id)."""
+        captcha_admit (admit a captcha-held member), or nothing
+        (already decided / unknown id)."""
         now = now if now is not None else time.time()
         entry = self.store.group(group_key)
+        if str(req_id).startswith("cap-"):
+            # A captcha hold: the queue id is cap-<user_id>.
+            # Approve admits them (the caller runs the
+            # deferred admit); decline clears the hold and
+            # removes them.
+            user_id = str(req_id)[4:]
+            rec = (entry.get("captcha") or {}).get(user_id)
+            if rec is None:
+                return {"ok": False, "execute": "none",
+                        "record": None}
+            record = {"id": req_id, "kind": "captcha",
+                      "user_id": user_id,
+                      "username": str(rec.get("username") or ""),
+                      "name": str(rec.get("name") or "")}
+            if approve:
+                self._audit(group_key, "captcha_decision",
+                            user_id=user_id, request=req_id,
+                            approve=True, by=by)
+                self.store.save()
+                return {"ok": True, "execute": "captcha_admit",
+                        "record": record}
+            self._captcha_clear(entry, user_id)
+            self._audit(group_key, "captcha_decision",
+                        user_id=user_id, request=req_id,
+                        approve=False, by=by)
+            self.store.save()
+            return {"ok": True, "execute": "kick",
+                    "record": record}
         record = (entry.get("join_requests") or {}).get(req_id)
         if record is None or record.get("state") != "pending":
             return {"ok": False, "execute": "none",
@@ -1791,6 +1924,234 @@ class GroupSurface:
             self._clear_acceptance(entry, user_id)
         self.store.save()
         return {"ok": True, "execute": execute, "record": record}
+
+    # ---- captcha (Rose CAPTCHA) -------------------------------
+    # The join captcha, wired to the community CaptchaGate: the
+    # gate owns the attempts cap and the identity boundary; this
+    # surface owns the per-group records (mode, challenge,
+    # expected answer, the member's facts) and the queue merge.
+    # The gate's _pending IS the surface's entry["captcha"]
+    # dict — one source of truth, surviving a restart.
+
+    def captcha_mode(self, group_key: str) -> str:
+        """The group's captcha mode, normalized (off | button |
+        math | question)."""
+        mode = str(self.store.settings(group_key).get(
+            "captcha_mode") or "off").strip().lower()
+        return mode if mode in ("button", "math", "question") \
+            else "off"
+
+    def _captcha_gate(self, group_key: str,
+                      entry: dict[str, Any] | None = None
+                      ) -> CaptchaGate:
+        """A CaptchaGate over this group's persisted captcha
+        records, with a checker that compares against the stored
+        expected answer.  Built fresh per call — the records
+        are the state, the gate is just the logic."""
+        entry = entry if entry is not None \
+            else self.store.group(group_key)
+        records = entry.setdefault("captcha", {})
+        return CaptchaGate(
+            checker=_CaptchaExpectedChecker(self, group_key),
+            pending=records)
+
+    def _captcha_challenge(self, group_key: str, mode: str, *,
+                           now: float | None = None
+                           ) -> tuple[Any, Any, Any]:
+        """(challenge text, expected answer, options) for one
+        mode.  (None, None, None) when the mode has nothing to
+        ask with — question mode with no questions configured."""
+        if mode == "button":
+            return ("Tap “I'm human” below to join — one tap "
+                    "proves you're not a bot.", "verify", None)
+        if mode == "math":
+            import random
+
+            a = random.randint(2, 9)
+            b = random.randint(2, 9)
+            correct = a + b
+            options = {correct}
+            while len(options) < 4:
+                options.add(random.randint(4, 18))
+            return (f"What is {a} + {b}?", str(correct),
+                    [str(o) for o in sorted(options)])
+        if mode == "question":
+            questions = self.store.settings(group_key).get(
+                "captcha_questions") or []
+            if not questions:
+                return (None, None, None)
+            first = questions[0] or {}
+            q = str(first.get("question") or "").strip()
+            a = str(first.get("answer") or "").strip()
+            if not q or not a:
+                return (None, None, None)
+            return (f"Answer to join: {q}", a, None)
+        return (None, None, None)
+
+    def captcha_hold(self, group_key: str, user_id: str, *,
+                     name: str = "", username: str = "",
+                     facts: dict[str, Any] | None = None,
+                     now: float | None = None
+                     ) -> dict[str, Any]:
+        """Hold a join behind the group's captcha: build the
+        challenge for the configured mode, store the record,
+        and open the gate's hold.  Returns {held, mode,
+        challenge, options} — the caller sends the challenge.
+        {held: False} when the mode is off, the mode has
+        nothing to ask with, or the member is already held
+        (the existing challenge is returned)."""
+        now = now if now is not None else time.time()
+        mode = self.captcha_mode(group_key)
+        if mode == "off":
+            return {"held": False, "reason": "off"}
+        entry = self.store.group(group_key)
+        uid = str(user_id)
+        records = entry.setdefault("captcha", {})
+        if uid in records:
+            rec = records[uid]
+            return {"held": True,
+                    "mode": str(rec.get("mode") or mode),
+                    "challenge": rec.get("challenge"),
+                    "options": rec.get("options"),
+                    "already": True}
+        challenge, expected, options = self._captcha_challenge(
+            group_key, mode, now=now)
+        if challenge is None:
+            return {"held": False, "reason": "no_challenge"}
+        records[uid] = {
+            "mode": mode, "challenge": challenge,
+            "expected": expected, "options": options,
+            "attempts": 0, "created": now,
+            "challenge_msg_id": None,
+            "name": str(name or ""),
+            "username": str(username or ""),
+            "facts": dict(facts or {}),
+        }
+        gate = self._captcha_gate(group_key, entry)
+        gate.request_join(uid, identity={
+            "user_id": uid, "username": str(username or ""),
+            "name": str(name or "")})
+        self._audit(group_key, "captcha_held", user_id=uid,
+                    mode=mode)
+        self.store.save()
+        return {"held": True, "mode": mode,
+                "challenge": challenge, "options": options}
+
+    def captcha_answer(self, group_key: str, user_id: str,
+                       answer: str, *, now: float | None = None
+                       ) -> dict[str, Any]:
+        """One answer attempt: the gate counts it, checks it
+        against the stored expected answer, and admits or
+        blocks.  Returns the gate's verdict {state, ...} plus
+        the record (name/username/facts) when admitted, so the
+        caller can run the deferred admit."""
+        now = now if now is not None else time.time()
+        entry = self.store.group(group_key)
+        uid = str(user_id)
+        rec = (entry.get("captcha") or {}).get(uid)
+        if rec is None:
+            return {"state": "unknown"}
+        mode = str(rec.get("mode") or "")
+        gate = self._captcha_gate(group_key, entry)
+        res = gate.verify(uid, str(answer or ""))
+        state = res.get("state")
+        if state == "admitted":
+            self._audit(group_key, "captcha_verified",
+                        user_id=uid, mode=mode)
+            self.store.save()
+            return {"state": "admitted", "record": dict(rec)}
+        if state == "blocked":
+            self._audit(group_key, "captcha_blocked",
+                        user_id=uid, attempts=res.get("attempts"),
+                        mode=mode)
+            self.store.save()
+            return {"state": "blocked",
+                    "attempts": res.get("attempts")}
+        self._audit(group_key, "captcha_failed",
+                    user_id=uid, attempts=res.get("attempts"),
+                    mode=mode)
+        self.store.save()
+        return {"state": "pending_captcha",
+                "attempts": res.get("attempts"),
+                "remaining": res.get("remaining")}
+
+    def captcha_admit(self, group_key: str, user_id: str, *,
+                      by: str = "", now: float | None = None
+                      ) -> dict[str, Any]:
+        """A moderator's admit: release the hold and hand the
+        record back so the caller can run the deferred admit.
+        {admitted: False} when nobody is held."""
+        entry = self.store.group(group_key)
+        uid = str(user_id)
+        rec = (entry.get("captcha") or {}).get(uid)
+        if rec is None:
+            return {"admitted": False}
+        gate = self._captcha_gate(group_key, entry)
+        gate.release(uid)
+        self._audit(group_key, "captcha_verified",
+                    user_id=uid, by=by, via="moderator")
+        self.store.save()
+        return {"admitted": True, "record": dict(rec)}
+
+    def captcha_status(self, group_key: str, user_id: str
+                       ) -> dict[str, Any]:
+        """One member's captcha standing: the gate's state plus
+        the record's mode and challenge."""
+        entry = self.store.group(group_key)
+        uid = str(user_id)
+        rec = (entry.get("captcha") or {}).get(uid)
+        if rec is None:
+            return {"state": "unknown"}
+        gate = self._captcha_gate(group_key, entry)
+        res = gate.status(uid)
+        res["mode"] = str(rec.get("mode") or "")
+        res["challenge"] = rec.get("challenge")
+        return res
+
+    def _captcha_clear(self, entry: dict[str, Any],
+                       user_id: str) -> bool:
+        """Drop a captcha hold from the persisted records (the
+        gate shares this dict, so this releases it too)."""
+        records = entry.get("captcha") or {}
+        return records.pop(str(user_id), None) is not None
+
+    def acceptance_raid_lift(self, group_key: str, *,
+                             now: float | None = None
+                             ) -> list[dict[str, Any]]:
+        """Release raid-held queue records whose raid window has
+        passed: the raid is over, the held members are admitted
+        through the normal decide path.  Returns the decide
+        results, so the caller can run the releases.  A no-op
+        while a raid is still active, and once lifted the
+        posture stays down until a new burst arms it."""
+        now = now if now is not None else time.time()
+        entry = self.store.group(group_key)
+        state = self._acceptance_state(entry)
+        raid_until = float(state.get("raid_until") or 0)
+        if raid_until and now < raid_until:
+            return []
+        if not raid_until:
+            return []
+        state["raid_until"] = 0.0
+        out: list[dict[str, Any]] = []
+        for record in self.acceptance_queue(group_key):
+            if record.get("kind") != "hold":
+                continue
+            member = (entry["members"].get(
+                str(record.get("user_id") or "")) or {})
+            acc = member.get("acceptance") or {}
+            if acc.get("via") != "raid":
+                continue
+            res = self.acceptance_decide(
+                group_key, str(record.get("id") or ""),
+                approve=True, by="raid_auto_end", now=now)
+            if res.get("ok"):
+                out.append(res)
+        if out:
+            self._audit(group_key, "raid_auto_end",
+                        released=len(out))
+            self.store.save()
+        return out
 
     # ---- §16 P5 layer state ------------------------------------
     # Member tags, boost intel, and the forum-topic rename
@@ -1987,6 +2348,12 @@ class GroupSurface:
                     "reasons": [], "welcome": False}
         acc = member["acceptance"]
         cfg, raid = self.acceptance_cfg(group_key, now=now)
+        if acc.get("via") == "approval":
+            # An approval hold is an admin's decision to make —
+            # the button doesn't self-release it.
+            return {"state": "still", "missing": [],
+                    "reasons": ["waiting for an admin's approval"],
+                    "welcome": False, "was_restricted": True}
         if acc.get("via") == "raid" and raid:
             # A raid hold is an admin's call while the rush is
             # on — the button doesn't self-release mid-raid.

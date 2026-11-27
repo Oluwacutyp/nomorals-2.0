@@ -449,7 +449,7 @@ class TestRegistration:
         assert "devask" in CONTROL_COMMANDS
         assert CONTROL_COMMANDS["devask"] == (1, None)
         assert "devask" in PUBLIC_COMMANDS
-        assert len(PUBLIC_COMMANDS) == 287
+        assert len(PUBLIC_COMMANDS) == 291
         assert "devask" in COMMAND_DETAILS
         assert "/devask" in COMMAND_DETAILS["devask"]["usage"]
         assert "devask" in LIST_ONELINERS

@@ -221,11 +221,18 @@ class CaptchaGate:
         *,
         max_attempts: int = 3,
         enabled: bool = True,
+        pending: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self.checker = checker or _AlwaysFailChecker()
         self.max_attempts = max_attempts
         self.enabled = enabled
-        self._pending: dict[str, dict[str, Any]] = {}
+        # A shared pending dict: the group surface passes its own
+        # persisted per-group captcha records in, so the gate, the
+        # queue and the surface all read one source of truth and a
+        # hold survives a restart.  Defaults to a private dict
+        # for the standalone shape.
+        self._pending: dict[str, dict[str, Any]] = (
+            pending if pending is not None else {})
         self._admitted: set[str] = set()
 
     def request_join(
@@ -236,8 +243,35 @@ class CaptchaGate:
         if not self.enabled:
             self._admitted.add(user_id)
             return {"user_id": user_id, "state": "admitted", "captcha_required": False}
-        self._pending[user_id] = {"attempts": 0, "created": time.time()}
+        # Merge, don't replace: a surface sharing its record dict
+        # keeps its own fields (mode, challenge, expected, the
+        # member's facts) on the hold; only the attempt count and
+        # the clock reset.
+        rec = self._pending.setdefault(user_id, {})
+        rec.update({"attempts": 0, "created": time.time()})
         return {"user_id": user_id, "state": "pending_captcha", "captcha_required": True}
+
+    def status(self, user_id: str) -> dict[str, Any]:
+        """admitted / pending_captcha / blocked / unknown for one
+        member.  Blocked is a hold whose attempts ran out — the
+        record stays pending, only a moderator releases them."""
+        if user_id in self._admitted:
+            return {"state": "admitted"}
+        entry = self._pending.get(user_id)
+        if entry is None:
+            return {"state": "unknown"}
+        attempts = int(entry.get("attempts") or 0)
+        if attempts > self.max_attempts:
+            return {"state": "blocked", "attempts": attempts}
+        return {"state": "pending_captcha", "attempts": attempts,
+                "remaining": self.max_attempts - attempts}
+
+    def release(self, user_id: str) -> dict[str, Any]:
+        """A moderator's release: drop the hold, mark admitted.
+        Returns whether a hold was open."""
+        had = self._pending.pop(user_id, None) is not None
+        self._admitted.add(user_id)
+        return {"released": had}
 
     def verify(self, user_id: str, answer: str) -> dict[str, Any]:
         entry = self._pending.get(user_id)
@@ -258,6 +292,7 @@ class CaptchaGate:
         return {
             "user_id": user_id, "state": "pending_captcha",
             "attempts": entry["attempts"],
+            "remaining": self.max_attempts - entry["attempts"],
         }
 
     def is_admitted(self, user_id: str) -> bool:

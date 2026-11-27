@@ -73,9 +73,12 @@ ACCEPTANCE_DEFAULTS: dict[str, Any] = {
                                   # approve themselves
     "bot_whitelist": [],          # user ids or @usernames
     "raid_burst": 8,              # joins inside the window…
-    "raid_window_s": 120,         # …that read as a raid
+    "raid_window_s": 120,         # …that read as a raid; 0 burst
+                                  # = the sensor never arms
     "raid_cooldown_s": 600,       # posture holds this long
     "raid_grace_minutes": 5,      # shrunken grace during a raid
+    "raid_action": "hold",        # hold | captcha | kick — what a
+                                  # raid-mode join gets
 }
 
 #: What the member is told to fix, per failed criterion.  Plain

@@ -10736,6 +10736,16 @@ class PartnerRuntime(
 
         if kind == "joinq":
             return self._control_joinq(command.tail, message)
+        if kind == "captcha":
+            return self._control_captcha(command.tail, message)
+        if kind == "raidtime":
+            return self._control_raidtime(command.tail, message)
+        if kind == "raidactiontime":
+            return self._control_raidactiontime(command.tail,
+                                                message)
+        if kind == "autoantiraid":
+            return self._control_autoantiraid(command.tail,
+                                              message)
         if kind == "console":
             return self._control_console(command.tail, message)
         if kind == "groups":

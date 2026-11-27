@@ -494,7 +494,7 @@ class ToolAndCliTests(unittest.TestCase):
         )
 
         self.assertIn("papergraph", PUBLIC_COMMANDS)
-        self.assertEqual(287, len(PUBLIC_COMMANDS))
+        self.assertEqual(291, len(PUBLIC_COMMANDS))
         self.assertIn("papergraph", CONTROL_COMMANDS)
         self.assertIn("papergraph", COMMAND_DETAILS)
         grouped = [c for _, cs in LIST_GROUPS for c in cs]

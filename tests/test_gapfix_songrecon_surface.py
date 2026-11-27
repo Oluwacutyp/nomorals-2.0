@@ -120,7 +120,7 @@ class SongReconSurfaceTests(unittest.TestCase):
         # Same access as /sham: not a public command, so the 279 pin
         # does not move.
         self.assertNotIn("songrecon", PUBLIC_COMMANDS)
-        self.assertEqual(len(PUBLIC_COMMANDS), 287)
+        self.assertEqual(len(PUBLIC_COMMANDS), 291)
 
     def test_songrecon_details_stay_honest(self) -> None:
         details = COMMAND_DETAILS["songrecon"]

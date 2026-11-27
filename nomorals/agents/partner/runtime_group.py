@@ -1098,6 +1098,201 @@ class RuntimeGroupMixin:
                        settings=surface.store.settings(key)),
                    parse_mode=self._rendered_mode(message, text))
 
+    def _captcha_hold_member(self, surface, key, message, user_id,
+                             facts) -> bool:  # type: ignore[no-untyped-def]
+        """Captcha-hold one arrival: open the surface's hold and
+        send the challenge.  True when the member is held after
+        this call (new hold, or already held) — the caller skips
+        the welcome and the admitted-arrival hooks.  False when
+        no hold applies (mode off, or the mode has nothing to
+        ask with — the member joins as normal, audited).
+        Operators, admins and bots are never held.  A hold with
+        no challenge delivered is a silent ban, so the challenge
+        send is gated first and the hold is cleared again when
+        the send itself fails."""
+        if getattr(message, "sender_is_bot", False):
+            return False
+        if self._operator_or_false(message) \
+                or self._group_admin_ok(message):
+            return False
+        mode = surface.captcha_mode(key)
+        if mode == "off":
+            return False
+        if not self._system_send_ok(surface, key, message,
+                                    "captcha"):
+            surface._audit(key, "captcha_skipped",
+                           user_id=str(user_id), mode=mode,
+                           reason="system_output_suppressed")
+            surface.store.save()
+            return False
+        held = surface.captcha_hold(
+            key, user_id,
+            name=str(facts.get("name") or ""),
+            username=str(facts.get("username") or ""),
+            facts=facts)
+        if not held.get("held"):
+            surface._audit(key, "captcha_skipped",
+                           user_id=str(user_id), mode=mode,
+                           reason=str(held.get("reason") or ""))
+            surface.store.save()
+            return False
+        challenge = str(held.get("challenge") or "")
+        options = held.get("options") or None
+        buttons = None
+        if mode == "button":
+            from ...social.chat.expression import buttons_from_spec
+
+            buttons = buttons_from_spec(
+                [[("✅ I'm human",
+                   f"captcha verify {user_id}")]],
+                settings=surface.store.settings(key))
+        elif mode == "math" and options:
+            from ...social.chat.expression import buttons_from_spec
+
+            buttons = buttons_from_spec(
+                [[(str(opt),
+                   f"captcha answer {user_id} {opt}")
+                  for opt in options]],
+                settings=surface.store.settings(key))
+        try:
+            result = self._send(
+                message.chat, challenge, buttons=buttons,
+                parse_mode=self._rendered_mode(message, challenge))
+            mid = getattr(result, "message_id", "") or ""
+            if mid:
+                entry = surface.store.group(key)
+                rec = (entry.get("captcha") or {}).get(
+                    str(user_id)) or {}
+                rec["challenge_msg_id"] = str(mid)
+                surface.store.save()
+        except Exception as exc:  # noqa: BLE001 - a hold with no
+            # challenge is a silent ban: clear it, audit, admit.
+            from ...social.chat.failures import record_failure
+
+            record_failure(
+                "runtime.PartnerRuntime._captcha_hold_member", exc)
+            entry = surface.store.group(key)
+            surface._captcha_clear(entry, str(user_id))
+            surface._audit(key, "captcha_skipped",
+                           user_id=str(user_id), mode=mode,
+                           reason=f"challenge send failed: {exc}")
+            surface.store.save()
+            return False
+        return True
+
+    def _captcha_admit_member(self, surface, key, message, user_id,
+                              record) -> str:  # type: ignore[no-untyped-def]
+        """The deferred admit: the held member verified (or an
+        admin admitted them).  Returns the welcome they never
+        got ("" when welcomes are off), and runs the reputation
+        hook and the presence watch with the member's stored
+        join facts.  The caller sends the welcome through the
+        §33 gate — or returns it as a command reply, like
+        /recheck does."""
+        facts = (record.get("facts") or {}) if record else {}
+        name = (str(record.get("name") or "")
+                or str(facts.get("name") or ""))
+        username = (str(record.get("username") or "")
+                    or str(facts.get("username") or ""))
+        text = surface.welcome_text_for(
+            key, name=name, username=username,
+            group_name=str(message.chat.title or ""))
+        self._reputation_join_hook(
+            surface, key, message, user_id=str(user_id),
+            username=username, name=name)
+        watch_event = getattr(self, "_presence_watch_event", None)
+        if watch_event is not None:
+            watch_event(
+                message.chat.platform, "join",
+                user_id=str(user_id), username=username,
+                name=name,
+                episode_id=(f"{key}:{int(time.time())}"),
+                group=str(message.chat.title or ""),
+                ts=time.time())
+        return text or ""
+
+    def _send_captcha_blocked_note(self, surface, key, message,
+                                   user_id):  # type: ignore[no-untyped-def]
+        """The blocked member's one line: too many wrong
+        answers — a moderator reviews them.  Sent once, on the
+        crossing attempt, through the §33 gate like every
+        admission note."""
+        if not self._system_send_ok(surface, key, message,
+                                    "captcha"):
+            return
+        who = (str(message.sender or "")
+               or str(message.sender_username or "")
+               or "you")
+        self._send(message.chat,
+                   f"{who} — too many wrong answers. A moderator "
+                   "will review you; hang on.")
+
+    def _captcha_intercept_message(self, surface, key, message,
+                                   user_id) -> bool:  # type: ignore[no-untyped-def]
+        """A pending member's message, before handle_message: in
+        question mode a text IS the answer attempt; in every
+        other mode (or with no text) the message is deleted —
+        a held member doesn't speak until they verify.  Returns
+        True when the message was consumed here.  Commands,
+        operators, admins and bots never reach it."""
+        text = str(message.text or "")
+        if text.startswith("/"):
+            return False
+        if getattr(message, "sender_is_bot", False):
+            return False
+        if self._operator_or_false(message) \
+                or self._group_admin_ok(message):
+            return False
+        status = surface.captcha_status(key, user_id)
+        state = str(status.get("state") or "")
+        if state not in ("pending_captcha", "blocked"):
+            return False
+        adapter = self._group_adapter(message.chat.platform)
+        mode = str(status.get("mode") or "")
+        if state == "blocked":
+            self._execute_group_action(
+                surface, key, adapter, message,
+                {"kind": "delete", "user_id": user_id,
+                 "rule": "captcha"})
+            surface._audit(key, "captcha_hold", user_id=user_id,
+                           mode=mode, blocked=True)
+            surface.store.save()
+            return True
+        if mode == "question" and text.strip():
+            res = surface.captcha_answer(key, user_id, text)
+            if res.get("state") == "admitted":
+                welcome = self._captcha_admit_member(
+                    surface, key, message, user_id,
+                    res.get("record") or {})
+                if welcome and self._system_send_ok(
+                        surface, key, message, "welcome"):
+                    self._send(
+                        message.chat, welcome,
+                        buttons=self._welcome_buttons(surface, key),
+                        parse_mode=self._rendered_mode(
+                            message, welcome))
+                return True
+            self._execute_group_action(
+                surface, key, adapter, message,
+                {"kind": "delete", "user_id": user_id,
+                 "rule": "captcha"})
+            surface._audit(key, "captcha_hold", user_id=user_id,
+                           mode=mode,
+                           attempts=res.get("attempts"))
+            if res.get("state") == "blocked":
+                self._send_captcha_blocked_note(
+                    surface, key, message, user_id)
+            surface.store.save()
+            return True
+        self._execute_group_action(
+            surface, key, adapter, message,
+            {"kind": "delete", "user_id": user_id,
+             "rule": "captcha"})
+        surface._audit(key, "captcha_hold", user_id=user_id,
+                       mode=mode)
+        surface.store.save()
+        return True
+
     def _send_acceptance_queue_note(self, surface, key, message,  # type: ignore[no-untyped-def]
                                     record: dict,
                                     reasons: list) -> None:
@@ -1254,6 +1449,14 @@ class RuntimeGroupMixin:
         surface = self._group_surface()
         key = message.chat.key
         self._probe_bot_claim(surface, key, message)
+        # Raid auto-lift rides the beat: when a raid window has
+        # passed, held members are released through the normal
+        # decide path.  An empty lift is two dict reads.
+        adapter = self._group_adapter(message.chat.platform)
+        for decided in surface.acceptance_raid_lift(key):
+            self._joinq_execute(
+                surface, key, adapter, message, decided,
+                approve=True)
         meta = message.meta or {}
         service = str(meta.get("service") or "")
 
@@ -1372,6 +1575,16 @@ class RuntimeGroupMixin:
                         username=str(member.get("username") or ""),
                         name=str(member.get("name") or ""),
                         group_name=str(message.chat.title or ""))
+                    if self._captcha_hold_member(
+                            surface, key, message, user_id,
+                            {"user_id": user_id,
+                             "username": str(
+                                 member.get("username") or ""),
+                             "name": str(member.get("name") or "")}):
+                        # Captcha-held: no welcome, no ledger
+                        # rights, no admitted-arrival hooks —
+                        # the challenge is the only reply.
+                        continue
                     if text:
                         welcomed.append(text)
                     self._reputation_join_hook(
@@ -1422,6 +1635,12 @@ class RuntimeGroupMixin:
                         out.get("reasons") or [],
                         grace_minutes=out.get("grace_minutes"),
                         pending_kick=bool(out.get("pending_kick")))
+                elif out.get("verdict") == "captcha":
+                    # Raid posture with raid_action captcha, or
+                    # a clean admit the captcha owns: hold them
+                    # behind the challenge, no welcome yet.
+                    self._captcha_hold_member(
+                        surface, key, message, user_id, facts)
                 # §32: admitted (welcomed or restricted-admitted)
                 # — the reputation hook hears about the record;
                 # declined/kicked arrivals never reach it.
@@ -1642,6 +1861,15 @@ class RuntimeGroupMixin:
         user_id = str(message.sender_id or message.sender or "")
         if not user_id:
             return False
+        # A captcha-held member's message, before handle_message:
+        # in question mode the text IS the answer attempt; in
+        # every other mode (or with no text) the message is
+        # deleted — a held member doesn't speak until they
+        # verify.  Commands, operators, admins and bots never
+        # reach it.
+        if self._captcha_intercept_message(
+                surface, key, message, user_id):
+            return True
         if meta.get("edited"):
             # Evidentiary antiedit: record both versions, then
             # let the edited text flow through the normal path.
@@ -4501,6 +4729,8 @@ class RuntimeGroupMixin:
                 "hygiene", "banned", "bots") if acc_crit.get(name)]
             _acc_cfg, raid_now = surface.acceptance_cfg(key)
             queue_n = len(surface.acceptance_queue(key))
+            burst = acc.get("raid_burst")
+            burst = 8 if burst is None else int(burst)
             card.block_lines([
                 f"mode: {acc.get('mode', 'open')} · action on a "
                 f"failed check: {acc.get('action', 'restricted')}"
@@ -4512,6 +4742,12 @@ class RuntimeGroupMixin:
                    else "none — the door is open"),
                 f"queue: {queue_n} waiting · raid posture: "
                 f"{'ACTIVE (tightened)' if raid_now else 'calm'}",
+                f"raid: auto-arm "
+                f"{'off' if burst == 0 else f'on {burst} joins'}"
+                f" · holds {int(acc.get('raid_cooldown_s') or 600)}s"
+                f" · grace {int(acc.get('raid_grace_minutes') or 5)}m"
+                f" · raid joins get: {acc.get('raid_action', 'hold')}",
+                f"captcha: {surface.captcha_mode(key)}",
             ], title="Acceptance")
             # Escalation block (DESIGN §30): the ladder EVERY
             # strike consumer reads — sensors, manual warns,
@@ -4835,6 +5071,14 @@ class RuntimeGroupMixin:
                 "decline|restricted|kick|default`",
                 "`/gsettings acceptance whitelist add|remove "
                 "@name|id`",
+                "`/gsettings acceptance raid hold|captcha|kick`",
+                "`/gsettings captcha mode off|button|math|"
+                "question` · `/gsettings captcha question add "
+                "Q|A|list|remove N|clear`",
+                "`/captcha [verify <id>|answer <id> <text>|"
+                "status <id>]` · `/raidtime <seconds>` · "
+                "`/raidactiontime <seconds>` · "
+                "`/autoantiraid <n>`",
                 "`/gsettings escalation limit N` · "
                 "`/gsettings escalation final kick|ban` · "
                 "`/gsettings escalation window DAYS`",
@@ -5400,6 +5644,101 @@ class RuntimeGroupMixin:
                     "cap N · ltv PCT · rate PCT — /gsettings "
                     "shows the levers.")
         # ── acceptance grammar (DESIGN §28) ─────────────────────
+        if head == "captcha":
+            sub = rest.lower()
+            if sub == "mode" and rest2.lower() in (
+                    "off", "button", "math", "question"):
+                mode = rest2.lower()
+                surface.update_settings(key, captcha_mode=mode)
+                surface._audit(
+                    key, "gsettings", setting="captcha_mode",
+                    value=mode,
+                    by=str(message.sender_id or message.sender
+                           or ""))
+                surface.store.save()
+                explain = {
+                    "off": "the door is as it always was — no "
+                           "captcha on joins.",
+                    "button": "a join gets a press-to-verify "
+                              "challenge; one tap admits them.",
+                    "math": "a join gets a small sum to answer "
+                            "— tap the right number.",
+                    "question": "a join gets the group's "
+                                "question to answer in text.",
+                }[mode]
+                return f"join captcha: {mode} — {explain}"
+            if sub == "question" and rest2:
+                bits = rest2.split(None, 1)
+                verb = bits[0].lower()
+                arg = bits[1].strip() if len(bits) > 1 else ""
+                questions = [dict(q) for q in (
+                    surface.store.settings(key).get(
+                        "captcha_questions") or [])]
+                if verb == "list":
+                    if not questions:
+                        return ("no captcha questions yet — "
+                                "/gsettings captcha question add "
+                                "QUESTION|ANSWER to set one.")
+                    lines = [f"{i + 1}. {q.get('question', '')}"
+                             for i, q in enumerate(questions)]
+                    return ("captcha questions:\n"
+                            + "\n".join(lines))
+                if verb == "add" and "|" in arg:
+                    q, _, a = arg.partition("|")
+                    q, a = q.strip(), a.strip()
+                    if not q or not a:
+                        return ("usage: /gsettings captcha "
+                                "question add QUESTION|ANSWER")
+                    questions.append({"question": q, "answer": a})
+                    surface.update_settings(
+                        key, captcha_questions=questions)
+                    surface._audit(
+                        key, "gsettings",
+                        setting="captcha_questions",
+                        value=f"add: {q}",
+                        by=str(message.sender_id or message.sender
+                               or ""))
+                    surface.store.save()
+                    return (f"captcha question added "
+                            f"({len(questions)} set) — question "
+                            "mode asks the first one.")
+                if verb == "remove" and arg.isdigit():
+                    n = int(arg)
+                    if 1 <= n <= len(questions):
+                        removed = questions.pop(n - 1)
+                        surface.update_settings(
+                            key, captcha_questions=questions)
+                        surface._audit(
+                            key, "gsettings",
+                            setting="captcha_questions",
+                            value="remove: "
+                            f"{removed.get('question', '')}",
+                            by=str(message.sender_id
+                                   or message.sender or ""))
+                        surface.store.save()
+                        return (f"captcha question {n} removed "
+                                f"({len(questions)} left).")
+                    return ("no question N there — /gsettings "
+                            "captcha question list shows them.")
+                if verb == "clear":
+                    surface.update_settings(
+                        key, captcha_questions=[])
+                    surface._audit(
+                        key, "gsettings",
+                        setting="captcha_questions",
+                        value="clear",
+                        by=str(message.sender_id or message.sender
+                               or ""))
+                    surface.store.save()
+                    return ("captcha questions cleared — "
+                            "question mode has nothing to ask "
+                            "with until one is added.")
+                return ("usage: /gsettings captcha question "
+                        "add QUESTION|ANSWER · list · remove N · "
+                        "clear")
+            return ("usage: /gsettings captcha mode "
+                    "off|button|math|question · /gsettings "
+                    "captcha question add Q|A|list|remove N|clear")
         if head == "acceptance":
             sub = rest.lower()
             if sub == "mode" and rest2.lower() in (
@@ -5410,9 +5749,10 @@ class RuntimeGroupMixin:
                         + {"open": "anyone can walk in; the "
                                    "criteria judge them at the "
                                    "door.",
-                           "request": "approval-mode invite "
-                                      "links produce requests "
-                                      "the rules judge first.",
+                           "request": "joins wait for an admin's "
+                                      "approval — requests and "
+                                      "walk-ins alike sit in "
+                                      "/joinq until decided.",
                            "invite": "joins arrive by invite; "
                                      "the criteria still judge "
                                      "them on arrival."}
@@ -5529,9 +5869,29 @@ class RuntimeGroupMixin:
                             f"{', '.join(wl) or 'empty'}.")
                 return ("usage: /gsettings acceptance whitelist "
                         "add|remove @name|id")
+            if sub == "raid" and rest2.lower() in (
+                    "hold", "captcha", "kick"):
+                self._acceptance_update(surface, key,
+                                        raid_action=rest2.lower())
+                surface._audit(
+                    key, "gsettings", setting="raid_action",
+                    value=rest2.lower(),
+                    by=str(message.sender_id or message.sender
+                           or ""))
+                surface.store.save()
+                explain = {
+                    "hold": "a clean join during a raid waits "
+                            "in the queue for an admin.",
+                    "captcha": "a clean join during a raid gets "
+                               "the captcha challenge instead.",
+                    "kick": "a clean join during a raid is "
+                            "removed on arrival.",
+                }[rest2.lower()]
+                return (f"raid joins now get: {rest2.lower()} "
+                        f"({explain})")
             return ("acceptance grammar: mode, the criterion "
                     "names, action, grace, auto, override, "
-                    "whitelist — /gsettings shows the block.")
+                    "whitelist, raid — /gsettings shows the block.")
         return ("I didn't follow that — /gsettings alone shows the "
                 "current settings and the change grammar.")
 
@@ -11919,6 +12279,116 @@ class RuntimeGroupMixin:
         return self._card(message, card,
                           [[("✅ Check me again", "recheck")]])
 
+    def _control_captcha(self, tail, message) -> str:  # type: ignore[no-untyped-def]
+        """The join captcha's command face (Rose CAPTCHA): a
+        held member verifies (button tap — the tap itself is
+        the answer) or answers (math/question text); anyone
+        reads their own standing, an admin reads another
+        member's.  The sender check is the gate: only the held
+        member answers their own hold — admins decide from
+        /joinq, never by answering for them."""
+        key = self._group_key_or_none(message)
+        if key is None:
+            return "that's a group thing — tap it in the group."
+        surface = self._group_surface()
+        user_id = str(message.sender_id or message.sender or "")
+        if not user_id:
+            return "I couldn't tell who tapped that."
+        parts = str(tail or "").strip().split()
+        if not parts:
+            return self._captcha_status_line(
+                surface, key, user_id,
+                surface.captcha_status(key, user_id))
+        verb = parts[0].lower()
+        if verb == "verify":
+            target = str(parts[1]) if len(parts) >= 2 else user_id
+            if target != user_id:
+                return ("that's their captcha to pass — only "
+                        "the held member taps it.")
+            res = surface.captcha_answer(key, user_id, "verify")
+            return self._captcha_answer_line(
+                surface, key, message, user_id, res)
+        if verb == "answer":
+            if len(parts) < 3:
+                return ("usage: /captcha answer <id> <your "
+                        "answer> — or tap the button.")
+            target = str(parts[1])
+            if target != user_id:
+                return ("that's their captcha to pass — only "
+                        "the held member answers it.")
+            res = surface.captcha_answer(
+                key, user_id, " ".join(parts[2:]))
+            return self._captcha_answer_line(
+                surface, key, message, user_id, res)
+        if verb == "status":
+            target = str(parts[1]) if len(parts) >= 2 else user_id
+            if target != user_id and not (
+                    self._operator_or_false(message)
+                    or self._group_admin_ok(message)):
+                return ("that's an admin read — your own "
+                        "standing is bare /captcha.")
+            if target.startswith("@"):
+                target = self._captcha_id_for_name(
+                    surface, key, target[1:]) or target
+            return self._captcha_status_line(
+                surface, key, target,
+                surface.captcha_status(key, target))
+        return ("usage: /captcha — your standing · /captcha "
+                "verify <id> · /captcha answer <id> <text> · "
+                "/captcha status <id>")
+
+    def _captcha_id_for_name(self, surface, key, username
+                             ) -> str | None:  # type: ignore[no-untyped-def]
+        """A ledger member's user id by username, or None."""
+        entry = surface.store.group(key)
+        for uid, member in (entry.get("members") or {}).items():
+            if str(member.get("username") or "").lower() \
+                    == str(username or "").lower():
+                return str(uid)
+        return None
+
+    def _captcha_answer_line(self, surface, key, message, user_id,
+                             res) -> str:  # type: ignore[no-untyped-def]
+        """The outcome line for one verify/answer attempt: the
+        welcome itself when admitted (the reply IS the welcome,
+        like /recheck), the hold line when blocked, tries-left
+        otherwise."""
+        state = str(res.get("state") or "")
+        if state == "admitted":
+            welcome = self._captcha_admit_member(
+                surface, key, message, user_id,
+                res.get("record") or {})
+            return welcome or "✅ verified — you're in. Welcome!"
+        if state == "blocked":
+            return ("too many wrong answers — you're on hold "
+                    "for a moderator now.")
+        if state == "pending_captcha":
+            remaining = res.get("remaining")
+            left = (f" — {remaining} attempt(s) left"
+                    if remaining is not None else "")
+            return f"not quite — try again{left}."
+        return "you're not on the captcha list — nothing to answer."
+
+    def _captcha_status_line(self, surface, key, user_id,
+                             status) -> str:  # type: ignore[no-untyped-def]
+        """One member's captcha standing, in plain words."""
+        state = str(status.get("state") or "")
+        if state == "unknown":
+            return "no captcha hold on that member."
+        if state == "admitted":
+            return "already verified — they're in."
+        label = surface._member_label(key, str(user_id)) \
+            or str(user_id)
+        mode = str(status.get("mode") or "")
+        attempts = status.get("attempts")
+        if state == "blocked":
+            return (f"{label} is blocked on the {mode} captcha "
+                    f"({attempts} failed attempt(s)) — a "
+                    "moderator decides from /joinq.")
+        return (f"{label} is waiting on the {mode} captcha "
+                f"({attempts} failed attempt(s)) — /joinq "
+                "decides.")
+
     def _joinq_label(self, surface, key, record) -> str:  # type: ignore[no-untyped-def]
         return (record.get("name")
                 or (f"@{record['username']}"
@@ -12076,6 +12546,24 @@ class RuntimeGroupMixin:
                     f"{label} released on the books — the "
                     f"platform didn't lift the restriction "
                     f"(see /glog).")
+        if execute == "captcha_admit":
+            # A captcha hold the admin approved: release the
+            # hold, then the deferred admit (welcome + hooks).
+            admitted = surface.captcha_admit(
+                key, user_id,
+                by=str(message.sender_id or message.sender or ""))
+            if admitted.get("admitted"):
+                text = self._captcha_admit_member(
+                    surface, key, message, user_id,
+                    admitted.get("record") or {})
+                if text and self._system_send_ok(
+                        surface, key, message, "welcome"):
+                    self._send(
+                        message.chat, text,
+                        buttons=self._welcome_buttons(surface, key),
+                        parse_mode=self._rendered_mode(message,
+                                                       text))
+            return f"✅ {label} admitted — they're in."
         if execute == "kick":
             done = self._execute_group_action(
                 surface, key, adapter, message,
@@ -12168,6 +12656,104 @@ class RuntimeGroupMixin:
         card.note("requests stay open until decided or the "
                   "invite link is revoked")
         return self._card(message, card, buttons)
+
+    def _control_raidtime(self, tail, message) -> str:  # type: ignore[no-untyped-def]
+        """Raid cooldown: how long raid mode holds once the
+        burst sensor arms it (60–86400 seconds)."""
+        key, err = self._mod_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        acc = (surface.store.settings(key)
+               .get("acceptance") or {})
+        text = str(tail or "").strip()
+        if not text:
+            current = int(acc.get("raid_cooldown_s") or 600)
+            return (f"raid mode holds for {current}s once the "
+                    "burst sensor arms it — /raidtime <seconds> "
+                    "to change it (60–86400).")
+        try:
+            seconds = int(text.split()[0])
+        except ValueError:
+            return ("that's not a number of seconds — "
+                    "/raidtime <seconds>.")
+        if seconds < 60 or seconds > 86400:
+            return "raid time is 60–86400 seconds."
+        self._acceptance_update(surface, key,
+                                raid_cooldown_s=seconds)
+        surface._audit(
+            key, "raid_config", setting="raid_cooldown_s",
+            value=seconds,
+            by=str(message.sender_id or message.sender or ""))
+        surface.store.save()
+        return (f"raid mode now holds for {seconds}s once "
+                "armed.")
+
+    def _control_raidactiontime(self, tail, message) -> str:  # type: ignore[no-untyped-def]
+        """Raid grace: how long a raid-held member gets to fix
+        their profile (60–86400 seconds, stored as minutes)."""
+        key, err = self._mod_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        acc = (surface.store.settings(key)
+               .get("acceptance") or {})
+        text = str(tail or "").strip()
+        if not text:
+            current = int(acc.get("raid_grace_minutes") or 5)
+            return (f"a raid-held member gets {current}m to "
+                    "fix their profile — /raidactiontime "
+                    "<seconds> to change it (60–86400).")
+        try:
+            seconds = int(text.split()[0])
+        except ValueError:
+            return ("that's not a number of seconds — "
+                    "/raidactiontime <seconds>.")
+        if seconds < 60 or seconds > 86400:
+            return "raid grace is 60–86400 seconds."
+        minutes = seconds // 60
+        self._acceptance_update(surface, key,
+                                raid_grace_minutes=minutes)
+        surface._audit(
+            key, "raid_config", setting="raid_grace_minutes",
+            value=minutes,
+            by=str(message.sender_id or message.sender or ""))
+        surface.store.save()
+        return (f"a raid-held member now gets {minutes}m to "
+                "fix their profile.")
+
+    def _control_autoantiraid(self, tail, message) -> str:  # type: ignore[no-untyped-def]
+        """The burst sensor: N joins inside the raid window
+        auto-arms raid mode (0 = off, 1–64)."""
+        key, err = self._mod_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        acc = (surface.store.settings(key)
+               .get("acceptance") or {})
+        text = str(tail or "").strip()
+        if not text:
+            current = acc.get("raid_burst")
+            current = 8 if current is None else int(current)
+            state = "off" if current == 0 \
+                else f"{current} joins"
+            return (f"raid mode auto-arms on {state} inside "
+                    "the raid window — /autoantiraid <n> to "
+                    "change it (0 = off, 1–64).")
+        try:
+            n = int(text.split()[0])
+        except ValueError:
+            return "that's not a number — /autoantiraid <n>."
+        if n < 0 or n > 64:
+            return "auto-raid is 0–64 joins (0 = off)."
+        self._acceptance_update(surface, key, raid_burst=n)
+        surface._audit(
+            key, "raid_config", setting="raid_burst", value=n,
+            by=str(message.sender_id or message.sender or ""))
+        surface.store.save()
+        return ("raid mode auto-arming is off." if n == 0 else
+                f"raid mode now auto-arms on {n} joins inside "
+                "the raid window.")
 
     # ---- cross-group reputation (DESIGN §32) -----------------------
 

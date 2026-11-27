@@ -215,7 +215,8 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "rules", "member", "lookup", "glog", "gsettings", "strikes",
     "setlog", "unsetlog", "log", "nolog", "lock", "unlock",
     "locks",
-    "recheck", "joinq", "console", "groups", "ghealth", "digest", "community", "gbackup",
+    "recheck", "joinq", "captcha", "raidtime", "raidactiontime",
+    "autoantiraid", "console", "groups", "ghealth", "digest", "community", "gbackup",
     "undonotice",
     "flag", "rep", "repclear", "repdismiss",
     "steal", "sticker", "convert", "gif", "emoji", "customemoji",
@@ -811,6 +812,10 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "strikes": (0, 1),        # /strikes [@member] — the defense strike ledger: who's on the ladder (admins; §17)
     "recheck": (0, 0),        # /recheck — a restricted member's “check me again”: re-runs the join criteria live (§28)
     "joinq": (0, None),       # /joinq [approve|decline <id>|all] — the admin join queue: requests + raid holds (§28)
+    "captcha": (0, 2),        # /captcha [verify <id>|answer <id> <text>|status <id>] — the join captcha's command face: a held member verifies or answers, anyone reads their own standing (admins read another's)
+    "raidtime": (0, 1),       # /raidtime [seconds] — how long raid mode holds once the burst sensor arms it (60–86400; admins)
+    "raidactiontime": (0, 1), # /raidactiontime [seconds] — how long a raid-held member gets to fix their profile, stored as minutes (60–86400; admins)
+    "autoantiraid": (0, 1),   # /autoantiraid [n] — the burst sensor: N joins inside the raid window auto-arms raid mode, 0 = off (0–64; admins)
     "console": (0, None),     # /console [gN [section [grammar]]] — the DM admin console: groups the sender admins, configured in tappable sections (§30)
     "groups": (0, None),      # /groups — the §8 dashboard: every group/channel you admin — status, member count, economy health, pending actions — deep-links into /console
     "ghealth": (0, None),     # /ghealth [name] [refresh] — WhatsApp group health analytics: churn, growth, topics, rhythm, silent members (census §6 #6; admins)
@@ -4042,6 +4047,22 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/joinq | /joinq approve <id> | /joinq decline <id> | /joinq approve all | /joinq ask <id> <message>",
             "example": "/joinq ask jr-0003 where did you hear about us?",
             "related": "/gsettings /glog /recheck"},
+    "captcha": {"what": "the join captcha (Rose CAPTCHA): a held member verifies or answers to get in. Bare /captcha reads your own standing; verify is the button tap (the tap itself is the answer); answer carries the text for math/question modes; status reads a member's standing (admins). Only the held member answers their own hold — admins decide from /joinq, never by answering for them. Three wrong answers holds them for a moderator.",
+            "usage": "/captcha | /captcha verify <id> | /captcha answer <id> <text> | /captcha status <id>",
+            "example": "/captcha answer 123456 7",
+            "related": "/joinq /gsettings /recheck"},
+    "raidtime": {"what": "how long raid mode holds once the burst sensor arms it (admins): the join-rush posture that tightens the door while it stands. Bare /raidtime reports the current hold; /raidtime <seconds> sets it (60–86400).",
+            "usage": "/raidtime [seconds]",
+            "example": "/raidtime 1800",
+            "related": "/raidactiontime /autoantiraid /gsettings"},
+    "raidactiontime": {"what": "how long a raid-held member gets to fix their profile (admins): the shrunken grace during a raid, in seconds (stored as minutes). Bare /raidactiontime reports it; /raidactiontime <seconds> sets it (60–86400).",
+            "usage": "/raidactiontime [seconds]",
+            "example": "/raidactiontime 600",
+            "related": "/raidtime /autoantiraid /gsettings"},
+    "autoantiraid": {"what": "the burst sensor (admins): N joins inside the raid window auto-arms raid mode — the door tightens itself instead of waiting for an admin to notice. Bare /autoantiraid reports the threshold; /autoantiraid <n> sets it (0 = off, 1–64).",
+            "usage": "/autoantiraid [n]",
+            "example": "/autoantiraid 5",
+            "related": "/raidtime /raidactiontime /gsettings"},
     "console": {"what": "the DM admin console (§30): message Devon privately and she lists the groups where YOU hold admin — pick one and configure its systems there in tappable sections (defense + the warn ladder, acceptance, economy + governance, estate levers, presentation, welcome/rules), with runtime status (uptime, per-platform connection, userbot session) on the home card. Changes apply at once and land in the group's /glog with your name on them. Owner-only switches stay owner-only, judged in the target group.",
             "usage": "/console | /console g1 | /console g1 defense escalation limit 5",
             "example": "/console",
@@ -5234,7 +5255,8 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("groups & communities", ["rules", "member", "lookup", "glog", "gsettings",
                             "strikes", "setlog", "unsetlog", "log", "nolog",
                             "lock", "unlock", "locks",
-                            "recheck", "joinq", "console",
+                            "recheck", "joinq", "captcha", "raidtime",
+                            "raidactiontime", "autoantiraid", "console",
                             "groups", "ghealth", "digest", "community", "gbackup",
                             "undonotice", "flag", "rep", "repclear",
                             "repdismiss",
@@ -5565,7 +5587,8 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("groups & communities",
      ["rules", "member", "lookup", "glog", "gsettings", "strikes",
       "setlog", "unsetlog", "log", "nolog", "lock", "unlock", "locks",
-      "recheck", "joinq", "console", "groups", "ghealth", "digest", "community", "gbackup",
+      "recheck", "joinq", "captcha", "raidtime", "raidactiontime",
+      "autoantiraid", "console", "groups", "ghealth", "digest", "community", "gbackup",
       "undonotice",
       "flag", "rep", "repclear", "repdismiss",
       "balance", "mine", "work", "pay", "gshop", "quests",

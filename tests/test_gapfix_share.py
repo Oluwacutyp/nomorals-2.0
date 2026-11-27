@@ -430,7 +430,7 @@ class ChatRegistrationTests(unittest.TestCase):
         self.assertIn("/share <file>",
                       COMMAND_DETAILS["share"]["usage"])
         self.assertNotIn("share", PUBLIC_COMMANDS)
-        self.assertEqual(287, len(PUBLIC_COMMANDS))
+        self.assertEqual(291, len(PUBLIC_COMMANDS))
         self.assertFalse(caller_may_run("share", False))
         self.assertTrue(caller_may_run("share", True))
         self.assertIn("/share", list_catalog())
