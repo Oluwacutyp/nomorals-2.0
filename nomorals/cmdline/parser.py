@@ -4848,6 +4848,8 @@ def _parser() -> argparse.ArgumentParser:
                      "nm animato post <project> <episode> [--private]\n"
                      "nm animato export <project> <episode>\n"
                      "nm animato status [--project NAME]\n"
+                     "nm animato templates [--json]\n"
+                     "nm animato template <genre> <project> \"<seed>\" [--count N]\n"
                      "nm animato autopost start|stop|status|run [--project NAME] [--force] [--json]"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -4889,6 +4891,14 @@ def _parser() -> argparse.ArgumentParser:
     an_st = an_sub.add_parser("status", help="episode status")
     an_st.add_argument("--project", default="")
     an_st.add_argument("--json", action="store_true")
+    an_tpls = an_sub.add_parser("templates", help="list the series templates")
+    an_tpls.add_argument("--json", action="store_true")
+    an_tpl = an_sub.add_parser("template", help="apply a series template to a project")
+    an_tpl.add_argument("genre", help="stories | news | music | cooking")
+    an_tpl.add_argument("name", help="project slug")
+    an_tpl.add_argument("seed", help="the seed: a story idea, news hook, song theme, or recipe (comma-separated = one episode each)")
+    an_tpl.add_argument("--count", type=int, default=1,
+                        help="episodes to queue from one seed (default: 1)")
     an_ap = an_sub.add_parser("autopost", help="scheduled auto-post mission")
     an_ap.add_argument("autopost_action",
                        choices=["start", "stop", "status", "run"],

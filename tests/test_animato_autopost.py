@@ -94,11 +94,13 @@ class FakePipeline:
         self.planned: list[dict] = []
         self._n = 0
 
-    def plan(self, niche, topic, *, style="", footage="", voice=""):
+    def plan(self, niche, topic, *, style="", footage="", voice="",
+             music=""):
         self._n += 1
         job = FakeJob(f"job_fake{self._n}", topic)
         self.planned.append({"niche": niche, "topic": topic, "style": style,
-                             "footage": footage, "voice": voice})
+                             "footage": footage, "voice": voice,
+                             "music": music})
         return job
 
     def preflight(self, job):

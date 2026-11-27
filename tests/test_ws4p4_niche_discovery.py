@@ -57,6 +57,8 @@ FLOOR_SLUGS = {
     "anime_edits", "did_you_know", "finance_facts",
     "horror_stories", "motivation", "reddit_stories",
     "sports_edits",
+    # Animato series templates (port step 3): the four automated genres.
+    "stories", "news", "cooking", "music_videos",
 }
 
 
@@ -250,7 +252,7 @@ def test_proposal_changes_nothing_effective():
     assert all(row["origin"] == "floor" for row in after)
     # and the code registry itself is untouched
     assert _code_registry_slugs() == FLOOR_SLUGS
-    # the floor reads are exactly the seven shipped plugins
+    # the floor reads are exactly the eleven shipped plugins
     assert {row["slug"] for row in floor_niches()} == FLOOR_SLUGS
 
 

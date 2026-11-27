@@ -20,6 +20,11 @@ _SHIPPED_MODULES = (
     "did_you_know",
     "sports_edits",
     "anime_edits",
+    # Animato series templates (port step 3): the four automated genres.
+    "stories",
+    "news",
+    "cooking",
+    "music_videos",
 )
 
 

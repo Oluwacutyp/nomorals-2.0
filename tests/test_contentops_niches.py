@@ -37,6 +37,11 @@ SAMPLE_TOPICS = {
     "did_you_know": "octopuses have three hearts",
     "sports_edits": "the boxer nobody wanted to train",
     "anime_edits": "the swordsman who swore an oath",
+    # Animato series templates (port step 3): the four automated genres.
+    "stories": "the lighthouse keeper who heard the sea talking",
+    "news": "gold hit a record high overnight",
+    "cooking": "jollof rice in one pan",
+    "music_videos": "a midnight drive out of a city that never loved you",
 }
 
 EXPECTED = sorted(SAMPLE_TOPICS)
@@ -68,7 +73,7 @@ class BrokenBrain:
 # ── registry ─────────────────────────────────────────────────────────────
 
 class RegistryTest(unittest.TestCase):
-    def test_all_seven_shipped(self):
+    def test_all_eleven_shipped(self):
         self.assertEqual(list_niches(), EXPECTED)
 
     def test_get_round_trip(self):

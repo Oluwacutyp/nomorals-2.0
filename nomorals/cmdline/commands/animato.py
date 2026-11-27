@@ -10,12 +10,16 @@
     nm animato post <project> <episode> [--private]
     nm animato export <project> <episode>
     nm animato status [project]
+    nm animato templates [--json]
+    nm animato template <genre> <project> "<seed>" [--count N]
     nm animato autopost start|stop|status|run [--project NAME] [--force]
 
 A spark runs one episode end to end through the shorts factory and
 either posts it straight to YouTube or hands back the finished file.
 The autopost mission runs the same loop on each project's schedule
 and posts itself — start it once, it runs every 30 minutes.
+A template genres a project (niche, style, voice, music bed) and
+queues episodes from a seed — the mission picks them up on schedule.
 Nothing here raises a traceback — failures print cleanly.
 """
 
@@ -221,6 +225,48 @@ def _cmd_status(args: argparse.Namespace, context) -> int:
         return _err(str(exc))
 
 
+def _cmd_templates(args: argparse.Namespace, context) -> int:
+    try:
+        from ...media.contentops.templates import list_templates
+
+        templates = list_templates()
+        if args.json:
+            print(json.dumps([t.to_dict() for t in templates], indent=2,
+                             default=str))
+            return 0
+        for t in templates:
+            print(f"{t.id:10} {t.name:14} {t.niche:14} {t.description}")
+        return 0
+    except Exception as exc:  # noqa: BLE001
+        return _err(str(exc))
+
+
+def _cmd_template(args: argparse.Namespace, context) -> int:
+    from ...media.contentops.templates import apply_template
+
+    try:
+        runner = _runner()
+        result = apply_template(
+            runner.store, (getattr(args, "genre", "") or "").strip(),
+            _project_arg(args) or args.name,
+            getattr(args, "seed", "") or "",
+            count=getattr(args, "count", 1) or 1)
+        lines = [f"applied {result['template']} to {result['project']} "
+                 f"({result['niche']} — {result['style']} — "
+                 f"music {result['music'] or 'ambient'})"]
+        for field_name, change in result.get("changes", {}).items():
+            lines.append(f"  {field_name}: {change}")
+        lines.append(f"  queued {len(result['topics'])} topic(s) "
+                     f"({result['queued']} in queue):")
+        for topic in result["topics"]:
+            lines.append(f"    • {topic}")
+        return _ok("\n".join(lines))
+    except (FileNotFoundError, ValueError) as exc:
+        return _err(str(exc))
+    except Exception as exc:  # noqa: BLE001
+        return _err(str(exc))
+
+
 def _cmd_autopost(args: argparse.Namespace, context) -> int:
     from ...media.contentops.autopost import (
         AutopostStore,
@@ -298,6 +344,8 @@ HANDLERS = {
     "post": _cmd_post,
     "export": _cmd_export,
     "status": _cmd_status,
+    "templates": _cmd_templates,
+    "template": _cmd_template,
     "autopost": _cmd_autopost,
 }
 

@@ -328,7 +328,8 @@ class StudioRunner:
                  else project.voice) or "edge"
         try:
             job = self.pipeline.plan(project.niche, topic, style=project.style,
-                                     footage=project.footage, voice=voice)
+                                     footage=project.footage, voice=voice,
+                                     music=project.music)
         except Exception as exc:  # noqa: BLE001 — planning must not raise
             episode.status = "failed"
             episode.error = str(exc)

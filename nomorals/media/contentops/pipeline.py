@@ -190,6 +190,7 @@ class Job:
     style: str = ""  # edit style preset; "" = niche default
     footage: str = ""  # "" = generated stills; "stock"|"auto" = stock first
     voice: str = ""  # "" = catalogue voice; "edge" = Edge TTS first
+    music: str = ""  # music-bed preset (see _shims.MUSIC_BED_PRESETS); "" = ambient bed
     status: str = "queued"  # queued|rendering|ready|posted|failed
     attempts: int = 0
     platforms: list = field(default_factory=list)
@@ -712,10 +713,12 @@ class ShortPipeline:
     # -- planning ----------------------------------------------------
     def plan(self, niche: str, topic: str, *,
              platforms: list | None = None,
-             style: str = "", footage: str = "", voice: str = "") -> Job:
+             style: str = "", footage: str = "", voice: str = "",
+             music: str = "") -> Job:
         """Create a queued :class:`Job` (no rendering yet)."""
         job = Job(id=new_job_id(), niche=niche, topic=topic,
                   style=style, footage=footage, voice=voice,
+                  music=music,
                   platforms=list(platforms or []),
                   created_at=_utcnow())
         self.jobs.save(job)
@@ -1542,9 +1545,17 @@ class ShortPipeline:
         duration = vo.get("duration_s") or wav_duration(vo["path"]) or 8.0
         duration = round(duration + 1.0, 2)  # tail for the end card
         bed_path = str(run_dir / "music_bed.wav")
-        self._edit.make_music_bed(
-            duration, bed_path,
-            seed=abs(hash(ctx["manifest"]["run_id"])) % (2 ** 31))
+        preset = (getattr(ctx.get("job"), "music", "") or "").strip()
+        roots = _shims.bed_roots(preset)
+        seed = abs(hash(ctx["manifest"]["run_id"])) % (2 ** 31)
+        try:
+            self._edit.make_music_bed(duration, bed_path, seed=seed,
+                                      roots=roots)
+        except TypeError:
+            # A music-bed maker without the roots knob (an older
+            # edit.py) still renders the default bed — the preset
+            # only shapes the bed when the maker supports it.
+            self._edit.make_music_bed(duration, bed_path, seed=seed)
         mixed = str(run_dir / "mixed_audio.wav")
         try:
             _ffmpeg("-i", vo["path"], "-i", bed_path,
@@ -1560,6 +1571,7 @@ class ShortPipeline:
                              retriable=True) from None
         (run_dir / "music_meta.json").write_text(json.dumps(
             {"bed_s": duration, "bed_db": "-16dB under voiceover",
+             "preset": preset or "ambient",
              "source": self._edit.source}, indent=2), encoding="utf-8")
         _log.info("pipeline %s: music bed %.1fs mixed",
                   ctx["manifest"]["run_id"], duration)

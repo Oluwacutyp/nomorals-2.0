@@ -277,20 +277,43 @@ def build_captions(phrases: list[tuple[str, float, float]],
     return out_path
 
 
-def make_music_bed(duration_s: float, out_path: str, seed: int = 7) -> str:
+#: Music-bed presets (chord roots in Hz, 6 s each) — the sound of a
+#: series. A StudioProject's ``music`` preset selects one; unknown or
+#: empty names fall back to the ambient default, never failing a render.
+MUSIC_BED_PRESETS: dict[str, list[float]] = {
+    "ambient": [110.0, 87.31, 130.81, 98.0],      # Am–F–C–G (the original bed)
+    "cinematic": [130.81, 98.0, 110.0, 146.83],   # C–G–Am–D, wide and open
+    "lofi": [110.0, 103.83, 87.31, 98.0],         # Am–Ab–F–G, dusty and warm
+    "phonk": [55.0, 65.41, 49.0, 58.27],          # low A–C–G–Bb, beat-forward
+    "upbeat": [130.81, 164.81, 196.0, 146.83],    # C–E–G–D, bright major
+    "tense": [110.0, 116.54, 103.83, 110.0],      # Am–Bb–Ab–Am, unresolved
+    "gentle": [220.0, 196.0, 164.81, 174.61],     # A–G–E–F, soft and high
+}
+
+
+def bed_roots(preset: str) -> list[float]:
+    """Chord roots for a music-bed preset (default bed when unknown)."""
+    return list(MUSIC_BED_PRESETS.get(
+        (preset or "").strip().lower(),
+        MUSIC_BED_PRESETS["ambient"]))
+
+
+def make_music_bed(duration_s: float, out_path: str, seed: int = 7,
+                   roots: list[float] | None = None) -> str:
     """A deterministic ambient pad bed (numpy → wav).  Returns path.
 
-    Slow Am–F–C–G pad with a breathing lowpass-ish sweep, faded in/out.
-    It is a *bed* — quiet by design (−18 dB) — meant to sit under the
-    voiceover, not to be listened to alone.
+    Slow pad with a breathing lowpass-ish sweep, faded in/out.
+    ``roots`` selects the chord progression (see :data:`MUSIC_BED_PRESETS`);
+    ``None`` keeps the original Am–F–C–G bed. It is a *bed* — quiet by
+    design (−18 dB) — meant to sit under the voiceover, not to be
+    listened to alone.
     """
     import numpy as np
     rng = random.Random(seed)
     sr = 22050
     n = max(1, int(duration_s * sr))
     t = np.arange(n) / sr
-    # Am F C G roots, 6 s each
-    roots = [110.0, 87.31, 130.81, 98.0]
+    roots = list(roots) if roots else list(MUSIC_BED_PRESETS["ambient"])
     chord = np.zeros(n)
     seg = 6.0
     for i in range(int(math.ceil(duration_s / seg))):
