@@ -427,6 +427,21 @@ def build_context(
     except Exception as exc:  # noqa: BLE001 — tool factories are optional
         _log.debug("tool service factories not wired: %s", exc)
 
+    # Studio publisher factory: the Animato studio (L4) may not import
+    # the YouTube publisher (L5) — the composition root installs the
+    # publisher class here, so the tool surface and the auto-post
+    # mission's bare StudioRunner() publish through the injected
+    # factory. Best-effort: unwired, publishing fails closed naming
+    # the missing wire (the CLI and chat surfaces pass the factory
+    # explicitly and never consult this slot).
+    try:
+        from ..media.contentops.publish.youtube import YouTubePublisher as _YouTubePublisher
+        from ..media.contentops.studio import set_publisher_factory as _set_pub_factory
+
+        _set_pub_factory(_YouTubePublisher)
+    except Exception as exc:  # noqa: BLE001 — studio wiring is optional
+        _log.debug("studio publisher factory not wired: %s", exc)
+
     # Social platform factories (WS3 P3): the LinkedIn SocialManager
     # adapter (L4) may not import the L5 connector it posts through —
     # the composition root installs its connector builder here, same

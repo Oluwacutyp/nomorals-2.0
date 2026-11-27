@@ -41,9 +41,12 @@ def _ok(msg: str) -> int:
 
 
 def _runner():
+    from ...media.contentops.publish.youtube import YouTubePublisher
     from ...media.contentops.studio import StudioRunner
 
-    return StudioRunner()
+    # L7 may import the L5 publisher directly — pass the class as the
+    # factory so the L4 runner never imports it itself.
+    return StudioRunner(publisher_factory=YouTubePublisher)
 
 
 def _project_arg(args) -> str:

@@ -45,6 +45,24 @@ _log = get_logger(__name__)
 #: so studio jobs and shorts jobs share one ledger (``nm shorts status``).
 DEFAULT_STUDIO_ROOT = Path.home() / "workspace" / "devon" / ".studio"
 
+#: Default YouTube publisher factory, installed by the composition
+#: root (:func:`nomorals.agents.context.build_context`) — the L4
+#: studio may not import the L5 publisher itself, so the factory
+#: lives here as a slot and the layer above fills it. ``None`` =
+#: unwired; publishing then fails closed naming the missing wire.
+_DEFAULT_PUBLISHER_FACTORY: Callable[[], Any] | None = None
+
+
+def set_publisher_factory(factory: Callable[[], Any] | None) -> None:
+    """Install (or clear, with None) the default publisher factory.
+
+    Called by the composition root with the real ``YouTubePublisher``
+    class; tests pass a fake (or clear it). A runner built with an
+    explicit ``publisher_factory`` never consults this slot.
+    """
+    global _DEFAULT_PUBLISHER_FACTORY
+    _DEFAULT_PUBLISHER_FACTORY = factory
+
 
 def _utcnow() -> str:
     # NOTE: timezone.utc, not datetime.UTC — this file imports the
@@ -253,8 +271,11 @@ class StudioRunner:
     """Spark → build → share, composing the organs that already exist.
 
     ``pipeline`` / ``publisher_factory`` are constructor-injectable;
-    when omitted the real subsystems are wired lazily (the shorts
-    factory's :class:`ShortPipeline` and the YouTube publisher).
+    when omitted the shorts pipeline is wired lazily and the
+    publisher comes from the module default installed by the
+    composition root (:func:`set_publisher_factory`) — with neither,
+    publishing fails closed naming the missing wire instead of
+    importing the publisher itself.
     ``spark()`` never raises for a failed render or publish — it
     returns the honest rung dict instead.
     """
@@ -276,11 +297,17 @@ class StudioRunner:
         return self._pipeline
 
     def _publisher(self) -> Any:
-        if self._publisher_factory is not None:
-            return self._publisher_factory()
-        from .publish.youtube import YouTubePublisher
-
-        return YouTubePublisher()
+        # The publisher is injected, never imported here: this module
+        # is L4 and the publisher organ is L5. The constructor factory
+        # wins; else the module default the composition root installed;
+        # else fail closed naming the missing wire.
+        factory = self._publisher_factory or _DEFAULT_PUBLISHER_FACTORY
+        if factory is None:
+            raise RuntimeError(
+                "no YouTube publisher configured — pass "
+                "publisher_factory=... to StudioRunner (or wire it via "
+                "set_publisher_factory at the composition root)")
+        return factory()
 
     # -- the loop ----------------------------------------------------
     def spark(self, project: StudioProject | str, topic: str = "", *,

@@ -8939,9 +8939,12 @@ class RuntimeMediaMixin:
             return "usage: /animato new|list|show|spark|queue|post|export|status ..."
         action = toks[0].lower()
         rest = toks[1:]
+        from ...media.contentops.publish.youtube import YouTubePublisher
         from ...media.contentops.studio import StudioRunner
 
-        runner = StudioRunner()
+        # L5 may import the L5 publisher directly — pass the class as
+        # the factory so the L4 runner never imports it itself.
+        runner = StudioRunner(publisher_factory=YouTubePublisher)
         if action == "list":
             projects = runner.store.list()
             if not projects:

@@ -287,6 +287,43 @@ def test_spark_publish_failure_still_returns_the_video(tmp_path):
     assert runner.store.load("stories").episodes[0].status == "ready"
 
 
+def test_spark_publish_without_factory_fails_closed(tmp_path):
+    """No publisher anywhere → the video is kept, the rung names the wire.
+
+    The L4 studio never imports the L5 publisher itself, so a bare
+    runner with no factory (and no composition-root default) must
+    fail the publish rung honestly, not raise or silently skip.
+    """
+    from nomorals.media.contentops.studio import set_publisher_factory
+
+    set_publisher_factory(None)
+    pipeline = FakePipeline(tmp_path / "runs")
+    runner = _runner(tmp_path, pipeline=pipeline)
+    project = runner.store.create("Stories")
+    result = runner.spark(project, "hello", publish="youtube")
+    assert result["ok"] is True  # the video exists; only the post failed
+    assert "not posted" in result["rungs"]["publish"]
+    assert "no YouTube publisher configured" in result["notes"][-1]
+    assert runner.store.load("stories").episodes[0].status == "ready"
+
+
+def test_set_publisher_factory_wires_bare_runner(tmp_path):
+    """The composition-root slot is what the tool/autopost paths use."""
+    from nomorals.media.contentops.studio import set_publisher_factory
+
+    publisher = FakePublisher()
+    set_publisher_factory(lambda: publisher)
+    try:
+        pipeline = FakePipeline(tmp_path / "runs")
+        runner = _runner(tmp_path, pipeline=pipeline)
+        project = runner.store.create("Stories")
+        result = runner.spark(project, "hello", publish="youtube")
+        assert result["ok"] is True
+        assert result["published"]["youtube"] == "yt_fake123"
+    finally:
+        set_publisher_factory(None)
+
+
 def test_publish_and_export_episode(tmp_path):
     pipeline = FakePipeline(tmp_path / "runs")
     publisher = FakePublisher()
