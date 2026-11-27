@@ -4846,7 +4846,7 @@ def _parser() -> argparse.ArgumentParser:
                      "nm animato spark \"<idea>\" [--project NAME] [--publish youtube] [--private]\n"
                      "nm animato queue <project> \"<topic>\"\n"
                      "nm animato post <project> <episode> [--private]\n"
-                     "nm animato export <project> <episode>\n"
+                     "nm animato export <project> [<episode>] [--dest DIR]\n"
                      "nm animato cast <project> <name> [--voice V] [--face-ref PATH] [--character-id ID]\n"
                      "nm animato status [--project NAME]\n"
                      "nm animato templates [--json]\n"
@@ -4897,9 +4897,17 @@ def _parser() -> argparse.ArgumentParser:
     an_post.add_argument("name", help="project slug")
     an_post.add_argument("episode", help="episode id (or prefix)")
     an_post.add_argument("--private", action="store_true")
-    an_exp = an_sub.add_parser("export", help="hand back a rendered episode's file")
+    an_exp = an_sub.add_parser(
+        "export",
+        help="hand back a rendered episode's file, or export the whole "
+             "project as a studio repo")
     an_exp.add_argument("name", help="project slug")
-    an_exp.add_argument("episode", help="episode id (or prefix)")
+    an_exp.add_argument("episode", nargs="?", default="",
+                        help="episode id (or prefix) — omit to export the "
+                             "whole project as a self-contained studio repo")
+    an_exp.add_argument("--dest", default="",
+                        help="export directory for the project export "
+                             "(default: <studio root>/exports/<slug>)")
     an_st = an_sub.add_parser("status", help="episode status")
     an_st.add_argument("--project", default="")
     an_st.add_argument("--json", action="store_true")

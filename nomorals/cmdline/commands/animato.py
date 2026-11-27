@@ -8,7 +8,10 @@
                               [--style S] [--voice V]
     nm animato queue <project> "<topic>"
     nm animato post <project> <episode> [--private]
-    nm animato export <project> <episode>
+    nm animato export <project> [<episode>] [--dest DIR]
+                — hand back a rendered episode's file, or export the
+                whole project as a self-contained studio repo (brief
+                + manifest + render scripts) when no episode is given
     nm animato cast <project> <name> [--voice V] [--face-ref PATH]
                 [--character-id ID]  — add a cast member; the face
                 reference locks that character's face into every
@@ -225,11 +228,24 @@ def _cmd_post(args: argparse.Namespace, context) -> int:
 def _cmd_export(args: argparse.Namespace, context) -> int:
     try:
         runner = _runner()
-        result = runner.export_episode(_project_arg(args) or args.name,
-                                       args.episode)
+        slug = _project_arg(args) or args.name
+        episode = (getattr(args, "episode", "") or "").strip()
+        if episode:
+            # The step-1 form: hand back one rendered episode's file.
+            result = runner.export_episode(slug, episode)
+            if not result.get("ok"):
+                return _err(result.get("reason", "export failed"))
+            return _ok(result["path"])
+        # The step-5 form: the whole project as a studio repo.
+        result = runner.export_project(
+            slug, dest=(getattr(args, "dest", "") or "").strip() or None)
         if not result.get("ok"):
             return _err(result.get("reason", "export failed"))
-        return _ok(result["path"])
+        cast = result.get("cast") or []
+        return _ok(f"exported {result['project']} → {result['path']} "
+                   f"({len(result['files'])} files, "
+                   f"{result['topics']} topics"
+                   f"{', cast ' + ', '.join(cast) if cast else ''})")
     except (FileNotFoundError, KeyError) as exc:
         return _err(str(exc))
     except Exception as exc:  # noqa: BLE001

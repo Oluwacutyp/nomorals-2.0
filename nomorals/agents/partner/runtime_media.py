@@ -8913,6 +8913,8 @@ class RuntimeMediaMixin:
             — add a cast member; the face reference locks that
             character's face into every scene of every episode
         /animato post <project> <episode> [--private]
+        /animato export <project>              — export the studio repo
+            (brief + manifest + render scripts)
         /animato export <project> <episode>    — hand back the file
         /animato status [--project NAME]       — episode status
         /animato autopost start|stop|status|run [--project NAME] [--force]
@@ -8932,7 +8934,7 @@ class RuntimeMediaMixin:
                     "/animato queue <project> \"<topic>\" · "
                     "/animato cast <project> <name> [--face-ref PATH] · "
                     "/animato post <project> <episode> · "
-                    "/animato export <project> <episode>\n"
+                    "/animato export <project> [<episode>]\n"
                     "/animato autopost start|stop|status|run "
                     "[--project NAME] [--force]")
         try:
@@ -9100,9 +9102,20 @@ class RuntimeMediaMixin:
             return (f"posted episode {result['episode_id']} → "
                     f"{result.get('video_id', '')}")
         if action == "export":
-            if len(rest) < 2:
-                return "usage: /animato export <project> <episode>"
+            if not rest:
+                return "usage: /animato export <project> [<episode>]"
             try:
+                if len(rest) == 1:
+                    # The step-5 form: the whole project as a studio repo.
+                    result = runner.export_project(rest[0])
+                    if not result.get("ok"):
+                        return (f"animato: "
+                                f"{result.get('reason', 'export failed')}")
+                    cast = result.get("cast") or []
+                    return (f"🎬 exported {result['project']} → "
+                            f"{result['path']} ({len(result['files'])} "
+                            f"files, {result['topics']} topics"
+                            f"{', cast ' + ', '.join(cast) if cast else ''})")
                 result = runner.export_episode(rest[0], rest[1])
             except (FileNotFoundError, KeyError) as exc:
                 return f"animato: {exc}"

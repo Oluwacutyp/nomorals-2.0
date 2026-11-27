@@ -32,6 +32,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -360,6 +361,270 @@ def _load_post_copy(pipeline: Any, job: Any) -> dict:
             "hashtags": []}
 
 
+def _cast_local_name(member: dict) -> str:
+    """Repo-local copy name for a cast member's reference image."""
+    return slugify(member["name"]) + Path(member["face_ref"]).suffix.lower()
+
+
+def _export_brief(project: StudioProject, lock: list[dict]) -> str:
+    """The project's brief: everything an episode run needs, in words."""
+    lines = [f"# {project.name}", "",
+             f"Studio project `{project.slug}` — exported from Devon "
+             "(Animato Studio). The manifest beside this brief "
+             "(`manifest.json`) is the source of truth; this brief is "
+             "the human-readable copy of it.", "",
+             "## Series",
+             f"- niche: {project.niche}",
+             f"- style: {project.style or '(default)'}",
+             f"- voice: {project.voice}",
+             f"- footage: {project.footage}",
+             f"- music: {project.music or '(none)'}",
+             f"- channel: {project.channel or '(not set)'}",
+             f"- schedule: {project.schedule or '(not set)'}",
+             ""]
+    if lock:
+        lines.append("## Cast")
+        for member in lock:
+            extra = (f", character {member['character_id']}"
+                     if member["character_id"] else "")
+            lines.append(f"- {member['name']} — voice "
+                         f"{member['voice']}{extra}, reference "
+                         f"cast/{_cast_local_name(member)}")
+        lines.append("")
+    lines.append("## Topic queue")
+    for i, topic in enumerate(project.topic_queue, 1):
+        lines.append(f"{i}. {topic}")
+    lines.append("")
+    if project.episodes:
+        lines.append("## Episodes (history — re-rendered from the queue)")
+        for ep in project.episodes:
+            lines.append(f"- {ep.id} — {ep.status} — {ep.topic}")
+        lines.append("")
+    lines.append("## Rebuild")
+    lines.append("Run `./render.sh` — it renders every queued topic, in "
+                 "order, through the same pipeline stages (plan → "
+                 "preflight → run). A topic renders with the cast lock, "
+                 "so every scene uses the cast's reference images in "
+                 "`cast/`.")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _export_readme(project: StudioProject) -> str:
+    """Short operational readme for the exported repo."""
+    return (f"# {project.name} — Animato studio export\n\n"
+            f"A self-contained studio repo for the `{project.slug}` "
+            "series: the brief (`BRIEF.md`), the manifest "
+            "(`manifest.json`), and the render scripts (`render.py`, "
+            "`render.sh`).\n\n"
+            "## Rebuild the videos\n\n"
+            "From a checkout of the nomorals-2.0 repo (or with "
+            "`nomorals` on PYTHONPATH):\n\n"
+            "```sh\n./render.sh\n```\n\n"
+            "That renders every topic in the queue, in order, through "
+            "the same pipeline stages Devon uses. One topic only:\n\n"
+            "```sh\n./render.sh --topic \"a lighthouse keeper\"\n```\n\n"
+            "Finished videos land under the pipeline's runs root; a "
+            "failed preflight or render is printed and the script "
+            "exits non-zero.\n")
+
+
+_EXPORT_RENDER_SH = """#!/bin/sh
+# Render every queued episode of this studio export.
+# Needs `nomorals` importable — run from a checkout of nomorals-2.0
+# (or set PYTHONPATH to one). Pass --topic "..." for one episode only.
+set -e
+cd "$(dirname "$0")"
+exec python3 render.py "$@"
+"""
+
+#: The render script template. ``__SNAPSHOT_REPR__`` is replaced at
+#: export time with a ``repr()`` of the project's manifest JSON — the
+#: script then carries the project's real topics and cast as data,
+#: not template filler. At run time the manifest beside the script
+#: is the source of truth; the snapshot is the fallback when the
+#: manifest cannot be read.
+_EXPORT_RENDER_PY = '''#!/usr/bin/env python3
+"""Render the queued episodes of this studio export.
+
+Generated from the studio manifest (manifest.json beside this script).
+It drives the same ShortPipeline stages Devon uses — plan, preflight,
+run — one episode per queued topic, with the project's cast lock
+applied so every scene renders from the cast's reference images.
+
+Run it from a checkout of the nomorals-2.0 repo (or with `nomorals`
+on PYTHONPATH):
+
+    ./render.sh                  # every queued topic, in order
+    ./render.sh --topic "TOPIC"  # one topic only
+
+It never fakes a render: a failed preflight or render is printed and
+the script exits non-zero; finished videos land under the pipeline's
+runs root.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+try:
+    from nomorals.media.contentops.pipeline import ShortPipeline
+    from nomorals.media.contentops.studio import (
+        resolve_cast_lock,
+        slugify,
+    )
+except ImportError:  # pragma: no cover — the import is the environment
+    ShortPipeline = None  # type: ignore[assignment]
+    resolve_cast_lock = None  # type: ignore[assignment]
+    slugify = None  # type: ignore[assignment]
+
+# The project as exported — the manifest beside this script is the
+# source of truth at run time; this snapshot is the fallback when the
+# manifest cannot be read, and the record of what the export held.
+SNAPSHOT = json.loads(__SNAPSHOT_REPR__)
+
+
+def _load_project() -> dict:
+    """The manifest, or the embedded snapshot when it cannot be read."""
+    here = Path(__file__).resolve().parent
+    manifest = here / "manifest.json"
+    try:
+        return json.loads(manifest.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"render: manifest.json unreadable ({exc}) — using the "
+              "snapshot baked into this script", file=sys.stderr)
+        return dict(SNAPSHOT)
+
+
+def _local_cast(project: dict) -> list[dict]:
+    """The cast lock, from the repo-local reference copies when present.
+
+    A member whose reference was copied into ``cast/`` at export
+    time renders from that copy — the repo is self-contained — and
+    only falls back to the manifest's (absolute) path when no copy
+    is present. A reference that is missing or unreadable either
+    way fails the render closed before any spend.
+    """
+    here = Path(__file__).resolve().parent
+    cast = []
+    for member in project.get("cast") or []:
+        face_ref = str(member.get("face_ref") or "")
+        if not face_ref:
+            continue
+        local = here / "cast" / (slugify(str(member.get("name") or ""))
+                                 + Path(face_ref).suffix.lower())
+        if local.is_file():
+            face_ref = str(local)
+        cast.append({"name": str(member.get("name") or ""),
+                     "voice": str(member.get("voice") or "edge"),
+                     "character_id": str(member.get("character_id") or ""),
+                     "face_ref": face_ref})
+    lock, error = resolve_cast_lock(cast)
+    if error:
+        print(f"render: cast reference failed — {error}", file=sys.stderr)
+        sys.exit(2)
+    return lock
+
+
+def main() -> int:
+    """Render the queue, one episode per topic; 0 only if all render."""
+    parser = argparse.ArgumentParser(
+        description="Render this studio export's queued episodes.")
+    parser.add_argument("--topic", default="",
+                        help="render one topic instead of the whole queue")
+    args = parser.parse_args()
+    if ShortPipeline is None:
+        print("render: the nomorals package is not importable — run "
+              "from a checkout of nomorals-2.0 or set PYTHONPATH",
+              file=sys.stderr)
+        return 2
+    project = _load_project()
+    topics = [args.topic] if args.topic else list(
+        project.get("topic_queue") or [])
+    if not topics:
+        print("render: no topics queued — nothing to render",
+              file=sys.stderr)
+        return 2
+    lock = _local_cast(project)
+    pipeline = ShortPipeline()
+    voice = (lock[0]["voice"] if lock
+             else project.get("voice") or "edge")
+    failed = 0
+    for n, topic in enumerate(topics, 1):
+        try:
+            job = pipeline.plan(
+                project.get("niche") or "did_you_know", topic,
+                style=project.get("style") or "",
+                footage=project.get("footage") or "auto",
+                voice=voice, music=project.get("music") or "",
+                cast=lock)
+        except Exception as exc:
+            print(f"[{n}/{len(topics)}] {topic}: plan failed — {exc}",
+                  file=sys.stderr)
+            failed += 1
+            continue
+        preflight = pipeline.preflight(job)
+        if not preflight.get("ok"):
+            detail = "; ".join(
+                f"{c.get('name')}: {c.get('detail')}"
+                for c in preflight.get("checks", [])
+                if not c.get("ok"))
+            print(f"[{n}/{len(topics)}] {topic}: preflight failed — "
+                  f"{detail or 'unknown'}", file=sys.stderr)
+            failed += 1
+            continue
+        result = pipeline.run(job)
+        if not result.ok:
+            error = result.error.to_dict() if result.error else {}
+            print(f"[{n}/{len(topics)}] {topic}: render failed — "
+                  f"{error.get('message') or error or 'render failed'}",
+                  file=sys.stderr)
+            failed += 1
+            continue
+        print(f"[{n}/{len(topics)}] {topic} → {result.final_path}")
+    if failed:
+        print(f"render: {failed} of {len(topics)} episode(s) failed",
+              file=sys.stderr)
+        return 1
+    print(f"render: {len(topics)} episode(s) done")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+def _write_export(root: Path, project: StudioProject,
+                  lock: list[dict]) -> list[str]:
+    """Write every export file under ``root``; return relative paths."""
+    (root / "manifest.json").write_text(
+        json.dumps(project.to_dict(), indent=2), encoding="utf-8")
+    (root / "BRIEF.md").write_text(
+        _export_brief(project, lock), encoding="utf-8")
+    (root / "README.md").write_text(
+        _export_readme(project), encoding="utf-8")
+    render = _EXPORT_RENDER_PY.replace(
+        "__SNAPSHOT_REPR__",
+        repr(json.dumps(project.to_dict(), indent=2)))
+    (root / "render.py").write_text(render, encoding="utf-8")
+    render_sh = root / "render.sh"
+    render_sh.write_text(_EXPORT_RENDER_SH, encoding="utf-8")
+    render_sh.chmod(0o755)
+    files = ["BRIEF.md", "README.md", "manifest.json", "render.py",
+             "render.sh"]
+    for member in lock:
+        src = Path(member["face_ref"])
+        cast_dir = root / "cast"
+        cast_dir.mkdir(exist_ok=True)
+        shutil.copyfile(src, cast_dir / _cast_local_name(member))
+        files.append(f"cast/{_cast_local_name(member)}")
+    return sorted(files)
+
+
 class StudioRunner:
     """Spark → build → share, composing the organs that already exist.
 
@@ -612,6 +877,75 @@ class StudioRunner:
                     "reason": "no rendered video file for this episode"}
         return {"ok": True, "project": project.slug,
                 "episode_id": episode.id, "path": episode.video_path}
+
+    def export_project(self, project: StudioProject | str,
+                       dest: str | os.PathLike | None = None
+                       ) -> dict[str, Any]:
+        """Export a project as a self-contained studio repo.
+
+        The repo rebuilds the project's videos without Devon
+        running: ``BRIEF.md`` (niche, style, voice, cast, schedule,
+        topic queue), ``manifest.json`` (the stored manifest,
+        verbatim), ``render.py`` + ``render.sh`` (the pipeline
+        stages, runnable — plan → preflight → run, one episode per
+        queued topic), and ``cast/`` (the cast's reference images,
+        so the repo is self-contained). ``dest`` defaults to
+        ``<studio root>/exports/<slug>``.
+        Fails closed with a named reason — missing project, no
+        topics, an unreadable face reference, or a non-empty
+        destination — and writes nothing partial: the repo is built
+        in a staging directory and moved into place only when every
+        file is written.
+        Returns ``{"ok", "project", "path", "files", "topics",
+        "cast"}`` or ``{"ok": False, "project", "reason"}``.
+        """
+        slug = project if isinstance(project, str) else project.slug
+        if isinstance(project, str):
+            try:
+                project = self.store.load(project)
+            except FileNotFoundError:
+                return {"ok": False, "project": slug,
+                        "reason": f"no studio project {slug!r} — "
+                                  "create it first (`animato new`)"}
+        else:
+            with contextlib.suppress(FileNotFoundError):
+                project = self.store.load(project.slug)
+        if not project.topic_queue:
+            return {"ok": False, "project": project.slug,
+                    "reason": "no topics queued — queue a topic first "
+                              f"(`animato queue {project.slug} "
+                              "\"<topic>\")"}
+        lock, lock_error = resolve_cast_lock(project.cast)
+        if lock_error:
+            return {"ok": False, "project": project.slug,
+                    "reason": lock_error}
+        target = Path(dest).expanduser() if dest else (
+            self.store.root / "exports" / project.slug)
+        if target.is_file():
+            return {"ok": False, "project": project.slug,
+                    "reason": f"export path {target} is a file, not a "
+                              "directory — pass --dest <dir>"}
+        if target.exists() and any(target.iterdir()):
+            return {"ok": False, "project": project.slug,
+                    "reason": f"export directory {target} already exists "
+                              "and is not empty — remove it or pass "
+                              "--dest <dir>"}
+        staging = target.with_name(
+            target.name + ".tmp-" + uuid.uuid4().hex[:8])
+        try:
+            staging.mkdir(parents=True, exist_ok=False)
+            files = _write_export(staging, project, lock)
+        except Exception as exc:  # noqa: BLE001 — export must not raise
+            shutil.rmtree(staging, ignore_errors=True)
+            return {"ok": False, "project": project.slug,
+                    "reason": f"could not write the export: {exc}"}
+        if target.exists():
+            target.rmdir()
+        staging.replace(target)
+        return {"ok": True, "project": project.slug,
+                "path": str(target), "files": files,
+                "topics": len(project.topic_queue),
+                "cast": [m["name"] for m in lock]}
 
 
 class _FakeJobShim:

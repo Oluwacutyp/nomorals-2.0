@@ -629,3 +629,169 @@ def test_parser_accepts_animato_cast():
     assert args.name == "stories"
     assert args.member == "Ada"
     assert args.face_ref == "/tmp/ada.png"
+
+
+# ── port step 5: GitHub-studio export ────────────────────────────────
+
+
+def _export_project(tmp_path, *, topics=("a lighthouse keeper",
+                                        "the tide that never came"),
+                    cast=True):
+    """A runner + a project with queued topics (and a cast, by default)."""
+    runner = _runner(tmp_path)
+    runner.store.create("Stories", niche="motivation", style="warm",
+                        voice="edge", music="lofi", channel="stories",
+                        schedule="daily")
+    for topic in topics:
+        runner.store.queue_topic("stories", topic)
+    if cast:
+        ref = _write_png(tmp_path / "ada.png")
+        runner.store.add_cast(
+            "stories", CastMember(name="Ada", voice="ada_warm",
+                                  face_ref=str(ref)))
+    return runner, runner.store.load("stories")
+
+
+def test_export_project_writes_brief_manifest_and_scripts(tmp_path):
+    runner, project = _export_project(tmp_path)
+    dest = tmp_path / "out"
+    result = runner.export_project("stories", dest=dest)
+    assert result["ok"] is True
+    assert result["project"] == "stories"
+    assert result["path"] == str(dest)
+    assert result["topics"] == 2
+    assert result["cast"] == ["Ada"]
+    for expected in ("BRIEF.md", "README.md", "manifest.json",
+                     "render.py", "render.sh", "cast/ada.png"):
+        assert expected in result["files"]
+    stored = json.loads((tmp_path / "studio" / "projects" / "stories"
+                         / "manifest.json").read_text(encoding="utf-8"))
+    exported = json.loads((dest / "manifest.json").read_text(
+        encoding="utf-8"))
+    assert exported == stored
+    brief = (dest / "BRIEF.md").read_text(encoding="utf-8")
+    assert "motivation" in brief and "daily" in brief
+    assert "a lighthouse keeper" in brief
+    assert "the tide that never came" in brief
+    assert "Ada" in brief
+    compile((dest / "render.py").read_text(encoding="utf-8"),
+            "render.py", "exec")
+    render_sh = (dest / "render.sh").read_text(encoding="utf-8")
+    assert render_sh.startswith("#!/bin/sh")
+    assert "render.py" in render_sh
+    assert (dest / "cast" / "ada.png").read_bytes() == (
+        tmp_path / "ada.png").read_bytes()
+
+
+def test_export_project_scripts_reference_real_topics_and_cast(tmp_path):
+    runner, project = _export_project(tmp_path)
+    dest = tmp_path / "out"
+    assert runner.export_project("stories", dest=dest)["ok"] is True
+    script = (dest / "render.py").read_text(encoding="utf-8")
+    assert "a lighthouse keeper" in script
+    assert "the tide that never came" in script
+    assert "Ada" in script
+    assert "motivation" in script
+    for filler in ("TODO", "FIXME", "YOUR TOPIC HERE", "placeholder"):
+        assert filler not in script
+
+
+def test_export_project_missing_project_fails_closed(tmp_path):
+    runner = _runner(tmp_path)
+    dest = tmp_path / "out"
+    result = runner.export_project("ghost", dest=dest)
+    assert result["ok"] is False
+    assert "ghost" in result["reason"]
+    assert not dest.exists()
+
+
+def test_export_project_no_topics_fails_closed(tmp_path):
+    runner = _runner(tmp_path)
+    runner.store.create("Stories")
+    dest = tmp_path / "out"
+    result = runner.export_project("stories", dest=dest)
+    assert result["ok"] is False
+    assert "no topics" in result["reason"]
+    assert not dest.exists()
+
+
+def test_export_project_unreadable_reference_fails_closed(tmp_path):
+    runner = _runner(tmp_path)
+    runner.store.create("Stories")
+    runner.store.queue_topic("stories", "a lighthouse keeper")
+    bad = tmp_path / "corrupt.png"
+    bad.write_bytes(b"this is not an image at all")
+    runner.store.add_cast(
+        "stories", CastMember(name="Ada", face_ref=str(bad)))
+    dest = tmp_path / "out"
+    result = runner.export_project("stories", dest=dest)
+    assert result["ok"] is False
+    assert "Ada" in result["reason"]
+    assert "not a readable image" in result["reason"]
+    assert not dest.exists()
+
+
+def test_export_project_refuses_nonempty_destination(tmp_path):
+    runner, project = _export_project(tmp_path)
+    dest = tmp_path / "out"
+    dest.mkdir()
+    (dest / "keep.txt").write_text("mine", encoding="utf-8")
+    result = runner.export_project("stories", dest=dest)
+    assert result["ok"] is False
+    assert "not empty" in result["reason"]
+    assert (dest / "keep.txt").read_text(encoding="utf-8") == "mine"
+
+
+def test_export_project_without_cast(tmp_path):
+    runner, project = _export_project(tmp_path, cast=False)
+    dest = tmp_path / "out"
+    result = runner.export_project("stories", dest=dest)
+    assert result["ok"] is True
+    assert result["cast"] == []
+    brief = (dest / "BRIEF.md").read_text(encoding="utf-8")
+    assert "## Cast" not in brief
+    assert not (dest / "cast").exists()
+    compile((dest / "render.py").read_text(encoding="utf-8"),
+            "render.py", "exec")
+
+
+def test_cli_export_project(tmp_path, monkeypatch, capsys):
+    import nomorals.media.contentops.studio as studio_mod
+    from nomorals.cmdline.commands.animato import cmd_animato
+
+    monkeypatch.setattr(studio_mod, "DEFAULT_STUDIO_ROOT",
+                        tmp_path / "studio")
+    assert cmd_animato(_cli_args("new", name="Stories",
+                                 niche="motivation"), None) == 0
+    capsys.readouterr()
+    assert cmd_animato(_cli_args("queue", name="stories",
+                                 topic="a lighthouse keeper"), None) == 0
+    dest = tmp_path / "out"
+    assert cmd_animato(_cli_args("export", name="stories",
+                                 dest=str(dest)), None) == 0
+    out = capsys.readouterr().out
+    assert "stories" in out and str(dest) in out
+    assert (dest / "manifest.json").is_file()
+    assert (dest / "render.py").is_file()
+    # the old episode form still fails cleanly on an unknown episode
+    assert cmd_animato(_cli_args("export", name="stories",
+                                 episode="ep_nope"), None) == 1
+    assert "ep_nope" in capsys.readouterr().err
+    # and a missing project fails closed
+    assert cmd_animato(_cli_args("export", name="ghost",
+                                 dest=str(tmp_path / "out2")), None) == 1
+
+
+def test_parser_accepts_animato_export():
+    from nomorals.cmdline import _parser
+
+    parser = _parser()
+    args = parser.parse_args(
+        ["animato", "export", "stories", "--dest", "/tmp/out"])
+    assert args.animato_action == "export"
+    assert args.name == "stories"
+    assert args.episode == ""
+    assert args.dest == "/tmp/out"
+    args = parser.parse_args(["animato", "export", "stories", "ep_abc"])
+    assert args.episode == "ep_abc"
+    assert args.dest == ""
