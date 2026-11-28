@@ -34,10 +34,28 @@ from .designs import (
     STATUS_BG_COLORS,
     STATUS_DESIGNS,
 )
+from .icons import (
+    _draw_arrow_in,
+    _draw_bell_slash,
+    _draw_check,
+    _draw_document,
+    _draw_headphones,
+    _draw_heart,
+    _draw_hourglass,
+    _draw_no_entry,
+    _draw_person,
+    _draw_phone,
+    _draw_pin,
+    _draw_share_arrow,
+    _draw_star,
+    _draw_video_camera,
+    _draw_voicemail,
+)
 from .media import MediaError, load_image
 from .render import (
     MockScreensError,
     _Canvas,
+    _draw_camera,
     _draw_media_placeholder,
     _draw_mic,
     _draw_nav,
@@ -230,39 +248,44 @@ def _darken(canvas: Image.Image, cv: _Canvas, y0: float,
 
 # ── lists (census §4.3–§4.8) ─────────────────────────────
 
-#: Preview-kind → (glyph, default label) for the media /
+#: Preview-kind → (vector icon, default label) for the media /
 #: event previews (census §4.4 + §4.6 vocabularies).  A
-#: row's own preview text wins over the default label.
-_PREVIEW_LABELS: dict[str, tuple[str, str]] = {
-    "photo": ("📷", "Photo"),
-    "video": ("🎥", "Video"),
-    "audio": ("🎧", "Audio"),
-    "voice": ("🎤", "Voice message"),
-    "gif": ("", "GIF"),
-    "sticker": ("", "Sticker"),
-    "document": ("📄", "Document"),
-    "location": ("📍", "Location"),
-    "contact": ("👤", "Contact"),
-    "disappearing": ("⏳", "Disappearing message"),
-    "deleted": ("🚫", "This message was deleted"),
-    "status_reaction": ("", "Reacted to your status"),
-    "story_mention": ("", "Mentioned you in your story"),
-    "story_reaction": ("", "Reacted to your story"),
+#: row's own preview text wins over the default label.  The
+#: icon is a vector name, never a font glyph: the stocked
+#: fonts carry none of these emoji, so the old glyphs
+#: rendered as tofu boxes at the head of the preview line.
+_PREVIEW_LABELS: dict[str, tuple[str | None, str]] = {
+    "photo": ("camera", "Photo"),
+    "video": ("video", "Video"),
+    "audio": ("headphones", "Audio"),
+    "voice": ("mic", "Voice message"),
+    "gif": (None, "GIF"),
+    "sticker": (None, "Sticker"),
+    "document": ("document", "Document"),
+    "location": ("pin", "Location"),
+    "contact": ("person", "Contact"),
+    "disappearing": ("hourglass", "Disappearing message"),
+    "deleted": ("no_entry", "This message was deleted"),
+    "status_reaction": (None, "Reacted to your status"),
+    "story_mention": (None, "Mentioned you in your story"),
+    "story_reaction": (None, "Reacted to your story"),
     "story_reply": ("", "Replied to your story"),
     "reel_reaction": ("", "Reacted to your reel"),
     "typing": ("", "Typing…"),
 }
 
-#: Call preview kinds → (arrow, label, missed): direction
-#: and medium ride the kind, so the record — and a reader
-#: not relying on colour — can tell them apart.
+#: Call preview kinds → (direction icon, label, missed):
+#: direction and medium ride the kind, so the record — and
+#: a reader not relying on colour — can tell them apart.
+#: The icon is a vector name, never a font glyph: the
+#: stocked fonts carry no arrow glyphs.
 _CALL_PREVIEWS: dict[str, tuple[str, str, bool]] = {
-    "call_in_voice": ("↙", "Incoming voice call", False),
-    "call_out_voice": ("↗", "Outgoing voice call", False),
-    "call_missed_voice": ("↙", "Missed voice call", True),
-    "call_in_video": ("↙", "Incoming video call", False),
-    "call_out_video": ("↗", "Outgoing video call", False),
-    "call_missed_video": ("↙", "Missed video call", True),
+    "call_in_voice": ("arrow_in", "Incoming voice call", False),
+    "call_out_voice": ("arrow_out", "Outgoing voice call", False),
+    "call_missed_voice": ("arrow_in", "Missed voice call", True),
+    "call_in_video": ("arrow_in", "Incoming video call", False),
+    "call_out_video": ("arrow_out", "Outgoing video call", False),
+    "call_missed_video": ("arrow_in", "Missed video call", True),
 }
 
 
@@ -280,10 +303,14 @@ def _list_header(draw, cv: _ListCanvas, y0: float) -> float:
                   title, font=cv.font(16.5, bold=True),
                   fill=pal["header_fg"])
     else:
-        color = pal["accent"] if (
-            screen.platform == "telegram"
-            and screen.chrome.style == "android") \
-            else pal["header_fg"]
+        if (screen.platform == "telegram"
+                and screen.chrome.style == "android"):
+            color = pal["accent"]
+        else:
+            # a design may name its own title colour: the
+            # WhatsApp list title wears the accent green,
+            # everything else the header foreground.
+            color = pal.get("title_fg", pal["header_fg"])
         draw.text((cv.s(16), cv.s(mid - 11)), title,
                   font=cv.font(17, bold=True), fill=color)
     if screen.subtitle:
@@ -392,27 +419,58 @@ def _list_tabs(draw, cv: _ListCanvas, y0: float) -> float:
     return h
 
 
-def _preview_parts(cv: _ListCanvas, row) -> tuple[str, str]:
-    """(text, colour-key) of a row's preview line: a
-    draft wears its red prefix, typing the accent, a
-    media/event kind its glyph + label (the row's own
-    text winning over the default label), a call kind
-    its arrow + label."""
+def _draw_preview_icon(draw, cv: _Canvas, icon: str, cx: float,
+                       cy: float, color) -> None:
+    """One preview-line icon at (cx, cy) in the text colour:
+    the media-kind or call-direction mark that used to be a
+    font glyph at the head of the line."""
+    if icon == "camera":
+        _draw_camera(draw, cv, cx, cy, color, w=15)
+    elif icon == "video":
+        _draw_video_camera(draw, cv.s, cx, cy, color, w=18.0)
+    elif icon == "headphones":
+        _draw_headphones(draw, cv.s, cx, cy, color, r=7.0)
+    elif icon == "mic":
+        _draw_mic(draw, cv, cx, cy, color, r=4.0)
+    elif icon == "document":
+        _draw_document(draw, cv.s, cx, cy, color, r=7.0)
+    elif icon == "pin":
+        _draw_pin(draw, cv.s, cx, cy, color, r=7.0)
+    elif icon == "person":
+        _draw_person(draw, cv.s, cx, cy, color, r=7.0)
+    elif icon == "hourglass":
+        _draw_hourglass(draw, cv.s, cx, cy, color, r=7.0)
+    elif icon == "no_entry":
+        _draw_no_entry(draw, cv.s, cx, cy, color, r=7.0)
+    elif icon == "arrow_in":
+        _draw_arrow_in(draw, cv.s, cx, cy, color, r=6.5)
+    elif icon == "arrow_out":
+        _draw_share_arrow(draw, cv.s, cx, cy, color, r=6.5)
+
+
+def _preview_parts(cv: _ListCanvas, row
+                   ) -> tuple[str, str, str | None]:
+    """(text, colour-key, vector icon) of a row's preview
+    line: a draft wears its red prefix, typing the accent,
+    a media/event kind its icon + label (the row's own
+    text winning over the default label), a call kind its
+    direction icon + label.  The icon is drawn by the
+    caller, never embedded in the text: the old glyphs
+    were font characters the stocked fonts do not carry."""
     kind = row.preview_kind
     if row.draft or kind == "draft":
-        return "Draft: " + row.preview, "draft_fg"
+        return "Draft: " + row.preview, "draft_fg", None
     if kind == "typing":
-        return "Typing…", "accent"
+        return "Typing…", "accent", None
     if kind in _CALL_PREVIEWS:
-        arrow, label, missed = _CALL_PREVIEWS[kind]
-        return arrow + " " + (row.preview or label), \
-            "draft_fg" if missed else "row_preview"
+        icon, label, missed = _CALL_PREVIEWS[kind]
+        return (row.preview or label), \
+            "draft_fg" if missed else "row_preview", icon
     if kind in _PREVIEW_LABELS:
-        glyph, label = _PREVIEW_LABELS[kind]
+        icon, label = _PREVIEW_LABELS[kind]
         text = row.preview or label
-        return (glyph + " " + text) if glyph else text, \
-            "row_preview"
-    return row.preview, "row_preview"
+        return text, "row_preview", icon
+    return row.preview, "row_preview", None
 
 
 def _list_row(canvas, draw, cv: _ListCanvas, row,
@@ -481,9 +539,8 @@ def _list_row(canvas, draw, cv: _ListCanvas, row,
         vx, vy = nx + 6, y0 + 15
         draw.ellipse([cv.s(vx), cv.s(vy), cv.s(vx + 13),
                       cv.s(vy + 13)], fill=pal["accent"])
-        draw.text((cv.s(vx + 2.5), cv.s(vy - 0.5)), "✓",
-                  font=cv.font(9.5, bold=True),
-                  fill=(255, 255, 255))
+        _draw_check(draw, cv.s, vx + 6.5, vy + 6.5,
+                    (255, 255, 255), r=4.5)
     # preview line
     py = y0 + 38
     px = tx
@@ -494,10 +551,14 @@ def _list_row(canvas, draw, cv: _ListCanvas, row,
         draw.text((cv.s(px), cv.s(py)), row.sender + ": ",
                   font=cv.font(13), fill=pal["row_preview"])
         px += cv.text_w(row.sender + ": ", 13)
-    ptext, pkey = _preview_parts(cv, row)
+    ptext, pkey, picon = _preview_parts(cv, row)
     if row.status and not ptext:
         ptext = {"sent": "Sent", "delivered": "Sent",
                  "seen": "Seen"}[row.status]
+    if picon:
+        _draw_preview_icon(draw, cv, picon, px + 7, py + 7,
+                           pal[pkey])
+        px += 18
     draw.text(
         (cv.s(px), cv.s(py)),
         _fit_text(cv, ptext, 13.5,
@@ -523,12 +584,12 @@ def _list_row(canvas, draw, cv: _ListCanvas, row,
                   font=cv.font(10.5, bold=True),
                   fill=pal["badge_fg"])
     elif row.muted:
-        draw.text((cv.s(right - 14), cv.s(by - 7)), "🔕",
-                  font=cv.font(11), fill=pal["meta"])
+        _draw_bell_slash(draw, cv.s, right - 8, by,
+                         pal["meta"], r=7.0)
     if row.pinned:
-        draw.text((cv.s(right - (34 if row.unread else 14)),
-                   cv.s(y0 + 32)), "📌",
-                  font=cv.font(10), fill=pal["pinned_fg"])
+        _draw_pin(draw, cv.s,
+                  right - (29 if row.unread else 9), y0 + 37,
+                  pal["pinned_fg"], r=6.5)
     draw.line([cv.s(tx), cv.s(y0 + h - 0.5), cv.s(cv.w),
                cv.s(y0 + h - 0.5)], fill=pal["divider"],
               width=cv.s(0.75))
@@ -549,8 +610,9 @@ def _list_call_row(canvas, draw, cv: _ListCanvas, row,
     person = screen.participant(row.participant_id)
     source = _draw_avatar_strict(
         canvas, draw, cv, ax, ay, av, person, row.name)
-    arrow, label, missed = _CALL_PREVIEWS.get(
-        row.preview_kind, ("↙", "Incoming voice call", False))
+    icon, label, missed = _CALL_PREVIEWS.get(
+        row.preview_kind, ("arrow_in", "Incoming voice call",
+                           False))
     call_type = row.call_type or (
         "video" if row.preview_kind.endswith("video")
         else "voice")
@@ -564,15 +626,15 @@ def _list_call_row(canvas, draw, cv: _ListCanvas, row,
     draw.text((cv.s(tx), cv.s(y0 + 12)),
               _fit_text(cv, row.name, 15.5, cv.w - tx - 60),
               font=cv.font(15.5), fill=pal["row_name"])
-    sub = arrow + " " + (row.preview or label)
+    sub = row.preview or label
     if row.time and row.preview:
         sub += " · " + row.time
     elif row.time and not row.preview:
-        sub = arrow + " " + row.time
-    draw.text((cv.s(tx), cv.s(y0 + 38)), sub,
-              font=cv.font(13),
-              fill=pal["draft_fg"] if missed
-              else pal["row_preview"])
+        sub = row.time
+    sub_fill = pal["draft_fg"] if missed else pal["row_preview"]
+    _draw_preview_icon(draw, cv, icon, tx + 7, y0 + 45, sub_fill)
+    draw.text((cv.s(tx + 16), cv.s(y0 + 38)), sub,
+              font=cv.font(13), fill=sub_fill)
     ix = cv.w - 40
     mid = y0 + h / 2
     if call_type == "video":
@@ -586,8 +648,8 @@ def _list_call_row(canvas, draw, cv: _ListCanvas, row,
                       (cv.s(ix + 19), cv.s(mid + 3))],
                      fill=pal["accent"])
     else:
-        draw.text((cv.s(ix + 2), cv.s(mid - 10)), "☎",
-                  font=cv.font(17), fill=pal["accent"])
+        _draw_phone(draw, cv.s, ix + 10, mid, pal["accent"],
+                    r=9.0)
     draw.line([cv.s(tx), cv.s(y0 + h - 0.5), cv.s(cv.w),
                cv.s(y0 + h - 0.5)], fill=pal["divider"],
               width=cv.s(0.75))
@@ -866,8 +928,8 @@ def render_status_screen(screen: StatusScreen, *,
               font=cv.font(12), fill=pal["meta_fg"])
     _draw_dots(draw, cv, w - 16, hy + 16, pal["name_fg"])
     if screen.reshare:
-        draw.text((cv.s(w - 44), cv.s(hy + 6)), "↗",
-                  font=cv.font(16), fill=pal["name_fg"])
+        _draw_share_arrow(draw, cv.s, w - 36, hy + 14,
+                          pal["name_fg"], r=8.0)
     drawn["regions"]["header"] = [
         0, cv.s(hy), cv.s(w), cv.s(38)]
     if media_box is not None:
@@ -935,10 +997,9 @@ def render_status_screen(screen: StatusScreen, *,
                   font=cv.font(14), fill=pal["reply_hint"])
         if screen.like:
             hx = 16 + pill_w + 26
-            draw.text((cv.s(hx - 11), cv.s(by + 8)), "♥",
-                      font=cv.font(24),
-                      fill=pal["heart_liked"] if screen.liked
-                      else pal["heart"])
+            _draw_heart(draw, cv.s, hx, by + 20,
+                        pal["heart_liked"] if screen.liked
+                        else pal["heart"], r=11.0)
         drawn["regions"]["reply_bar"] = [
             0, cv.s(by), cv.s(w), cv.s(44)]
         drawn["elements"].append({
@@ -1109,11 +1170,10 @@ def _control_glyph(draw, cv: _CallCanvas, name: str,
                    cv.s(cy - 7)], fill=color, width=cv.s(2))
         draw.line([cv.s(cx), cv.s(cy), cv.s(cx + 5),
                    cv.s(cy + 2)], fill=color, width=cv.s(2))
-    else:  # accept / decline / end: the phone glyph
-        glyph = "☎"
-        tw = cv.text_w(glyph, 24)
-        draw.text((cv.s(cx - tw / 2), cv.s(cy - 13)), glyph,
-                  font=cv.font(24), fill=color)
+    else:  # accept / decline / end: the phone vector — the
+        # old "☎" glyph is not in the stocked fonts, so the
+        # disc rendered a tofu box instead of a handset.
+        _draw_phone(draw, cv.s, cx, cy, color, r=12.0)
 
 
 def _control_disc(canvas, draw, cv: _CallCanvas, name: str,
@@ -1435,9 +1495,13 @@ def render_call_history(screen: CallHistoryScreen, *,
         if entry.sim:
             sub = (sub + " · " + entry.sim) if sub \
                 else entry.sim
-        if entry.type == "outgoing":
-            sub = ("↗ " + sub) if sub else "↗"
-        draw.text((cv.s(66), cv.s(y + 31)), sub,
+        arrow_out = entry.type == "outgoing"
+        tx = 66
+        if arrow_out:
+            _draw_share_arrow(draw, cv.s, 72, y + 37,
+                              pal["sub"], r=6.5)
+            tx = 82
+        draw.text((cv.s(tx), cv.s(y + 31)), sub,
                   font=cv.font(12), fill=pal["sub"])
         tw = cv.text_w(entry.when, 13)
         draw.text((cv.s(w - 40 - tw), cv.s(y + 10)),
@@ -1465,8 +1529,9 @@ def render_call_history(screen: CallHistoryScreen, *,
                    fill=pal["segment_bg"])
     draw.line([0, cv.s(by), cv.s(w), cv.s(by)],
               fill=pal["divider"], width=cv.s(0.75))
-    glyphs = {"Favourites": "★", "Calls": "☎",
-              "Contacts": "👤", "Voicemail": "➿"}
+    icons = {"Favourites": _draw_star, "Calls": _draw_phone,
+             "Contacts": _draw_person,
+             "Voicemail": _draw_voicemail}
     slot = w / max(1, len(screen.tabs))
     for i, label in enumerate(screen.tabs):
         cx = slot * i + slot / 2
@@ -1482,10 +1547,12 @@ def render_call_history(screen: CallHistoryScreen, *,
                          cv.s(by + 8 + r * 8 + 1.8)],
                         fill=color)
         else:
-            glyph = glyphs.get(label, "•")
-            tw = cv.text_w(glyph, 17)
-            draw.text((cv.s(cx - tw / 2), cv.s(by + 5)),
-                      glyph, font=cv.font(17), fill=color)
+            icon = icons.get(label)
+            if icon is None:
+                draw.text((cv.s(cx - 3), cv.s(by + 5)), "•",
+                          font=cv.font(17), fill=color)
+            else:
+                icon(draw, cv.s, cx, by + 14, color, r=9.0)
         tw = cv.text_w(label, 10)
         draw.text((cv.s(cx - tw / 2), cv.s(by + 34)), label,
                   font=cv.font(10), fill=color)

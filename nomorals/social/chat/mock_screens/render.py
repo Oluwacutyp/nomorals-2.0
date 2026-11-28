@@ -35,12 +35,22 @@ from __future__ import annotations
 
 import hashlib
 import io
+import math
+import random
 from dataclasses import replace
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from .. import makers as _makers
 from .designs import CHAT_DESIGNS, DEVICES, GROUP_NAME_COLORS
+from .icons import (
+    _draw_lock,
+    _draw_paperclip,
+    _draw_phone,
+    _draw_plus,
+    _draw_smiley,
+    _draw_video_camera,
+)
 from .media import (
     VOICE_BARS,
     MediaError,
@@ -230,33 +240,52 @@ class _Canvas:
     def s(self, value: float) -> int:
         return int(round(value * SCALE))
 
-    def font(self, size: float, *, bold: bool = False):
+    def font(self, size: float, *, bold: bool = False,
+             weight: int | None = None):
         """This screen's face through the ONE door (makers'
         font seam over the typography context policy): the
         platform's real UI family where it is stockable, a
         design-named ``family`` when the design carries one.
-        A family the stocked library does not hold fails the
-        render with the registry's named reason, carried as
-        this surface's own error type."""
+        An iPhone screen wears SF Pro Text — the real iOS
+        face, vendored in the core font library — because
+        Roboto/Inter at the same size is measurably wider
+        (~6% on a message line) and the mock reads as a
+        different phone; an Android screen keeps the policy
+        face (Roboto).  A family the stocked library does
+        not hold fails the render with the registry's named
+        reason, carried as this surface's own error type —
+        except the iPhone default, which falls back to the
+        policy face so a bare host still renders.  ``weight``
+        names an exact weight (the iOS clock and header
+        title are semibold 600); ``bold`` is the old binary
+        form and loses to an explicit weight."""
         from ....media.typography import FontNotStocked
+        design_family = self.design.get("family")
+        family = design_family
+        if family is None and self.screen.chrome.style == "iphone":
+            family = "SF Pro Text"
         try:
             return _makers._font(
                 self.s(size), bold=bold,
                 context=self.font_context,
-                family=self.design.get("family"))
+                family=family, weight=weight)
         except FontNotStocked as exc:
+            if design_family is None and family == "SF Pro Text":
+                return _makers._font(
+                    self.s(size), bold=bold,
+                    context=self.font_context, weight=weight)
             raise MockScreensError(str(exc)) from exc
 
     def wrap(self, text: str, size: float, max_w: float,
-             *, bold: bool = False) -> list:
+             *, bold: bool = False, weight: int | None = None) -> list:
         return _makers._wrap(self._measure, text,
-                             self.font(size, bold=bold),
+                             self.font(size, bold=bold, weight=weight),
                              self.s(max_w))
 
     def text_w(self, text: str, size: float, *,
-               bold: bool = False) -> float:
+               bold: bool = False, weight: int | None = None) -> float:
         return self._measure.textlength(
-            text, font=self.font(size, bold=bold)) / SCALE
+            text, font=self.font(size, bold=bold, weight=weight)) / SCALE
 
 
 def _draw_ticks(draw: ImageDraw.ImageDraw, cv: _Canvas,
@@ -298,15 +327,29 @@ def _draw_status_bar(draw, cv: _Canvas, y0: float) -> float:
     h = float(dev["status_h"])
     draw.rectangle([0, 0, cv.s(cv.w), cv.s(h)], fill=pal["status_bg"])
     fg = pal["status_fg"]
-    font = cv.font(13, bold=True)
-    draw.text((cv.s(22 if dev["notch"] else 12), cv.s(6 if dev["notch"] else 3)),
+    # The clock is the iOS 15 semibold face at 15pt, centred in
+    # the 44pt bar; Android keeps its own 14pt medium clock.
+    # iOS never shows a "4G" label: a 4G network reads LTE.
+    if dev["notch"]:
+        font = cv.font(15, weight=600)
+        clock_x, clock_y = 32, 13
+    else:
+        font = cv.font(14, weight=500)
+        clock_x, clock_y = 12, 7
+    draw.text((cv.s(clock_x), cv.s(clock_y)),
               chrome.clock, font=font, fill=fg)
     if dev["notch"]:
-        pill_w, pill_h = 108, 24
-        x = (cv.w - pill_w) / 2
+        # iPhone 14 (390x844): a notch, 209x30pt, hanging from
+        # the top edge with rounded bottom corners — not the
+        # 108x24 Dynamic Island pill, which matches no iPhone
+        # (the real island is ~126x37pt on the Pro models).
+        notch_w, notch_h = 209, 30
+        x = (cv.w - notch_w) / 2
         draw.rounded_rectangle(
-            [cv.s(x), cv.s(8), cv.s(x + pill_w), cv.s(8 + pill_h)],
-            radius=cv.s(pill_h / 2), fill=(10, 10, 10))
+            [cv.s(x), cv.s(0), cv.s(x + notch_w), cv.s(notch_h)],
+            radius=cv.s(12), fill=(10, 10, 10))
+        draw.rectangle([cv.s(x), cv.s(0), cv.s(x + notch_w),
+                        cv.s(12)], fill=(10, 10, 10))
     # right cluster: network label, signal bars, battery
     bx = cv.w - 14
     lvl = chrome.battery / 100.0
@@ -324,6 +367,8 @@ def _draw_status_bar(draw, cv: _Canvas, y0: float) -> float:
          cv.s(by + bh - 3.5)], fill=fg)
     bx -= bw + 8
     net = chrome.network or ""
+    if dev["notch"] and net == "4G":
+        net = "LTE"
     if net:
         nf = cv.font(11, bold=True)
         tw = draw.textlength(net, font=nf) / SCALE
@@ -420,17 +465,14 @@ def _draw_header(canvas, draw, cv: _Canvas, y0: float) -> float:
                    fill=pal["header_bg"])
     fg = pal["header_fg"]
     mid = y0 + h / 2
-    # back arrow (+ iPhone unread badge count)
+    # back arrow.  No unread count here: the "< 3" badge is an
+    # iMessage convention (it lives in _draw_header_center);
+    # real WhatsApp iOS shows no count beside the back arrow.
     ax = 12
     draw.line([(cv.s(ax + 7), cv.s(mid - 7)), (cv.s(ax), cv.s(mid)),
                (cv.s(ax + 7), cv.s(mid + 7))], fill=fg,
               width=cv.s(2.2))
     tx = ax + 12
-    if screen.chrome.style == "iphone" and screen.chrome.unread:
-        label = str(screen.chrome.unread)
-        f = cv.font(15)
-        draw.text((cv.s(tx), cv.s(mid - 9)), label, font=f, fill=fg)
-        tx += cv.text_w(label, 15) + 4
     av = 38
     person = _header_person(screen)
     if screen.group and (person is None or not person.avatar) \
@@ -444,32 +486,30 @@ def _draw_header(canvas, draw, cv: _Canvas, y0: float) -> float:
     tx += av + 12
     limit_x = cv.w - (150 if screen.platform == "instagram"
                       else 118)
-    title_f = cv.font(16, bold=True)
+    # the contact name is 17pt semibold on iOS (15 was too
+    # small and bold is the wrong weight for the face).
+    title_f = cv.font(17, weight=600)
     draw.text((cv.s(tx), cv.s(y0 + (9 if screen.subtitle else 17))),
-              _fit_text(cv, screen.title, 16, limit_x - tx,
-                        bold=True),
+              _fit_text(cv, screen.title, 17, limit_x - tx,
+                        weight=600),
               font=title_f, fill=fg)
     if screen.subtitle:
         draw.text((cv.s(tx), cv.s(y0 + 31)),
-                  _fit_text(cv, screen.subtitle, 12,
+                  _fit_text(cv, screen.subtitle, 13,
                             limit_x - tx),
-                  font=cv.font(12), fill=pal["header_sub"])
-    # right icons: video (vector) + call (glyph) — in the
-    # accent on designs whose header actions are coloured
-    # (Messenger), in the header foreground elsewhere
+                  font=cv.font(13), fill=pal["header_sub"])
+    # right icons: video (vector) + call (vector phone) — in
+    # the accent on designs whose header actions are coloured
+    # (Messenger), in the header foreground elsewhere.  Both
+    # are drawn, never font glyphs: the stocked fonts carry
+    # no telephone glyph, so the old "☎" rendered as a tofu
+    # box and the call button looked blank.
     icon_fg = pal["accent"] if cv.dflag(
         "header_icons_accent") else fg
     ix = cv.w - 30
-    draw.text((cv.s(ix), cv.s(mid - 10)), "☎",
-              font=cv.font(17), fill=icon_fg)
+    _draw_phone(draw, cv.s, ix + 8, mid, icon_fg, r=9.0)
     vx = ix - 42
-    draw.rounded_rectangle(
-        [cv.s(vx), cv.s(mid - 7), cv.s(vx + 17), cv.s(mid + 7)],
-        radius=cv.s(3), fill=icon_fg)
-    draw.polygon([(cv.s(vx + 19), cv.s(mid - 3)),
-                  (cv.s(vx + 26), cv.s(mid - 8)),
-                  (cv.s(vx + 26), cv.s(mid + 8)),
-                  (cv.s(vx + 19), cv.s(mid + 3))], fill=icon_fg)
+    _draw_video_camera(draw, cv.s, vx + 13, mid, icon_fg, w=26.0)
     if screen.platform == "instagram":
         draw.ellipse([cv.s(vx - 34), cv.s(mid - 10),
                       cv.s(vx - 14), cv.s(mid + 10)],
@@ -480,13 +520,15 @@ def _draw_header(canvas, draw, cv: _Canvas, y0: float) -> float:
 
 
 def _fit_text(cv: _Canvas, text: str, size: float,
-              max_w: float, *, bold: bool = False) -> str:
+              max_w: float, *, bold: bool = False,
+              weight: int | None = None) -> str:
     """Truncate with an ellipsis to a measured width — a
     header title must never run under the header icons."""
-    if cv.text_w(text, size, bold=bold) <= max_w:
+    if cv.text_w(text, size, bold=bold, weight=weight) <= max_w:
         return text
     out = text
-    while out and cv.text_w(out + "…", size, bold=bold) > max_w:
+    while out and cv.text_w(out + "…", size, bold=bold,
+                            weight=weight) > max_w:
         out = out[:-1]
     return out + "…" if out else "…"
 
@@ -541,8 +583,7 @@ def _draw_input_bar_styled(draw, cv: _Canvas, y0: float,
     fh = 40
     mid = fy + fh / 2
     if style == "telegram":
-        draw.text((cv.s(16), cv.s(fy + 10)), "☺",
-                  font=cv.font(19), fill=pal["meta"])
+        _draw_smiley(draw, cv.s, 25, mid, pal["meta"], r=9.0)
         draw.text((cv.s(46), cv.s(fy + 11)), "Message",
                   font=cv.font(14.5), fill=pal["input_fg"])
         _draw_mic(draw, cv, cv.w - 26, mid, pal["meta"])
@@ -577,8 +618,8 @@ def _draw_input_bar_styled(draw, cv: _Canvas, y0: float,
             outline=pal["meta"], width=cv.s(1.2))
         draw.text((cv.s(64), cv.s(fy + 11)), "Send a chat",
                   font=cv.font(14), fill=pal["input_fg"])
-        draw.text((cv.s(cv.w - 34), cv.s(fy + 10)), "☺",
-                  font=cv.font(18), fill=pal["meta"])
+        _draw_smiley(draw, cv.s, cv.w - 25, mid, pal["meta"],
+                     r=9.0)
         return h
     if style == "imessage":
         _draw_camera(draw, cv, 24, mid, pal["meta"], w=20)
@@ -616,6 +657,7 @@ def _draw_input_bar(draw, cv: _Canvas, y0: float) -> float:
                    fill=pal["input_bg"])
     fy = y0 + 8
     fh = 40
+    mid = fy + fh / 2
     style = str(cv.dflag("input_style", "whatsapp"))
     if style not in ("whatsapp", "instagram"):
         return _draw_input_bar_styled(draw, cv, y0, style)
@@ -633,17 +675,33 @@ def _draw_input_bar(draw, cv: _Canvas, y0: float) -> float:
                      fill=pal["accent"])
         draw.text((cv.s(54), cv.s(fy + 11)), "Message...",
                   font=cv.font(14), fill=pal["input_fg"])
-        draw.text((cv.s(cv.w - 44), cv.s(fy + 9)), "☺",
-                  font=cv.font(18), fill=pal["header_fg"])
+        _draw_smiley(draw, cv.s, cv.w - 35, mid,
+                     pal["header_fg"], r=9.0)
         return h
-    # WhatsApp: field + green mic button
+    # WhatsApp.  iPhone: the blue "+" at the bottom-left,
+    # then the field (smiley + "Message" + camera), then the
+    # green mic disc.  Android: no "+" at all — the field
+    # spans nearly full width and wears a paperclip inside
+    # at the right, before the camera (the real Android
+    # layout).  The plus wears WhatsApp blue (ticks_read);
+    # the field icons wear the meta grey.  The old bar drew
+    # the plus on both styles, and its smiley was a "☺"
+    # glyph the stocked fonts do not carry, so both spots
+    # read as blank.
+    android = cv.screen.chrome.style == "android"
+    fx0 = 10 if android else 44
+    if not android:
+        _draw_plus(draw, cv.s, 22, mid, pal["ticks_read"], r=10.0)
     draw.rounded_rectangle(
-        [cv.s(8), cv.s(fy), cv.s(cv.w - 60), cv.s(fy + fh)],
+        [cv.s(fx0), cv.s(fy), cv.s(cv.w - 60), cv.s(fy + fh)],
         radius=cv.s(fh / 2), fill=pal["input_field"])
-    draw.text((cv.s(20), cv.s(fy + 10)), "☺",
-              font=cv.font(18), fill=pal["meta"])
-    draw.text((cv.s(48), cv.s(fy + 11)), "Message",
+    _draw_smiley(draw, cv.s, fx0 + 14, mid, pal["meta"], r=9.0)
+    draw.text((cv.s(fx0 + 32), cv.s(fy + 11)), "Message",
               font=cv.font(14), fill=pal["input_fg"])
+    if android:
+        _draw_paperclip(draw, cv.s, cv.w - 108, mid,
+                        pal["meta"], r=9.0)
+    _draw_camera(draw, cv, cv.w - 82, mid, pal["meta"], w=19)
     mx = cv.w - 32
     draw.ellipse([cv.s(mx - 20), cv.s(fy), cv.s(mx + 20),
                   cv.s(fy + fh)], fill=pal["accent"])
@@ -664,10 +722,18 @@ def _draw_nav(draw, cv: _Canvas, y0: float) -> float:
     if dev["nav"] == "home":
         bw = 134
         x = (cv.w - bw) / 2
+        # the home indicator / gesture pill is a neutral bar —
+        # dark on a light screen, light on a dark one — never
+        # the palette's greenish meta grey.  Not every palette
+        # names a header foreground (call/status carry "fg" or
+        # the status foreground instead), so fall back through
+        # the design's own foregrounds.
+        pill = (cv.pal.get("header_fg") or cv.pal.get("fg")
+                or cv.pal.get("nav_fg") or cv.pal["status_fg"])
         draw.rounded_rectangle(
             [cv.s(x), cv.s(y0 + h - 9), cv.s(x + bw),
              cv.s(y0 + h - 4)], radius=cv.s(2.5),
-            fill=cv.pal["meta"])
+            fill=pill)
         return h
     draw.rectangle([0, cv.s(y0), cv.s(cv.w), cv.s(y0 + h)],
                    fill=cv.pal["nav_bg"])
@@ -722,7 +788,14 @@ def _quote_block(cv: _Canvas, msg: Message):
         author.name if author is not None else target.sender)
     color = (_participant_color(author, cv.screen)
              if author is not None else cv.pal["accent"])
-    return name, color, (target.text or target.caption or "📷 Photo")
+    # A quoted photo carries no text: the fourth element names
+    # the vector icon the draw site puts before the word
+    # "Photo".  The old fallback prefixed a "📷" glyph the
+    # stocked fonts do not carry, so the quote read "▯ Photo".
+    text = target.text or target.caption
+    if text:
+        return name, color, text, None
+    return name, color, "Photo", "camera"
 
 
 def _measure_bubble(cv: _Canvas, msg: Message) -> tuple:
@@ -762,9 +835,9 @@ def _measure_bubble(cv: _Canvas, msg: Message) -> tuple:
     quote = _quote_block(cv, msg)
     h = _PAD_Y
     if quote is not None:
-        name, _color, qtext = quote
+        name, _color, qtext, qicon = quote
         qlines = cv.wrap(qtext, 11, text_max - 16)[:2]
-        parts["quote"] = (name, qlines)
+        parts["quote"] = (name, qlines, qicon)
         h += 14 + len(qlines) * 14.5 + 7
     if cv.screen.group and not own:
         author = cv.screen.participant(msg.sender)
@@ -991,8 +1064,8 @@ def _draw_bubble(canvas, draw, cv: _Canvas, msg: Message,
         return
     quote = _quote_block(cv, msg)
     if quote is not None:
-        name, color, _qtext = quote
-        _n, qlines = parts["quote"]
+        name, color, _qtext, qicon = quote
+        _n, qlines, _qi = parts["quote"]
         qh = 14 + len(qlines) * 14.5 + 5
         qbg = _shade(fill, 0.07) if not (
             cv.screen.platform == "instagram" and own) else (
@@ -1005,8 +1078,13 @@ def _draw_bubble(canvas, draw, cv: _Canvas, msg: Message,
         draw.text((cv.s(cx + 5), cv.s(cy)), name,
                   font=cv.font(11.5, bold=True), fill=color)
         qy = cy + 14
-        for line in qlines:
-            draw.text((cv.s(cx + 5), cv.s(qy)), line,
+        for li, line in enumerate(qlines):
+            lx = cx + 5
+            if li == 0 and qicon == "camera":
+                _draw_camera(draw, cv, cx + 12, qy + 7,
+                             pal["meta"], w=14)
+                lx = cx + 29
+            draw.text((cv.s(lx), cv.s(qy)), line,
                       font=cv.font(11), fill=pal["meta"])
             qy += 14.5
         cy += qh + 4
@@ -1196,8 +1274,29 @@ def _draw_chip(draw, cv: _Canvas, msg: Message, y: float,
     pal = cv.pal
     w, h, lines = _chip_size(cv, msg.text, system=system)
     x = (cv.w - w) / 2
-    bg = pal["system_bg"] if system else pal["chip_bg"]
     fg = pal["system_fg"] if system else pal["chip_fg"]
+    if system:
+        # A system row — the encryption notice, "X added Y" —
+        # is centred text straight on the wallpaper, no pill:
+        # real WhatsApp never puts these in a chip.  Only the
+        # date divider (system=False) keeps its white pill.
+        # The encryption notice wears a small lock before its
+        # first line, centred with the text as one unit.
+        encrypted = "encrypt" in msg.text.lower()
+        ly = y + 4.5
+        for i, line in enumerate(lines):
+            tw = cv.text_w(line, 11.0)
+            tx = x + (w - tw) / 2
+            if encrypted and i == 0:
+                unit = 14 + 5 + tw
+                lx = (cv.w - unit) / 2
+                _draw_lock(draw, cv.s, lx + 7, ly + 6, fg, r=7.0)
+                tx = lx + 14 + 5
+            draw.text((cv.s(tx), cv.s(ly)), line,
+                      font=cv.font(11), fill=fg)
+            ly += 15
+        return h
+    bg = pal["chip_bg"]
     draw.rounded_rectangle(
         [cv.s(x), cv.s(y), cv.s(x + w), cv.s(y + h)],
         radius=cv.s(7), fill=bg)
@@ -1229,6 +1328,172 @@ def _attach_media_record(cv: _Canvas, entry: dict,
         entry["duration_s"] = round(probe.seconds, 3)
         entry["bars"] = [round(b, 3) for b in probe.bars]
     return entry
+
+
+def _doodle_star(d, cx, cy, r, ink, w):
+    pts = []
+    for i in range(10):
+        ang = -math.pi / 2 + i * math.pi / 5
+        rr = r if i % 2 == 0 else r * 0.45
+        pts.append((cx + rr * math.cos(ang),
+                    cy + rr * math.sin(ang)))
+    d.line(pts + [pts[0]], fill=ink, width=w)
+
+
+def _doodle_heart(d, cx, cy, r, ink, w):
+    pts = [(cx, cy + 0.9 * r), (cx - 0.9 * r, cy - 0.1 * r),
+           (cx - 0.45 * r, cy - 0.8 * r), (cx, cy - 0.35 * r),
+           (cx + 0.45 * r, cy - 0.8 * r), (cx + 0.9 * r, cy - 0.1 * r)]
+    d.line(pts + [pts[0]], fill=ink, width=w)
+
+
+def _doodle_smiley(d, cx, cy, r, ink, w):
+    d.ellipse([cx - r, cy - r, cx + r, cy + r],
+              outline=ink, width=w)
+    d.ellipse([cx - 0.4 * r, cy - 0.35 * r,
+               cx - 0.2 * r, cy - 0.15 * r], fill=ink)
+    d.ellipse([cx + 0.2 * r, cy - 0.35 * r,
+               cx + 0.4 * r, cy - 0.15 * r], fill=ink)
+    d.arc([cx - 0.5 * r, cy - 0.2 * r, cx + 0.5 * r,
+           cy + 0.7 * r], start=20, end=160, fill=ink, width=w)
+
+
+def _doodle_bubble(d, cx, cy, r, ink, w):
+    d.rounded_rectangle([cx - r, cy - 0.7 * r, cx + r, cy + 0.6 * r],
+                        radius=int(r * 0.3), outline=ink, width=w)
+    d.line([(cx - 0.5 * r, cy + 0.6 * r), (cx - 0.7 * r, cy + r),
+            (cx - 0.2 * r, cy + 0.6 * r)], fill=ink, width=w)
+
+
+def _doodle_bolt(d, cx, cy, r, ink, w):
+    pts = [(cx + 0.2 * r, cy - r), (cx - 0.5 * r, cy + 0.1 * r),
+           (cx - 0.05 * r, cy + 0.1 * r), (cx - 0.2 * r, cy + r),
+           (cx + 0.5 * r, cy - 0.1 * r), (cx + 0.05 * r, cy - 0.1 * r)]
+    d.line(pts + [pts[0]], fill=ink, width=w)
+
+
+def _doodle_sun(d, cx, cy, r, ink, w):
+    d.ellipse([cx - 0.55 * r, cy - 0.55 * r,
+               cx + 0.55 * r, cy + 0.55 * r],
+              outline=ink, width=w)
+    for i in range(8):
+        ang = i * math.pi / 4
+        d.line([(cx + 0.75 * r * math.cos(ang),
+                 cy + 0.75 * r * math.sin(ang)),
+                (cx + r * math.cos(ang),
+                 cy + r * math.sin(ang))], fill=ink, width=w)
+
+
+def _doodle_note(d, cx, cy, r, ink, w):
+    d.ellipse([cx - 0.5 * r, cy + 0.3 * r, cx, cy + 0.7 * r],
+              fill=ink)
+    d.line([(cx - 0.05 * r, cy + 0.5 * r),
+            (cx - 0.05 * r, cy - 0.8 * r)], fill=ink, width=w)
+    d.arc([cx - 0.05 * r, cy - 0.8 * r, cx + 0.6 * r,
+           cy - 0.2 * r], start=270, end=30, fill=ink, width=w)
+
+
+def _doodle_house(d, cx, cy, r, ink, w):
+    d.rectangle([cx - 0.6 * r, cy - 0.2 * r,
+                 cx + 0.6 * r, cy + 0.8 * r],
+                outline=ink, width=w)
+    d.line([(cx - 0.85 * r, cy - 0.2 * r), (cx, cy - r),
+            (cx + 0.85 * r, cy - 0.2 * r)], fill=ink, width=w)
+    d.rectangle([cx - 0.15 * r, cy + 0.25 * r,
+                 cx + 0.15 * r, cy + 0.8 * r],
+                outline=ink, width=w)
+
+
+def _doodle_camera(d, cx, cy, r, ink, w):
+    d.rounded_rectangle([cx - r, cy - 0.6 * r, cx + r, cy + 0.6 * r],
+                        radius=int(r * 0.2), outline=ink, width=w)
+    d.ellipse([cx - 0.35 * r, cy - 0.35 * r,
+               cx + 0.35 * r, cy + 0.35 * r],
+              outline=ink, width=w)
+
+
+def _doodle_ring(d, cx, cy, r, ink, w):
+    d.ellipse([cx - r, cy - r, cx + r, cy + r],
+              outline=ink, width=w)
+
+
+def _doodle_triangle(d, cx, cy, r, ink, w):
+    pts = [(cx, cy - r), (cx + 0.9 * r, cy + 0.7 * r),
+           (cx - 0.9 * r, cy + 0.7 * r)]
+    d.line(pts + [pts[0]], fill=ink, width=w)
+
+
+def _doodle_balloon(d, cx, cy, r, ink, w):
+    d.ellipse([cx - 0.6 * r, cy - r, cx + 0.6 * r, cy + 0.1 * r],
+              outline=ink, width=w)
+    d.line([(cx, cy + 0.1 * r), (cx + 0.2 * r, cy + 0.5 * r),
+            (cx - 0.2 * r, cy + 0.8 * r)], fill=ink, width=w)
+
+
+_DOODLE_PAINTERS = (_doodle_star, _doodle_heart, _doodle_smiley,
+                    _doodle_bubble, _doodle_bolt, _doodle_sun,
+                    _doodle_note, _doodle_house, _doodle_camera,
+                    _doodle_ring, _doodle_triangle, _doodle_balloon)
+
+_TILE_LOGICAL = 200.0  # one doodle tile, logical px
+_DOODLE_CACHE: dict[bool, Image.Image] = {}
+
+
+def _doodle_tile(dark: bool) -> Image.Image:
+    """One seamless tile of the WhatsApp doodle wallpaper:
+    thin-outline doodles (star, heart, smiley, chat bubble,
+    bolt, sun, note, house, camera, ring, triangle, balloon)
+    in the measured ink colour, scattered by a fixed seed.
+    Seamless by construction: every doodle is drawn at its
+    spot and at all eight neighbouring tile offsets on a 3x
+    tile scratch, then the centre tile is cropped — a doodle
+    crossing an edge re-enters on the opposite side.  The
+    real pattern's own tile period could not be recovered
+    from the owner's JPEG screenshots (autocorrelation is
+    flat), so this is the same style, density and ink at
+    the measured base colour — not the vendor's exact art.
+    """
+    if dark in _DOODLE_CACHE:
+        return _DOODLE_CACHE[dark]
+    ink = (31, 45, 52, 255) if dark else (233, 229, 220, 255)
+    t = int(_TILE_LOGICAL * SCALE)
+    big = Image.new("RGBA", (3 * t, 3 * t), (0, 0, 0, 0))
+    d = ImageDraw.Draw(big)
+    rng = random.Random(20261127 if not dark else 20261128)
+    w = max(1, int(SCALE))
+    for _ in range(44):
+        painter = rng.choice(_DOODLE_PAINTERS)
+        cx = rng.uniform(0, t)
+        cy = rng.uniform(0, t)
+        r = rng.uniform(16, 30)
+        for dx in (-t, 0, t):
+            for dy in (-t, 0, t):
+                painter(d, cx + dx + t, cy + dy + t, r, ink, w)
+    for _ in range(14):
+        cx = rng.uniform(0, t)
+        cy = rng.uniform(0, t)
+        r = rng.uniform(2, 4)
+        for dx in (-t, 0, t):
+            for dy in (-t, 0, t):
+                d.ellipse([cx + dx + t - r, cy + dy + t - r,
+                           cx + dx + t + r, cy + dy + t + r],
+                          fill=ink)
+    tile = big.crop((t, t, 2 * t, 2 * t))
+    _DOODLE_CACHE[dark] = tile
+    return tile
+
+
+def _draw_wallpaper(img: Image.Image, cv: _Canvas,
+                    y0: float, y1: float) -> None:
+    """Tile the WhatsApp doodle pattern across the chat area
+    (between the header and the input bar), under the bubbles.
+    Only WhatsApp wears the doodle wallpaper; other designs
+    keep their flat base."""
+    tile = _doodle_tile(cv.screen.dark)
+    t = tile.width
+    for x in range(0, cv.s(cv.w), t):
+        for y in range(cv.s(y0), cv.s(y1), t):
+            img.paste(tile, (x, y), tile)
 
 
 def render_screen(screen: Screen, *, avatars: dict | None = None,
@@ -1331,6 +1596,9 @@ def render_screen(screen: Screen, *, avatars: dict | None = None,
                     cv.pal["wallpaper"])
     cv.image = img
     draw = ImageDraw.Draw(img)
+    if screen.platform == "whatsapp":
+        _draw_wallpaper(img, cv, status_h + header_h,
+                        total_h - nav_h - input_h)
     drawn: dict = {
         "platform": screen.platform,
         "style": screen.chrome.style,

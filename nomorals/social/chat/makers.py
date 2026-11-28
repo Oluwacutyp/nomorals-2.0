@@ -86,6 +86,19 @@ from typing import Any
 from .expression import ProviderHealth
 from .failures import record_failure
 from .fun import _sniff_image, _trim_caption, picture_shape
+from .mock_screens.icons import (
+    _draw_close,
+    _draw_heart,
+    _draw_share_arrow,
+    _draw_star,
+)
+
+
+def _px(value: float) -> int:
+    """Identity scale for vector icons: the card maker lays
+    out in device pixels already, so no device scale
+    applies — the icon helpers take a scale callable."""
+    return int(round(value))
 
 __all__ = [
     "MAKER_COMMANDS", "CARD_KINDS", "CARD_STYLES",
@@ -209,7 +222,8 @@ _PAD = 40
 
 
 def _font(size: int, *, bold: bool = False, intent: str = "text",
-          context: str = "", family: str | None = None):
+          context: str = "", family: str | None = None,
+          weight: int | None = None):
     """Card faces come through the ONE door: the typography
     service's context policy (media.typography.policy) over
     the stocked FontLibrary registry.  Designs name a
@@ -222,13 +236,18 @@ def _font(size: int, *, bold: bool = False, intent: str = "text",
     guarantees a real face on every host, and a family that
     cannot resolve raises the registry's named
     FontNotStocked outcome instead of silently sliding to
-    the bitmap default."""
+    the bitmap default.  ``weight`` names an exact weight
+    (400/500/600/700 — the iOS clock is semibold 600, the
+    header title is semibold 600); ``bold`` is the old
+    binary form and loses to an explicit weight.
+    """
     from ...media.typography import get_service, pil_font_for
 
     return pil_font_for(get_service(), context, size,
                         intent=None if context else intent,
                         family=family,
-                        weight=700 if bold else 400)
+                        weight=(int(weight) if weight is not None
+                                else (700 if bold else 400)))
 
 
 def _initials(name: str) -> str:
@@ -901,9 +920,8 @@ def _render_platform(key: str, entries: list[dict[str, Any]]
         regions["header"] = (0, 0, width, header_h)
         y = header_h
     elif spec["header"] == "minimal":
-        draw.text((_PAD, 10), "✕",
-                  font=_font(34, bold=True, intent="display"),
-                  fill=spec["text"])
+        _draw_close(draw, _px, _PAD + 17, 27, spec["text"],
+                    r=13.0)
         regions["header"] = (0, 0, width, header_h)
         y = header_h
     elif spec["header"] == "band":
@@ -966,13 +984,20 @@ def _render_platform(key: str, entries: list[dict[str, Any]]
                     spec["like_at"]) else spec["accent"]
             draw.ellipse([rail_x, cy, rail_x + 64, cy + 64],
                          fill=fill)
-            glyph = {"Like": "♥", "Comment": "…",
-                     "Share": "↗"}.get(action, "•")
-            gf = _font(30, bold=True)
-            gb = draw.textbbox((0, 0), glyph, font=gf)
-            draw.text((rail_x + (64 - (gb[2] - gb[0])) / 2 - gb[0],
-                       cy + (64 - (gb[3] - gb[1])) / 2 - gb[1]),
-                      glyph, font=gf, fill=(255, 255, 255))
+            if action == "Like":
+                _draw_heart(draw, _px, rail_x + 32, cy + 32,
+                            (255, 255, 255), r=13.0)
+            elif action == "Share":
+                _draw_share_arrow(draw, _px, rail_x + 32, cy + 32,
+                                  (255, 255, 255), r=13.0)
+            else:
+                gf = _font(30, bold=True)
+                glyph = {"Comment": "…"}.get(action, "•")
+                gb = draw.textbbox((0, 0), glyph, font=gf)
+                draw.text((rail_x + (64 - (gb[2] - gb[0])) / 2
+                           - gb[0],
+                           cy + (64 - (gb[3] - gb[1])) / 2 - gb[1]),
+                          glyph, font=gf, fill=(255, 255, 255))
             count = str(post.get("likes") or "1.2K") if i == 0 \
                 else ""
             if count:
@@ -994,18 +1019,25 @@ def _render_platform(key: str, entries: list[dict[str, Any]]
             if key == "tinder":
                 draw.ellipse([ax, act_y, ax + 44, act_y + 44],
                              fill=fill)
-                glyph = ("✕" if action == "Pass" else
-                         "♥" if action == "Like" else "★")
-                gf = _font(24, bold=True)
-                gb = draw.textbbox((0, 0), glyph, font=gf)
-                draw.text((ax + (44 - (gb[2] - gb[0])) / 2 - gb[0],
-                           act_y + (44 - (gb[3] - gb[1])) / 2 - gb[1]),
-                          glyph, font=gf, fill=(255, 255, 255))
+                if action == "Pass":
+                    _draw_close(draw, _px, ax + 22, act_y + 22,
+                                (255, 255, 255), r=10.0)
+                elif action == "Like":
+                    _draw_heart(draw, _px, ax + 22, act_y + 22,
+                                (255, 255, 255), r=10.0)
+                else:
+                    _draw_star(draw, _px, ax + 22, act_y + 22,
+                               (255, 255, 255), r=11.0)
                 boxes.append((ax, act_y, 44, 44))
                 continue
             if i == int(spec["like_at"]):
-                label = f"♥ {action}"
-            draw.text((ax, act_y), label, font=act_font, fill=fill)
+                _draw_heart(draw, _px, ax + 7, act_y + 9, fill,
+                            r=7.0)
+                draw.text((ax + 16, act_y), label,
+                          font=act_font, fill=fill)
+            else:
+                draw.text((ax, act_y), label, font=act_font,
+                          fill=fill)
             boxes.append((ax, act_y, step, 32))
         regions["actions"] = boxes
     regions["post"] = (content_x, post_y, content_w, post_h - 20)

@@ -220,7 +220,7 @@ def test_record_refuses_an_empty_timeline(tmp_path):
 def test_chat_timeline_is_data_not_sleeps():
     rec = build_chat_recording(demo_screen("whatsapp"))
     assert rec.kind == "chat"
-    assert rec.size == (800, 1864)
+    assert rec.size == (800, 1824)
     labels = [c["label"] for c in rec.timeline]
     assert labels[0] == "opening"
     assert labels[-1] == "ending"

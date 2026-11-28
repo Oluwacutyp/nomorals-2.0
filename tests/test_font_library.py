@@ -393,7 +393,7 @@ class TestFontsSurface:
         # No internal id in user-facing text.
         assert re.search(r"@[0-9a-f]{8}\b", overview) is None
         # The content itself is unchanged.
-        assert "27 families" in overview
+        assert "28 families" in overview
         assert "core subset" in overview
 
     def test_telegram_overview_renders_html(
@@ -418,7 +418,7 @@ class TestFontsSurface:
         runtime = self._runtime()
         overview = runtime._control_fonts("fonts", "", None)
         assert re.search(r"@[0-9a-f]{8}\b", overview) is None
-        assert "27 families" in overview
+        assert "28 families" in overview
 
     def test_message_less_overview_stays_canonical(
             self, pack_dir, tmp_path, monkeypatch):

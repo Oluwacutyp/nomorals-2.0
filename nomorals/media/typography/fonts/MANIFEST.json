@@ -6,9 +6,9 @@
   "commit": "c30b221beb0c1da59d563feb91ec8656a1fa972a"
  },
  "built_at": "2026-11-11T16:59:26Z",
- "family_count": 27,
- "file_count": 56,
- "total_bytes": 36531748,
+ "family_count": 28,
+ "file_count": 60,
+ "total_bytes": 38329528,
  "families": [
   {
    "name": "Inter",
@@ -1310,6 +1310,64 @@
      "variable": false,
      "sha256": "95837e182baeeada83368f7748db28357f0a1b75c6b84ff7065b5edf933c8e18",
      "bytes": 99356,
+     "scripts": [
+      "Latin"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "SF Pro Text",
+   "category": "Sans Serif",
+   "license": "Apple proprietary (see sfpro/ATTRIBUTION.md)",
+   "license_file": "sfpro/ATTRIBUTION.md",
+   "reserved_font_name": false,
+   "dir": "sfpro",
+   "subsets": [
+    "latin",
+    "latin-ext"
+   ],
+   "faces": [
+    {
+     "file": "sfpro/SFProText-Regular.ttf",
+     "weight": 400,
+     "style": "normal",
+     "variable": false,
+     "sha256": "b531581731da4de2efcf213b777ff4018ca4dc239980b37f034e61e91c831bf4",
+     "bytes": 434120,
+     "scripts": [
+      "Latin"
+     ]
+    },
+    {
+     "file": "sfpro/SFProText-Medium.ttf",
+     "weight": 500,
+     "style": "normal",
+     "variable": false,
+     "sha256": "c7efc5d8037664a594680f179e55c6f89c220366da9bb8d2d0cac35047c7a795",
+     "bytes": 453296,
+     "scripts": [
+      "Latin"
+     ]
+    },
+    {
+     "file": "sfpro/SFProText-Semibold.ttf",
+     "weight": 600,
+     "style": "normal",
+     "variable": false,
+     "sha256": "95fd62a1c9b8388dd94bd30ddd2b35213fcefa0f1c3ea1268735a0c2b7623bc4",
+     "bytes": 453440,
+     "scripts": [
+      "Latin"
+     ]
+    },
+    {
+     "file": "sfpro/SFProText-Bold.ttf",
+     "weight": 700,
+     "style": "normal",
+     "variable": false,
+     "sha256": "e75223787620bb8ba1b9f97f68c5e1fbe659d92cc61439cb81b4cef1ec8c0544",
+     "bytes": 456924,
      "scripts": [
       "Latin"
      ]

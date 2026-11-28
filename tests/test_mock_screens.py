@@ -181,7 +181,7 @@ def test_style_switch_changes_the_chrome():
     data_i, drawn_i = render_screen(screen_iphone)
     assert drawn_a["size"][0] != drawn_i["size"][0]
     assert data_a != data_i
-    # the iPhone wears the notch pill and the unread count
+    # the iPhone wears the notch and the taller status bar
     assert drawn_i["regions"]["status_bar"][3] > \
         drawn_a["regions"]["status_bar"][3]
 

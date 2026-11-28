@@ -138,10 +138,12 @@ CONTEXT_POLICIES: dict[str, ContextFontPolicy] = {
     # Mock screens wear the platforms' real UI faces where
     # they are stockable: Roboto is the Android face behind
     # WhatsApp / Telegram / Google Messages.  iMessage's San
-    # Francisco and Snapchat's Helvetica-class face are not
-    # stockable (Apple / proprietary licences), so Inter —
-    # the stocked neo-grotesque in the same class — stands in,
-    # named here rather than silently substituted.
+    # Francisco (SF Pro Text) IS stocked now — vendored in
+    # fonts/sfpro with its attribution, Apple proprietary —
+    # and the mock-screen canvas names it outright for the
+    # iPhone style; Inter remains the fallback here for any
+    # caller that does not name a family, and for Snapchat's
+    # Helvetica-class face, which is still unstocked.
     "screen": ContextFontPolicy(
         families=("Roboto", "Inter", "Noto Sans"),
         intent="text"),

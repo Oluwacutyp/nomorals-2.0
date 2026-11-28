@@ -26,6 +26,14 @@ from __future__ import annotations
 from PIL import Image, ImageDraw, ImageOps
 
 from .designs import SOCIAL_DESIGNS
+from .icons import (
+    _draw_heart,
+    _draw_music_note,
+    _draw_pin,
+    _draw_play,
+    _draw_share_arrow,
+    _draw_speech,
+)
 from .render import (
     _Canvas,
     _draw_media_placeholder,
@@ -257,17 +265,28 @@ def render_post_screen(screen: PostScreen, *,
             "box": [0, cv.s(my), cv.s(w),
                     cv.s(w * 0.75)]})
         y = my + w * 0.75 + 12
-    # engagement row
+    # engagement row: vector icons + counts.  The old row
+    # drew "♥ 💬 ↗" as font glyphs the stocked fonts do not
+    # carry, so each count was led by a tofu box.
     ey = y + 6
-    parts = [("♥", screen.likes), ("💬", screen.comments),
-             ("↗", screen.shares)]
+    parts = [("heart", screen.likes), ("speech", screen.comments),
+             ("share", screen.shares)]
     ex = 12.0
-    for glyph, count in parts:
-        label = glyph + " " + _count(cv, count)
+    for icon, count in parts:
+        label = _count(cv, count)
         tw = cv.text_w(label, 14)
-        draw.text((cv.s(ex), cv.s(ey)), label,
+        if icon == "heart":
+            _draw_heart(draw, cv.s, ex + 7, ey + 7, pal["sub"],
+                        r=7.0)
+        elif icon == "speech":
+            _draw_speech(draw, cv.s, ex + 7, ey + 7, pal["sub"],
+                         r=7.0)
+        else:
+            _draw_share_arrow(draw, cv.s, ex + 7, ey + 7,
+                              pal["sub"], r=7.0)
+        draw.text((cv.s(ex + 16), cv.s(ey)), label,
                   font=cv.font(14), fill=pal["sub"])
-        ex += tw + 26
+        ex += 16 + tw + 26
     drawn["elements"].append({
         "id": "engagement", "kind": "post_engagement",
         "likes": screen.likes, "comments": screen.comments,
@@ -319,8 +338,10 @@ def _profile_grid_cell(canvas, draw, cv: _SocialCanvas, item,
           "pinned": bool(item.pinned),
           "box": [cv.s(x), cv.s(y), cv.s(size), cv.s(size)]}
     if item.kind in ("video", "short") and item.views >= 0:
-        label = "▶ " + _count(cv, item.views)
-        draw.text((cv.s(x + 6), cv.s(y + size - 20)), label,
+        label = _count(cv, item.views)
+        _draw_play(draw, cv.s, x + 11, y + size - 14,
+                   (0xFF, 0xFF, 0xFF), r=6.0)
+        draw.text((cv.s(x + 21), cv.s(y + size - 20)), label,
                   font=cv.font(11, bold=True),
                   fill=(0xFF, 0xFF, 0xFF))
     if item.pinned:
@@ -697,25 +718,36 @@ def _sticker_chip(draw, cv: _SocialCanvas, sticker, cx: float,
     carrying the kind's text (a poll/quiz wears its
     options under it).  Returns (w, h) consumed."""
     pal = cv.pal
+    icon = None
     if sticker.kind == "mention":
         label = "@" + sticker.text
     elif sticker.kind == "hashtag":
         label = "#" + sticker.text
     elif sticker.kind == "location":
-        label = "📍 " + sticker.text
+        label = sticker.text
+        icon = "pin"
     elif sticker.kind == "music":
-        label = "♪ " + sticker.text
+        label = sticker.text
+        icon = "note"
     else:
         label = sticker.text
     tw = cv.text_w(label, 14, bold=True)
-    w = tw + 20
+    w = tw + 20 + (16 if icon else 0)
     h = 30.0
     x = cx - w / 2
     y = cy - h / 2
     draw.rounded_rectangle(
         [cv.s(x), cv.s(y), cv.s(x + w), cv.s(y + h)],
         radius=cv.s(15), fill=pal["card_bg"])
-    draw.text((cv.s(x + 10), cv.s(y + 7)), label,
+    tx = x + 10
+    if icon == "pin":
+        _draw_pin(draw, cv.s, tx + 6, y + 15, pal["fg"], r=7.0)
+        tx += 16
+    elif icon == "note":
+        _draw_music_note(draw, cv.s, tx + 6, y + 15, pal["fg"],
+                         r=7.0)
+        tx += 16
+    draw.text((cv.s(tx), cv.s(y + 7)), label,
               font=cv.font(14, bold=True), fill=pal["fg"])
     if sticker.options and sticker.kind in ("poll", "quiz"):
         oy = y + h + 4
@@ -861,10 +893,10 @@ def render_story_screen(screen: StoryScreen, *,
             fill=pal["card_bg"])
         draw.text((cv.s(28), cv.s(by + 11)), "Send message",
                   font=cv.font(14), fill=pal["sub"])
-        draw.text((cv.s(w - 62), cv.s(by + 8)), "♥",
-                  font=cv.font(18), fill=(0xFF, 0xFF, 0xFF))
-        draw.text((cv.s(w - 34), cv.s(by + 8)), "↗",
-                  font=cv.font(18), fill=(0xFF, 0xFF, 0xFF))
+        _draw_heart(draw, cv.s, w - 53, by + 18,
+                    (0xFF, 0xFF, 0xFF), r=9.0)
+        _draw_share_arrow(draw, cv.s, w - 25, by + 18,
+                          (0xFF, 0xFF, 0xFF), r=9.0)
         drawn["regions"]["reply_bar"] = [
             cv.s(12), cv.s(by), cv.s(w - 12), cv.s(40)]
     return _finish(img), drawn
@@ -912,13 +944,16 @@ def _comment_block(img, draw, cv: _SocialCanvas, comment,
     ay = ty + th + 4
     draw.text((cv.s(nx), cv.s(ay)), "Reply",
               font=cv.font(12, bold=True), fill=pal["sub"])
-    likes = "♥ " + _count(cv, comment.likes)
-    draw.text((cv.s(nx + 52), cv.s(ay)), likes,
+    likes = _count(cv, comment.likes)
+    _draw_heart(draw, cv.s, nx + 58, ay + 6, pal["sub"], r=6.0)
+    draw.text((cv.s(nx + 68), cv.s(ay)), likes,
               font=cv.font(12), fill=pal["sub"])
     used = ay + 18 - y
     if comment.liked_by_creator:
-        draw.text((cv.s(nx), cv.s(ay + 18)),
-                  "♥ Liked by Creator",
+        _draw_heart(draw, cv.s, nx + 6, ay + 24,
+                    (0xFE, 0x2C, 0x55), r=6.0)
+        draw.text((cv.s(nx + 14), cv.s(ay + 18)),
+                  "Liked by Creator",
                   font=cv.font(11.5), fill=(0xFE, 0x2C, 0x55))
         used += 20
     return used, {
