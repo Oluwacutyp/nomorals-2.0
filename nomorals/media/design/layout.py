@@ -11,28 +11,57 @@ content: text by font metrics, a frame by its own layout) or
 ``fill`` (an equal share of the free space). Absolute children sit
 outside the flow, positioned by their transform.
 
-Text is measured through the DejaVu font door (the same door the
-vector and decks renders use — Inter is not installed on this box,
-so widths are DejaVu widths, stated wherever they are pinned).
+Text is measured through the typography service's policy door
+with the node's own named family (Inter by default — stocked
+in the vendored core subset, so widths are Inter widths now,
+not the DejaVu widths the first port measured because Inter
+was not installed on that box). A family that cannot resolve
+is a named miss (logged) and the Pillow bitmap default, never
+a silent slide to another face.
 Grid mode places children by their ``grid_column``/``grid_row``;
 grid auto-placement is not built (see the survey).
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from PIL import ImageFont
 
+from ..typography import get_service, pil_font_for
 from .model import DesignDocument
+
+_log = logging.getLogger(__name__)
 
 __all__ = ["compute_layout", "measure_text"]
 
 _FONT_NAMES = ("DejaVuSans-Bold.ttf", "DejaVuSans.ttf")
 
 
-def _font(size_px: float, bold: bool = False) -> Any:
+def _font(size_px: float, bold: bool = False,
+          family: str | None = None) -> Any:
+    """The PIL font for ``size_px`` points.
+
+    A named ``family`` resolves through the typography service
+    (stocked library, then the parsed host catalogue); a family
+    that cannot resolve is a named miss (logged) and the Pillow
+    bitmap default. No family keeps the old DejaVu ladder — the
+    measurement fallback, never a silent substitution.
+    """
     size = max(1, int(round(size_px)))
+    if family:
+        try:
+            return pil_font_for(get_service(), "text", size,
+                                family=family,
+                                weight=700 if bold else 400)
+        except Exception as exc:  # noqa: BLE001 - named miss
+            _log.warning("design layout font %r could not resolve: %s",
+                         family, exc)
+            try:
+                return ImageFont.load_default(size=size)
+            except TypeError:
+                return ImageFont.load_default()
     names = (_FONT_NAMES[0], _FONT_NAMES[1]) if bold else (_FONT_NAMES[1],)
     for name in names:
         try:
@@ -49,12 +78,11 @@ def measure_text(text: str, font_family: str = "Inter", font_size: float = 16.0,
                  bold: bool = False, line_height: float = 140.0) -> tuple[float, float]:
     """Measure ``text``: (width, height) in design points.
 
-    Width is the longest line's DejaVu advance; height is
-    ``lines * font_size * line_height / 100``. ``font_family`` is
-    recorded for the caller but the measurement uses the DejaVu
-    door (Inter is not installed here).
+    Width is the longest line's advance in the named
+    ``font_family`` (Inter by default); height is
+    ``lines * font_size * line_height / 100``.
     """
-    font = _font(font_size, bold=bold)
+    font = _font(font_size, bold=bold, family=font_family)
     lines = str(text).split("\n") or [""]
     width = max((font.getlength(line) for line in lines), default=0.0)
     height = len(lines) * float(font_size) * float(line_height) / 100.0
@@ -87,7 +115,9 @@ def _hug_size(doc: DesignDocument, node: dict[str, Any],
     ntype = node.get("type")
     if ntype == "text":
         size, bold, lh = _text_style(node)
-        return measure_text(node.get("characters", ""), "Inter", size,
+        style = node.get("style") or {}
+        family = str(style.get("font_family") or "Inter")
+        return measure_text(node.get("characters", ""), family, size,
                             bold=bold, line_height=lh)
     if ntype in ("frame", "group", "component", "componentSet", "instance"):
         # A hug frame sizes to its flow children; lay it out with

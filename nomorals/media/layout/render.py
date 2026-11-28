@@ -154,12 +154,14 @@ def _draw_graphic(image: Image.Image, draw: ImageDraw.ImageDraw,
     image.paste(placed, (px0, py0))
 
 
-def _text_flows(doc: LayoutDocument) -> dict[str, list]:
+def _text_flows(doc: LayoutDocument, font_context: str = ""
+                ) -> dict[str, list]:
     """Compose every text flow in the document. Frames linked by
     ``next_frame_id`` form one threaded flow (the story is composed
     across them in link order, spanning pages when the thread does);
     unlinked frames are solo flows. Returns
-    ``{item_id: [ComposedLine, ...]}``."""
+    ``{item_id: [ComposedLine, ...]}``. A ``font_context``
+    composes every flow with that policy face."""
     items = [i for i in doc.all_items() if i.content_type() == "text"]
     by_id = {i.id: i for i in items}
     targeted = {i.text_options().next_frame_id for i in items}
@@ -187,7 +189,8 @@ def _text_flows(doc: LayoutDocument) -> dict[str, list]:
         for boxes in frames:
             flat.extend(boxes)
         size = _story_size(story)
-        composed = compose_story(story, flat, font_size=size)
+        composed = compose_story(story, flat, font_size=size,
+                                 context=font_context)
         # Hand the composed lines back to their frames, column by
         # column: frame j owns composed.frames[sum(len(boxes[:j])):].
         index = 0
@@ -207,7 +210,8 @@ def _text_flows(doc: LayoutDocument) -> dict[str, list]:
             continue
         boxes = _frame_boxes(doc, item)
         composed = compose_story(story, boxes,
-                                 font_size=_story_size(story))
+                                 font_size=_story_size(story),
+                                 context=font_context)
         lines = []
         for frame in composed.frames:
             lines.extend(frame.lines)
@@ -241,7 +245,7 @@ def _story_size(story) -> float:
 
 def _draw_text(draw: ImageDraw.ImageDraw, doc: LayoutDocument,
                item: Item, xf: Affine, scale: float,
-               lines: list) -> None:
+               lines: list, font_context: str = "") -> None:
     if not lines:
         return
     story = doc.stories.get(item.story_id or "")
@@ -259,7 +263,9 @@ def _draw_text(draw: ImageDraw.ImageDraw, doc: LayoutDocument,
             if run.color is not None:
                 color_value = run.color
     color = _resolve_color(doc, color_value) or _BLACK
-    font = font_for(size, bold)
+    # The draw face is the composed face: a context draws with
+    # the policy face, no context with the DejaVu door.
+    font = font_for(size, bold, context=font_context)
     options = item.text_options()
     columns = max(1, options.columns)
     x0, y0, x1, y1 = item.local_bounds()
@@ -288,7 +294,8 @@ def _draw_text(draw: ImageDraw.ImageDraw, doc: LayoutDocument,
     for col_index, col in enumerate(column_lines):
         col_x = x0 + col_index * (col_w + gutter)
         for line in col:
-            text_w = measure_text(line.text, size, bold)
+            text_w = measure_text(line.text, size, bold,
+                                  context=font_context)
             if align == "center":
                 off = max(0.0, (col_w - text_w) / 2.0)
             elif align == "right":
@@ -301,13 +308,14 @@ def _draw_text(draw: ImageDraw.ImageDraw, doc: LayoutDocument,
 
 
 def _render_page_image(doc: LayoutDocument, page: Page,
-                       scale: float) -> Image.Image:
+                       scale: float, font_context: str = ""
+                       ) -> Image.Image:
     width = max(1, int(round(page.width * scale)))
     height = max(1, int(round(page.height * scale)))
     image = Image.new("RGB", (width, height), _WHITE)
     draw = ImageDraw.Draw(image)
     layers = {layer.id: layer for layer in doc.layers}
-    flows = _text_flows(doc)
+    flows = _text_flows(doc, font_context=font_context)
 
     def draw_item(item: Item, parent: Affine | None) -> None:
         if item.hidden or item.nonprinting:
@@ -322,7 +330,8 @@ def _render_page_image(doc: LayoutDocument, page: Page,
             return
         if item.content_type() == "text":
             _draw_text(draw, doc, item, xf, scale,
-                       flows.get(item.id, []))
+                       flows.get(item.id, []),
+                       font_context=font_context)
             return
         if item.content_type() == "graphic":
             _draw_graphic(image, draw, doc, item, xf, scale)
@@ -334,23 +343,26 @@ def _render_page_image(doc: LayoutDocument, page: Page,
     return image
 
 
-def render_page(doc: LayoutDocument, page_id: str, scale: float = 1.0
-                ) -> bytes:
-    """Render one page to PNG bytes."""
+def render_page(doc: LayoutDocument, page_id: str, scale: float = 1.0,
+                font_context: str = "") -> bytes:
+    """Render one page to PNG bytes. A ``font_context`` draws
+    the page's text with that policy face."""
     if scale is None or scale <= 0:
         raise LayoutError(f"render scale must be positive, got {scale}",
                           kind="invalid_argument")
     page = doc.find_page(page_id)
     if page is None:
         raise LayoutError(f"no page {page_id!r}", kind="not_found")
-    image = _render_page_image(doc, page, float(scale))
+    image = _render_page_image(doc, page, float(scale),
+                               font_context=font_context)
     buf = io.BytesIO()
     image.save(buf, format="PNG")
     return buf.getvalue()
 
 
-def render_document(doc: LayoutDocument, scale: float = 1.0
-                    ) -> list[bytes]:
+def render_document(doc: LayoutDocument, scale: float = 1.0,
+                    font_context: str = "") -> list[bytes]:
     """Render every page to PNG bytes, in document order."""
-    return [render_page(doc, page.id, scale=scale)
+    return [render_page(doc, page.id, scale=scale,
+                        font_context=font_context)
             for spread in doc.spreads for page in spread.pages]

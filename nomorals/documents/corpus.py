@@ -199,10 +199,23 @@ _FONT_CANDIDATES = (
 
 def find_embedded_font() -> str | None:
     """A subsettable TrueType font for the embedded-PDF row, if the
-    machine has one (env override, fontconfig, then known paths)."""
+    machine has one (env override, the stocked library, then
+    fontconfig, then known paths). The library comes before the
+    host hunt (gapfix 164): the stocked Inter is the face Devon
+    renders with, so the embedded row embeds the face she draws
+    — the host DejaVu hunt is the fallback, not the first pick.
+    """
     env = os.environ.get("NM_CORPUS_FONT")
     if env and Path(env).is_file():
         return env
+    try:
+        from ..media.typography.fontlib import FontLibrary
+
+        path = FontLibrary.discover().resolve("Inter")
+        if path.is_file():
+            return str(path)
+    except Exception as exc:  # noqa: BLE001 - host hunt below
+        _log.debug("corpus.find_embedded_font library miss: %s", exc)
     fc_match = shutil.which("fc-match")
     if fc_match:
         import subprocess
@@ -222,6 +235,18 @@ def find_embedded_font() -> str | None:
         for hit in sorted(share.rglob("DejaVuSans.ttf")):
             return str(hit)
     return None
+
+
+def _display_font_path(path: str) -> str:
+    """A font path as the parity doc records it: inside the repo,
+    relative to the repo root (stable across checkouts — the
+    vendored core subset moves with the tree); outside it,
+    absolute (a host path is the same everywhere)."""
+    try:
+        root = Path(__file__).resolve().parents[2]
+        return Path(path).resolve().relative_to(root).as_posix()
+    except (ValueError, OSError):
+        return path
 
 
 def ocr_gate_state() -> dict[str, Any]:
@@ -272,7 +297,8 @@ def measure_all() -> dict[str, Any]:
     token_row("pdf (WinAnsi writer)", to_pdf(doc), "corpus.pdf")
 
     font = find_embedded_font()
-    embedded: dict[str, Any] = {"font": font}
+    embedded: dict[str, Any] = {"font": _display_font_path(font)
+                                if font else None}
     if font:
         blob = to_pdf_embedded(doc, font)
         back = parse_bytes(blob, filename="corpus.pdf")

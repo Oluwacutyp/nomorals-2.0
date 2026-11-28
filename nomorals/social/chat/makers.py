@@ -300,7 +300,7 @@ def _draw_medallion(draw, xy: tuple[int, int], size: int,
     x, y = xy
     draw.ellipse([x, y, x + size, y + size],
                  fill=_medallion_color(name))
-    font = _font(int(size * 0.42), bold=True)
+    font = _font(int(size * 0.42), bold=True, context="card_title")
     label = _initials(name)
     box = draw.textbbox((0, 0), label, font=font)
     tw, th = box[2] - box[0], box[3] - box[1]
@@ -401,7 +401,7 @@ def _draw_placeholder(draw, xy: tuple[int, int], size: int,
                                radius=max(4, size // 5), fill=fill)
     else:
         draw.ellipse([x, y, x + size, y + size], fill=fill)
-    font = _font(int(size * 0.42), bold=True)
+    font = _font(int(size * 0.42), bold=True, context="card_title")
     label = _initials(name)
     box = draw.textbbox((0, 0), label, font=font)
     tw, th = box[2] - box[0], box[3] - box[1]
@@ -472,9 +472,23 @@ def render_card_png(style: str, entries: list[dict], *,
     if style == "duo" and len(entries) < 2:
         raise MakerError("a duo card needs two speakers")
     theme = _STYLE_THEMES[style if style != "duo" else "quote"]
-    name_font = _font(34, bold=True)
-    text_font = _font(37)
-    big_font = _font(54, bold=True)
+    # Each skin wears its policy family now: the quote skin is
+    # editorial (Playfair body, a script name), the meme skin
+    # is display type, and the chat skins (duo, ttc, chat, ff)
+    # are the house text face (gapfix 164 — all three doors
+    # were bare intents before, so every card came out DejaVu).
+    if style == "quote":
+        name_font = _font(34, bold=True, context="quote_script")
+        text_font = _font(37, context="quote")
+        big_font = _font(54, bold=True, context="quote")
+    elif style == "meme":
+        name_font = _font(34, bold=True, context="caption")
+        text_font = _font(37, context="card")
+        big_font = _font(54, bold=True, context="meme")
+    else:  # duo, ttc, chat, ff
+        name_font = _font(34, bold=True, context="card")
+        text_font = _font(37, context="card")
+        big_font = _font(54, bold=True, context="card")
 
     probe = ImageDraw.Draw(Image.new("RGB", (_CARD_W, 100)))
     med = 84
@@ -518,7 +532,7 @@ def render_card_png(style: str, entries: list[dict], *,
             drawn["texts"].append(entry["text"])
         who = " — ".join(n for n in drawn["names"] if n)
         if who:
-            font = _font(26)
+            font = _font(26, context="caption")
             tw = draw.textlength(f"— {who}", font=font)
             draw.text(((_CARD_W - tw) / 2, y), f"— {who}",
                       font=font, fill=theme["name"])
@@ -538,7 +552,8 @@ def render_card_png(style: str, entries: list[dict], *,
                 [x, y, x + bw, y + heights[idx]], radius=22,
                 fill=bubble_fill)
             draw.text((x + 24, y + 14), entry["name"],
-                      font=_font(28, bold=True), fill=name_fill)
+                      font=_font(28, bold=True, context="card"),
+                      fill=name_fill)
             ty = y + 58
             for line in lines:
                 draw.text((x + 24, ty), line, font=text_font,
@@ -915,7 +930,7 @@ def _render_platform(key: str, entries: list[dict[str, Any]]
                        fill=spec["divider"])
         draw.ellipse([_PAD, 14, _PAD + 36, 50], fill=spec["accent"])
         draw.text((_PAD + 52, 14), spec["label"],
-                  font=_font(30, bold=True, intent="display"),
+                  font=_font(30, bold=True, context="card_title"),
                   fill=spec["accent"])
         regions["header"] = (0, 0, width, header_h)
         y = header_h
@@ -932,7 +947,7 @@ def _render_platform(key: str, entries: list[dict[str, Any]]
                         for c in range(3))
             draw.line([0, i, width, i], fill=row)
         draw.text((_PAD, 22), spec["label"],
-                  font=_font(30, bold=True, intent="display"),
+                  font=_font(30, bold=True, context="card_title"),
                   fill=(255, 255, 255))
         regions["header"] = (0, 0, width, header_h)
         y = header_h
@@ -991,7 +1006,7 @@ def _render_platform(key: str, entries: list[dict[str, Any]]
                 _draw_share_arrow(draw, _px, rail_x + 32, cy + 32,
                                   (255, 255, 255), r=13.0)
             else:
-                gf = _font(30, bold=True)
+                gf = _font(30, bold=True, context="card")
                 glyph = {"Comment": "…"}.get(action, "•")
                 gb = draw.textbbox((0, 0), glyph, font=gf)
                 draw.text((rail_x + (64 - (gb[2] - gb[0])) / 2
@@ -1001,7 +1016,7 @@ def _render_platform(key: str, entries: list[dict[str, Any]]
             count = str(post.get("likes") or "1.2K") if i == 0 \
                 else ""
             if count:
-                cf = _font(20)
+                cf = _font(20, context="card")
                 cw = draw.textlength(count, font=cf)
                 draw.text((rail_x + (64 - cw) / 2, cy + 66), count,
                           font=cf, fill=spec["sub"])
@@ -1049,7 +1064,8 @@ def _render_platform(key: str, entries: list[dict[str, Any]]
                            fill=spec["comment_surface"])
         draw.text((content_x, y + 12),
                   f"Comments · {len(comment_rows)}",
-                  font=_font(24, bold=True), fill=spec["sub"])
+                  font=_font(24, bold=True, context="card_title"),
+                  fill=spec["sub"])
         cy = y + 54
         for entry, rows in comment_rows:
             depth = int(entry.get("depth") or 0)
@@ -1149,7 +1165,7 @@ def _render_feature(key: str, entries: list[dict[str, Any]], *,
     }
     title = str(entry.get("title") or "").strip()
     if title:
-        tfont = _font(34, bold=True, intent="caption")
+        tfont = _font(34, bold=True, context="caption")
         tw = draw.textlength(title.upper(), font=tfont)
         draw.text(((size - tw) / 2, 84), title.upper(), font=tfont,
                   fill=spec["accent"])
@@ -1176,7 +1192,7 @@ def _render_feature(key: str, entries: list[dict[str, Any]], *,
     if author:
         draw.line([size // 2 - 60, size - 190, size // 2 + 60,
                    size - 190], fill=spec["accent"], width=4)
-        afont = _font(36, bold=True, intent="caption")
+        afont = _font(36, bold=True, context="caption")
         label = author.upper()
         tw = draw.textlength(label, font=afont)
         draw.text(((size - tw) / 2, size - 160), label, font=afont,

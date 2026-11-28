@@ -18,13 +18,17 @@ substitute: a staged frame that silently drops a layer is a lie.
 """
 from __future__ import annotations
 
+import logging
 import math
 from pathlib import Path
 from typing import Any
 
 from PIL import Image, ImageChops, ImageDraw, ImageFont
 
+from ..typography import get_service, pil_font_for
 from .scene import ArtistError, Camera, Scene
+
+_log = logging.getLogger(__name__)
 
 #: Pixels per depth unit in the staging projection.
 DEPTH_UNIT = 100.0
@@ -42,15 +46,15 @@ def _parse_color(value: str) -> tuple[int, int, int]:
 
 
 def _font(size: int) -> Any:
+    """Cover-art labels wear the cover context (Anton): the
+    scene's titles are display type, not the old DejaVu door
+    (gapfix 164). A total miss is logged and the Pillow bitmap
+    default carries the label."""
     size = max(8, int(size))
-    for name in ("DejaVuSans.ttf", "DejaVuSans-Bold.ttf"):
-        try:
-            return ImageFont.truetype(name, size)
-        except OSError:
-            continue
     try:
-        return ImageFont.load_default(size=size)
-    except TypeError:
+        return pil_font_for(get_service(), "cover", size, weight=700)
+    except Exception as exc:  # noqa: BLE001 - named miss
+        _log.warning("artist font could not resolve: %s", exc)
         return ImageFont.load_default()
 
 

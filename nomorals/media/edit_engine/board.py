@@ -38,6 +38,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import os
 import random
 import re
@@ -47,6 +48,7 @@ from typing import Any
 
 from ...core.failure_store import home_dir as _devon_home_dir
 from ...core.ids import new_id
+from ...media.typography import get_service, pil_font_for
 from ...media_edit.videos import MediaEditError
 from .document import _canonical
 
@@ -895,15 +897,21 @@ def _seeded_rng(seed_text: str) -> random.Random:
 
 # ── render rung: deterministic PNG ───────────────────────────────────
 
+_log = logging.getLogger(__name__)
+
 
 def _load_font(size: int, *, bold: bool = False):
-    """DejaVu at ``size``; the PIL default when it is not there."""
+    """Board text wears the card context (Inter): the whiteboard
+    is house text, not the old DejaVu door (gapfix 164). A total
+    miss is logged and the Pillow bitmap default carries the
+    label."""
     from PIL import ImageFont
 
-    name = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
     try:
-        return ImageFont.truetype(name, max(8, int(size)))
-    except (OSError, ValueError):
+        return pil_font_for(get_service(), "card", max(8, int(size)),
+                            weight=700 if bold else 400)
+    except Exception as exc:  # noqa: BLE001 - named miss
+        _log.warning("board font could not resolve: %s", exc)
         return ImageFont.load_default()
 
 

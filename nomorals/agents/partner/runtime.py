@@ -11387,10 +11387,24 @@ class PartnerRuntime(
                         media_sweeper = _sweep
                 except Exception:  # noqa: BLE001 - no sweeper, prune only
                     media_sweeper = None
+                # Font-pack prune (gapfix 164): the same idiom —
+                # the typography pruner runs before the disk
+                # preflight measures, so a blocked update can
+                # free the fonts pile itself instead of refusing
+                # on it. An import failure leaves the pruner
+                # unwired and the step records exactly that.
+                font_pruner = None
+                try:
+                    from ...media.typography import prune_library
+
+                    font_pruner = prune_library
+                except Exception:  # noqa: BLE001 - no pruner
+                    font_pruner = None
                 updater = UpdateManager(
                     repo_root, snapshots,
                     quiesce=self._quiesce_bridges_for_update,
-                    media_cache_sweeper=media_sweeper)
+                    media_cache_sweeper=media_sweeper,
+                    font_pruner=font_pruner)
                 controller = ChatUpdateController(
                     mission_store=MissionStore(self.context.db),
                     update_runner=lambda pull: updater.run(pull=pull))

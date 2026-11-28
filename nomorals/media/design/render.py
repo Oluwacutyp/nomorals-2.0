@@ -14,30 +14,42 @@ applies and from their transforms otherwise.
 from __future__ import annotations
 
 import io
+import logging
 import math
 from typing import Any
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from ..typography import get_service, pil_font_for
 from .components import resolve_instance
 from .layout import compute_layout
 from .model import DesignDocument
 
+_log = logging.getLogger(__name__)
+
 __all__ = ["render_frame"]
 
-_FONT_PATHS = (
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-)
 
+def _font(size: float, bold: bool = False,
+          family: str | None = None) -> ImageFont.FreeTypeFont:
+    """The PIL font for ``size`` points.
 
-def _font(size: float, bold: bool = False) -> ImageFont.FreeTypeFont:
+    A named ``family`` resolves through the typography service
+    (stocked library, then the parsed host catalogue); no family
+    asks for the house text face (Inter). A family that cannot
+    resolve is a named miss (logged) and the Pillow bitmap
+    default — never a silent slide to an unrelated face. The old
+    hardcoded DejaVu host paths are gone (gapfix 164).
+    """
     size = max(1, int(round(size)))
-    path = _FONT_PATHS[1] if bold else _FONT_PATHS[0]
     try:
-        return ImageFont.truetype(path, size)
-    except OSError:
+        return pil_font_for(get_service(), "text", size,
+                            family=family or "Inter",
+                            weight=700 if bold else 400)
+    except Exception as exc:  # noqa: BLE001 - named miss
+        _log.warning("design render font %r could not resolve: %s",
+                     family or "Inter", exc)
         return ImageFont.load_default()
 
 
@@ -322,7 +334,8 @@ class _Renderer:
         style = node.get("style") or {}
         size = float(style.get("font_size", 16.0))
         bold = str(style.get("font_style", "")).lower() in ("bold", "semibold", "black")
-        font = _font(size, bold)
+        font = _font(size, bold,
+                     family=str(style.get("font_family") or "") or None)
         text = str(node.get("characters") or "")
         lh = style.get("line_height") or {}
         if lh.get("unit") == "pixels":

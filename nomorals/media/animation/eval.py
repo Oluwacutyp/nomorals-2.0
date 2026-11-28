@@ -46,6 +46,7 @@ class DisplayItem:
     element: int = 0
     clip: int | None = None
     text: str = ""
+    font: str = ""
     font_size: float = 24.0
     text_color: str = "#000000"
     asset: str = ""
@@ -231,6 +232,7 @@ def _flatten_element(element: Element, transform: Affine,
         origin = m.apply(Vec2(0.0, 0.0))
         item.points = [[(origin.x, origin.y)]]
         item.text = element.text
+        item.font = element.font
         item.font_size = element.font_size
         item.text_color = element.text_color.to_hex()
     elif element.kind == "bitmap":

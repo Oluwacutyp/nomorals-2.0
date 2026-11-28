@@ -496,6 +496,7 @@ class UpdateManager:
         pre_update_gates: Any | None = None,
         quiesce: QuiesceFn | None = None,
         media_cache_sweeper: Any | None = None,
+        font_pruner: Any | None = None,
     ) -> None:
         self.repo_dir = Path(repo_dir)
         self.snapshots = snapshots
@@ -519,6 +520,18 @@ class UpdateManager:
         # prune needs no such seam: the manager already owns its
         # snapshot store.
         self._media_cache_sweeper = media_cache_sweeper
+        # Font-pack prune (disk discipline, gapfix 164): the
+        # callable that prunes unreferenced families from the
+        # stocked font pack before the disk preflight measures.
+        # Same idiom as the sweeper above: the chat runtime
+        # wires the typography pruner in; a construction without
+        # one (the console update, tests) prunes nothing and the
+        # self-clear step records exactly that — it never
+        # pretends a prune happened. The pruner itself owns the
+        # referenced set (policy families + owner pins + DejaVu
+        # Sans) and the scope (pack tier only, never the core
+        # subset, never an owner-local dir, never a system font).
+        self._font_pruner = font_pruner
         #: What the self-clear step (step 0.55) freed, in plain
         #: words — the disk preflight names it when it still has
         #: to refuse, so the refusal never claims nothing was
@@ -671,15 +684,21 @@ class UpdateManager:
         snapshots to the newest 3 + the protected rollback
         anchor; (2) when a media-cache sweeper is wired, sweep
         each WhatsApp account's download cache to its cap,
-        oldest first. Nothing else is ever deleted — never the
-        fonts area, never live data, never the newest 3 or the
-        protected anchor, never a file the media vault points
-        at (the sweep's own rule). A failure in either half
-        journals here and never fails the update; the step
-        records ok=True with the failure named in its detail,
-        because the clear is best-effort and the preflight —
-        not this step — is the gate. Returns the plain-words
-        detail, which the preflight names when it still refuses.
+        oldest first; (3) when a font pruner is wired, prune
+        unreferenced families from the stocked font pack — the
+        referenced set is every policy family + every owner pin
+        + DejaVu Sans, and only the pack tier ever goes (never
+        the core subset, never an owner-local dir, never a
+        system font; the leftover build copy goes only when the
+        pack is whole). Nothing else is ever deleted — never
+        live data, never the newest 3 or the protected anchor,
+        never a file the media vault points at (the sweep's own
+        rule). A failure in any third journals here and never
+        fails the update; the step records ok=True with the
+        failure named in its detail, because the clear is
+        best-effort and the preflight — not this step — is the
+        gate. Returns the plain-words detail, which the
+        preflight names when it still refuses.
         """
         pruned, prune_err = self._prune_pre_update_snapshots()
         if prune_err:
@@ -720,20 +739,60 @@ class UpdateManager:
                 media_part = f"media sweep failed ({sweep_err})"
                 _log.warning("media-cache sweep could not run: %s",
                              exc, exc_info=True)
-        if not pruned and not files and not prune_err and not sweep_err:
-            detail = f"nothing to clear: {snap_part}; {media_part}"
+        font_families = 0
+        font_freed = 0
+        font_err = ""
+        if self._font_pruner is None:
+            fonts_part = "fonts not pruned (no pruner wired)"
         else:
-            detail = f"{snap_part}; {media_part}"
+            try:
+                result = self._font_pruner()
+                if not isinstance(result, dict):
+                    result = {}
+                font_families = len(result.get("removed_families")
+                                    or [])
+                font_freed = (int(result.get("bytes_freed") or 0)
+                              + int(result.get("build_bytes_freed")
+                                    or 0))
+                font_err = str(result.get("error") or "")
+                if font_err and not font_families and not font_freed:
+                    fonts_part = f"font prune failed ({font_err})"
+                elif font_families:
+                    fonts_part = (
+                        f"pruned {font_families} unreferenced "
+                        f"font famil{'y' if font_families == 1 else 'ies'} "
+                        f"({diskspace.human_bytes(font_freed)} freed)")
+                    if result.get("build_dir_removed"):
+                        fonts_part += " (incl. the leftover build copy)"
+                else:
+                    fonts_part = ("no unreferenced font families "
+                                  "to prune")
+            except Exception as exc:  # noqa: BLE001 - never fails update
+                font_err = f"{type(exc).__name__}: {exc}"
+                fonts_part = f"font prune failed ({font_err})"
+                _log.warning("font prune could not run: %s",
+                             exc, exc_info=True)
+        if (not pruned and not files and not font_families
+                and not font_freed and not prune_err
+                and not sweep_err and not font_err):
+            detail = (f"nothing to clear: {snap_part}; {media_part}; "
+                      f"{fonts_part}")
+        else:
+            detail = f"{snap_part}; {media_part}; {fonts_part}"
         self._disk_clear_detail = detail
         entry: dict[str, Any] = {
             "run_id": run_id, "event": "disk_clear",
             "ts": time.time(), "detail": detail,
             "pruned": pruned, "swept_files": files,
-            "swept_bytes": freed}
+            "swept_bytes": freed,
+            "pruned_font_families": font_families,
+            "font_bytes_freed": font_freed}
         if prune_err:
             entry["prune_error"] = prune_err
         if sweep_err:
             entry["sweep_error"] = sweep_err
+        if font_err:
+            entry["font_prune_error"] = font_err
         self._journal(entry)
         # _run records the report step from the returned detail;
         # the step is best-effort, so it always records ok=True

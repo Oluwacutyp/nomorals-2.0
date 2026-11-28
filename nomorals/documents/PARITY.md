@@ -32,7 +32,7 @@ full-text token multiset (prose formats).
 
 Shortfalls, named: markdown loses the two table names (its table block has no caption — see "What does not convert"); docx loses the three list-bullet markers (a paragraph style, not text); the WinAnsi PDF loses exactly the tokens containing the characters counted below. Nothing else is lost in any format.
 
-Embedded-PDF detail: font `/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf` carries 6253 glyphs; the subset embedded in the corpus PDF carries 75 — subsetting keeps the file small while the text stays exact. (Byte sizes are not printed: the page footer carries a timestamp, so a PDF's exact length is time-dependent at the ±1-byte level and would make this doc lie about being stale.)
+Embedded-PDF detail: font `nomorals/media/typography/fonts/ofl/inter/Inter[opsz,wght].ttf` carries 2933 glyphs; the subset embedded in the corpus PDF carries 78 — subsetting keeps the file small while the text stays exact. (Byte sizes are not printed: the page footer carries a timestamp, so a PDF's exact length is time-dependent at the ±1-byte level and would make this doc lie about being stale.)
 
 XLSX typed-cell census (independent reader, openpyxl data_type): b=3, d=3, n=7, s=35 — `n` numeric, `d` date, `b` boolean, `s` string. Typed writing is real: values a spreadsheet can type are typed, and values that would lose information typed (leading-zero codes, thousands separators) stay strings.
 

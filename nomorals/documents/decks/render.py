@@ -18,12 +18,16 @@ output width.
 from __future__ import annotations
 
 import io
+import logging
 from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
 
+from ...media.typography import get_service, pil_font_for
 from ..errors import DocumentError
 from .model import EMU_PER_INCH, DeckDocument, DeckShape, DeckSlide
+
+_log = logging.getLogger(__name__)
 
 __all__ = ["render_slide", "render_slide_to_png"]
 
@@ -37,19 +41,34 @@ _SCHEME_DEFAULTS = {
 }
 
 
-def _font(size_px: int, bold: bool = False) -> Any:
+def _font(size_px: int, bold: bool = False,
+          family: str | None = None) -> Any:
+    """The PIL font for ``size_px`` points.
+
+    A named ``family`` resolves through the typography service —
+    the stocked library first, then the parsed host catalogue,
+    so a deck's Calibri/Arial resolves to the real face on a
+    Windows host that carries it. No family wears the card
+    context (Inter). A family that cannot resolve anywhere is a
+    named miss (logged) and the Pillow bitmap default — never a
+    silent slide to an unrelated face. The old DejaVu ladder is
+    gone (gapfix 164).
+    """
     size_px = max(8, int(size_px))
-    names = ("DejaVuSans-Bold.ttf", "DejaVuSans.ttf") if bold \
-        else ("DejaVuSans.ttf",)
-    for name in names:
-        try:
-            return ImageFont.truetype(name, size_px)
-        except OSError:
-            continue
     try:
-        return ImageFont.load_default(size=size_px)
-    except TypeError:
-        return ImageFont.load_default()
+        if family:
+            return pil_font_for(get_service(), "text", size_px,
+                                family=family,
+                                weight=700 if bold else 400)
+        return pil_font_for(get_service(), "card", size_px,
+                            weight=700 if bold else 400)
+    except Exception as exc:  # noqa: BLE001 - named miss
+        _log.warning("deck font %r could not resolve: %s",
+                     family or "card", exc)
+        try:
+            return ImageFont.load_default(size=size_px)
+        except TypeError:
+            return ImageFont.load_default()
 
 
 def _resolve_color(color: str | None,
@@ -254,7 +273,7 @@ class _Renderer:
                 line_h = 0
                 for run, text in line_runs:
                     size = self.font_px(run.size_half_points)
-                    font = _font(size, bold=run.bold)
+                    font = _font(size, bold=run.bold, family=run.font)
                     line_h = max(line_h, size)
                     color = _resolve_color(run.color,
                                            self.doc.theme_colors)
@@ -276,7 +295,7 @@ class _Renderer:
         current_w = 0
         for run in para.runs:
             size = self.font_px(run.size_half_points)
-            font = _font(size, bold=run.bold)
+            font = _font(size, bold=run.bold, family=run.font)
             words = run.text.split(" ")
             for i, word in enumerate(words):
                 piece = word + (" " if i < len(words) - 1 else "")

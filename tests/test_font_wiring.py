@@ -103,6 +103,7 @@ def test_context_policy_rows_carry_the_briefs_taste():
     ("brandmark", "Montserrat"),
     ("caption", "Inter"),
     ("mono", "JetBrains Mono"),
+    ("cad", "JetBrains Mono"),
     ("cover", "Anton"),
     ("screen", "Roboto"),
     ("screen_whatsapp", "Roboto"),

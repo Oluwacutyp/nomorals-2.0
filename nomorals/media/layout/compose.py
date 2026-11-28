@@ -14,6 +14,7 @@ options.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 
 from PIL import ImageFont
@@ -21,14 +22,40 @@ from PIL import ImageFont
 from .errors import LayoutError
 from .model import Story
 
+_log = logging.getLogger(__name__)
+
 __all__ = ["ComposedFrame", "ComposedLine", "ComposedStory",
            "compose_story", "font_for", "measure_text"]
 
 _DEFAULT_SIZE = 12.0
 
 
-def _font(size: float, bold: bool = False):
+def _font(size: float, bold: bool = False, context: str = "",
+          family: str | None = None):
+    """The PIL font for ``size`` points.
+
+    No ``context``/``family``: the layout organ's DejaVu door —
+    the measured widths the craftfonts lane pinned. A ``context``
+    or ``family`` names the policy face instead, resolved
+    through the typography service; a family that cannot resolve
+    is a named miss (logged) and the Pillow bitmap default —
+    never a silent slide to an unrelated face.
+    """
     size = max(4, int(round(size)))
+    weight = 700 if bold else 400
+    if context or family:
+        try:
+            from ..typography import get_service, pil_font_for
+
+            return pil_font_for(get_service(), context or "text", size,
+                                family=family, weight=weight)
+        except Exception as exc:  # noqa: BLE001 - named miss
+            _log.warning("layout font %r could not resolve: %s",
+                         family or context, exc)
+            try:
+                return ImageFont.load_default(size=size)
+            except TypeError:
+                return ImageFont.load_default()
     try:
         # The typography service is the one font door: the same
         # DejaVuSans face this ladder used to find by host path,
@@ -42,7 +69,7 @@ def _font(size: float, bold: bool = False):
 
         font = pil_font_for(get_service(), "text", size,
                             family="DejaVu Sans",
-                            weight=700 if bold else 400)
+                            weight=weight)
         if font is not None:
             return font
     except Exception:  # noqa: BLE001 - the ladder below is the fallback
@@ -60,18 +87,24 @@ def _font(size: float, bold: bool = False):
         return ImageFont.load_default()
 
 
-def font_for(size: float, bold: bool = False):
+def font_for(size: float, bold: bool = False, context: str = "",
+             family: str | None = None):
     """The PIL font for ``size`` points (DejaVuSans, bold variant
-    when asked) — the one font door the layout organ uses."""
-    return _font(size, bold)
+    when asked) — the one font door the layout organ uses. A
+    ``context``/``family`` asks for the policy face instead."""
+    return _font(size, bold, context=context, family=family)
 
 
-def measure_text(text: str, size: float, bold: bool = False) -> float:
+def measure_text(text: str, size: float, bold: bool = False,
+                 context: str = "", family: str | None = None) -> float:
     """The width of ``text`` at ``size`` points, measured with the
-    real font — never an estimate from character counts."""
+    real font — never an estimate from character counts. The
+    measurement uses the same face the draw path uses: a
+    ``context``/``family`` measures with that face, no context
+    measures with the DejaVu door."""
     if not text:
         return 0.0
-    font = _font(size, bold)
+    font = _font(size, bold, context=context, family=family)
     try:
         return float(font.getlength(text))
     except AttributeError:  # pragma: no cover - old Pillow
@@ -85,24 +118,28 @@ def _line_height(size: float, leading: float | None) -> float:
 
 
 def _hyphenate(word: str, width: float, size: float,
-               bold: bool = False) -> list[str]:
+               bold: bool = False, context: str = "",
+               family: str | None = None) -> list[str]:
     """Split a word that is wider than ``width`` into hyphenated
     pieces that each fit. Splits are made at measured positions
     (at least 2 characters per piece); a word that cannot be split
     usefully comes back whole."""
-    if measure_text(word, size, bold) <= width:
+    if measure_text(word, size, bold, context=context,
+                    family=family) <= width:
         return [word]
     pieces: list[str] = []
     rest = word
     while rest:
-        if measure_text(rest, size, bold) <= width:
+        if measure_text(rest, size, bold, context=context,
+                        family=family) <= width:
             pieces.append(rest)
             break
         # Longest prefix (with a hyphen) that fits.
         take = 0
         for end in range(2, len(rest)):
             piece = rest[:end] + "-"
-            if measure_text(piece, size, bold) <= width:
+            if measure_text(piece, size, bold, context=context,
+                            family=family) <= width:
                 take = end
             else:
                 break
@@ -154,14 +191,17 @@ class ComposedStory:
 
 
 def _wrap_words(words: list[str], width: float, size: float,
-                bold: bool = False) -> list[str]:
+                bold: bool = False, context: str = "",
+                family: str | None = None) -> list[str]:
     """Greedy line breaking over measured words, with hyphenation
     for words wider than the frame."""
     lines: list[str] = []
     current = ""
     for word in words:
-        if measure_text(word, size, bold) > width:
-            pieces = _hyphenate(word, width, size, bold)
+        if measure_text(word, size, bold, context=context,
+                        family=family) > width:
+            pieces = _hyphenate(word, width, size, bold,
+                                context=context, family=family)
             for piece in pieces[:-1]:
                 if current:
                     lines.append(current)
@@ -169,7 +209,8 @@ def _wrap_words(words: list[str], width: float, size: float,
                 lines.append(piece)
             word = pieces[-1]
         trial = word if not current else current + " " + word
-        if measure_text(trial, size, bold) <= width:
+        if measure_text(trial, size, bold, context=context,
+                        family=family) <= width:
             current = trial
         else:
             if current:
@@ -186,7 +227,8 @@ def compose_story(story: Story,
                   font_size: float = _DEFAULT_SIZE,
                   leading: float | None = None,
                   vertical_justification: str = "top",
-                  first_baseline: str = "ascent"
+                  first_baseline: str = "ascent",
+                  context: str = "", family: str | None = None
                   ) -> ComposedStory:
     """Compose ``story`` into one frame or a list of frames
     (threading: the text flows from each frame into the next).
@@ -194,7 +236,9 @@ def compose_story(story: Story,
     Call as ``compose_story(story, width, height, ...)`` for a
     single frame, or ``compose_story(story, [(w, h), ...], ...)``
     for a threaded run. Returns the lines per frame, whether any
-    text is overset, and the remaining text."""
+    text is overset, and the remaining text. A ``context``/
+    ``family`` composes with that face (measure and draw agree);
+    no context keeps the DejaVu door."""
     if height is not None:
         frame_list = [(float(width_or_frames), float(height))]
     elif isinstance(width_or_frames, (list, tuple)):
@@ -250,7 +294,8 @@ def compose_story(story: Story,
                 para_index += 1
                 if not pending:
                     continue
-            wrapped = _wrap_words(pending, width, size)
+            wrapped = _wrap_words(pending, width, size,
+                                  context=context, family=family)
             room = max_lines - len(lines)
             take = wrapped[:room]
             lines.extend(take)

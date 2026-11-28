@@ -17,10 +17,12 @@ a placeholder and calls it the thing.
 from __future__ import annotations
 
 import io
+import logging
 import math
 
 from PIL import Image, ImageDraw, ImageFont
 
+from ..typography import get_service, pil_font_for
 from .errors import CadError
 from .geom import ccw_sweep, spline_eval
 from .model import (
@@ -39,19 +41,21 @@ from .model import (
 
 __all__ = ["render_document", "render_to_image"]
 
+_log = logging.getLogger(__name__)
+
 
 def _font(size: float, bold: bool = False):
+    """CAD text wears the cad context (JetBrains Mono): a
+    dimension reads the same width it draws. A total miss is
+    logged and the Pillow bitmap default carries the label —
+    never a silent slide to an unrelated face. The old DejaVu
+    ladder is gone (gapfix 164)."""
     size = max(6, int(round(size)))
-    names = (("DejaVuSans-Bold.ttf", "DejaVuSans.ttf") if bold
-             else ("DejaVuSans.ttf",))
-    for name in names:
-        try:
-            return ImageFont.truetype(name, size)
-        except OSError:
-            continue
     try:
-        return ImageFont.load_default(size=size)
-    except TypeError:
+        return pil_font_for(get_service(), "cad", size,
+                            weight=700 if bold else 400)
+    except Exception as exc:  # noqa: BLE001 - named miss
+        _log.warning("cad font could not resolve: %s", exc)
         return ImageFont.load_default()
 
 

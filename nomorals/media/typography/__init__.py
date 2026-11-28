@@ -38,6 +38,7 @@ from .preview import (
     get_preview_service,
     reset_preview_service,
 )
+from .prune import prune_library, prune_report, referenced_families
 from .selection import INTENTS, Selection, face_traits, select
 from .service import TypographyService, get_service, reset_service
 from .shaping import (
@@ -63,6 +64,7 @@ __all__ = [
     "dominant_direction", "emoji_font_path", "face_traits",
     "get_preview_service", "get_service", "graphemes",
     "load_font", "parse_font_file", "pil_font_for",
+    "prune_library", "prune_report", "referenced_families",
     "reset_preview_service", "reset_service",
     "script_fraction",
     "select", "shaped_width", "shaping_engine", "unshaped_width",

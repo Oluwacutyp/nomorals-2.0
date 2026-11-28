@@ -210,6 +210,67 @@ class RuntimeFontsMixin:
                 card.note(str(exc))
             return self._render_fonts_card(card, message)
 
+        if verb == "prune":
+            # Trim the stocked pack to the families renderers
+            # actually ask for (gapfix 164): `/fonts prune`
+            # lists exactly what would go (dry run);
+            # `/fonts prune go` deletes it. Only unreferenced
+            # pack families ever go — never the core subset,
+            # never an owner-local dir, never a system font.
+            from ...core import diskspace
+            from ...media.typography import prune_library
+
+            go = rest.strip().lower() in ("go", "yes", "do it")
+            try:
+                report = prune_library(dry_run=not go)
+            except Exception as exc:  # noqa: BLE001 - honest line
+                record_failure("fonts.prune", exc)
+                return f"the font prune could not run: {exc}"
+            if report.get("error") and not report.get(
+                    "removed_families"):
+                return ("the font prune could not run: "
+                        f"{report['error']}")
+            removed = report.get("removed_families") or []
+            kept = report.get("kept_families", 0)
+            card = Card("chat", title="Font prune", icon="🔤")
+            if not removed:
+                card.line("nothing to prune — every stocked "
+                          "pack family is one a renderer asks "
+                          "for.")
+            else:
+                names = ", ".join(removed)
+                if go:
+                    card.line(
+                        f"pruned {len(removed)} unreferenced "
+                        f"families ({names}) — "
+                        f"{diskspace.human_bytes(report.get('bytes_freed', 0))} freed.")
+                    if report.get("build_dir_removed"):
+                        card.line(
+                            "the leftover build copy went too "
+                            f"({diskspace.human_bytes(report.get('build_bytes_freed', 0))}).")
+                    if not report.get("verified", True):
+                        card.line("the pack did not re-verify "
+                                  "cleanly after the prune — "
+                                  f"{report.get('error', '')}")
+                    else:
+                        card.line("the pack re-verified clean.")
+                else:
+                    card.line(
+                        f"would prune {len(removed)} unreferenced "
+                        f"families ({names}) — "
+                        f"{diskspace.human_bytes(report.get('prunable_bytes', 0))} "
+                        "would come back. Nothing deleted.")
+                    card.note("`/fonts prune go` deletes them. "
+                              "A pruned family comes back only by "
+                              "rebuilding the pack.")
+            kept_names = [name for name in
+                          report.get("referenced_families") or []]
+            shown = ", ".join(kept_names[:12])
+            if len(kept_names) > 12:
+                shown += f" and {len(kept_names) - 12} more"
+            card.line(f"kept {kept} families ({shown}).")
+            return self._render_fonts_card(card, message)
+
         return _FONTS_USAGE
 
     @staticmethod

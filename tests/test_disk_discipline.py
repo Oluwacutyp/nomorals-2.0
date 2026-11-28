@@ -76,16 +76,19 @@ def _snapshots(tmp: str):
     return SnapshotManager(home, db)
 
 
-def _scripted(tmp: str, snapshots, sweeper=None):
+def _scripted(tmp: str, snapshots, sweeper=None, font_pruner=None):
     """An UpdateManager with a REAL snapshot manager and scripted
     git/migrate seams (the updater-hardening idiom); the pull
     lands SHA_B. Returns (manager, pull_calls). ``sweeper`` is
-    the optional media-cache sweeper the chat runtime wires in."""
+    the optional media-cache sweeper the chat runtime wires in;
+    ``font_pruner`` is the optional unreferenced-font pruner."""
     from nomorals.os.update import UpdateManager
 
     kwargs: dict = {}
     if sweeper is not None:
         kwargs["media_cache_sweeper"] = sweeper
+    if font_pruner is not None:
+        kwargs["font_pruner"] = font_pruner
     mgr = UpdateManager(tmp, snapshots,
                         health_checks=[lambda: (True, "fine")],
                         **kwargs)
@@ -451,6 +454,81 @@ class TestUpdateSelfClear(unittest.TestCase):
             self.assertIn("pruned 1 old pre-update snapshot",
                           clear["detail"])
             self.assertIn("no sweeper wired", clear["detail"])
+
+    # ── Fix 5: the fonts pile is pruned by the self-clear ────────
+    # (gapfix 164: the update's own clear prunes unreferenced
+    # pack families before the disk preflight measures, so the
+    # 4.6 GB fonts pile stops blocking updates.)
+
+    def test_font_pruner_runs_before_the_measure_and_is_named(self):
+        from nomorals.core import diskspace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            order: list[str] = []
+
+            def pruner():
+                order.append("prune")
+                return {"removed_families": ["Zzz Unused"],
+                        "removed_files": 2, "bytes_freed": 123456,
+                        "build_dir_removed": False,
+                        "build_bytes_freed": 0, "kept_families": 3,
+                        "pack_bytes": 999, "build_bytes": 0,
+                        "error": ""}
+
+            mgr, _ = _scripted(tmp, _snapshots(tmp),
+                               font_pruner=pruner)
+            real_report = diskspace.disk_report
+
+            def _measured(*args, **kwargs):
+                order.append("measure")
+                return real_report(*args, **kwargs)
+
+            with mock.patch.object(diskspace, "free_bytes",
+                                   return_value=10 ** 15), \
+                    mock.patch.object(diskspace, "disk_report",
+                                      side_effect=_measured):
+                report = mgr.run()
+            self.assertTrue(report.ok, report.error)
+            self.assertLess(order.index("prune"),
+                            order.index("measure"))
+            clear = _step(report, "disk_clear")
+            self.assertIsNotNone(clear)
+            self.assertIn("pruned 1 unreferenced font family",
+                          clear["detail"])
+            self.assertIn("120.6KB freed", clear["detail"])
+
+    def test_font_pruner_failure_never_fails_the_update(self):
+        from nomorals.core import diskspace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            def boom():
+                raise OSError("pack locked")
+
+            mgr, _ = _scripted(tmp, _snapshots(tmp), font_pruner=boom)
+            with mock.patch.object(diskspace, "free_bytes",
+                                   return_value=10 ** 15):
+                report = mgr.run()
+            self.assertTrue(report.ok, report.error)
+            clear = _step(report, "disk_clear")
+            self.assertIsNotNone(clear)
+            self.assertIn("font prune failed", clear["detail"])
+            journal = Path(mgr.journal_path).read_text(
+                encoding="utf-8")
+            self.assertIn('"disk_clear"', journal)
+            self.assertIn("font_prune_error", journal)
+
+    def test_no_font_pruner_wired_says_so(self):
+        from nomorals.core import diskspace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr, _ = _scripted(tmp, _snapshots(tmp))
+            with mock.patch.object(diskspace, "free_bytes",
+                                   return_value=10 ** 15):
+                report = mgr.run()
+            self.assertTrue(report.ok, report.error)
+            clear = _step(report, "disk_clear")
+            self.assertIsNotNone(clear)
+            self.assertIn("no pruner wired", clear["detail"])
 
     def test_refusal_names_what_the_clear_freed(self):
         # Even when the clear is not enough, the refusal names

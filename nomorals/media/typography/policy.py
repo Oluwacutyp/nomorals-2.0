@@ -131,6 +131,12 @@ CONTEXT_POLICIES: dict[str, ContextFontPolicy] = {
         families=("JetBrains Mono", "Roboto Mono", "Space Mono",
                   "IBM Plex Mono"),
         intent="mono"),
+    # CAD drawings: dimension and label text in a monospace
+    # face, so a measured value reads the same width it draws
+    # (gapfix 164 — the cad renderer wore DejaVu before).
+    "cad": ContextFontPolicy(
+        families=("JetBrains Mono", "Roboto Mono", "Space Mono"),
+        intent="mono"),
     # Cover art titles.
     "cover": ContextFontPolicy(
         families=("Anton", "Montserrat", "Bebas Neue"),

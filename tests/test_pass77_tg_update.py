@@ -376,9 +376,11 @@ class TestRuntimeDispatch(unittest.TestCase):
             # updater (update-hardening) — the fake takes the real
             # constructor's shape. Same for media_cache_sweeper
             # (disk discipline, 2026-11-27): the runtime wires the
-            # personal service's cache sweep in.
+            # personal service's cache sweep in. Same for
+            # font_pruner (gapfix 164): the runtime wires the
+            # typography pruner in.
             def __init__(self, repo, snapshots, quiesce=None,
-                         media_cache_sweeper=None):
+                         media_cache_sweeper=None, font_pruner=None):
                 pass
 
             def run(self, pull=True):
@@ -445,9 +447,11 @@ class TestRuntimeDispatch(unittest.TestCase):
             # updater (update-hardening) — the fake takes the real
             # constructor's shape. Same for media_cache_sweeper
             # (disk discipline, 2026-11-27): the runtime wires the
-            # personal service's cache sweep in.
+            # personal service's cache sweep in. Same for
+            # font_pruner (gapfix 164): the runtime wires the
+            # typography pruner in.
             def __init__(self, repo, snapshots, quiesce=None,
-                         media_cache_sweeper=None):
+                         media_cache_sweeper=None, font_pruner=None):
                 pass
 
             def run(self, pull=True):

@@ -12,23 +12,41 @@ playhead at reduced alpha). Anything not drawn is named in
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
 
+from ..typography import get_service, pil_font_for
 from .eval import DisplayItem, DisplayList, evaluate
 from .model import AnimationDocument, Rgba
+
+_log = logging.getLogger(__name__)
 
 __all__ = ["render_display_list", "render_frame"]
 
 
-def _font(size: float) -> ImageFont.FreeTypeFont:
+def _font(size: float, family: str | None = None
+          ) -> ImageFont.FreeTypeFont:
+    """The PIL font for ``size`` points.
+
+    A named ``family`` resolves through the typography service;
+    no family wears the poster context (the motion studio's
+    unnamed font, Anton). A family that cannot resolve is a
+    named miss (logged) and the Pillow bitmap default — never a
+    silent slide to an unrelated face. The old hardcoded DejaVu
+    host path is gone (gapfix 164).
+    """
     try:
-        return ImageFont.truetype(
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            max(1, int(size)))
-    except OSError:
+        if family:
+            return pil_font_for(get_service(), "poster", max(1, int(size)),
+                                family=family)
+        return pil_font_for(get_service(), "poster", max(1, int(size)),
+                            weight=700)
+    except Exception as exc:  # noqa: BLE001 - named miss
+        _log.warning("animation font %r could not resolve: %s",
+                     family or "poster", exc)
         return ImageFont.load_default()
 
 
@@ -100,7 +118,9 @@ def _draw_shape(base: Image.Image, item: DisplayItem,
             return None
         x, y = item.points[0][0]
         color = Rgba.from_hex(item.text_color)
-        draw.text((x, y), item.text, font=_font(item.font_size),
+        draw.text((x, y), item.text,
+                  font=_font(item.font_size,
+                             family=item.font or None),
                   fill=(round(color.r * 255), round(color.g * 255),
                         round(color.b * 255),
                         round(color.a * 255 * alpha)))
