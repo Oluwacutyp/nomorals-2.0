@@ -3732,6 +3732,12 @@ class RuntimeGroupMixin:
         # outranks a stale ledger snapshot for the header —
         # the userbot on Telegram, the group roster on
         # WhatsApp (never the userbot for a WhatsApp target).
+        # Telegram ALWAYS refreshes through user_full here —
+        # a username resolve alone carries no phone, no bio,
+        # no flags, so a @handle lookup that stopped at the
+        # resolver would answer a thinner dossier than an ID
+        # lookup for the same account.  A fresh value wins;
+        # an empty fresh field never clobbers a resolver value.
         if not live:
             if is_whatsapp:
                 wa_adapter = self._group_adapter("whatsapp")
@@ -3749,9 +3755,60 @@ class RuntimeGroupMixin:
                         target_id) or {}
             else:
                 live = self._lookup_user_full(target_id) or {}
+        elif not is_whatsapp:
+            fresh = self._lookup_user_full(target_id) or {}
+            for key, value in fresh.items():
+                if value or key not in live:
+                    live[key] = value
         username = (live.get("username")
                     or member.get("username") or "")
         name = live.get("name") or member.get("name") or ""
+        # The observation itself is recorded: a live read is
+        # Devon seeing the account — username, name and photo
+        # id land in the ledger's identity history (dated) for
+        # every group that already knows the member, so the
+        # NEXT lookup has a change to show.  A stranger gets
+        # no phantom member; the gate below governs what is
+        # SHOWN, never what is recorded.  Best-effort: a
+        # failed observation never breaks the dossier.
+        if not is_whatsapp and groups and live:
+            import contextlib
+
+            with contextlib.suppress(Exception):
+                surface.note_user_update(
+                    "telegram", target_id,
+                    username=username, name=name,
+                    photo_id=str(live.get("photo_id") or ""))
+        # The number, chased through every route Devon has:
+        # (1) the live read — Telegram hands the number over
+        # for mutual contacts and everybody-visible accounts;
+        # (2) the userbot account's own contact list — numbers
+        # the owner saved; (3) Devon's own record — a
+        # /addcontact journal row naming this account.  Each
+        # names its source; all three missing renders hidden,
+        # never a guessed number.
+        phone = ""
+        phone_source = ""
+        if not is_whatsapp:
+            phone = str(live.get("phone") or "")
+            if phone:
+                phone_source = ("mutual contact — visible to "
+                                "the userbot")
+            else:
+                contact_phone = self._lookup_contact_phone(
+                    target_id)
+                if contact_phone:
+                    phone = contact_phone
+                    phone_source = ("in the userbot's contacts")
+                else:
+                    journal_phone, journal_ts = (
+                        self._lookup_journal_phone(target_id))
+                    if journal_phone:
+                        phone = journal_phone
+                        phone_source = (
+                            "added via /addcontact" + (
+                                f" on {_fmt_ts(journal_ts)}"
+                                if journal_ts else ""))
         # The full dossier (phone + economy/moderation/reputation
         # detail) is for the operator, the account itself, or an
         # admin of a group the target is in.  Anyone else gets
@@ -3794,11 +3851,46 @@ class RuntimeGroupMixin:
         for entry in groups:
             rec = surface.member(entry["key"], target_id) or {}
             total_messages += int(rec.get("message_count") or 0)
+        # Identity history first: the rows below name the last
+        # username / name / photo change, so the timeline is
+        # collected once, here, and the board below reuses it.
+        history: list[dict] = []
+        seen: set = set()
+        for entry in groups:
+            rec = surface.member(entry["key"], target_id) or {}
+            for change in rec.get("identity_history") or []:
+                stamp = (change.get("kind"), change.get("old"),
+                         change.get("new"), change.get("ts"))
+                if stamp in seen:
+                    continue
+                seen.add(stamp)
+                history.append(change)
+        history.sort(key=lambda c: float(c.get("ts") or 0))
+
+        def _last_change(kind: str) -> str:
+            for change in reversed(history):
+                if change.get("kind") == kind:
+                    return _fmt_ts(change.get("ts"))
+            return "no change on record"
+
+        # The WhatsApp contact read, once: the rows below and
+        # the photo send after the card share it — one bridge
+        # call per dossier, not two.
+        wa_contact: dict = {}
+        if is_whatsapp:
+            wa_contact = self._lookup_wa_contact(target_id)
+
         if is_whatsapp:
             # WhatsApp has no handles, no account-age signal
             # and no premium/bot flags: the identity IS the
             # phone, the role comes from the live roster, and
-            # every row names what it actually is.
+            # every row names what it actually is.  The live
+            # contact read (bridges' contact_info) adds the
+            # About, the photo, the verified name, the linked
+            # identity and the business profile; last seen is
+            # NOT fetchable on WhatsApp — it only arrives
+            # through presence subscription, which Devon does
+            # not run — so the row says so.
             role = str(live.get("wa_role") or "")
             role_label = ({"admin": "group admin",
                            "superadmin": "group admin"}.get(
@@ -3808,40 +3900,167 @@ class RuntimeGroupMixin:
                      or "".join(c for c in str(target_id)
                                 if c.isdigit())
                      or str(target_id))
+            wa_ok = bool(wa_contact.get("ok"))
+            wa_about = str(wa_contact.get("about") or "") \
+                if wa_ok else ""
+            about_text = (
+                wa_about if wa_about else
+                ("not visible (bridge couldn't read the contact)"
+                 if not wa_ok else "no About set"))
+            business = wa_contact.get("business") \
+                if wa_ok and isinstance(
+                    wa_contact.get("business"), dict) \
+                else {}
+            if business:
+                business_text = " · ".join(
+                    str(business.get(key) or "")
+                    for key in ("description", "email",
+                                "website", "address")
+                    if business.get(key)) or "business profile"
+            else:
+                business_text = (
+                    "not a business" if wa_ok
+                    else "not visible")
+            photo_text = (
+                "not visible (bridge couldn't read the contact)"
+                if not wa_ok else
+                ("yes" if wa_contact.get("has_photo")
+                 else "no photo on file"))
+            verified_text = (
+                "not visible (bridge couldn't read the contact)"
+                if not wa_ok else
+                (str(wa_contact.get("verified_name") or "")
+                 or "none"))
+            lid_text = (
+                "not visible (bridge couldn't read the contact)"
+                if not wa_ok else
+                (str(wa_contact.get("lid") or "")
+                 or "not visible"))
             rows = [("WhatsApp",
                      f"{phone} (the address itself — visible "
                      "by construction)"),
                     ("Display name",
                      name or "no name on record"),
+                    ("About", about_text),
                     ("Group role", role_label),
+                    ("Profile photo", photo_text),
+                    ("Verified name", verified_text),
+                    ("Linked identity", lid_text),
+                    ("Business", business_text),
+                    ("Last seen",
+                     "not visible — WhatsApp only shares last "
+                     "seen with contacts, and Devon doesn't "
+                     "track presence"),
                     ("First seen by Devon", _fmt_ts(first_seen)),
                     ("Joined", _fmt_ts(member.get("joined_ts")
                                        or first_seen)),
                     ("Messages", total_messages),
-                    ("Last seen", _fmt_ts(member.get("last_seen"))),
                     ("Account age",
                      "not applicable on WhatsApp")]
         else:
+            # Telegram: every field the live read can honestly
+            # carry — bio, presence, the number with its
+            # source, every platform flag, language, the linked
+            # personal channel, the photo (presence + count +
+            # last change), and the last change dates out of
+            # Devon's own observation history.
+            live_read = bool(live)
+            about = str(live.get("about") or "")
+            bio_text = (about if about else
+                        ("not visible (userbot couldn't read "
+                         "the account)" if not live_read
+                         else "no bio set"))
+            status_kind = str(live.get("status_kind") or "")
+            last_seen_ts = live.get("last_seen_ts")
+            if status_kind == "online":
+                presence = "online now"
+            elif status_kind == "offline" and last_seen_ts:
+                presence = (f"last seen "
+                            f"{_fmt_ts(last_seen_ts)}")
+            elif status_kind == "recently":
+                presence = "recently (Telegram's own bucket)"
+            elif status_kind == "last_week":
+                presence = ("within the last week (Telegram's "
+                            "own bucket)")
+            elif status_kind == "last_month":
+                presence = ("within the last month (Telegram's "
+                            "own bucket)")
+            elif status_kind == "offline":
+                presence = "offline (no stamp visible)"
+            else:
+                presence = "not visible"
+            flags = []
+            if live.get("bot"):
+                flags.append("bot account")
+            if live.get("premium"):
+                flags.append("Telegram Premium")
+            if live.get("verified"):
+                flags.append("verified")
+            if live.get("scam"):
+                flags.append("scam — Telegram marks this account")
+            if live.get("fake"):
+                flags.append("fake — Telegram marks this account")
+            if live.get("restricted"):
+                flags.append("restricted")
+            if live.get("support"):
+                flags.append("Telegram support")
+            if live.get("deleted"):
+                flags.append("deleted account")
+            if live.get("mutual_contact"):
+                flags.append("mutual contact")
+            if live.get("has_photo"):
+                photo_text = "yes"
+                photo_count = live.get("photo_count")
+                if isinstance(photo_count, int):
+                    photo_text += f" ({photo_count} on file)"
+                last_photo = _last_change("photo_changed")
+                if last_photo != "no change on record":
+                    photo_text += f" · last changed {last_photo}"
+                photo_dc = live.get("photo_dc")
+                if photo_dc is not None:
+                    photo_text += f" · photo DC {photo_dc}"
+            else:
+                photo_text = "no photo"
+            channel_title = str(
+                live.get("personal_channel_title") or "")
+            channel_id = str(
+                live.get("personal_channel_id") or "")
+            channel_text = (channel_title or channel_id
+                            or "none")
+            extra_names = [str(u) for u in
+                           live.get("usernames") or []
+                           if str(u) and str(u) != username]
             rows = [("Telegram ID", target_id),
                     ("Handle", f"@{username}" if username
                      else "no username"),
+                    ("Bio", bio_text),
+                    ("Presence", presence),
+                    ("Phone",
+                     f"{phone} ({phone_source})" if phone
+                     else "not visible — Telegram only shows a "
+                     "number to mutual contacts or when the "
+                     "account sets it public; Devon holds no "
+                     "copy"),
+                    ("Flags", ", ".join(flags)
+                     if flags else "none"),
+                    ("Language",
+                     str(live.get("lang_code") or "") or "not set"),
+                    ("Personal channel", channel_text),
+                    ("Profile photo", photo_text),
+                    ("Last username change",
+                     _last_change("username_changed")),
+                    ("Last name change",
+                     _last_change("name_changed")),
                     ("First seen by Devon", _fmt_ts(first_seen)),
                     ("Joined", _fmt_ts(member.get("joined_ts")
                                        or first_seen)),
                     ("Messages", total_messages),
                     ("Last seen", _fmt_ts(member.get("last_seen"))),
                     ("Account age", render_account_age(target_id))]
-            phone = live.get("phone")
-            rows.append(("Phone",
-                         f"{phone} (mutual contact — visible to the "
-                         "userbot)" if phone else "not visible"))
-            flags = []
-            if live.get("bot"):
-                flags.append("bot account")
-            if live.get("premium"):
-                flags.append("Telegram Premium")
-            if flags:
-                rows.append(("Flags", ", ".join(flags)))
+            if extra_names:
+                rows.insert(2, ("Also known as",
+                                ", ".join(f"@{u}"
+                                          for u in extra_names)))
         card.stats(rows)
         if groups:
             card.board("\n".join(
@@ -3861,26 +4080,32 @@ class RuntimeGroupMixin:
                     f"{chat.get('title') or chat.get('id')}"
                     for chat in common),
                     title="Shared with the userbot account")
-        history: list[dict] = []
-        seen: set = set()
-        for entry in groups:
-            rec = surface.member(entry["key"], target_id) or {}
-            for change in rec.get("identity_history") or []:
-                stamp = (change.get("kind"), change.get("old"),
-                         change.get("new"), change.get("ts"))
-                if stamp in seen:
-                    continue
-                seen.add(stamp)
-                history.append(change)
-        history.sort(key=lambda c: float(c.get("ts") or 0))
         if history:
+            def _history_line(change: dict) -> str:
+                kind = str(change.get("kind") or "changed")
+                when = _fmt_ts(change.get("ts"))
+                if kind == "photo_changed":
+                    # A photo id is an opaque number; the fact
+                    # that the picture changed, and when, is
+                    # what the dossier can honestly say.
+                    return f"photo changed ({when})"
+                return (f"{kind}: "
+                        f"{change.get('old') or '—'} → "
+                        f"{change.get('new') or '—'} ({when})")
+
             card.board("\n".join(
-                f"{change.get('kind', 'changed')}: "
-                f"{change.get('old') or '—'} → "
-                f"{change.get('new') or '—'} "
-                f"({_fmt_ts(change.get('ts'))})"
-                for change in history[-5:]),
+                _history_line(change)
+                for change in history[-10:]),
                 title=f"Identity history ({len(history)} total)")
+        if not is_whatsapp:
+            # Public links on file for this @handle, from the
+            # OSINT identity graph — what other investigations
+            # already ingested.  A lookup reads the graph, it
+            # never crawls the web on its own.
+            links = self._lookup_graph_links(username)
+            if links:
+                card.board("\n".join(links),
+                           title="Public links on file")
         if primary_key:
             try:
                 wallet = surface.economy.balance(primary_key,
@@ -3933,7 +4158,7 @@ class RuntimeGroupMixin:
                                title="Reputation")
             except Exception:  # noqa: BLE001 - dossier survives
                 pass
-        return render_card(
+        dossier = render_card(
             card,
             platform=str(primary_key or group_key or "telegram"
                          ).split(":", 1)[0],
@@ -3941,6 +4166,59 @@ class RuntimeGroupMixin:
                       if primary_key
                       else surface.store.peek_settings(
                           group_key or ""))).text
+        # The picture itself, ahead of the dossier: the
+        # current profile photo (Telegram, downloaded through
+        # the userbot; WhatsApp, the bridge's photo URL) sent
+        # as a photo message captioned with the name + id.
+        # A failed fetch sends nothing — the dossier text
+        # still answers on its own, and a missing photo is
+        # never faked with a placeholder.
+        try:
+            import os
+            import shutil
+            import tempfile
+
+            tmpdir = tempfile.mkdtemp(prefix="nm-lookup-")
+            try:
+                photo_path = ""
+                if not is_whatsapp:
+                    adapter = self._group_adapter("telegram")
+                    fn = getattr(adapter, "user_photo_path",
+                                 None) if adapter else None
+                    if fn is not None:
+                        photo_path = fn(str(target_id),
+                                        tmpdir) or ""
+                else:
+                    # WhatsApp: the contact read already ran for
+                    # the rows above — its photo URL, downloaded
+                    # here, never fetched twice.
+                    photo_url = str(
+                        wa_contact.get("photo_url") or "")
+                    if photo_url:
+                        import urllib.request
+
+                        photo_path = os.path.join(
+                            tmpdir, "pfp.jpg")
+                        try:
+                            urllib.request.urlretrieve(
+                                photo_url, photo_path)
+                        except Exception:  # noqa: BLE001
+                            photo_path = ""
+                        if photo_path and (
+                                not os.path.exists(photo_path)
+                                or os.path.getsize(photo_path)
+                                == 0):
+                            photo_path = ""
+                if photo_path:
+                    caption = (f"{name or username or target_id}"
+                               f" · {target_id}")
+                    self._lookup_send_photo(message, photo_path,
+                                            caption)
+            finally:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:  # noqa: BLE001 - photo is best-effort
+            pass
+        return dossier
 
     def _lookup_scan_ledger(self, surface, token: str
                             ) -> tuple[str, list[dict]]:
@@ -4115,6 +4393,130 @@ class RuntimeGroupMixin:
             return fn(str(target_id)) or []
         except Exception:  # noqa: BLE001 - no proof, no detail
             return []
+
+    def _lookup_contact_phone(self, target_id: str) -> str | None:
+        """The target's number out of the userbot account's OWN
+        contact list — numbers Devon legitimately holds because
+        the owner saved them.  None when the target is no
+        contact of the account, or the userbot is down."""
+        adapter = self._group_adapter("telegram")
+        if adapter is None:
+            return None
+        fn = getattr(adapter, "user_contact_phone", None)
+        if fn is None:
+            return None
+        try:
+            return fn(str(target_id)) or None
+        except Exception:  # noqa: BLE001 - no number, no detail
+            return None
+
+    def _lookup_journal_phone(self, target_id: str
+                              ) -> tuple[str, float | None]:
+        """The target's number out of Devon's own record: a
+        /addcontact journal row (kind contact_added) naming
+        this account — the number as the owner saved it and the
+        date it was saved.  ("", None) when Devon never added
+        the account by number.  The journal read is the
+        established tail (500 entries), so a contact added
+        before the tail carries no row here — the line then
+        says not visible, never a guess."""
+        try:
+            vault = self._pairing_personal()["personal"].vault
+            rows = vault.journal(kind="contact_added")
+        except Exception:  # noqa: BLE001 - no record, no detail
+            return "", None
+        wanted = str(target_id)
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("counterpart_id") or "") != wanted:
+                continue
+            text = str(row.get("text") or "")
+            phone = text.rsplit("·", 1)[-1].strip() \
+                if "·" in text else ""
+            if not phone:
+                continue
+            try:
+                ts = float(row.get("ts") or 0) or None
+            except (TypeError, ValueError):
+                ts = None
+            return phone, ts
+        return "", None
+
+    def _lookup_graph_links(self, username: str) -> list[str]:
+        """Public links on file for one @handle, from the OSINT
+        identity graph — platform URLs other investigations
+        already ingested for this username.  [] when the graph
+        holds nothing for it: the graph is read-only here, a
+        lookup never crawls the web on its own."""
+        handle = str(username or "").strip().lstrip("@").lower()
+        if not handle:
+            return []
+        try:
+            from ...agents.osint_graph import IdentityGraph
+
+            node = IdentityGraph(self.context).node(
+                f"username:{handle}", depth=1)
+        except Exception:  # noqa: BLE001 - no links, no detail
+            return []
+        if not isinstance(node, dict):
+            return []
+        links: list[str] = []
+        for child in node.get("links") or []:
+            if not isinstance(child, dict):
+                continue
+            if child.get("kind") in ("domain", "url"):
+                value = str(child.get("value") or "")
+                if value and value not in links:
+                    links.append(value)
+        return links
+
+    def _lookup_wa_contact(self, target_id: str) -> dict:
+        """The live WhatsApp contact read behind a dossier
+        (bridges' contact_info): about, photo URL, verified
+        name, linked identity, business profile.  {} when the
+        bridge is down or the read refuses."""
+        adapter = self._group_adapter("whatsapp")
+        if adapter is None:
+            return {}
+        fn = getattr(adapter, "contact_info", None)
+        if fn is None:
+            return {}
+        try:
+            out = fn(str(target_id)) or {}
+        except Exception:  # noqa: BLE001 - no read, no detail
+            return {}
+        return out if isinstance(out, dict) else {}
+
+    def _lookup_send_photo(self, message, path: str,
+                           caption: str) -> bool:
+        """Send one photo ahead of a dossier (the picture
+        itself, captioned with the name + id) through the chat's
+        own adapter.  False when the file is gone, the adapter
+        cannot send media, or the send refuses — the dossier
+        text still answers on its own."""
+        import os
+
+        if not path or not os.path.exists(path):
+            return False
+        try:
+            adapter = self.gateway._adapter_for(
+                str(getattr(message.chat, "platform", "") or ""))
+        except Exception:  # noqa: BLE001 - no adapter, no photo
+            return False
+        if adapter is None:
+            return False
+        from ...social.chat.base import MediaRef
+
+        try:
+            result = adapter.send_media(
+                message.chat, MediaRef(path=path, kind="photo"),
+                caption=caption)
+        except Exception:  # noqa: BLE001 - no photo, no crash
+            return False
+        if isinstance(result, dict):
+            return bool(result.get("ok"))
+        return bool(getattr(result, "ok", False))
 
     def _lookup_dm_admin_ok(self, sender: str, group_keys: list
                             ) -> bool:

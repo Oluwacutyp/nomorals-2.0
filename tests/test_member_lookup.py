@@ -281,6 +281,120 @@ class _LookupRuntimeTests(unittest.TestCase):
         out = self._lookup("7", "7")
         assert "ada_ng" in out
 
+    def test_dossier_enriched_rows_from_live_read(self):
+        # A live read that lands fills every new row; the
+        # phone names its source, the photo its count, the
+        # channel its title, the history its last change date.
+        live = {
+            "username": "ada_ng", "name": "Ada N.",
+            "phone": "+2348012345678",
+            "bot": False, "premium": True, "verified": True,
+            "scam": False, "fake": False, "restricted": False,
+            "support": False, "mutual_contact": True,
+            "deleted": False, "lang_code": "en",
+            "about": "Builder of things.",
+            "status_kind": "offline",
+            "last_seen_ts": NOW - 3600,
+            "usernames": ["ada_old"],
+            "personal_channel_id": "123",
+            "personal_channel_title": "Ada's channel",
+            "has_photo": True, "photo_id": "999", "photo_dc": 4,
+            "photo_count": 3, "common_chats_count": 2,
+        }
+        self.rt._lookup_user_full = lambda uid: dict(live)
+        out = self._lookup("5478650254", "7")
+        # render_card HTML-escapes the rows: assert on the
+        # human-readable text, not the escaped form.
+        import html
+
+        out = html.unescape(out)
+        assert "Builder of things." in out  # Bio
+        assert "last seen" in out.lower()  # Presence
+        assert "+2348012345678 (mutual contact" in out
+        assert "Telegram Premium" in out
+        assert "verified" in out
+        assert "Ada's channel" in out
+        assert "@ada_old" in out  # Also known as
+        assert "3 on file" in out  # Profile photo count
+        assert "Last username change" in out
+        assert "Last name change" in out
+
+    def test_dossier_not_visible_when_live_read_fails(self):
+        # The userbot could not read the account at all: every
+        # live field says not visible — never a dressed-up
+        # empty, never a guessed value.
+        self.rt._lookup_user_full = lambda uid: {}
+        out = self._lookup("5478650254", "7")
+        assert "not visible" in out.lower()
+        assert "no bio set" not in out.lower()
+        assert "Telegram only shows a number" in out
+        assert "Flags" in out and "none" in out.lower()
+
+    def test_phone_from_userbot_contacts(self):
+        adapter = SimpleNamespace(
+            user_contact_phone=lambda uid: "+2348011112222"
+            if str(uid) == "7" else None)
+        self.rt._group_adapter = lambda platform: (
+            adapter if platform == "telegram" else None)
+        self.rt._lookup_user_full = lambda uid: {
+            "username": "ada_ng", "name": "Ada N."}
+        import html
+
+        out = html.unescape(self._lookup("5478650254", "7"))
+        assert "+2348011112222 (in the userbot's contacts)" in out
+
+    def test_phone_from_devon_addcontact_record(self):
+        vault = SimpleNamespace(journal=lambda kind="": [
+            {"kind": "contact_added", "counterpart_id": "7",
+             "text": "Ada N. · +2348099988877",
+             "ts": NOW - 86400}] if kind == "contact_added"
+            else [])
+        self.rt._pairing_personal = lambda: {
+            "personal": SimpleNamespace(vault=vault)}
+        self.rt._lookup_user_full = lambda uid: {
+            "username": "ada_ng", "name": "Ada N."}
+        out = self._lookup("5478650254", "7")
+        assert "+2348099988877 (added via /addcontact" in out
+
+    def test_phone_journal_row_for_another_account_ignored(self):
+        # A contact_added row naming a DIFFERENT account never
+        # lends its number to this dossier.
+        vault = SimpleNamespace(journal=lambda kind="": [
+            {"kind": "contact_added", "counterpart_id": "8",
+             "text": "Bo · +2348000000001",
+             "ts": NOW - 86400}] if kind == "contact_added"
+            else [])
+        self.rt._pairing_personal = lambda: {
+            "personal": SimpleNamespace(vault=vault)}
+        self.rt._lookup_user_full = lambda uid: {
+            "username": "ada_ng", "name": "Ada N."}
+        out = self._lookup("5478650254", "7")
+        assert "+2348000000001" not in out
+        assert "not visible" in out.lower()
+
+    def test_graph_links_empty_for_unknown_handle(self):
+        assert self.rt._lookup_graph_links("ada_ng") == []
+        assert self.rt._lookup_graph_links("") == []
+
+    def test_graph_links_returns_public_links_on_file(self):
+        from nomorals.agents.osint_graph import IdentityGraph
+
+        # the bare test DB has no schema: create the kv_store
+        # table the graph persists through (migrations.py DDL
+        # + migration 86's expires_at column)
+        self.rt.context.db.execute(
+            "CREATE TABLE IF NOT EXISTS kv_store ("
+            "key TEXT PRIMARY KEY, value TEXT NOT NULL, "
+            "kind TEXT NOT NULL DEFAULT 'json', "
+            "updated_at REAL NOT NULL, expires_at REAL)")
+        graph = IdentityGraph(self.rt.context)
+        # the domain first: the extractor treats a domain
+        # preceded by "@" on its line as part of an email
+        graph.ingest("example.com @ada_ng", source="test")
+        graph.save()
+        assert self.rt._lookup_graph_links("ada_ng") == [
+            "example.com"]
+
 
 # ── user_update seam: silent fan-out, no reply ──────────────────
 
@@ -334,6 +448,7 @@ def _install_fake_telethon():
     functions = types.ModuleType("telethon.tl.functions")
     users = types.ModuleType("telethon.tl.functions.users")
     messages = types.ModuleType("telethon.tl.functions.messages")
+    photos = types.ModuleType("telethon.tl.functions.photos")
     events_mod = types.ModuleType("telethon.events")
 
     class GetFullUserRequest:
@@ -346,8 +461,16 @@ def _install_fake_telethon():
             self.max_id = max_id
             self.limit = limit
 
+    class GetUserPhotosRequest:
+        def __init__(self, user_id, offset=0, max_id=0, limit=1):
+            self.user_id = user_id
+            self.offset = offset
+            self.max_id = max_id
+            self.limit = limit
+
     users.GetFullUserRequest = GetFullUserRequest
     messages.GetCommonChatsRequest = GetCommonChatsRequest
+    photos.GetUserPhotosRequest = GetUserPhotosRequest
     telethon.tl = tl
     telethon.events = events_mod
     sys.modules["telethon"] = telethon
@@ -355,14 +478,19 @@ def _install_fake_telethon():
     sys.modules["telethon.tl.functions"] = functions
     sys.modules["telethon.tl.functions.users"] = users
     sys.modules["telethon.tl.functions.messages"] = messages
+    sys.modules["telethon.tl.functions.photos"] = photos
     sys.modules["telethon.events"] = events_mod
     return GetFullUserRequest, GetCommonChatsRequest
 
 
 class _FakeClient:
-    def __init__(self, *, full=None, chats=None):
+    def __init__(self, *, full=None, chats=None, photos=None,
+                 photo_path=None, contacts=None):
         self._full = full
         self._chats = chats
+        self._photos = photos
+        self._photo_path = photo_path
+        self._contacts = contacts
         self.calls = []
 
     async def __call__(self, request):
@@ -371,7 +499,20 @@ class _FakeClient:
             return self._full
         if type(request).__name__ == "GetCommonChatsRequest":
             return self._chats
+        if type(request).__name__ == "GetUserPhotosRequest":
+            if self._photos is None:
+                raise AssertionError(
+                    "unexpected request GetUserPhotosRequest")
+            return self._photos
         raise AssertionError(f"unexpected request {request!r}")
+
+    async def download_profile_photo(self, peer, file=None):
+        self.calls.append("download_profile_photo")
+        return self._photo_path
+
+    async def get_contacts(self):
+        self.calls.append("get_contacts")
+        return self._contacts or []
 
 
 def _adapter_with_fake_client(fake_client):
@@ -440,7 +581,8 @@ def test_adapter_user_update_facts_from_event():
         id=7, username="ada_ng", first_name="Ada", last_name="N."))
     facts = TelegramAdapter._user_update_facts(event)
     assert facts == {"user_id": "7", "username": "ada_ng",
-                     "name": "Ada N.", "online": ""}
+                     "name": "Ada N.", "online": "",
+                     "photo_id": ""}
 
 
 def test_adapter_user_update_facts_none_when_no_user():
@@ -448,3 +590,182 @@ def test_adapter_user_update_facts_none_when_no_user():
 
     assert TelegramAdapter._user_update_facts(
         SimpleNamespace()) is None
+
+# ── profile-photo observation ─────────────────────────────────────
+
+
+def test_photo_change_is_recorded_as_identity_event(tmp_path):
+    surface = _surface(tmp_path)
+    surface.handle_message(KEY, "7", username="ada", name="Ada",
+                           text="hi", ts=1000.0)
+    touched = surface.note_user_update(
+        "telegram-bot", "7", username="ada", name="Ada",
+        photo_id="111")
+    assert touched == [KEY]
+
+    def _photo_events():
+        history = (surface.member(KEY, "7") or {}).get(
+            "identity_history") or []
+        return [e for e in history if e["kind"] == "photo_changed"]
+
+    events = _photo_events()
+    assert len(events) == 1
+    assert events[0]["new"] == "111"
+    assert events[0]["old"] == ""
+    assert events[0]["ts"]
+    # the same photo again: no new event
+    surface.note_user_update("telegram-bot", "7", username="ada",
+                             name="Ada", photo_id="111")
+    assert len(_photo_events()) == 1
+    # a new photo: a second event, and the member carries it
+    surface.note_user_update("telegram-bot", "7", username="ada",
+                             name="Ada", photo_id="222")
+    assert len(_photo_events()) == 2
+    assert surface.member(KEY, "7").get("photo_id") == "222"
+
+
+def test_photo_id_seeded_without_event_for_new_member(tmp_path):
+    surface = _surface(tmp_path)
+    surface.note_join(KEY, "7", username="ada", name="Ada",
+                      photo_id="111", ts=1000.0)
+    member = surface.member(KEY, "7")
+    assert member.get("photo_id") == "111"
+    assert not [e for e in (member.get("identity_history") or [])
+                if e["kind"] == "photo_changed"]
+
+
+# ── adapter: enriched user_full + photo + contact phone ──────────
+
+
+def test_adapter_user_full_enriched_fields():
+    from datetime import UTC, datetime
+
+    _install_fake_telethon()
+
+    class UserStatusOffline:
+        def __init__(self, was_online):
+            self.was_online = was_online
+
+    user = SimpleNamespace(
+        id=7, username="ada_ng", first_name="Ada", last_name="N.",
+        phone="+2348012345678", bot=False, premium=True,
+        verified=True, scam=False, fake=False, restricted=False,
+        support=False, contact=True, mutual_contact=True,
+        deleted=False, lang_code="en",
+        status=UserStatusOffline(datetime.fromtimestamp(
+            NOW - 3600, tz=UTC)),
+        usernames=[SimpleNamespace(username="ada_old", active=True),
+                   SimpleNamespace(username="ada_dead",
+                                   active=False)])
+    full_user = SimpleNamespace(
+        user=user, about="Builder of things.",
+        common_chats_count=2, personal_channel_id=123,
+        profile_photo=SimpleNamespace(id=999, dc_id=4))
+    fake = _FakeClient(
+        full=SimpleNamespace(
+            full_user=full_user,
+            chats=[SimpleNamespace(id=123,
+                                   title="Ada's channel")]),
+        photos=SimpleNamespace(count=3))
+    adapter = _adapter_with_fake_client(fake)
+    out = adapter.user_full("7")
+    assert out is not None
+    assert out["phone"] == "+2348012345678"
+    assert out["about"] == "Builder of things."
+    assert out["status_kind"] == "offline"
+    assert out["last_seen_ts"] == NOW - 3600
+    assert out["usernames"] == ["ada_old"]
+    assert out["personal_channel_id"] == "123"
+    assert out["personal_channel_title"] == "Ada's channel"
+    assert out["has_photo"] is True
+    assert out["photo_id"] == "999"
+    assert out["photo_dc"] == 4
+    assert out["photo_count"] == 3
+    assert out["verified"] is True
+    assert out["mutual_contact"] is True
+    assert out["common_chats_count"] == 2
+
+
+def test_adapter_user_full_photo_count_absent_when_read_fails():
+    _install_fake_telethon()
+    user = SimpleNamespace(id=7, username="ada_ng",
+                           first_name="Ada", last_name="",
+                           phone=None, bot=False, premium=False)
+    fake = _FakeClient(full=SimpleNamespace(full_user=SimpleNamespace(
+        user=user)))
+    adapter = _adapter_with_fake_client(fake)
+    out = adapter.user_full("7")
+    assert out is not None
+    # the photos read raised in the fake: the count stays
+    # absent, never 0 dressed up as "no photos"
+    assert out["photo_count"] is None
+    assert out["has_photo"] is False
+
+
+def test_adapter_user_photo_path_returns_downloaded_file(tmp_path):
+    _install_fake_telethon()
+    wanted = str(tmp_path / "pfp-7.jpg")
+    fake = _FakeClient(photo_path=wanted)
+    adapter = _adapter_with_fake_client(fake)
+    assert adapter.user_photo_path("7", str(tmp_path)) == wanted
+    assert "download_profile_photo" in fake.calls
+
+
+def test_adapter_user_photo_path_none_when_no_photo():
+    _install_fake_telethon()
+    fake = _FakeClient(photo_path=None)
+    adapter = _adapter_with_fake_client(fake)
+    assert adapter.user_photo_path("7", "/tmp") is None
+
+
+def test_adapter_user_contact_phone_from_own_contacts():
+    _install_fake_telethon()
+    fake = _FakeClient(contacts=[
+        SimpleNamespace(id=7, phone="+2348012345678"),
+        SimpleNamespace(id=8, phone="+2348000000001")])
+    adapter = _adapter_with_fake_client(fake)
+    assert adapter.user_contact_phone("7") == "+2348012345678"
+    assert adapter.user_contact_phone("9") is None
+    assert "get_contacts" in fake.calls
+
+
+# ── WhatsApp adapter: contact_info ──────────────────────────────
+
+
+def _wa_adapter_with_admin(response):
+    from nomorals.social.chat.whatsapp import WhatsAppAdapter
+
+    adapter = WhatsAppAdapter.__new__(WhatsAppAdapter)
+    calls = []
+
+    def _admin_cmd(cmd, payload, *, timeout=30.0):
+        calls.append((cmd, payload))
+        return dict(response)
+
+    adapter._admin_cmd = _admin_cmd
+    adapter._admin_calls = calls
+    return adapter
+
+
+def test_whatsapp_contact_info_normalizes_bare_number():
+    adapter = _wa_adapter_with_admin({
+        "ok": True, "jid": "2348012345678@s.whatsapp.net",
+        "registered": True, "about": "Hey there",
+        "has_photo": True,
+        "photo_url": "https://example.invalid/p.jpg",
+        "verified_name": "Ada", "lid": "123@lid"})
+    out = adapter.contact_info("2348012345678")
+    assert out["ok"] is True
+    assert out["jid"] == "2348012345678@s.whatsapp.net"
+    assert out["verified_name"] == "Ada"
+    assert len(adapter._admin_calls) == 1
+    cmd, payload = adapter._admin_calls[0]
+    assert cmd == "contact_info"
+    assert payload["jid"] == "2348012345678@s.whatsapp.net"
+
+
+def test_whatsapp_contact_info_empty_jid_refuses():
+    adapter = _wa_adapter_with_admin({})
+    out = adapter.contact_info("")
+    assert out["ok"] is False
+    assert adapter._admin_calls == []

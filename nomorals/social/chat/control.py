@@ -800,7 +800,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "contact": (0, None),     # /contact <name|@handle|id> — everything Devon recorded between you and one contact: messages, statuses, calls, media, groups (census §6 #5; owner only, a read)
     "rules": (0, 0),          # /rules — this group's rules, rendered from the settings the enforcer reads (P1)
     "member": (0, 1),         # /member [@name] — group member card: tenure, activity, identity changes (P1)
-    "lookup": (0, 1),         # /lookup <id|@username> — the account dossier: ID, account-age estimate, phone when visible, groups, username/name history, economy + moderation record (DM + group)
+    "lookup": (0, 1),         # /lookup <id|@username> — the account dossier: ID, account-age estimate, bio/presence/flags/photo, phone where visible (mutual contact, userbot contacts, /addcontact record), groups, username/name/photo history with dates, economy + moderation record (DM + group); WhatsApp by number adds about/verified name/linked identity/business
     "glog": (0, 1),           # /glog [n] — the group's held audit log (admins; P1)
     "setlog": (0, 1),         # /setlog [channel id] — designate the log channel (pull-only; admins)
     "unsetlog": (0, 0),       # /unsetlog — remove the log-channel designation (admins)
@@ -3999,7 +3999,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/member [@name]",
             "example": "/member @ada",
             "related": "/rules /glog"},
-    "lookup": {"what": "the account dossier, by Telegram ID or @username: who the account is, which of Devon's groups it is in, its username and display-name history with dates, its economy standing and moderation record, an account-age estimate from its ID range (labelled an estimate, never a made-up exact date), and its phone number only when the userbot can legitimately see it (mutual contact) — otherwise the line says not visible. In a group anyone gets the public card; the phone line and the full economy/moderation detail show only to the operator, a group admin, or the account itself. In my DM a lookup is for group admins, the operator, or yourself.",
+    "lookup": {"what": "the account dossier, by Telegram ID or @username (or a WhatsApp number): who the account is — bio, presence, profile photo (sent with the dossier), flags (bot, Premium, verified, scam, fake), language, linked channel, all usernames — which of Devon's groups it is in, its username, display-name and photo history with dates (including the last username change), its economy standing and moderation record, an account-age estimate from its ID range (labelled an estimate, never a made-up exact date), and its phone number only when Devon can legitimately reach it — visible to the userbot as a mutual contact, in the userbot's own contacts, or in Devon's /addcontact record — otherwise the line says not visible, never a guess. WhatsApp adds the About, the verified name, the linked identity and the business profile; last seen there is not fetchable, and the line says so. In a group anyone gets the public card; the phone line and the full economy/moderation detail show only to the operator, a group admin, or the account itself. In my DM a lookup is for group admins, the operator, or yourself.",
             "usage": "/lookup <id|@username>",
             "example": "/lookup 123456789",
             "related": "/member /rep /groups"},

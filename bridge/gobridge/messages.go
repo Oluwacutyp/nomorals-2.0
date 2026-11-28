@@ -175,6 +175,8 @@ func (b *bridge) handleCommand(cc *clientConn, req request) {
 		b.cmdChatDisappear(ctx, cc, id, req)
 	case "profile_get":
 		b.cmdProfileGet(ctx, cc, id, req)
+	case "contact_info":
+		b.cmdContactInfo(ctx, cc, id, req)
 	case "profile_set":
 		b.cmdProfileSet(ctx, cc, id, req)
 	case "privacy_get":

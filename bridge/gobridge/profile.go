@@ -78,6 +78,9 @@ type profileClient interface {
 		avatar []byte) (string, error)
 	GetUserInfo(ctx context.Context, jids []types.JID,
 	) (map[types.JID]types.UserInfo, error)
+	GetProfilePictureInfo(ctx context.Context, jid types.JID,
+		params *whatsmeow.GetProfilePictureParams,
+	) (*types.ProfilePictureInfo, error)
 	TryFetchPrivacySettings(ctx context.Context,
 		ignoreCache bool) (*types.PrivacySettings, error)
 	SetPrivacySetting(ctx context.Context,
@@ -278,6 +281,71 @@ func (b *bridge) cmdProfileGet(ctx context.Context, cc *clientConn, id string, r
 	out["picture_id"] = info.PictureID
 	out["has_photo"] = info.PictureID != ""
 	b.reply(cc, id, out)
+}
+
+// ── contact info (OSINT lookup) ─────────────────────────────
+//
+// One OTHER contact, live: the same GetUserInfo read the own
+// profile uses, addressed at the target JID instead of the
+// account's own — about (Status), picture id, verified name,
+// linked identity (LID) — plus the photo's direct URL from
+// GetProfilePictureInfo.  A failed photo read is not a failed
+// contact read: the about/verified facts stand and the photo
+// is just absent.  Last seen is NOT here: WhatsApp publishes
+// no last-seen fetch — it only arrives through presence
+// subscription, which this bridge does not run — so the
+// caller says so instead of faking a time.
+
+// contactInfoFrom renders one GetUserInfo entry (+ the photo
+// info, when the photo read landed) as the contact_info reply
+// body: pure, so the shape is pinned in tests against fakes
+// instead of a live session.
+func contactInfoFrom(jid types.JID, info types.UserInfo,
+	pic *types.ProfilePictureInfo) map[string]any {
+	out := map[string]any{
+		"ok": true, "jid": jid.String(), "registered": true,
+		"about": info.Status, "picture_id": info.PictureID,
+		"has_photo": info.PictureID != "",
+		"lid":       info.LID.String(),
+	}
+	if info.VerifiedName != nil {
+		out["verified_name"] =
+			info.VerifiedName.Details.GetVerifiedName()
+	}
+	if pic != nil && pic.URL != "" {
+		out["photo_url"] = pic.URL
+		out["has_photo"] = true
+	}
+	return out
+}
+
+func (b *bridge) cmdContactInfo(ctx context.Context, cc *clientConn, id string, req request) {
+	raw := strings.TrimSpace(req.str("jid"))
+	if raw == "" {
+		b.reply(cc, id, map[string]any{"ok": false,
+			"error": "contact_info needs a jid"})
+		return
+	}
+	jid, err := parseJID(raw)
+	if err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	infos, err := b.cli.GetUserInfo(ctx, []types.JID{jid})
+	if err != nil {
+		b.fail(cc, id, err)
+		return
+	}
+	info, ok := infos[jid]
+	if !ok {
+		// WhatsApp knows no such account.
+		b.reply(cc, id, map[string]any{"ok": true,
+			"jid": jid.String(), "registered": false})
+		return
+	}
+	pic, _ := b.cli.GetProfilePictureInfo(ctx, jid,
+		&whatsmeow.GetProfilePictureParams{})
+	b.reply(cc, id, contactInfoFrom(jid, info, pic))
 }
 
 func (b *bridge) cmdProfileSet(ctx context.Context, cc *clientConn, id string, req request) {

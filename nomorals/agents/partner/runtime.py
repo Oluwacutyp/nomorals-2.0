@@ -1115,7 +1115,8 @@ class PartnerRuntime(
         surface.note_user_update(
             platform, user_id,
             username=str(meta.get("username") or ""),
-            name=str(meta.get("name") or ""))
+            name=str(meta.get("name") or ""),
+            photo_id=str(meta.get("photo_id") or ""))
         # Presence watch (census §6 #4): a UserUpdate that carries a
         # presence transition (Telegram only — WhatsApp never forwards
         # contact presence) runs the watch check for this contact.

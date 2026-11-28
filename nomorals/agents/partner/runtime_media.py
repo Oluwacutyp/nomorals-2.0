@@ -8743,7 +8743,10 @@ class RuntimeMediaMixin:
     # and the owner's next message IS the footage: a sent video/file,
     # or a path/URL in text.  The ask is answered in _process_inner
     # (runtime.py), after the proposal reason ask, and expires after
-    # the same 15-minute TTL.  "cancel" drops it.
+    # the same 15-minute TTL.  "cancel" drops it — typed, or
+    # the [Cancel] button on the ask (Telegram and WhatsApp),
+    # which re-enters as "/trendops cancel" and is answered
+    # in _control_trendops.
     def _trendops_ask_store(self) -> dict[str, dict[str, Any]]:
         store = getattr(self, "_trendops_ask_store_v", None)
         if store is None:

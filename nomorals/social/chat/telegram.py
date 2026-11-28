@@ -2090,6 +2090,8 @@ class TelegramAdapter(ChatAdapter):
                                   "username": facts["username"],
                                   "name": facts["name"],
                                   "online": facts["online"],
+                                  "photo_id": facts.get(
+                                      "photo_id") or "",
                                   "envelope": None}))
                 else:
                     _log.warning("telegram: Telethon has no "
@@ -5454,12 +5456,20 @@ class TelegramAdapter(ChatAdapter):
 
     def user_full(self, user_id: str) -> dict[str, Any] | None:
         """One Telegram user, full (member-intel dossier): the
-        entity behind an ID — username, display name, bot and
-        premium flags, and the phone number ONLY when Telegram
-        itself hands it over, which is only for mutual
-        contacts.  ``phone`` is None otherwise — never a guess,
-        never borrowed from another account.  Read-only; None
-        when the userbot is down or the user cannot be read."""
+        entity behind an ID — username, display name, bio, last
+        seen, every flag the platform itself carries (bot,
+        premium, verified, scam, fake, restricted, support),
+        language, all usernames (primary + collectible), the
+        linked personal channel when the account has one, the
+        profile photo (presence + count), and the phone number
+        ONLY when Telegram itself hands it over, which is only
+        for mutual contacts or an everybody-visible number.
+        ``phone`` is None otherwise — never a guess, never
+        borrowed from another account.  Every field is read
+        off the MTProto objects with getattr, so an older
+        layer that lacks a field leaves it absent instead of
+        crashing the read.  Read-only; None when the userbot
+        is down or the user cannot be read."""
         if self._client is None:
             return None
 
@@ -5482,19 +5492,162 @@ class TelegramAdapter(ChatAdapter):
                 return None
             first = str(getattr(user, "first_name", "") or "")
             last = str(getattr(user, "last_name", "") or "")
-            return {
+            out: dict[str, Any] = {
                 "id": str(getattr(user, "id", "") or ""),
                 "username": str(getattr(user, "username", "") or ""),
                 "name": " ".join(p for p in (first, last) if p),
                 "phone": getattr(user, "phone", None) or None,
                 "bot": bool(getattr(user, "bot", False)),
                 "premium": bool(getattr(user, "premium", False)),
+                "verified": bool(getattr(user, "verified", False)),
+                "scam": bool(getattr(user, "scam", False)),
+                "fake": bool(getattr(user, "fake", False)),
+                "restricted": bool(getattr(user, "restricted",
+                                            False)),
+                "support": bool(getattr(user, "support", False)),
+                "contact": bool(getattr(user, "contact", False)),
+                "mutual_contact": bool(getattr(
+                    user, "mutual_contact", False)),
+                "deleted": bool(getattr(user, "deleted", False)),
+                "lang_code": str(getattr(user, "lang_code", "")
+                                 or ""),
+                "about": str(getattr(full_user, "about", "") or ""),
+                "common_chats_count": getattr(
+                    full_user, "common_chats_count", None),
             }
+            # Every username the account holds: the primary plus
+            # any collectible (fragment) usernames, active only.
+            # An account with none keeps just the primary field.
+            extra: list[str] = []
+            for entry in getattr(user, "usernames", None) or []:
+                handle = str(getattr(entry, "username", "") or "")
+                if handle and getattr(entry, "active", True):
+                    extra.append(handle)
+            out["usernames"] = extra
+            # The profile photo: presence + id + the DC that
+            # serves it, straight off the full-user object.
+            photo = getattr(full_user, "profile_photo", None)
+            out["has_photo"] = photo is not None
+            out["photo_id"] = str(getattr(photo, "id", "") or "") \
+                if photo is not None else ""
+            out["photo_dc"] = getattr(photo, "dc_id", None) \
+                if photo is not None else None
+            # Last seen / online: the User.status object carries
+            # it — online now, a was_online stamp for offline,
+            # or Telegram's own coarse buckets (recently, last
+            # week, last month).  No stamp is ever invented.
+            status = getattr(user, "status", None)
+            kind = type(status).__name__ if status is not None \
+                else ""
+            out["status_kind"] = {
+                "UserStatusOnline": "online",
+                "UserStatusOffline": "offline",
+                "UserStatusRecently": "recently",
+                "UserStatusLastWeek": "last_week",
+                "UserStatusLastMonth": "last_month",
+                "UserStatusEmpty": "",
+            }.get(kind, "")
+            was = getattr(status, "was_online", None) \
+                if status is not None else None
+            try:
+                out["last_seen_ts"] = float(was.timestamp()) \
+                    if was is not None else None
+            except Exception:  # noqa: BLE001 - no stamp, no field
+                out["last_seen_ts"] = None
+            # The linked personal channel, when the account has
+            # one: the id off the full user, the title off the
+            # chats the same response already carries.
+            channel_id = getattr(
+                full_user, "personal_channel_id", None)
+            out["personal_channel_id"] = (
+                str(channel_id) if channel_id else "")
+            title = ""
+            if channel_id:
+                for chat in getattr(full, "chats", None) or []:
+                    if str(getattr(chat, "id", "") or "") == \
+                            str(channel_id):
+                        title = str(getattr(chat, "title", "")
+                                    or "")
+                        break
+            out["personal_channel_title"] = title
+            # How many profile photos the account holds (a
+            # second, cheap call — limit 1, the count rides
+            # along).  Absent when the read fails, never 0
+            # dressed up as "no photos".
+            try:
+                from telethon.tl.functions.photos import (
+                    GetUserPhotosRequest,
+                )
+
+                photos = await self._client(
+                    GetUserPhotosRequest(peer, offset=0, max_id=0,
+                                         limit=1))
+                out["photo_count"] = int(getattr(
+                    photos, "count", 0) or 0)
+            except Exception:  # noqa: BLE001 - count stays absent
+                out["photo_count"] = None
+            return out
 
         try:
             return self._run_on_loop(_do(), timeout=30.0)
         except Exception as exc:  # noqa: BLE001 - a path, not a dependency
             _log.debug("telegram user_full failed: %s", exc)
+            return None
+
+    def user_photo_path(self, user_id: str, dest_dir: str
+                        ) -> str | None:
+        """The target's CURRENT profile photo, downloaded to
+        dest_dir — the picture itself behind a /lookup, not
+        just its id.  None when there is no photo, the userbot
+        is down, or the download fails.  Read-only; the caller
+        owns the file afterwards (including deleting it)."""
+        if self._client is None:
+            return None
+
+        async def _do() -> str | None:
+            import os
+
+            try:
+                peer: Any = int(str(user_id))
+            except (TypeError, ValueError):
+                peer = str(user_id)
+            path = await self._client.download_profile_photo(
+                peer,
+                file=os.path.join(
+                    dest_dir, f"pfp-{user_id}.jpg"))
+            return str(path) if path else None
+
+        try:
+            return self._run_on_loop(_do(), timeout=60.0)
+        except Exception as exc:  # noqa: BLE001 - no photo, no crash
+            _log.debug("telegram user photo download failed: %s",
+                       exc)
+            return None
+
+    def user_contact_phone(self, user_id: str) -> str | None:
+        """The phone number for one user out of the userbot
+        account's OWN contact list — the numbers Devon
+        legitimately holds because the owner saved them (or
+        /addcontact saved them).  A mutual contact's number is
+        visible to the account by construction; a stranger
+        returns None, never a guess.  Read-only."""
+        if self._client is None:
+            return None
+
+        async def _do() -> str | None:
+            contacts = await self._client.get_contacts()
+            wanted = str(user_id)
+            for entry in contacts or []:
+                if str(getattr(entry, "id", "") or "") == wanted:
+                    return str(getattr(entry, "phone", "") or "") \
+                        or None
+            return None
+
+        try:
+            return self._run_on_loop(_do(), timeout=30.0)
+        except Exception as exc:  # noqa: BLE001 - no number, no crash
+            _log.debug("telegram contact phone read failed: %s",
+                       exc)
             return None
 
     def common_chats(self, user_id: str
@@ -5542,9 +5695,13 @@ class TelegramAdapter(ChatAdapter):
         transition the event carries ("online" when the user just
         came online, "offline" when they just went offline, "" when
         the update is not a presence transition — a rename, a
-        typing pulse, anything else).  None when the event
-        carries no attributable user — an unattributable update
-        journals against nothing, never a guess."""
+        typing pulse, anything else), plus the current profile
+        photo id when the event carries a user object with one —
+        a photo change rides the same event, so a silent photo
+        swap is caught while the member says nothing.  None when
+        the event carries no attributable user — an
+        unattributable update journals against nothing, never a
+        guess."""
         if getattr(event, "online", None) is True:
             online = "online"
         elif getattr(event, "offline", None) is True:
@@ -5552,12 +5709,16 @@ class TelegramAdapter(ChatAdapter):
         else:
             online = ""
         user = getattr(event, "user", None)
+        photo_id = ""
         if user is not None:
             uid = getattr(user, "id", None)
             username = str(getattr(user, "username", "") or "")
             first = str(getattr(user, "first_name", "") or "")
             last = str(getattr(user, "last_name", "") or "")
             name = " ".join(p for p in (first, last) if p)
+            photo = getattr(user, "photo", None)
+            photo_id = str(getattr(photo, "photo_id", "") or "") \
+                if photo is not None else ""
         else:
             uid = (getattr(event, "user_id", None)
                    or getattr(event, "sender_id", None))
@@ -5570,7 +5731,8 @@ class TelegramAdapter(ChatAdapter):
         if not uid:
             return None
         return {"user_id": str(uid), "username": username,
-                "name": name, "online": online}
+                "name": name, "online": online,
+                "photo_id": photo_id}
 
     def message_sender(self, chat: ChatRef, message_id: str
                        ) -> dict[str, Any] | None:

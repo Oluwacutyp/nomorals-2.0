@@ -2356,6 +2356,62 @@ async function handleCommand(sock, req) {
         }
         return reply(sock, id, out);
       }
+      // One OTHER contact, live (OSINT lookup): the same
+      // fetchStatus + profilePictureUrl reads the own profile
+      // uses, addressed at the target JID — about, photo URL —
+      // plus onWhatsApp (registered or not) and the business
+      // profile when the contact is a business.  A failed
+      // photo read is not a failed contact read: the about
+      // stands and the photo is just absent.  Last seen is NOT
+      // here: Baileys publishes no last-seen fetch — it only
+      // arrives through presence subscription, which this
+      // bridge does not run — so the caller says so instead
+      // of faking a time.
+      case 'contact_info': {
+        const raw = String(req.jid || '').trim();
+        if (!raw) return reply(sock, id, { ok: false, error: 'contact_info needs a jid' });
+        const digits = raw.replace(/[^\d]/g, '');
+        const jid = raw.includes('@') ? raw : (digits ? `${digits}@s.whatsapp.net` : '');
+        if (!jid) return reply(sock, id, { ok: false, error: 'contact_info needs a JID or phone number' });
+        let registered = null;
+        try {
+          const rows = await wa.onWhatsApp(jid);
+          const row = Array.isArray(rows) ? rows[0] : null;
+          registered = row ? !!row.exists : false;
+        } catch { registered = null; }
+        if (registered === false) {
+          return reply(sock, id, { ok: true, jid, registered: false });
+        }
+        const out = { ok: true, jid, registered: registered !== null ? registered : true };
+        try {
+          const res = await wa.fetchStatus(jid);
+          const entry = Array.isArray(res) ? res[0] : res;
+          out.about = (entry && typeof entry.status === 'object')
+            ? String(entry.status.status || '')
+            : String(entry?.status || '');
+        } catch (e) {
+          out.info_error = String(e.message || e);
+        }
+        try {
+          const photo = await wa.profilePictureUrl(jid, 'image') || '';
+          out.photo_url = photo;
+          out.has_photo = !!photo;
+        } catch { out.photo_url = ''; out.has_photo = false; }
+        try {
+          if (typeof wa.getBusinessProfile === 'function') {
+            const biz = await wa.getBusinessProfile(jid);
+            if (biz && typeof biz === 'object') {
+              const business = {};
+              for (const k of ['description', 'email', 'address', 'website', 'category', 'business_hours', 'address']) {
+                if (biz[k] != null && biz[k] !== '') business[k] = biz[k];
+              }
+              if (Array.isArray(biz.categories) && biz.categories.length) business.categories = biz.categories;
+              if (Object.keys(business).length) out.business = business;
+            }
+          }
+        } catch { /* business profile is best-effort, never a failure */ }
+        return reply(sock, id, out);
+      }
       case 'profile_set': {
         const field = String(req.field || '');
         try {

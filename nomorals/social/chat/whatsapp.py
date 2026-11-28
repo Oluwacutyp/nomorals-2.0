@@ -3306,6 +3306,38 @@ class WhatsAppAdapter(ChatAdapter):
         "info_error" instead of inventing values."""
         return self._admin_cmd("profile_get", {}, timeout=15)
 
+    def contact_info(self, jid: str, *, timeout: float = 20
+                     ) -> dict[str, Any]:
+        """One OTHER contact, live (bridges' ``contact_info``):
+        {"ok", "jid", "registered", "about", "has_photo",
+        "photo_url", "picture_id", "verified_name", "lid",
+        "business"}.  The about is the profile About text, the
+        photo URL is the direct image URL when the account's
+        privacy lets it through, the LID is WhatsApp's linked
+        identity for the number, and "business" carries the
+        business profile (description, email, address, website)
+        when the contact is a business — absent otherwise, never
+        invented.  "registered" is False when WhatsApp says the
+        number is not on WhatsApp at all.  {} when the bridge is
+        down; {"ok": False, ...} with the honest reason when the
+        read itself refuses.  Last seen is NOT in here: WhatsApp
+        publishes no last-seen fetch — it only arrives through
+        presence subscription, which Devon does not run — so the
+        dossier says so instead of faking a time."""
+        jid = str(jid or "").strip()
+        if not jid:
+            return {"ok": False,
+                    "error": "contact_info needs a JID"}
+        if "@" not in jid:
+            digits = "".join(c for c in jid if c.isdigit())
+            if not digits:
+                return {"ok": False,
+                        "error": "contact_info needs a JID or "
+                                 "phone number"}
+            jid = f"{digits}@s.whatsapp.net"
+        return self._admin_cmd("contact_info", {"jid": jid},
+                               timeout=timeout)
+
     def set_profile_name(self, name: str) -> dict[str, Any]:
         """Set the account's profile (push) name (bridges'
         ``profile_set`` field=name: whatsmeow app-state

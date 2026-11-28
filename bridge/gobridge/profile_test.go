@@ -29,6 +29,7 @@ type fakeProfileClient struct {
 	photoBytes []byte
 	photoSet   bool
 	info       map[types.JID]types.UserInfo
+	pic        *types.ProfilePictureInfo
 	settings   types.PrivacySettings
 	setName    types.PrivacySettingType
 	setValue   types.PrivacySetting
@@ -61,6 +62,13 @@ func (f *fakeProfileClient) SetGroupPhoto(_ context.Context,
 func (f *fakeProfileClient) GetUserInfo(_ context.Context,
 	_ []types.JID) (map[types.JID]types.UserInfo, error) {
 	return f.info, nil
+}
+
+func (f *fakeProfileClient) GetProfilePictureInfo(
+	_ context.Context, _ types.JID,
+	_ *whatsmeow.GetProfilePictureParams,
+) (*types.ProfilePictureInfo, error) {
+	return f.pic, nil
 }
 
 func (f *fakeProfileClient) TryFetchPrivacySettings(
@@ -164,6 +172,35 @@ func TestPrivacySettingsMapOmitsUnread(t *testing.T) {
 			t.Fatalf("unread category %q present in %v",
 				k, out)
 		}
+	}
+}
+
+func TestContactInfoFrom(t *testing.T) {
+	jid := types.NewJID("2348012345678", types.DefaultUserServer)
+	lid := types.NewJID("123456789012345", types.HiddenUserServer)
+	info := types.UserInfo{
+		Status: "Available", PictureID: "pic-9", LID: lid,
+	}
+	pic := &types.ProfilePictureInfo{
+		URL: "https://example.invalid/p.jpg", ID: "pic-9",
+		Type: "image"}
+	out := contactInfoFrom(jid, info, pic)
+	if out["registered"] != true || out["about"] !=
+		"Available" || out["picture_id"] != "pic-9" ||
+		out["photo_url"] != "https://example.invalid/p.jpg" ||
+		out["lid"] != lid.String() || out["has_photo"] != true {
+		t.Fatalf("contact info = %v", out)
+	}
+	// No photo read: the about still stands, the photo is
+	// just absent — never a fabricated URL.
+	out = contactInfoFrom(jid, types.UserInfo{Status: "hi"},
+		nil)
+	if out["about"] != "hi" || out["has_photo"] != false {
+		t.Fatalf("photo-less contact info = %v", out)
+	}
+	if _, present := out["photo_url"]; present {
+		t.Fatalf("photo_url present without a photo read: %v",
+			out)
 	}
 }
 

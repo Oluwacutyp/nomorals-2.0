@@ -1125,9 +1125,13 @@ class GroupSurface:
     # ---- member ledger -------------------------------------------
     def _observe_identity(self, group_key: str, user_id: str, *,
                           username: str = "", name: str = "",
+                          photo_id: str = "",
                           ts: float) -> list[dict[str, Any]]:
         """Snapshot a member's identity; return CHANGE EVENTS for
-        anything that differs from the stored snapshot."""
+        anything that differs from the stored snapshot.  A
+        profile-photo change is an identity event exactly like a
+        rename: the photo id is the observation (never the image
+        bytes), dated like every other change."""
         entry = self.store.group(group_key)
         member = entry["members"].get(user_id)
         events: list[dict[str, Any]] = []
@@ -1136,6 +1140,7 @@ class GroupSurface:
                 "user_id": user_id,
                 "username": username or "",
                 "name": name or "",
+                "photo_id": photo_id or "",
                 "first_seen": ts,
                 "joined_ts": None,
                 "last_seen": ts,
@@ -1145,6 +1150,22 @@ class GroupSurface:
             return events
         for field_name, new in (("username", username),
                                 ("name", name)):
+            if new and member.get(field_name) != new:
+                event = {
+                    "kind": f"{field_name}_changed",
+                    "user_id": user_id,
+                    "old": member.get(field_name) or "",
+                    "new": new, "ts": ts}
+                events.append(event)
+                member[field_name] = new
+        if photo_id and member.get("photo_id") != photo_id:
+            event = {
+                "kind": "photo_changed",
+                "user_id": user_id,
+                "old": member.get("photo_id") or "",
+                "new": photo_id, "ts": ts}
+            events.append(event)
+            member["photo_id"] = photo_id
             if new and member.get(field_name) != new:
                 event = {
                     "kind": f"{field_name}_changed",
@@ -1187,6 +1208,7 @@ class GroupSurface:
                   username: str = "", name: str = "",
                   last_name: str = "", is_bot: bool = False,
                   has_photo: bool | None = None,
+                  photo_id: str = "",
                   ts: float | None = None) -> dict[str, Any]:
         """Record a join in the ledger WITHOUT rendering the
         welcome (acceptance may hold it until admission — the
@@ -1197,7 +1219,8 @@ class GroupSurface:
         judged on.  Returns the member record."""
         now = ts if ts is not None else time.time()
         self._observe_identity(group_key, user_id,
-                               username=username, name=name, ts=now)
+                               username=username, name=name,
+                               photo_id=photo_id, ts=now)
         entry = self.store.group(group_key)
         member = entry["members"][user_id]
         member["joined_ts"] = now
@@ -8125,6 +8148,7 @@ class GroupSurface:
 
     def note_user_update(self, platform: str, user_id: str, *,
                          username: str = "", name: str = "",
+                         photo_id: str = "",
                          ts: float | None = None
                          ) -> list[str]:
         """Fan a live identity change out to every group on
@@ -8155,6 +8179,7 @@ class GroupSurface:
                 continue
             self._observe_identity(key, wanted,
                                    username=username, name=name,
+                                   photo_id=photo_id,
                                    ts=now)
             touched.append(key)
         if touched:
