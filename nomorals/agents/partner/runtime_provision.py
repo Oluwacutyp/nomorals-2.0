@@ -680,10 +680,14 @@ class RuntimeProvisionMixin:
                 vtxt = "bridge: no verdict recorded"
             stage = " · sweep retry" \
                 if row.get("stage") == "sweep" else ""
+            alt = str(row.get("seam_poster_alt_id") or "")
+            alt_txt = (f" · alt {alt}"
+                       if alt and alt != row.get("counterpart_id")
+                       else "")
             return (f"  {when} · status view trace · {who} · "
                     f"status_viewing {toggle} · "
                     f"attempted {'yes' if attempted else 'no'} · "
-                    f"{vtxt}{stage}")
+                    f"{vtxt}{alt_txt}{stage}")
         if kind == "view_once_trace":
             toggle = "on" if row.get("view_once_toggle") \
                 else "OFF"
@@ -1156,9 +1160,20 @@ class RuntimeProvisionMixin:
                              "view_status verb"}
                 return False
             try:
-                res = fn(str(item.get("poster_id") or ""),
-                         str(item.get("source_id") or ""),
-                         float(item.get("ts") or 0.0))
+                # The poster's alternate form rides as the 4th
+                # argument (gapfix166): an adapter whose verb
+                # still takes three falls back to the old call
+                # below, so an older seam shape never breaks the
+                # view — the channel_fetcher's arity discipline.
+                try:
+                    res = fn(str(item.get("poster_id") or ""),
+                             str(item.get("source_id") or ""),
+                             float(item.get("ts") or 0.0),
+                             str(item.get("poster_alt_id") or ""))
+                except TypeError:
+                    res = fn(str(item.get("poster_id") or ""),
+                             str(item.get("source_id") or ""),
+                             float(item.get("ts") or 0.0))
             except Exception as exc:  # noqa: BLE001
                 item["bridge_verdict"] = {
                     "ok": False, "error": str(exc),
@@ -1307,9 +1322,18 @@ class RuntimeProvisionMixin:
             if not callable(fn):
                 return False
             try:
-                res = fn(str(item.get("poster_id") or ""),
-                         str(item.get("source_id") or ""),
-                         str(item.get("emoji") or "❤️"))
+                # The poster's alternate form rides as the 4th
+                # argument (gapfix166), same arity discipline
+                # as the view seam beside it.
+                try:
+                    res = fn(str(item.get("poster_id") or ""),
+                             str(item.get("source_id") or ""),
+                             str(item.get("emoji") or "❤️"),
+                             str(item.get("poster_alt_id") or ""))
+                except TypeError:
+                    res = fn(str(item.get("poster_id") or ""),
+                             str(item.get("source_id") or ""),
+                             str(item.get("emoji") or "❤️"))
             except Exception as exc:  # noqa: BLE001
                 record_failure(
                     "runtime_provision.status_reactor", exc)
@@ -2175,6 +2199,8 @@ class RuntimeProvisionMixin:
                 platform, poster_id=str(
                     getattr(message, "sender_id", "") or counterpart),
                 poster_name=str(getattr(message, "sender", "") or ""),
+                poster_alt_id=str(
+                    meta.get("poster_alt_id") or ""),
                 text=str(getattr(message, "text", "") or ""),
                 media=media,
                 source_id=str(getattr(message, "message_id", "")

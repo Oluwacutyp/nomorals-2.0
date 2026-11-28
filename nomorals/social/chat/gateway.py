@@ -1678,7 +1678,8 @@ class ChatGateway:
             return False
 
     def react(self, platform: str, chat: ChatRef | str, message_id: str,
-              emoji: str) -> SendResult:
+              emoji: str, key: dict[str, Any] | None = None
+              ) -> SendResult:
         """Place a reaction on one message through the origin adapter.
 
         The passthrough the conversational runtime was missing:
@@ -1687,7 +1688,12 @@ class ChatGateway:
         ``typing`` but no reaction verb, so a caller had to hold an
         adapter directly. An adapter without the verb inherits the
         base class's honest refusal, which is what comes back —
-        never a fake success."""
+        never a fake success.  *key* (gapfix166) is the message's
+        full original key when the caller holds it (the WhatsApp
+        acknowledge path passes the inbound message's wa_key) —
+        it rides through only to an adapter whose react accepts
+        it; an older three-arg react gets the plain call, so no
+        platform's react breaks on the new parameter."""
         chat = chat if isinstance(chat, ChatRef) else ChatRef.parse(str(chat))
         adapter = self._adapter_for(chat.platform)
         if adapter is None:
@@ -1697,6 +1703,12 @@ class ChatGateway:
             return SendResult(ok=False, platform=platform,
                               error="dry run")
         try:
+            if key is not None:
+                try:
+                    return adapter.react(chat, str(message_id or ""),
+                                         str(emoji or ""), key=key)
+                except TypeError:
+                    pass
             return adapter.react(chat, str(message_id or ""),
                                  str(emoji or ""))
         except Exception as exc:  # noqa: BLE001 - a receipt never breaks intake

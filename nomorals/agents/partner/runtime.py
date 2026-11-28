@@ -13599,8 +13599,17 @@ class PartnerRuntime(
                     exc)
                 emoji = ""
             if emoji:
+                # The message's full original key (gapfix166),
+                # when the adapter stamped it from the bridge's
+                # inbound event: the reaction then rides the key
+                # WhatsApp assigned instead of the bridge's
+                # memory — a message the bridge has not seen in
+                # this process lifetime still reacts.
+                wa_key = (getattr(message, "meta", None) or {}).get(
+                    "wa_key")
                 result = self.gateway.react(
-                    platform, chat, str(message.message_id), emoji)
+                    platform, chat, str(message.message_id), emoji,
+                    key=wa_key if isinstance(wa_key, dict) else None)
                 if getattr(result, "ok", False):
                     landed = "reaction"
                 else:

@@ -211,6 +211,84 @@ func TestSendStatusReactionErrorPropagates(t *testing.T) {
 	}
 }
 
+// ── gapfix166: the poster's alternate form + supplied keys ──
+
+func TestPosterJIDPrefersFromAlt(t *testing.T) {
+	// Both forms sent: the receipt/react must carry the
+	// alternate form WhatsApp keyed the status under.
+	jid, err := request{"from": lidPoster.String(),
+		"from_alt": pnPoster.String()}.posterJID()
+	if err != nil || jid != pnPoster {
+		t.Fatalf("posterJID = %v, %v, want the alt %v",
+			jid, err, pnPoster)
+	}
+	// No alt: the primary form, exactly as before.
+	jid, err = request{"from": lidPoster.String()}.posterJID()
+	if err != nil || jid != lidPoster {
+		t.Fatalf("posterJID = %v, %v, want %v", jid, err,
+			lidPoster)
+	}
+	// A bad alt refuses instead of falling back to the wrong
+	// form silently.  ("@" parses to an empty JID —
+	// whatsmeow's ParseJID never errors, it returns empty
+	// for garbage — so emptiness is the refusal signal.)
+	if _, err := (request{"from": lidPoster.String(),
+		"from_alt": "@"}).posterJID(); err == nil {
+		t.Fatal("an alt that parses to an empty JID was accepted")
+	}
+}
+
+func TestSuppliedReactKeyShapes(t *testing.T) {
+	self := types.JID{User: "2348000000000",
+		Server: types.DefaultUserServer}
+	group := types.JID{User: "120363025000000000",
+		Server: types.GroupServer}
+	// Group key: the participant is the sender.
+	chat, sender, id, ok := suppliedReactKey(map[string]any{
+		"remoteJid": group.String(), "id": "m1",
+		"participant": pnPoster.String(), "fromMe": false,
+	}, self)
+	if !ok || chat != group || sender != pnPoster || id != "m1" {
+		t.Fatalf("group key = (%v, %v, %v, %v), want (%v, %v, m1, true)",
+			chat, sender, id, ok, group, pnPoster)
+	}
+	// DM key from the other party: no participant, so the
+	// sender is the chat itself.
+	chat, sender, id, ok = suppliedReactKey(map[string]any{
+		"remoteJid": pnPoster.String(), "id": "m2",
+		"fromMe": false,
+	}, self)
+	if !ok || chat != pnPoster || sender != pnPoster || id != "m2" {
+		t.Fatalf("DM key = (%v, %v, %v, %v), want (%v, %v, m2, true)",
+			chat, sender, id, ok, pnPoster, pnPoster)
+	}
+	// The account's own DM message: no participant, fromMe —
+	// the sender is the account, or the reaction key would
+	// claim the other party sent it.
+	chat, sender, id, ok = suppliedReactKey(map[string]any{
+		"remoteJid": pnPoster.String(), "id": "m3",
+		"fromMe": true,
+	}, self)
+	if !ok || sender != self {
+		t.Fatalf("own DM key sender = %v, want self %v",
+			sender, self)
+	}
+	// Malformed keys refuse: no remoteJid, no id, a remoteJid
+	// that parses to empty, a bad participant — never a
+	// half-built reaction.
+	for _, key := range []map[string]any{
+		{"id": "m4"},
+		{"remoteJid": pnPoster.String()},
+		{"remoteJid": "@", "id": "m4"},
+		{"remoteJid": group.String(), "id": "m4",
+			"participant": "@"},
+	} {
+		if _, _, _, ok := suppliedReactKey(key, self); ok {
+			t.Fatalf("malformed key %v was accepted", key)
+		}
+	}
+}
+
 // ── authored keyboards (buttons completion, 2026-11-08) ─────
 
 func TestParseButtonsFlattensRowsInOrder(t *testing.T) {

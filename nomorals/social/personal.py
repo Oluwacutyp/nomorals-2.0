@@ -1113,6 +1113,7 @@ class PersonalSurfaces:
                             media_missing: bool = False,
                             view_once: bool = False,
                             account_id: str = "",
+                            poster_alt_id: str = "",
                             ts: float = 0.0,
                             sweep: bool = False
                             ) -> list[dict[str, Any]]:
@@ -1172,6 +1173,12 @@ class PersonalSurfaces:
                     "account": rec.id, "platform": platform,
                     "counterpart_id": poster_id,
                     "poster_name": poster_name,
+                    # The poster's other addressing form (LID <->
+                    # phone), gapfix166: the ledger carries it so
+                    # the sweep replay can address the receipt/
+                    # reaction with the form WhatsApp keyed the
+                    # status under, exactly like the live pass.
+                    "poster_alt_id": str(poster_alt_id or ""),
                     "media_kind": "",
                     "source_id": str(source_id),
                     "path": "", "bytes": 0,
@@ -1206,6 +1213,11 @@ class PersonalSurfaces:
                 view_item = {
                     "poster_id": poster_id,
                     "poster_name": poster_name,
+                    # The poster's other form rides the item
+                    # (gapfix166): the seam hands it to the
+                    # bridge, which prefers it as the receipt's
+                    # participant when present.
+                    "poster_alt_id": str(poster_alt_id or ""),
                     "source_id": str(source_id), "ts": ts}
                 self._status_attempted.add(vkey)
                 try:
@@ -1292,6 +1304,10 @@ class PersonalSurfaces:
                     "status_viewing_toggle": bool(
                         rec.toggle("status_viewing")),
                     "seam_poster_id": poster_id,
+                    # Both addressing forms, so the live trace
+                    # can arbitrate which one WhatsApp keyed the
+                    # status under (gapfix166).
+                    "seam_poster_alt_id": str(poster_alt_id or ""),
                     "seam_source_id": str(source_id),
                     "seam_ts": ts,
                     "view_attempted": view_item is not None,
@@ -1328,6 +1344,7 @@ class PersonalSurfaces:
                     reacted = bool(self.status_reactor(rec, {
                         "poster_id": poster_id,
                         "poster_name": poster_name,
+                        "poster_alt_id": str(poster_alt_id or ""),
                         "source_id": str(source_id),
                         "emoji": emoji, "ts": ts}))
                 except Exception:  # noqa: BLE001 - the wired seam
@@ -1475,6 +1492,7 @@ class PersonalSurfaces:
                 platform,
                 poster_id=str(row.get("counterpart_id") or ""),
                 poster_name=str(row.get("poster_name") or ""),
+                poster_alt_id=str(row.get("poster_alt_id") or ""),
                 text=str(row.get("text") or ""),
                 # Ledger rows written before the media-cache
                 # discipline carry download-cache paths, and the

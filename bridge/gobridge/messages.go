@@ -293,6 +293,31 @@ func fromOf(v *events.Message) map[string]any {
 	return from
 }
 
+// keyOf builds the message's full original key for the wire
+// (gapfix166) — the key WhatsApp itself assigned the message
+// (remoteJid/id/participant/participantAlt/fromMe), which the
+// adapter stamps on the delivered message so a reaction to it
+// can carry the original key instead of rebuilding it from
+// bridge memory.  The participant is the sender for group
+// messages only — a DM key carries none, exactly like Baileys'
+// WAMessageKey — and participantAlt is the sender's other
+// addressing form (LID <-> phone) when whatsmeow reports one.
+func keyOf(v *events.Message, chat, sender types.JID,
+	kind string) map[string]any {
+	key := map[string]any{
+		"remoteJid": chat.String(),
+		"id":        string(v.Info.ID),
+		"fromMe":    v.Info.IsFromMe,
+	}
+	if kind == "group" {
+		key["participant"] = sender.String()
+		if alt := v.Info.SenderAlt.ToNonAD(); !alt.IsEmpty() {
+			key["participantAlt"] = alt.String()
+		}
+	}
+	return key
+}
+
 func contextInfoOf(m *waE2E.Message) *waE2E.ContextInfo {
 	if m == nil {
 		return nil
@@ -831,6 +856,7 @@ func (b *bridge) onMessage(v *events.Message) {
 			// and downstream identity resolution degrades to a
 			// placeholder (register #29).
 			"from":      map[string]any{"id": sender.String(), "name": ownName},
+			"key":       keyOf(v, chat, sender, kind),
 			"text":      textOf(msg),
 			"reply_to":  ownReplyTo,
 			"view_once": isViewOnce,
@@ -892,6 +918,7 @@ func (b *bridge) onMessage(v *events.Message) {
 		"type": "message", "id": string(v.Info.ID),
 		"chat":      map[string]any{"id": chat.String(), "kind": kind, "title": title},
 		"from":      from,
+		"key":       keyOf(v, chat, sender, kind),
 		"text":      textOf(msg),
 		"media":     media,
 		"reply_to":  replyTo,
@@ -2603,6 +2630,36 @@ type statusViewClient interface {
 	GetPrivacySettings(ctx context.Context) types.PrivacySettings
 }
 
+// posterJID resolves the poster for a status verb from the
+// request (gapfix166): the adapter sends both addressing forms
+// when the bridge reported the poster's other form ("from" +
+// "from_alt"), and the receipt/reaction must be addressed with
+// the alternate form — a status keyed under one form while the
+// receipt carries the other is a silent no-op that still
+// returns ok.  The alt wins when present; without it the
+// primary form is used exactly as before.  A form that parses
+// to an empty JID refuses: whatsmeow's ParseJID never errors,
+// it returns empty for garbage ("@", "user@"), so emptiness
+// is the refusal signal, not the error.
+func (r request) posterJID() (types.JID, error) {
+	var raw string
+	if alt := strings.TrimSpace(r.str("from_alt")); alt != "" {
+		raw = alt
+	} else {
+		raw = r.str("from")
+	}
+	jid, err := parseJID(raw)
+	if err != nil {
+		return types.JID{}, err
+	}
+	if jid.IsEmpty() {
+		return types.JID{}, errEmptyJID
+	}
+	return jid, nil
+}
+
+var errEmptyJID = errors.New("empty jid")
+
 var _ statusViewClient = (*whatsmeow.Client)(nil)
 
 // markStatusViewed fires the read receipt for one status post
@@ -2636,7 +2693,10 @@ func (b *bridge) cmdStatusView(ctx context.Context, cc *clientConn, id string, r
 	// any "id" a caller set), so reading the target from "id"
 	// aimed every view at a random request id.
 	msgID := strings.TrimSpace(req.str("message_id"))
-	sender, err := parseJID(req.str("from"))
+	// The sender is the poster's alternate form when the
+	// adapter sent one (gapfix166): the receipt must carry
+	// the form WhatsApp keyed the status under.
+	sender, err := req.posterJID()
 	if err != nil || msgID == "" {
 		b.reply(cc, id, map[string]any{"ok": false,
 			"error": "status_view needs the status message id and the poster's jid"})
@@ -2816,7 +2876,10 @@ func (b *bridge) cmdStatusReact(ctx context.Context, cc *clientConn, id string, 
 	// Target in "message_id", never "id" (the correlation id —
 	// see cmdStatusView).
 	msgID := strings.TrimSpace(req.str("message_id"))
-	poster, err := parseJID(req.str("from"))
+	// The poster is the alternate form when the adapter sent
+	// one (gapfix166): the reaction key must carry the form
+	// WhatsApp keyed the status under.
+	poster, err := req.posterJID()
 	emoji := strings.TrimSpace(req.str("emoji"))
 	if err != nil || msgID == "" || emoji == "" {
 		b.reply(cc, id, map[string]any{"ok": false,
@@ -2830,6 +2893,44 @@ func (b *bridge) cmdStatusReact(ctx context.Context, cc *clientConn, id string, 
 		return
 	}
 	b.reply(cc, id, map[string]any{"ok": true})
+}
+
+// suppliedReactKey resolves a caller-supplied full message key
+// into the (chat, sender, id) BuildReaction needs (gapfix166).
+// The key is the one WhatsApp assigned the message, passed
+// through by the adapter from the inbound event — it wins over
+// bridge memory, so a message the bridge has not seen in this
+// process lifetime still reacts.  The participant is the sender
+// for group keys; a DM key carries none, so the sender is the
+// chat itself — unless the key is the account's own message
+// (fromMe), where the sender is the account (self).  ok is
+// false when the key is absent or malformed.
+func suppliedReactKey(key map[string]any, self types.JID) (
+	types.JID, types.JID, types.MessageID, bool) {
+	remote, _ := key["remoteJid"].(string)
+	// whatsmeow's ParseJID never errors — it returns empty
+	// for garbage — so emptiness is the refusal signal.
+	chat, err := parseJID(remote)
+	if err != nil || chat.IsEmpty() {
+		return types.JID{}, types.JID{}, "", false
+	}
+	mid, _ := key["id"].(string)
+	mid = strings.TrimSpace(mid)
+	if mid == "" {
+		return types.JID{}, types.JID{}, "", false
+	}
+	var sender types.JID
+	if p, _ := key["participant"].(string); strings.TrimSpace(p) != "" {
+		sender, err = parseJID(p)
+		if err != nil || sender.IsEmpty() {
+			return types.JID{}, types.JID{}, "", false
+		}
+	} else if fromMe, _ := key["fromMe"].(bool); fromMe {
+		sender = self
+	} else {
+		sender = chat
+	}
+	return chat, sender, types.MessageID(mid), true
 }
 
 // cmdReact reacts to one CHAT message as the owner (parity G1):
@@ -2855,6 +2956,31 @@ func (b *bridge) cmdReact(ctx context.Context, cc *clientConn, id string, req re
 		return
 	}
 	emoji := strings.TrimSpace(req.str("emoji"))
+	// A caller-supplied full key wins over bridge memory
+	// (gapfix166): the adapter passes the key the inbound
+	// event carried, so a message this process never saw
+	// still reacts instead of refusing honestly.
+	if keyMap, ok := req["key"].(map[string]any); ok {
+		self := types.EmptyJID
+		if b.cli.Store.ID != nil {
+			self = b.cli.Store.ID.ToNonAD()
+		}
+		keyChat, keySender, keyID, ok := suppliedReactKey(
+			keyMap, self)
+		if !ok {
+			b.reply(cc, id, map[string]any{"ok": false,
+				"error": "react key needs remoteJid and id"})
+			return
+		}
+		msg := b.cli.BuildReaction(keyChat, keySender, keyID,
+			emoji)
+		if _, err := b.cli.SendMessage(ctx, keyChat, msg); err != nil {
+			b.fail(cc, id, err)
+			return
+		}
+		b.reply(cc, id, map[string]any{"ok": true})
+		return
+	}
 	sender := b.cachedSender(mid)
 	if sender.IsEmpty() {
 		b.memMu.Lock()

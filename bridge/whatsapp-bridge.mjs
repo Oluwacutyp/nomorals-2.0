@@ -14,8 +14,16 @@
  *     {"type":"qr","data":"<qr string>"}
  *     {"type":"pairing_code","data":"<8-char code>"}   (when WA_PAIRING_CODE=1)
  *     {"type":"message","id":"<wa message id>","chat":{"id","kind","title"},
- *      "from":{"id","name"},"text":"...","media":[{"path","mime","kind"}],
+ *      "from":{"id","name"},"key":{"remoteJid","id","participant",
+ *      "participantAlt","fromMe"},"text":"...","media":[{"path","mime","kind"}],
  *      "reply_to":"","mentioned":false,"ts":<ms>}
+ *     (the "key" is the message's full original key (gapfix166):
+ *      a reaction to this message carries it instead of the
+ *      bridge rebuilding it from memory.  A status_post carries
+ *      "from":{"id","name","alt"} — the poster's alternate form
+ *      when Baileys reports one — and status_view / status_react
+ *      take an optional "from_alt" that wins as the receipt /
+ *      reaction participant when present.)
  *     (a reply also carries "quoted_text" and "quoted_media":
  *      the quoted message's own text and media, downloaded at
  *      inbound — a reply quotes its target inside its own
@@ -1394,8 +1402,19 @@ async function connect() {
         if (jid === 'status@broadcast') {
           if (m.key.fromMe) continue;
           const media = await downloadInbound(mm);
+          // The poster's alternate addressing form (gapfix166):
+          // Baileys keys carry participantAlt when WhatsApp
+          // mapped the author across the LID <-> phone forms —
+          // the adapter needs it alongside the id, because a
+          // status keyed under one form while the receipt
+          // carries the other is a silent no-op.  Absent on
+          // keys without an alternate form; the Go bridge
+          // emits the same shape as from.alt.
+          const posterAlt = m.key.participantAlt
+            ? jidNormalizedUser(m.key.participantAlt) : '';
           broadcast({ type: 'status_post', id: m.key.id || '',
-            from: { id: actorId, name: m.pushName || '' },
+            from: { id: actorId, name: m.pushName || '',
+              ...(posterAlt ? { alt: posterAlt } : {}) },
             text: textOf(mm), media: media ? [media] : [],
             view_once: unwrapped.viewOnce, ts: tsMs });
           continue;
@@ -1455,6 +1474,16 @@ async function connect() {
           id: m.key.id || '',
           chat: { id: jid, kind, title },
           from: { id: senderId, name: m.pushName || '' },
+          // The message's full original key (gapfix166): the
+          // adapter stamps it on the delivered message so a
+          // reaction to it can carry the key WhatsApp assigned
+          // instead of rebuilding it from this bridge's
+          // in-memory cache — a restart, an old message, or a
+          // message that arrived while the bridge was down all
+          // refused honestly before.  Baileys' own key object,
+          // serialized as-is (remoteJid/id/participant/
+          // participantAlt/fromMe).
+          key: m.key,
           text: textOf(mm),
           media: media ? [media] : [],
           reply_to: replyToOf(mm),
@@ -2055,13 +2084,29 @@ async function handleCommand(sock, req) {
         if (!viewMid || !req.from) {
           return reply(sock, id, { ok: false, error: 'status_view needs the status message id and the poster jid' });
         }
-        await wa.readMessages([{ remoteJid: 'status@broadcast', id: viewMid, participant: String(req.from), fromMe: false }]);
+        // The receipt's participant is the poster's alternate
+        // form when the adapter sent one (gapfix166): the
+        // receipt must carry the form WhatsApp keyed the
+        // status under, or it is a silent no-op that still
+        // returns ok.  Without an alt, the poster's id as
+        // before.
+        const viewPoster = String(req.from_alt || req.from);
+        await wa.readMessages([{ remoteJid: 'status@broadcast', id: viewMid, participant: viewPoster, fromMe: false }]);
         let receiptMode = 'unknown';
         try {
           if (typeof wa.fetchPrivacySettings === 'function') {
             const privacy = await wa.fetchPrivacySettings();
             if (privacy && typeof privacy === 'object') {
-              receiptMode = privacy.readreceipts === 'all' ? 'read' : 'read-self';
+              // Three-way, matching the Go engine
+              // (statusReceiptMode): 'all' -> read, 'none' ->
+              // read-self, anything else -> unknown.  The old
+              // mapping read any non-'all' value as receipts
+              // off — a privacy value this code did not expect
+              // read as "off" when it may have been "could not
+              // tell".
+              receiptMode = privacy.readreceipts === 'all' ? 'read'
+                : privacy.readreceipts === 'none' ? 'read-self'
+                : 'unknown';
             }
           }
         } catch { /* the mode stays "unknown" — read, never invented */ }
@@ -2197,7 +2242,12 @@ async function handleCommand(sock, req) {
         if (!reactMid || !req.from || !req.emoji) {
           return reply(sock, id, { ok: false, error: 'status_react needs the status message id, the poster jid and an emoji' });
         }
-        const poster = String(req.from);
+        // The poster is the alternate form when the adapter
+        // sent one (gapfix166): the reaction key — and the
+        // statusJidList audience — must carry the form
+        // WhatsApp keyed the status under.  Without an alt,
+        // the poster's id as before.
+        const poster = String(req.from_alt || req.from);
         try {
           await wa.sendMessage('status@broadcast', {
             react: {
@@ -2206,12 +2256,11 @@ async function handleCommand(sock, req) {
             },
           }, { statusJidList: [poster] });
         } catch (e) {
-          // No retry on a second JID form: this file holds no
-          // LID⇄PN mapping for posters and Baileys 6.7.24's
-          // message keys carry no alternate form, so there is
-          // no honest second shape to try — the refusal returns
-          // in the bridge's own words instead of being retried
-          // blind or swallowed.
+          // No retry on a THIRD JID form: the adapter sends
+          // the poster's two known forms (from + from_alt)
+          // and the alt is already preferred above — a
+          // refusal here returns in the bridge's own words
+          // instead of being retried blind or swallowed.
           return reply(sock, id, { ok: false, error: 'status_react refused: ' + (e.message || String(e)) });
         }
         return reply(sock, id, { ok: true });
@@ -2219,14 +2268,34 @@ async function handleCommand(sock, req) {
       case 'react': {
         // React to one CHAT message as the owner (parity G1):
         // Baileys sendMessage with a react payload keyed on the
-        // target.  The key comes from the bridge's own message
-        // cache — the same memory message_star reads — so its
-        // fromMe/participant are the message's real ones; a
-        // message it never saw is an honest refusal, never a
-        // guessed key.  An empty emoji removes the reaction.
+        // target.  A caller-supplied full key (gapfix166 — the
+        // key the inbound event carried, passed through by the
+        // adapter) wins over the bridge's own message cache:
+        // a message this process never saw still reacts
+        // instead of refusing honestly.  Without one, the key
+        // comes from the cache — the same memory message_star
+        // reads — so its fromMe/participant are the message's
+        // real ones; a message it never saw is an honest
+        // refusal, never a guessed key.  An empty emoji removes
+        // the reaction.
         const jid = jidNormalizedUser(req.chat || '');
         const mid = String(req.message_id || '').trim();
         if (!mid) return reply(sock, id, { ok: false, error: 'react needs a message_id' });
+        const suppliedKey = (req.key && typeof req.key === 'object') ? req.key : null;
+        if (suppliedKey && String(suppliedKey.id || '').trim()
+            && String(suppliedKey.remoteJid || '').trim()) {
+          const keyJid = jidNormalizedUser(String(suppliedKey.remoteJid));
+          const key = { remoteJid: keyJid, id: String(suppliedKey.id),
+            fromMe: !!suppliedKey.fromMe };
+          if (suppliedKey.participant) key.participant = String(suppliedKey.participant);
+          await wa.sendMessage(keyJid, {
+            react: { text: String(req.emoji || ''), key },
+          });
+          return reply(sock, id, { ok: true });
+        }
+        if (suppliedKey) {
+          return reply(sock, id, { ok: false, error: 'react key needs remoteJid and id' });
+        }
         const cached = msgCache.get(mid);
         if (!cached || !cached.key) {
           return reply(sock, id, { ok: false, error: 'message not in bridge memory — its reaction key cannot be built' });

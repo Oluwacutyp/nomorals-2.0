@@ -412,6 +412,34 @@ def _split_text(text: str, *, limit: int | None = None) -> list[str]:
     return [c for c in chunks if c] or [text]
 
 
+def _wa_message_key(obj: dict[str, Any]
+                    ) -> dict[str, Any] | None:
+    """The message's full original key from a bridge event
+    (gapfix166) — the key WhatsApp itself assigned the message
+    (remoteJid/id/participant/participantAlt/fromMe), which the
+    bridges now emit on every message event.  Normalized to
+    those fields only, strings/bool coerced; None when the
+    bridge sent no usable key (an older bridge, or a feed that
+    carries no key) — the caller then falls back to bridge
+    memory exactly as before, never a half-shaped key."""
+    raw = obj.get("key")
+    if not isinstance(raw, dict):
+        return None
+    remote_jid = str(raw.get("remoteJid") or "").strip()
+    mid = str(raw.get("id") or "").strip()
+    if not remote_jid or not mid:
+        return None
+    key: dict[str, Any] = {"remoteJid": remote_jid, "id": mid,
+                           "fromMe": bool(raw.get("fromMe"))}
+    participant = str(raw.get("participant") or "").strip()
+    if participant:
+        key["participant"] = participant
+    participant_alt = str(raw.get("participantAlt") or "").strip()
+    if participant_alt:
+        key["participantAlt"] = participant_alt
+    return key
+
+
 def _wa_envelope(obj: dict[str, Any], text: str) -> dict[str, Any]:
     """The defense envelope (brief §1.3) from a bridge event —
     PASS-THROUGH ONLY: the bridge is an external process
@@ -1993,6 +2021,15 @@ class WhatsAppAdapter(ChatAdapter):
             poster_id = str(frm.get("id") or "")
             if not poster_id:
                 return
+            # The poster's OTHER addressing form (LID <-> phone
+            # JID), reported by the Go bridge as from.alt and by
+            # Baileys keys as participantAlt: the receipt/react
+            # verbs must be addressed with the form WhatsApp
+            # keyed the status under, and the adapter used to
+            # drop it here — the alt never reached the seam
+            # (status-view fix, gapfix166).  sender_id stays
+            # from.id verbatim; the alt rides alongside in meta.
+            poster_alt_id = str(frm.get("alt") or "").strip()
             ts = obj.get("ts") or 0
             try:
                 ts = float(ts) / 1000.0
@@ -2022,6 +2059,8 @@ class WhatsAppAdapter(ChatAdapter):
                 ts=ts,
             )
             msg.meta["service"] = "status_post"
+            if poster_alt_id:
+                msg.meta["poster_alt_id"] = poster_alt_id
             if obj.get("view_once"):
                 msg.meta["view_once"] = True
             # Media the bridge reported WITHOUT a local path
@@ -2157,6 +2196,17 @@ class WhatsAppAdapter(ChatAdapter):
                     ts=ts,
                 )
             wa_msg.meta["envelope"] = _wa_envelope(obj, wa_msg.text)
+            # The message's full original key (gapfix166): the
+            # bridges emit it on the event now, so a reaction to
+            # this message can carry the key WhatsApp assigned
+            # instead of rebuilding it from bridge memory — a
+            # restart, an old message, or a message that arrived
+            # while the bridge was down all refused honestly
+            # before.  Absent on older bridges: the react path
+            # falls back to memory exactly as before.
+            _wa_key = _wa_message_key(obj)
+            if _wa_key is not None:
+                wa_msg.meta["wa_key"] = _wa_key
             # Media the bridge reported WITHOUT a local path (its
             # download failed) was filtered out of wa_msg.media
             # above — silently, until 2026-11-06: the brain then
@@ -2948,7 +2998,8 @@ class WhatsAppAdapter(ChatAdapter):
             timeout=10)
 
     def view_status(self, poster_id: str, message_id: str,
-                    ts: float = 0.0) -> dict[str, Any]:
+                    ts: float = 0.0, poster_alt_id: str = ""
+                    ) -> dict[str, Any]:
         """Mark one contact status as viewed by this account (§15
         status viewing): the bridge's ``status_view`` verb sends
         the read receipt for that status post (whatsmeow MarkRead
@@ -2963,16 +3014,26 @@ class WhatsAppAdapter(ChatAdapter):
         read it reports "unknown").  *ts* (the post's timestamp)
         is accepted for call-shape compatibility and deliberately
         NOT sent: the bridges stamp the receipt at read time,
-        like the phone (status mining, 2026-11-07)."""
+        like the phone (status mining, 2026-11-07).
+        *poster_alt_id* (gapfix166) is the poster's OTHER
+        addressing form (LID <-> phone) when the bridge reported
+        one: the bridges prefer it as the receipt's participant,
+        because a status keyed under one form while the receipt
+        carries the other is a silent no-op that still returns
+        ok.  Absent, the payload is exactly the old shape."""
         poster_id = str(poster_id or "").strip()
         message_id = str(message_id or "").strip()
+        poster_alt_id = str(poster_alt_id or "").strip()
         if not poster_id or not message_id:
             return {"ok": False,
                     "error": "status_view needs the poster's jid "
                              "and the status message id"}
-        return self._admin_cmd("status_view", {
-            "message_id": message_id, "from": poster_id},
-            timeout=10)
+        payload: dict[str, Any] = {
+            "message_id": message_id, "from": poster_id}
+        if poster_alt_id:
+            payload["from_alt"] = poster_alt_id
+        return self._admin_cmd("status_view", payload,
+                               timeout=10)
 
     def send_status(self, text: str = "", *,
                     media_path: str = "",
@@ -3227,20 +3288,36 @@ class WhatsAppAdapter(ChatAdapter):
             "star": bool(star)}, timeout=15)
 
     def react_message(self, chat: ChatRef, message_id: str,
-                      emoji: str = "") -> dict[str, Any]:
+                      emoji: str = "",
+                      key: dict[str, Any] | None = None
+                      ) -> dict[str, Any]:
         """React to one CHAT message as the owner (bridges'
         ``react``; parity G1 — the message-level sibling of
-        react_status).  The reaction key is built from bridge
-        memory on both engines — a message neither bridge has
-        seen is an honest refusal.  An empty emoji REMOVES the
+        react_status).  *key* (gapfix166) is the message's full
+        original key as the bridge reported it on the inbound
+        event (remoteJid/id/participant/fromMe) — the bridges
+        prefer it over their own memory, so a message the
+        bridge has not seen in this process lifetime still
+        reacts instead of refusing honestly.  A malformed key
+        (no remoteJid/id) refuses here, never half-shaped on
+        the wire; absent, the bridges rebuild the key from
+        memory exactly as before.  An empty emoji REMOVES the
         owner's reaction (the shape the phone itself sends)."""
         message_id = str(message_id or "").strip()
         if not message_id:
             return {"ok": False,
                     "error": "react needs a message_id"}
-        return self._admin_cmd("react", {
+        payload: dict[str, Any] = {
             "chat": self._jid(chat), "message_id": message_id,
-            "emoji": str(emoji or "")}, timeout=15)
+            "emoji": str(emoji or "")}
+        if key is not None:
+            shaped = _wa_message_key({"key": key})
+            if shaped is None:
+                return {"ok": False,
+                        "error": "react key needs remoteJid and "
+                                 "id"}
+            payload["key"] = shaped
+        return self._admin_cmd("react", payload, timeout=15)
 
     def forward_message(self, chat: ChatRef, message_id: str,
                         dest: ChatRef) -> dict[str, Any]:
@@ -3260,13 +3337,19 @@ class WhatsAppAdapter(ChatAdapter):
             "dest": self._jid(dest)}, timeout=30)
 
     def react(self, chat: ChatRef, message_id: str,
-              emoji: str) -> SendResult:
+              emoji: str, key: dict[str, Any] | None = None
+              ) -> SendResult:
         """The §22 base reaction verb, carried on WhatsApp by
         the bridges' ``react`` (parity G1): before this, the
         adapter inherited the base class's honest "reactions
         not supported" — the verb simply didn't exist on either
-        engine.  An empty emoji removes the reaction."""
-        verdict = self.react_message(chat, message_id, emoji)
+        engine.  An empty emoji removes the reaction.  *key*
+        (gapfix166) is the message's full original key when
+        the caller holds it (the acknowledge path passes the
+        inbound message's wa_key) — the bridges prefer it over
+        their own memory."""
+        verdict = self.react_message(chat, message_id, emoji,
+                                     key=key)
         if isinstance(verdict, dict) and verdict.get("ok"):
             return SendResult(ok=True, platform=self.name,
                               message_id=str(message_id or ""))
@@ -3277,20 +3360,32 @@ class WhatsAppAdapter(ChatAdapter):
                           error=error or "the bridge refused")
 
     def react_status(self, poster_id: str, message_id: str,
-                     emoji: str) -> dict[str, Any]:
+                     emoji: str, poster_alt_id: str = ""
+                     ) -> dict[str, Any]:
         """React to one contact status post as the owner (the
         status_react toggle's verb): the bridges' ``status_react``
-        — a reaction keyed on the post at status@broadcast."""
+        — a reaction keyed on the post at status@broadcast.
+        *poster_alt_id* (gapfix166) is the poster's OTHER
+        addressing form when the bridge reported one: the
+        bridges prefer it as the reaction's participant (and, on
+        the Baileys rung, its audience), because a reaction
+        keyed under the wrong form is dropped silently.  Absent,
+        the payload is exactly the old shape."""
         poster_id = str(poster_id or "").strip()
         message_id = str(message_id or "").strip()
         emoji = str(emoji or "").strip()
+        poster_alt_id = str(poster_alt_id or "").strip()
         if not poster_id or not message_id or not emoji:
             return {"ok": False,
                     "error": "status_react needs the poster's jid, "
                              "the status message id and an emoji"}
-        return self._admin_cmd("status_react", {
+        payload: dict[str, Any] = {
             "message_id": message_id, "from": poster_id,
-            "emoji": emoji}, timeout=15)
+            "emoji": emoji}
+        if poster_alt_id:
+            payload["from_alt"] = poster_alt_id
+        return self._admin_cmd("status_react", payload,
+                               timeout=15)
 
     # -- own identity (§/parity G3, census bundle #5) --------
     # The account could be READ (a push name arrives on every
