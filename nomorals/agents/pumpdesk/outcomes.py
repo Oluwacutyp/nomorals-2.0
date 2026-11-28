@@ -17,12 +17,16 @@ import urllib.error
 import urllib.request
 from typing import Callable, Optional
 
+from .sources import DEX_API
 from .wsclient import TransportDeniedError
 
 __all__ = ["DEX_API", "token_snapshot", "token_attention",
            "default_http_get"]
 
-DEX_API = "https://api.dexscreener.com"
+#: DexScreener's free surface — canonical endpoint imported
+#: from sources.py, the ONE source of truth (gapfix160).
+#: Verified live 200 from this box 2026-11-25 (profiles + token
+#: snapshot for a real pump mint).
 
 
 def default_http_get(url: str, headers: dict,

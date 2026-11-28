@@ -100,7 +100,8 @@ class PumpDesk:
                 chain.SolanaRPC(
                     route["endpoint"],
                     on_outcome=_outcome_for(route["domain"]),
-                    budget_s=desk_source_budget_s())
+                    budget_s=desk_source_budget_s(),
+                    indexed=route.get("indexed", True))
                 for route in rpc_routes(reg)
             ]
             self._rpc = chain.RoutedRPC(clients)
@@ -496,11 +497,12 @@ class PumpDesk:
         #    exists); a pair-less mint is ledgered only, no
         #    dossier spend.  The pump.fun frontend API is the
         #    FALLBACK, attempted only when DexScreener contributed
-        #    nothing new this cycle — it is Cloudflare-blocked
-        #    from datacenter IPs (403), so polling it every cycle
-        #    burns the budget on a leg that cannot answer.  Each
-        #    leg reports its own outcome; a dead leg never kills
-        #    the cycle.
+        #    nothing new this cycle — it answers again from this
+        #    box (200, 3/3 pulls 2026-11-25; the 2026-11-14
+        #    Cloudflare block no longer holds), and it stays the
+        #    fallback on cost and coverage, not because it cannot
+        #    answer.  Each leg reports its own outcome; a dead
+        #    leg never kills the cycle.
         dex_new = 0
         dex_promoted = 0
         try:

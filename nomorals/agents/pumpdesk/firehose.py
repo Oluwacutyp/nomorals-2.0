@@ -33,9 +33,11 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlparse
 from typing import Any, Callable, Optional
 
 from . import chain
+from .sources import DEX_PROFILES, FRONTEND_API, PUMPPORTAL_WS, SOLANA_PUBLIC_RPC
 from .wsclient import (
     TRANSPORT_DENIED_CLASS, TransportDeniedError, WebSocketClient,
     WSClosed)
@@ -49,15 +51,19 @@ __all__ = [
     "DEX_DISCOVERY_MAX_NEW",
 ]
 
-PUMPPORTAL_WS = "wss://pumpportal.fun/api/data"
-FRONTEND_API = "https://frontend-api-v3.pump.fun"
-#: DexScreener's newest token profiles — the desk's working
-#: discovery surface.  Verified live from this box (2026-11-14):
-#: 200, 30 rows in ~1.3s.  The pump.fun frontend API the desk
-#: used to poll is Cloudflare-blocked from datacenter IPs (403,
-#: empty body), so DexScreener is the primary discovery leg and
-#: the frontend poll is the fallback, not the other way round.
-DEX_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
+#: Canonical desk endpoints — imported from sources.py, the ONE
+#: source of truth (gapfix160); these names stay importable from
+#: this module for existing callers.  DexScreener's newest token
+#: profiles are the desk's working discovery surface.  Verified
+#: live from this box (2026-11-14, re-confirmed 2026-11-25):
+#: 200, 30 rows in ~1.3s.  The pump.fun frontend API answers
+#: again from this box (200, 3/3 pulls 2026-11-25 — the
+#: 2026-11-14 Cloudflare block no longer holds), so DexScreener
+#: stays primary on cost and coverage (newest profiles, lighter
+#: poll), with the frontend poll as the fallback when DexScreener
+#: contributes nothing new — not because the frontend cannot
+#: answer.
+
 #: New mints the discovery leg spends pair lookups on per cycle
 #: (a pair read per mint; the PumpVet monitor's cap).
 DEX_DISCOVERY_MAX_NEW = 10
@@ -383,7 +389,9 @@ class RpcLogBackend:
     """
 
     name = "rpc-logs"
-    domain = "api.mainnet-beta.solana.com"
+    #: Registry domain for the public-RPC floor — derived from the
+    #: canonical endpoint, never a second literal.
+    domain = urlparse(SOLANA_PUBLIC_RPC).hostname or ""
 
     def __init__(self, rpc_http_endpoint: str,
                  client_factory: Callable[[str], Any] = None,
@@ -526,8 +534,7 @@ class Firehose:
     SLICE_GRACE_S = 5.0
 
     def __init__(self, emit: Emit, registry: Any = None,
-                 rpc_http_endpoint: str =
-                 "https://api.mainnet-beta.solana.com",
+                 rpc_http_endpoint: str = SOLANA_PUBLIC_RPC,
                  client_factory: Callable[[str], Any] = None,
                  jitter: Callable[[], float] = None):
         self.emit = emit

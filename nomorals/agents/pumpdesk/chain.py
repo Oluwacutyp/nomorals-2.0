@@ -42,6 +42,7 @@ from typing import Any, Callable, Optional
 
 from .wsclient import TRANSPORT_DENIED_CLASS, TransportDeniedError
 from .failures import record_failure
+from .sources import INDEXED_RPC_METHODS, SOLANA_PUBLIC_RPC
 
 __all__ = [
     "PUMP_PROGRAM", "PUMPSWAP_PROGRAM", "SOL_MINT",
@@ -478,13 +479,22 @@ class SolanaRPC:
     of the cycle instead of stalling the desk (the 2026-10-23
     failure: ~16.5s stalls repeated across routes and dossiers
     until the whole watch job timed out).  The desk resets the
-    budget at the top of every cycle (``reset_budget``)."""
+    budget at the top of every cycle (``reset_budget``).
 
-    def __init__(self, endpoint: str = "https://api.mainnet-beta.solana.com",
+    ``indexed`` marks whether this route serves the indexed
+    methods (:data:`sources.INDEXED_RPC_METHODS`): False for a
+    free tier that refuses them by policy (PublicNode, verified
+    live 2026-11-25 — HTTP 403 "Indexed requests require a
+    personal token").  RoutedRPC never spends an indexed call
+    on such a route; the refusal is a route capability, not a
+    per-call failure to retry."""
+
+    def __init__(self, endpoint: str = SOLANA_PUBLIC_RPC,
                  timeout: float = 20.0,
                  on_outcome: Optional[Callable[..., None]] = None,
                  user_agent: str = "",
-                 budget_s: float = 0.0):
+                 budget_s: float = 0.0,
+                 indexed: bool = True):
         self.endpoint = endpoint
         self.timeout = timeout
         self.on_outcome = on_outcome
@@ -495,6 +505,7 @@ class SolanaRPC:
         self.budget_s = max(0.0, float(budget_s or 0.0))
         self._budget_spent = 0.0
         self._id = 0
+        self.indexed = bool(indexed)
 
     # ── per-cycle source budget ───────────────────────────────────
 
@@ -725,8 +736,24 @@ class RoutedRPC:
                 reset()
 
     def _route(self, method: str, *args: Any, **kwargs: Any) -> Any:
+        # An indexed method never spends a call on a route that
+        # cannot serve it (sources.INDEXED_RPC_METHODS): the
+        # refusal is a known route capability, and trying it
+        # anyway burns the cycle budget on a guaranteed 403.
+        # Route doubles without an ``indexed`` attribute count as
+        # indexed (the pre-gapfix160 shape) — the partition only
+        # ever narrows a route the registry marked.
+        eligible = [c for c in self.clients
+                    if method not in INDEXED_RPC_METHODS
+                    or getattr(c, "indexed", True)]
+        if not eligible:
+            raise RPCError(
+                f"{method}: no indexed-capable route — every "
+                f"configured route refuses indexed reads "
+                f"(PublicNode's free tier requires a personal "
+                f"token for them)")
         last_exc: Optional[Exception] = None
-        for client in self.clients:
+        for client in eligible:
             try:
                 out = getattr(client, method)(*args, **kwargs)
             except Exception as exc:  # noqa: BLE001 - failover is the job

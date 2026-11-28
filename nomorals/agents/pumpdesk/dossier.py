@@ -22,6 +22,7 @@ from typing import Any, Optional
 
 from . import chain
 from .failures import record_failure
+from .sources import RUGCHECK_API
 
 __all__ = [
     "SERIAL_MIN_LAUNCHES", "SERIAL_RUG_RATIO",
@@ -32,13 +33,14 @@ __all__ = [
 ]
 
 #: RugCheck's free report API — the dossier's de-rug fallback.
-#: Verified live from this box (2026-11-14): 200 in ~1.3s, and
-#: the report carries exactly the evidence the dossier reads
-#: from the throttled RPC — mint/freeze authority, top holders
-#: with insider flags, creator + creator balance, risks, and the
-#: rugged flag.  The chain is the spine when it answers;
-#: RugCheck only fills what the RPC could not.
-RUGCHECK_API = "https://api.rugcheck.xyz"
+#: Canonical endpoint: imported from sources.py, the ONE source
+#: of truth (gapfix160).  Verified live from this box (2026-11-14,
+#: re-confirmed 2026-11-25): 200 in ~1.3s, and the report carries
+#: exactly the evidence the dossier reads from the throttled RPC
+#: — mint/freeze authority, top holders with insider flags,
+#: creator + creator balance, risks, and the rugged flag.  The
+#: chain is the spine when it answers; RugCheck only fills what
+#: the RPC could not.
 
 #: Serial-rugger headline rule (design §8.1, G-BOT blueprint).
 SERIAL_MIN_LAUNCHES = 3

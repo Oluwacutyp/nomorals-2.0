@@ -32,7 +32,33 @@ __all__ = [
     "rpc_routes", "PUBLIC_RPC_ENDPOINTS",
     "desk_user_agent", "desk_source_budget_s", "pumpportal_api_key",
     "DEFAULT_USER_AGENT", "DEFAULT_SOURCE_BUDGET_S",
+    "FRONTEND_API", "DEX_PROFILES", "DEX_API", "RUGCHECK_API",
+    "PUMPPORTAL_WS", "SOLANA_PUBLIC_RPC", "PUBLICNODE_RPC",
+    "INDEXED_RPC_METHODS",
 ]
+
+# ── canonical desk endpoints (ONE source of truth) ───────────────────
+#
+# Every URL the desk fetches lives HERE.  firehose.py, dossier.py,
+# outcomes.py and chain.py import these names — no second literal
+# of any of them anywhere in the desk (gapfix160).  Each was
+# verified live from this box 2026-11-25 (probe tables in
+# ~/workspace/pumpdesksources-verify/SURVEY.md); a URL that stops
+# answering is retired here, never patched in one caller.
+
+#: pump.fun's unofficial frontend REST (the site itself reads it).
+FRONTEND_API = "https://frontend-api-v3.pump.fun"
+#: DexScreener's newest token profiles (discovery) + token surface.
+DEX_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
+DEX_API = "https://api.dexscreener.com"
+#: RugCheck's free report API.
+RUGCHECK_API = "https://api.rugcheck.xyz"
+#: PumpPortal's data socket (free new-token + migration subs).
+PUMPPORTAL_WS = "wss://pumpportal.fun/api/data"
+#: The always-free Solana JSON-RPC floor.
+SOLANA_PUBLIC_RPC = "https://api.mainnet-beta.solana.com"
+#: PublicNode's free Solana RPC (basic reads only — see below).
+PUBLICNODE_RPC = "https://solana-rpc.publicnode.com"
 
 #: (nation, domain, name, auth_needed, notes)
 MEMCOIN_SEEDS: tuple = (
@@ -49,21 +75,31 @@ MEMCOIN_SEEDS: tuple = (
      False,
      "PublicNode's free public endpoint — a second keyless RPC "
      "route so holder reads are not hostage to one endpoint's "
-     "per-method throttles. Health-graded like every source; "
-     "stood down when it stops answering."),
+     "per-method throttles. BASIC READS ONLY (verified live "
+     "2026-11-25): its free tier refuses indexed methods with "
+     "HTTP 403 'Indexed requests require a personal token' "
+     "(getSlot, getTokenLargestAccounts, getTokenSupply), and its "
+     "basic reads are intermittently Cloudflare-challenged from "
+     "datacenter egress — so it is marked indexed=False in "
+     "PUBLIC_RPC_ENDPOINTS and RoutedRPC never spends an indexed "
+     "call on it. Health-graded like every source; stood down "
+     "when it stops answering."),
     ("GLOBAL", "solana.drpc.org", "Solana RPC (dRPC public)",
      False,
      "dRPC's free public endpoint — RETIRED as a route 2026-11-14: "
      "the free plan does not serve Solana at all (HTTP 400 code 35 "
      "\"chain is not available on free plan\" on getSlot and on "
-     "getAccountInfo, verified live). Kept as a registry record "
-     "only; it is NOT in PUBLIC_RPC_ENDPOINTS and no route is "
-     "built for it."),
+     "getAccountInfo, verified live; re-confirmed 2026-11-25). "
+     "Kept as a registry record only; it is NOT in "
+     "PUBLIC_RPC_ENDPOINTS and no route is built for it."),
     ("GLOBAL", "frontend-api-v3.pump.fun", "pump.fun frontend API",
      False,
      "Unofficial REST the pump.fun site itself reads: coin lists "
-     "for backfill/candidate discovery. Schema drifts; the health "
-     "loop is the containment."),
+     "for backfill/candidate discovery. Verified live 200 from "
+     "this box 2026-11-25 (3/3 pulls + retries, real coin rows) — "
+     "the 2026-11-14 Cloudflare block from datacenter IPs no "
+     "longer holds. Schema drifts; the health loop is the "
+     "containment."),
     ("GLOBAL", "api.dexscreener.com", "DexScreener API", False,
      "Free pair/token surface — the outcome grader for calls "
      "(post-graduation prices). No key, generous rate limits."),
@@ -224,48 +260,72 @@ def pumpportal_api_key() -> str:
 
 # ── RPC endpoint selection ────────────────────────────────────────────
 
+#: Desk RPC method names that need an INDEXED route: the methods
+#: a free-tier endpoint may refuse by policy.  Verified live
+#: 2026-11-25 — PublicNode's free tier answers these with HTTP
+#: 403 ("Indexed requests require a personal token" for
+#: getTokenLargestAccounts / getTokenSupply; empty 403 for
+#: getSlot), while getAccountInfo / getBalance / getHealth /
+#: getSignaturesForAddress / getTransaction answer 200 on the
+#: same endpoint.  RoutedRPC never spends one of these calls on
+#: a route marked indexed=False; the refusal is a route
+#: capability, not a per-call failure to retry.
+INDEXED_RPC_METHODS: frozenset = frozenset({
+    "get_token_largest", "get_token_supply", "get_slot",
+})
+
+
 #: Keyless public RPC routes, in seed preference order:
-#: (endpoint, registry domain, human source label).  More than one
-#: route is the point — the public floor throttles PER METHOD
+#: (endpoint, registry domain, human source label, indexed).
+#: ``indexed`` is False when the route's free tier refuses the
+#: INDEXED_RPC_METHODS (PublicNode, verified live 2026-11-25) —
+#: such a route still serves basic reads, it is simply never
+#: asked an indexed question.  More than one route is the point
+#: — the public floor throttles PER METHOD
 #: (getTokenLargestAccounts 429s while account reads pass), so a
 #: single endpoint makes whole dossier fields hostages.  Routes
 #: join the memecoin registry kind above and are health-graded
 #: from real outcomes; rpc_routes() orders by that health.
-#: dRPC is NOT a route (2026-11-14, verified live): its free plan
-#: does not serve Solana at all (HTTP 400 code 35 on getSlot and
-#: on getAccountInfo) — a route that can never answer is not a
-#: route, and every failover walk that tried it paid a call and a
-#: failure for nothing.  Its registry seed stays as the record.
+#: dRPC is NOT a route (2026-11-14, verified live; re-confirmed
+#: 2026-11-25): its free plan does not serve Solana at all
+#: (HTTP 400 code 35 on getSlot and on getAccountInfo) — a route
+#: that can never answer is not a route, and every failover walk
+#: that tried it paid a call and a failure for nothing.  Its
+#: registry seed stays as the record.
 PUBLIC_RPC_ENDPOINTS: tuple = (
-    ("https://api.mainnet-beta.solana.com",
-     "api.mainnet-beta.solana.com", "solana public RPC"),
-    ("https://solana-rpc.publicnode.com",
-     "solana-rpc.publicnode.com", "PublicNode public RPC"),
+    (SOLANA_PUBLIC_RPC,
+     "api.mainnet-beta.solana.com", "solana public RPC", True),
+    (PUBLICNODE_RPC,
+     "solana-rpc.publicnode.com", "PublicNode public RPC", False),
 )
 
 
-def rpc_routes(registry: Any = None) -> list[dict[str, str]]:
-    """The desk's ordered RPC routes: [{endpoint, domain, source}].
+def rpc_routes(registry: Any = None) -> list[dict[str, Any]]:
+    """The desk's ordered RPC routes: [{endpoint, domain, source,
+    indexed}].
 
     A provisioned Helius key (``HELIUS_API_KEY`` in env — the
     provisioning bridge writes it when the owner provisions
     ``/pump provision helius``) is ALWAYS first: it is the tier
-    the owner paid for, without public throttles.  The keyless
-    public routes follow, ordered by the ONE registry's health
-    when a registry is at hand — active sources before stood-
-    down/disabled/dead ones, seed order preserved within a tier
-    (a stable sort), so a route that keeps failing sinks without
-    bespoke failover code.  Read per call: a freshly provisioned
-    key and fresh health both take effect with no restart."""
-    routes: list[dict[str, str]] = []
+    the owner paid for, without public throttles, and it serves
+    indexed methods.  The keyless public routes follow, ordered
+    by the ONE registry's health when a registry is at hand —
+    active sources before stood-down/disabled/dead ones, seed
+    order preserved within a tier (a stable sort), so a route
+    that keeps failing sinks without bespoke failover code.
+    Read per call: a freshly provisioned key and fresh health
+    both take effect with no restart."""
+    routes: list[dict[str, Any]] = []
     key = os.environ.get("HELIUS_API_KEY", "").strip()
     if key:
         routes.append({
             "endpoint": f"https://mainnet.helius-rpc.com/?api-key={key}",
             "domain": "mainnet.helius-rpc.com",
-            "source": "helius (provisioned)"})
-    public = [{"endpoint": ep, "domain": dom, "source": label}
-              for ep, dom, label in PUBLIC_RPC_ENDPOINTS]
+            "source": "helius (provisioned)",
+            "indexed": True})
+    public = [{"endpoint": ep, "domain": dom, "source": label,
+               "indexed": indexed}
+              for ep, dom, label, indexed in PUBLIC_RPC_ENDPOINTS]
     if registry is not None:
         def _tier(route: dict[str, str]) -> int:
             try:
