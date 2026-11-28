@@ -105,6 +105,50 @@ def norm_text(s: str) -> str:
 # the discovery algorithm.
 
 
+# Login-wall copy: a modal that asks the visitor to sign
+# in before the page shows its content.  Strong phrases
+# only — a bare "log in" link in a header is not a wall,
+# and a page that merely mentions logging in is not one
+# either.  The phrases are matched against the text of
+# the blocking layer itself (see _ClickScanner.layer_texts),
+# never against the whole page.
+_LOGIN_MODAL_MARKERS = (
+    "never miss a post",
+    "log in to continue",
+    "sign up to continue",
+    "log in or sign up",
+    "sign in to continue",
+    "log in to see",
+    "sign up to see",
+    "log in to view",
+    "sign in to view",
+    "log in to instagram",
+    "sign up for instagram",
+    "create an account to continue",
+    "log in to watch",
+    "join to see",
+    "log in to access",
+    "sign up to view",
+)
+# Controls that DISMISS a login wall — the close control,
+# "not now", and the other ways out.  The wall's own
+# "Log in" / "Sign up" buttons are deliberately NOT here:
+# clicking one would open a login form, not clear the
+# wall.  Devon never signs in for you.
+_LOGIN_DISMISS_LABELS = (
+    "close", "dismiss", "not now", "no thanks", "skip",
+    "cancel", "maybe later", "continue as guest",
+    "continue without logging in",
+    "continue without an account", "browse as guest",
+    "not right now", "no, thanks",
+)
+# Known per-site login-wall shapes where the generic
+# heuristics need help — seeds beside the heuristics,
+# never a closed list.
+SITE_LOGIN_MARKERS: dict[str, tuple[str, ...]] = {
+    "instagram.com": ("never miss a post from",),
+}
+
 # Age-confirmation wording (matched case-insensitively).
 _AGE_LABELS = (
     "i'm 18 or older", "i am 18 or older", "i'm over 18",
@@ -215,10 +259,21 @@ class _ClickScanner(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.controls: list[dict[str, str]] = []
         self.forms_with_dob = False
+        #: The text of every blocking layer on the page, in
+        #: document order — a login wall's copy lives in
+        #: its modal, and discovery matches the wall's
+        #: phrases against the layer's own text, never
+        #: against the whole page (a help article that
+        #: mentions logging in is not a wall).
+        self.layer_texts: list[str] = []
         self._open: dict[str, str] | None = None
         self._text: list[str] = []
-        # Stack of (tag, is_layer, is_visible) for ancestors.
-        self._stack: list[tuple[str, bool, bool]] = []
+        # Stack of (tag, is_layer, is_visible, layer buffer)
+        # for ancestors.  A layer element carries a text
+        # buffer; its text lands in layer_texts when it
+        # closes.
+        self._stack: list[tuple[str, bool, bool,
+                                list[str] | None]] = []
 
     def handle_starttag(self, tag: str,
                         attrs: list[tuple[str, str | None]]
@@ -226,7 +281,7 @@ class _ClickScanner(HTMLParser):
         a = {k: (v or "") for k, v in attrs}
         layer = _is_layer(a)
         ancestors_visible = all(
-            vis for _, _, vis in self._stack)
+            vis for _, _, vis, _ in self._stack)
         visible = ancestors_visible and not _is_hidden(a)
         is_clickable = tag in ("button", "a") or (
             tag == "input"
@@ -243,14 +298,16 @@ class _ClickScanner(HTMLParser):
                 "value": a.get("value", ""),
                 "text": "",
                 "blocking": "1" if layer or any(
-                    up for _, up, _ in self._stack) else "",
+                    up for _, up, _, _ in self._stack) else "",
                 "visible": "1" if visible else "",
             }
             self._text = []
             if tag == "input" and a.get("value"):
                 self._finish()
         if tag not in _VOID_TAGS:
-            self._stack.append((tag, layer, visible))
+            self._stack.append(
+                (tag, layer, visible,
+                 [] if layer else None))
         if tag == "input":
             hint = " ".join((a.get("name", ""), a.get("id", ""),
                              a.get("placeholder", ""))).lower()
@@ -263,6 +320,9 @@ class _ClickScanner(HTMLParser):
     def handle_data(self, data: str) -> None:
         if self._open is not None:
             self._text.append(data)
+        for _, _, _, buf in self._stack:
+            if buf is not None:
+                buf.append(data)
 
     def handle_endtag(self, tag: str) -> None:
         if self._open is not None and \
@@ -272,8 +332,26 @@ class _ClickScanner(HTMLParser):
         # tag (tolerant of the mis-nesting real pages ship).
         for i in range(len(self._stack) - 1, -1, -1):
             if self._stack[i][0] == tag:
+                popped = self._stack[i:]
                 del self._stack[i:]
+                for _, _, _, buf in popped:
+                    if buf is not None:
+                        text = " ".join(
+                            " ".join(buf).split())
+                        if text:
+                            self.layer_texts.append(text)
                 break
+
+    def close_layers(self) -> None:
+        """Flush the text of layers still open at end of
+        input (a torn page never closes its modal) into
+        :attr:`layer_texts`."""
+        for _, _, _, buf in self._stack:
+            if buf is not None:
+                text = " ".join(" ".join(buf).split())
+                if text:
+                    self.layer_texts.append(text)
+        self._stack = []
 
     def _finish(self) -> None:
         assert self._open is not None
@@ -317,7 +395,7 @@ class GateObservation:
     the frame's name/URL; ``source`` names the document
     ("main" or "frame:<name>")."""
 
-    kind: str                # cookie | consent | age | age_dob
+    kind: str                # cookie | consent | age | age_dob | login
     label: str               # the control's visible text, folded
     selector: str = ""       # css hint, when the page gives one
     host: str = ""
@@ -434,10 +512,24 @@ class JobProjection:
         found and what was not."""
         lines: list[str] = []
         if self.final_state == "refused":
-            lines.append(
-                "the page asks for a date of birth to "
-                "verify age — Devon does not invent one, "
-                "so the gate stays up")
+            parts: list[str] = []
+            for obs in self.refused:
+                if obs.kind == "age_dob":
+                    parts.append(
+                        "the page asks for a date of birth "
+                        "to verify age — Devon does not "
+                        "invent one, so the gate stays up")
+                elif obs.kind == "login":
+                    parts.append(
+                        "the page shows a login wall with no "
+                        "way to dismiss it — Devon does not "
+                        "sign in for you, so the wall stays "
+                        "up")
+                else:
+                    parts.append(
+                        f"the {obs.kind} gate has no control "
+                        "to clear it, so it stays up")
+            lines.append("; ".join(parts))
         elif self.final_state == "gate_standing":
             kinds = ", ".join(o.kind for o in self.remaining)
             lines.append(
@@ -563,6 +655,7 @@ class GateDiscovery:
             # A torn page scans as whatever was collected.
             with suppress(Exception):
                 scanner.feed(text)
+            scanner.close_layers()
             controls = [c for c in scanner.controls
                         if c.get("visible")]
             labels = [(c, norm_text(c["text"] or c["value"]),
@@ -622,8 +715,53 @@ class GateDiscovery:
                         add("cookie", control, label, raw,
                             frame_name)
 
-        order = {"age": 0, "age_dob": 0, "consent": 1,
-                 "cookie": 2}
+            # ── login walls ──
+            # A modal that asks the visitor to sign in
+            # before the page shows its content — the wall
+            # the interstitial pass used to shoot straight
+            # through.  The copy must sit in the blocking
+            # layer itself (a help page that mentions
+            # logging in is not a wall), and the control is
+            # the layer's DISMISS control: its close button
+            # or "not now" — never its "Log in" / "Sign up"
+            # buttons, which would open a login form
+            # instead of clearing the wall.  A wall with no
+            # dismiss control is still an observation, with
+            # no control on it: the pass refuses it (Devon
+            # does not sign in for you) instead of
+            # inventing a way in or shooting over it.
+            site_host = host[4:] if host.startswith("www.") \
+                else host
+            login_markers = (_LOGIN_MODAL_MARKERS
+                             + SITE_LOGIN_MARKERS.get(
+                                 site_host, ()))
+            login_context = any(
+                m in norm_text(layer_text)
+                for layer_text in scanner.layer_texts
+                for m in login_markers)
+            if login_context:
+                dismissed = False
+                for control, label, raw in labels:
+                    if not control.get("blocking"):
+                        continue
+                    if label in _LOGIN_DISMISS_LABELS:
+                        add("login", control, label, raw,
+                            frame_name)
+                        dismissed = True
+                if not dismissed and \
+                        ("login", frame_name) not in by_key:
+                    by_key[("login", frame_name)] = \
+                        GateObservation(
+                            kind="login",
+                            label="login wall — no way to "
+                                  "dismiss",
+                            host=host, frame=frame_name,
+                            source=("main" if not frame_name
+                                    else f"frame:{frame_name}"),
+                            raw_label="")
+
+        order = {"age": 0, "age_dob": 0, "login": 1,
+                 "consent": 2, "cookie": 3}
         return sorted(
             by_key.values(),
             key=lambda g: (not g.blocking,
@@ -734,7 +872,9 @@ def run_gate_pass(probe: Any, *, memory: Any = None,
     gone, memory or not — memory never skips a gate.  A
     date-of-birth form ends the pass at once with
     final_state "refused": Devon does not invent an age,
-    and nothing is clicked on such a page.  The caller
+    and nothing is clicked on such a page.  A login wall
+    with no dismiss control ends the pass the same way:
+    Devon does not sign in for you.  The caller
     turns a non-open final state into its own refusal
     error; this pass reports truth and raises nothing."""
     observations: list[GateObservation] = []
@@ -760,6 +900,30 @@ def run_gate_pass(probe: Any, *, memory: Any = None,
                            "birth to verify age — Devon does "
                            "not invent one, so the gate "
                            "stays up"))
+                refused.append(obs)
+                remaining = _discover_on_probe(probe)
+                return JobProjection(
+                    observations=observations, receipts=receipts,
+                    cleared=cleared, refused=refused,
+                    remaining=remaining, final_state="refused")
+            if not obs.selector and not obs.raw_label:
+                # A gate with no control to click — a login
+                # wall with no dismiss control.  Devon does
+                # not invent a way in: the refusal is the
+                # answer, receipted, and nothing is shot
+                # over the wall.
+                detail = ("the page shows a login wall with "
+                          "no way to dismiss it — Devon does "
+                          "not sign in for you, so the wall "
+                          "stays up" if obs.kind == "login"
+                          else f"the {obs.kind} gate has no "
+                          "control to clear it, so it stays "
+                          "up")
+                receipts.append(InteractionReceipt(
+                    observation=obs, action="refuse",
+                    outcome="refused",
+                    verification="no_reader",
+                    detail=detail))
                 refused.append(obs)
                 remaining = _discover_on_probe(probe)
                 return JobProjection(

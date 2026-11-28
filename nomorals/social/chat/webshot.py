@@ -11,7 +11,9 @@ This organ is the full class over the same engine:
   opens in Devon's real browser session (a persistent
   profile beside the book, so cookies and gate clearances
   survive across captures), settles, runs the interstitial
-  pass (cookie banners, consent walls, age gates) and the
+  pass (cookie banners, consent walls, age gates, login
+  walls — a login modal is dismissed through its close
+  control, never signed into) and the
   bot-check pass (managed wait-out, checkbox click, owner
   takeover for hard puzzle walls) — and only then shoots:
   full-page / viewport / single-element clip, and
@@ -478,6 +480,115 @@ def playwright_renderer(url: str, opts: ShotOptions
             f"chromium shot failed: {exc}") from exc
 
 
+def _refuse_if_login_wall(session: Any) -> None:
+    """A login wall standing at shoot time is a refusal,
+    not a shot.  The interstitial pass runs at open, but a
+    modal can mount after it (Instagram's is JS-rendered),
+    so the page is re-read right before the still: a
+    blocking login wall still standing raises GateBlocked
+    with challenge-state evidence, exactly as the pass
+    would have.  A session without a probe simply skips
+    the check.  Never raises for anything else."""
+    from . import webnav
+
+    probe = getattr(session, "probe", None)
+    if probe is None:
+        return
+    try:
+        html = str(probe.html() or "")
+        url = str(probe.url() or "")
+    except Exception:  # noqa: BLE001 - no re-read, no refusal
+        return
+    standing = [g for g in webnav.detect_gates(html, url)
+                if g.kind == "login" and g.blocking]
+    if not standing:
+        return
+    err = webnav.GateBlocked(
+        "a login wall is still standing on the page — the "
+        "capture would be a photo of the wall, so nothing "
+        "was shot", gates=standing)
+    with suppress(Exception):
+        err.evidence = webnav.capture_block_evidence(
+            probe, kind="gate",
+            attempts=[g.kind for g in standing])
+    raise err
+
+
+def _is_instagram_url(url: str) -> bool:
+    """True for instagram.com post/reel/profile URLs."""
+    from urllib.parse import urlsplit
+
+    with suppress(Exception):
+        host = (urlsplit(str(url or "")).hostname or "").lower()
+        return host in ("instagram.com", "www.instagram.com")
+    return False
+
+
+def _login_wall_refusal(exc: Any) -> bool:
+    """True when a gate refusal names a standing login
+    wall — the only refusal the Instagram content rung
+    answers."""
+    gates = list(getattr(exc, "gates", None) or [])
+    if any(getattr(g, "kind", "") == "login" for g in gates):
+        return True
+    proj = getattr(exc, "projection", None)
+    remaining = list(getattr(proj, "remaining", None) or [])
+    return any(getattr(g, "kind", "") == "login"
+               for g in remaining)
+
+
+def _instagram_content_rung(
+        url: str, *,
+        instagram_fetch: Any) -> CaptureResult | None:
+    """The Instagram content rung: the nav rung refused on
+    a login wall, but the post itself may still come down
+    through the /instagram download chain (yt-dlp — the
+    organ's own seam, injected by the caller).  An image
+    post becomes the capture (rung "instagram", captioned
+    with the post's title); a reel, a video, or a chain
+    that walls off returns None and the refusal stands.
+    The bytes are normalized to PNG: the delivery path
+    accepts captures as PNG only, and a JPEG straight
+    from the chain would be rejected there instead of
+    sent.  Never raises."""
+    try:
+        got = instagram_fetch(url)
+    except Exception:  # noqa: BLE001 - a failed fetch is None
+        return None
+    if got is None:
+        return None
+    try:
+        data, title = got
+    except (TypeError, ValueError):
+        return None
+    width, height = image_dimensions(data or b"")
+    if not width:
+        return None
+    try:
+        import io
+
+        from PIL import Image
+
+        with Image.open(io.BytesIO(bytes(data))) as img:
+            canvas = img.convert("RGB")
+            buf = io.BytesIO()
+            canvas.save(buf, "PNG")
+            png = buf.getvalue()
+    except Exception:  # noqa: BLE001 - unconvertible is None
+        return None
+    width, height = image_dimensions(png)
+    if not width:
+        return None
+    return CaptureResult(
+        data=png, title=str(title or ""),
+        final_url=url, rung="instagram",
+        width=width, height=height,
+        gate_diagnostics=(
+            "the login wall would not clear, so the "
+            "screenshot refused — the post itself came "
+            "down through the download chain instead"))
+
+
 def nav_renderer(url: str, opts: ShotOptions, *,
                  takeover_hook: Any = None,
                  takeover_factory: Any = None,
@@ -499,6 +610,9 @@ def nav_renderer(url: str, opts: ShotOptions, *,
         takeover_factory=takeover_factory,
         on_step=on_step)
     try:
+        # A login wall that mounted after the pass is still
+        # a refusal, not a shot over the modal.
+        _refuse_if_login_wall(session)
         if opts.pdf:
             data = session.capture_still(pdf=True)
         elif opts.clip:
@@ -574,6 +688,9 @@ def capture_flow(url: str, opts: ShotOptions, *,
     shots: list[CaptureResult] = []
     try:
         def _shoot(step_label: str) -> CaptureResult:
+            # A login wall that mounted after the last pass
+            # is still a refusal, not a shot over the modal.
+            _refuse_if_login_wall(session)
             if opts.pdf:
                 data = session.capture_still(pdf=True)
             elif opts.clip:
@@ -752,10 +869,19 @@ def capture(url: str, opts: ShotOptions, *,
             takeover_hook: Any = None,
             takeover_factory: Any = None,
             profile_dir: Path | None = None,
-            on_step: Any = None) -> CaptureResult:
+            on_step: Any = None,
+            instagram_fetch: Callable[
+                [str], tuple[bytes, str] | None] | None = None
+            ) -> CaptureResult:
     """Shoot ``url`` down the ladder.  ``local_renderer`` /
     ``fetcher`` are injectable (tests, alternate engines);
     production callers pass only ``db`` (for the breaker).
+    ``instagram_fetch`` is the /instagram download chain
+    as a seam (url -> (image bytes, title) | None): when
+    the nav rung refuses on an Instagram login wall, the
+    post itself is fetched through it instead of handing
+    back a walled screenshot — or the refusal, when the
+    post does not come down either.
     Raises :class:`WebshotUnavailable` with every rung's
     reason when nothing could honor the request.
 
@@ -763,9 +889,13 @@ def capture(url: str, opts: ShotOptions, *,
     A gate/wall REFUSAL from it is final — the seeds are
     never allowed to shoot over a page that refused Devon
     (their shot would be the gate itself, or a cached
-    rendering that pretends the wall isn't there).  An
-    unavailable engine or an ordinary rung failure still
-    falls through to the seeds, as before."""
+    rendering that pretends the wall isn't there).  The
+    Instagram content rung is not a screenshot over the
+    wall: it fetches the post's own media through the
+    download chain, and it runs only for a login-wall
+    refusal on instagram.com.  An unavailable engine or
+    an ordinary rung failure still falls through to the
+    seeds, as before."""
     from . import webnav
 
     reasons: list[str] = []
@@ -789,7 +919,23 @@ def capture(url: str, opts: ShotOptions, *,
                     "a readable image")
         return result
     except (webnav.GateBlocked, webnav.WallBlocked) as exc:
-        failed = WebshotUnavailable(url, [str(exc)])
+        # Instagram login walls get one more rung — the
+        # post itself, through the download chain — before
+        # the refusal stands.  Anything else refuses here.
+        if instagram_fetch is not None \
+                and _is_instagram_url(url) \
+                and _login_wall_refusal(exc):
+            content = _instagram_content_rung(
+                url, instagram_fetch=instagram_fetch)
+            if content is not None:
+                return content
+            failed = WebshotUnavailable(url, [
+                str(exc),
+                "instagram: the post itself didn't come down "
+                "through the download chain either — try "
+                "/instagram <url> for the download"])
+        else:
+            failed = WebshotUnavailable(url, [str(exc)])
         # The refusal's challenge-state evidence rides
         # along: the handler delivers it labelled as a
         # block, never as the shot.

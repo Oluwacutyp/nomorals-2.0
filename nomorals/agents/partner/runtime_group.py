@@ -7818,6 +7818,37 @@ class RuntimeGroupMixin:
                     f"{wall} page as found")
         return ""
 
+    def _webshot_instagram_content(self, url: str):  # type: ignore[no-untyped-def]
+        """The /instagram download chain as a webshot seam:
+        (image bytes, title) for the post at ``url``, or
+        None when it does not come down.  The chain's file
+        is read and removed — the bytes ride the capture,
+        the file does not linger.  A reel or video still
+        returns its bytes; the rung refuses them (a shot
+        is a photo) and the login-wall refusal stands."""
+        from contextlib import suppress
+        from pathlib import Path
+
+        from ...media.downloader import MediaDownloader
+        from ...media.platforms import fetch_instagram
+
+        try:
+            res = fetch_instagram(
+                url, downloader=MediaDownloader(self.context))
+        except Exception:  # noqa: BLE001 - a failed fetch is None
+            return None
+        if not getattr(res, "ok", False) \
+                or not getattr(res, "path", ""):
+            return None
+        path = Path(str(res.path))
+        try:
+            data = path.read_bytes()
+        except Exception:  # noqa: BLE001 - unreadable is None
+            return None
+        with suppress(Exception):
+            path.unlink()
+        return (data, str(getattr(res, "title", "") or ""))
+
     def _control_webshot(self, tail, message):  # type: ignore[no-untyped-def]
         """/webshot (§18 + §20): render a page and return the
         shot as a photo with the URL + page title as its
@@ -7914,7 +7945,8 @@ class RuntimeGroupMixin:
                     takeover_factory=self._webshot_takeover_factory(
                         message),
                     profile_dir=self._webshot_profile_dir(book),
-                    on_step=on_step)
+                    on_step=on_step,
+                    instagram_fetch=self._webshot_instagram_content)
                 shots = [result]
         except shot_organ.WebshotUnavailable as exc:
             book.record(url=url, ok=False, error=str(exc),
