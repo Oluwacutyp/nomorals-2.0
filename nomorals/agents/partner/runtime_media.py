@@ -8758,15 +8758,30 @@ class RuntimeMediaMixin:
             "action": "apply", "format": fmt_name, "at": time.time()}
 
     def _trendops_ask_for_footage(self, chat_key: str,
-                                  fmt_name: str) -> str | None:
-        """Arm the footage ask; the prompt, or None when there is no
-        chat to arm it on (then the caller falls back to usage)."""
+                                  fmt_name: str) -> Any:
+        """Arm the footage ask; the prompt with its Cancel button, or
+        None when there is no chat to arm it on (then the caller falls
+        back to usage).  The button taps ``/trendops cancel`` — the
+        same drop the typed word performs."""
         if not chat_key:
             return None
         self._note_trendops_ask(chat_key, fmt_name)
-        return (f"🎬 applying the {fmt_name} format — send the footage "
-                "(a video file, or its path/URL) and I'll cut it. "
-                "('cancel' drops it.)")
+        from ...social.chat.tgbot_buttons import actionable
+
+        return actionable(
+            f"🎬 applying the {fmt_name} format — send the footage "
+            "(a video file, or its path/URL) and I'll cut it. "
+            "('cancel' drops it.)",
+            [[("❌ Cancel", "trendops cancel")]])
+
+    def _trendops_ask_drop(self, chat_key: str) -> str | None:
+        """Drop an armed footage ask; the drop line, or None when
+        nothing is armed in this chat.  The one drop path for both
+        the typed "cancel" and the Cancel button tap — the tap must
+        do exactly what typing does."""
+        if self._trendops_ask_store().pop(chat_key, None) is None:
+            return None
+        return "trendops apply dropped — no footage, nothing cut."
 
     def _trendops_ask_answer(self, message) -> str | None:  # type: ignore[no-untyped-def]
         """Answer an armed footage ask with the owner's next message.
@@ -8788,8 +8803,7 @@ class RuntimeMediaMixin:
         text = (getattr(message, "text", "") or "").strip()
         media = list(getattr(message, "media", None) or [])
         if text.lower() == "cancel" and not media:
-            store.pop(chat_key, None)
-            return "trendops apply dropped — no footage, nothing cut."
+            return self._trendops_ask_drop(chat_key)
         footage = ""
         for item in media:
             path = getattr(item, "path", "") or ""
@@ -9426,6 +9440,7 @@ class RuntimeMediaMixin:
         /trendops apply <format> <footage> [--music <audio>] [--caption "text"]
                                                            — cut footage to a format
         /trendops apply <format>                           — arms a footage ask
+        /trendops cancel                                   — drop an armed footage ask
         /trendops capture <url> [--name <slug>] [--niche X] — catch a trending clip
         /trendops propose                                  — peaking formats, ranked
         /trendops remove <slug>                            — drop a format
@@ -9517,6 +9532,13 @@ class RuntimeMediaMixin:
                 return self._trendops_apply(fmt_name, footage, music=music,
                                             caption=caption,
                                             beats=beats or None)
+            if action == "cancel":
+                # The Cancel button on the footage ask (and the typed
+                # word, via _trendops_ask_answer) — one drop path.
+                dropped = self._trendops_ask_drop(chat_key)
+                if dropped is not None:
+                    return dropped
+                return "no trendops footage ask is armed in this chat."
             if action == "capture":
                 if not rest:
                     return ("usage: /trendops capture <url> "

@@ -248,6 +248,12 @@ class TestTrendopsFootageAsk:
         self_ns._trendops_ask_for_footage = (
             lambda chat_key, fmt: RuntimeMediaMixin._trendops_ask_for_footage(
                 self_ns, chat_key, fmt))
+        # The drop helper is likewise the REAL mixin method, bound
+        # so both the typed "cancel" and the Cancel tap exercise it
+        # (it only needs the stubbed _trendops_ask_store above).
+        self_ns._trendops_ask_drop = (
+            lambda chat_key: RuntimeMediaMixin._trendops_ask_drop(
+                self_ns, chat_key))
         return self_ns, calls, store
 
     def test_apply_without_footage_arms_the_ask(self, monkeypatch):
@@ -259,8 +265,55 @@ class TestTrendopsFootageAsk:
             lambda context: SimpleNamespace())
         out = RuntimeMediaMixin._control_trendops(
             fake, "apply roadster", chat_key="telegram:123")
-        assert "footage" in str(out).lower()
+        text = out.text if hasattr(out, "text") else str(out)
+        assert "footage" in text.lower()
         assert calls["ask"] == [("telegram:123", "roadster")]
+
+    def test_apply_without_footage_prompt_carries_cancel_button(
+            self, monkeypatch):
+        from nomorals.agents.partner.runtime_media import RuntimeMediaMixin
+
+        fake, _calls, _store = self._fake_self()
+        monkeypatch.setattr(
+            "nomorals.media.trendops.TrendOps",
+            lambda context: SimpleNamespace())
+        out = RuntimeMediaMixin._control_trendops(
+            fake, "apply roadster", chat_key="telegram:123")
+        assert hasattr(out, "buttons")
+        flat = [data for row in out.buttons for _label, data in row]
+        assert "trendops cancel" in flat
+        label = [label for row in out.buttons for label, _data in row]
+        assert any("Cancel" in item for item in label)
+        assert "footage" in out.text.lower()
+
+    def test_cancel_command_drops_the_ask(self, monkeypatch):
+        """The Cancel button's tap (``/trendops cancel``) drops the
+        armed ask exactly like the typed word — and cuts nothing."""
+        from nomorals.agents.partner.runtime_media import RuntimeMediaMixin
+
+        fake, calls, store = self._fake_self()
+        store["telegram:123"] = {"action": "apply", "format": "roadster",
+                                 "at": time.time()}
+        monkeypatch.setattr(
+            "nomorals.media.trendops.TrendOps",
+            lambda context: SimpleNamespace())
+        out = RuntimeMediaMixin._control_trendops(
+            fake, "cancel", chat_key="telegram:123")
+        assert "dropped" in str(out).lower()
+        assert calls["apply"] == []
+        assert "telegram:123" not in store
+
+    def test_cancel_command_with_nothing_armed_says_so(self, monkeypatch):
+        from nomorals.agents.partner.runtime_media import RuntimeMediaMixin
+
+        fake, calls, _store = self._fake_self()
+        monkeypatch.setattr(
+            "nomorals.media.trendops.TrendOps",
+            lambda context: SimpleNamespace())
+        out = RuntimeMediaMixin._control_trendops(
+            fake, "cancel", chat_key="telegram:123")
+        assert "no trendops footage ask is armed" in str(out).lower()
+        assert calls["apply"] == []
 
     def test_apply_without_footage_and_without_chat_fails_closed(self, monkeypatch):
         from nomorals.agents.partner.runtime_media import RuntimeMediaMixin
