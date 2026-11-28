@@ -446,7 +446,12 @@ def _wa_envelope(obj: dict[str, Any], text: str) -> dict[str, Any]:
         if media["kind"] == "sticker":
             sticker = {"animated": bool(first.get("animated")),
                        "bytes": media["bytes"],
-                       "key": str(obj.get("id") or ""), "pack": ""}
+                       "key": str(obj.get("id") or ""), "pack": "",
+                       # A sound sticker (audio nested on the
+                       # StickerMessage): the bridge reports it,
+                       # so a received sound sticker is recognised
+                       # here, not silently treated as silent.
+                       "sound": bool(first.get("sound"))}
     forward: dict[str, Any] | None = None
     fwd = obj.get("forward")
     if obj.get("is_forwarded") or obj.get("forwarding_score") \
@@ -1440,7 +1445,11 @@ class WhatsAppAdapter(ChatAdapter):
                 media = MediaRef(path=str(entry.get("path") or ""),
                                  kind=str(entry.get("media_kind") or "file"),
                                  name=str(entry.get("name") or ""),
-                                 view_once=bool(entry.get("view_once")))
+                                 view_once=bool(entry.get("view_once")),
+                                 audio_path=str(
+                                     entry.get("audio_path") or ""),
+                                 audio_seconds=float(
+                                     entry.get("audio_seconds") or 0))
                 result = self.send_media(
                     chat, media,
                     caption=str(entry.get("caption") or ""),
@@ -2721,6 +2730,25 @@ class WhatsAppAdapter(ChatAdapter):
                 error="view-once applies to photos and videos — "
                       f"this is a {kind or 'unknown'} attachment",
                 seconds=time.perf_counter() - started)
+        # Sound-sticker audio: rides only on a sticker (the
+        # bridge nests it on StickerMessage field 26); any other
+        # kind with audio attached is a caller error, refused
+        # here rather than sent as a silent file with a stray
+        # payload.
+        audio_path = str(
+            getattr(media, "audio_path", "") or "").strip()
+        audio_seconds = 0.0
+        try:
+            audio_seconds = float(
+                getattr(media, "audio_seconds", 0) or 0)
+        except (TypeError, ValueError):
+            audio_seconds = 0.0
+        if audio_path and kind != "sticker":
+            return SendResult(
+                ok=False, platform=self.name,
+                error="sound audio only rides on a sticker — "
+                      f"this is a {kind or 'unknown'} attachment",
+                seconds=time.perf_counter() - started)
         wire_buttons = (
             [[[str(label), str(data)] for label, data in row]
              for row in buttons if row] if buttons else None)
@@ -2739,7 +2767,7 @@ class WhatsAppAdapter(ChatAdapter):
             self._buttons_list_form(buttons)
         ride_along = bool(wire_buttons) and not on_media
         if not self.connected.is_set():
-            return self._enqueue({
+            entry: dict[str, Any] = {
                 "kind": "media",
                 "chat_id": chat.chat_id,
                 "chat_kind": chat.kind,
@@ -2750,13 +2778,19 @@ class WhatsAppAdapter(ChatAdapter):
                 "caption": caption,
                 "buttons": wire_buttons,
                 "view_once": view_once,
-            })
+            }
+            if audio_path:
+                entry["audio_path"] = audio_path
+                entry["audio_seconds"] = audio_seconds
+            return self._enqueue(entry)
         # Same send-once guard as text (see _send_text_outcome): a
         # media dispatch whose ack was lost is never re-dispatched.
         # History cannot reconcile media, so a guarded repeat is
         # simply held unconfirmed.
         media_key = (self._jid(chat),
-                     "\x00media\x00" + path + "\x00" + caption)
+                     "\x00media\x00" + path + "\x00"
+                     + (audio_path + "\x00" if audio_path else "")
+                     + caption)
         if self._unconfirmed_at(media_key) is not None:
             return SendResult(ok=False, platform=self.name,
                               error=UNCONFIRMED_SEND_ERROR,
@@ -2776,6 +2810,9 @@ class WhatsAppAdapter(ChatAdapter):
             # side of the contract — reported, not assumed.
             "media_kind": kind,
         }
+        if audio_path:
+            cmd["audio_path"] = audio_path
+            cmd["audio_seconds"] = audio_seconds
         if on_media:
             cmd["buttons"] = wire_buttons
         if kind in ("voice", "ptt"):

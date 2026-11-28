@@ -669,7 +669,10 @@ class RuntimeExpressionMixin:
         raster sticker; a replied image → image-to-sticker; a
         replied video/GIF → animated sticker.  The ``pack``
         and ``steal`` heads route to the caller's personal
-        pack and the stealer instead of the maker."""
+        pack and the stealer instead of the maker.  ``sound``
+        makes a sound sticker on WhatsApp: a replied video
+        keeps its audio, a replied photo takes the voice note
+        sent with the command."""
         if message is None:
             return "usage: /sticker text — or reply to an image/video."
         from ...social.chat import media_convert
@@ -686,7 +689,9 @@ class RuntimeExpressionMixin:
         out_dir = self._expression_root() / "expression_media"
         produced = ""
         note = ""
-        if text:
+        sound = None
+        want_sound = head == "sound"
+        if text and not want_sound:
             made = media_convert.make_text_sticker(
                 text, out_dir=out_dir)
             produced = str(made.get("raster") or "")
@@ -697,29 +702,49 @@ class RuntimeExpressionMixin:
         else:
             found = self._replied_media_local(message)
             if found is None or not found[0]:
-                return ("usage: /sticker text — or reply to an "
-                        "image or a short video and I'll make it "
-                        "a sticker.")
-            path, kind, _ids = found
-            try:
-                if kind in ("video", "animation", "gif"):
-                    # The animated-sticker format is the TARGET
-                    # platform's, not the maker's: WhatsApp
-                    # stickers are WebP (a .webm cannot be one —
-                    # the bridge would send it as a document),
-                    # Telegram's animated stickers are .webm.
-                    platform = str(
-                        getattr(message.chat, "platform", "")
-                        or "")
-                    fmt = ("webp" if platform.startswith("whatsapp")
-                           else "webm")
-                    produced = str(media_convert.video_to_sticker(
-                        path, out_dir=out_dir, format=fmt))
+                if want_sound:
+                    # "/sticker sound" with nothing to put sound
+                    # on is the text sticker that says "sound" —
+                    # the tail is the text, as it always was.
+                    made = media_convert.make_text_sticker(
+                        text, out_dir=out_dir)
+                    produced = str(made.get("raster") or "")
+                    note = str(made.get("note") or "")
+                    if not produced:
+                        return (f"the SVG sticker is ready "
+                                f"({made['spec'].id}) — {note}")
                 else:
-                    produced = str(media_convert.image_to_sticker(
-                        path, out_dir=out_dir))
-            except media_convert.ConversionError as exc:
-                return str(exc)
+                    return ("usage: /sticker text — or reply to an "
+                            "image or a short video and I'll make it "
+                            "a sticker.")
+            else:
+                path, kind, _ids = found
+                if want_sound:
+                    sound = self._sound_sticker_for(
+                        message, path, kind, out_dir)
+                    if isinstance(sound, str):
+                        return sound
+                    produced = str(sound.sticker)
+                else:
+                    try:
+                        if kind in ("video", "animation", "gif"):
+                            # The animated-sticker format is the TARGET
+                            # platform's, not the maker's: WhatsApp
+                            # stickers are WebP (a .webm cannot be one —
+                            # the bridge would send it as a document),
+                            # Telegram's animated stickers are .webm.
+                            platform = str(
+                                getattr(message.chat, "platform", "")
+                                or "")
+                            fmt = ("webp" if platform.startswith("whatsapp")
+                                   else "webm")
+                            produced = str(media_convert.video_to_sticker(
+                                path, out_dir=out_dir, format=fmt))
+                        else:
+                            produced = str(media_convert.image_to_sticker(
+                                path, out_dir=out_dir))
+                    except media_convert.ConversionError as exc:
+                        return str(exc)
         if not self._group_gate(message, "sticker"):
             return ("the sticker is made, but this room isn't "
                     "claimed for my bot-system posts (§33), so "
@@ -735,11 +760,82 @@ class RuntimeExpressionMixin:
             record_failure("expression.sticker.shelve", exc)
         ref = MediaRef(path=produced, kind="sticker",
                        name=Path(produced).name)
+        if sound is not None:
+            # The audio rides the ref so the adapter carries it
+            # to the bridge alongside the sticker.
+            ref = MediaRef(path=str(sound.sticker), kind="sticker",
+                           name=Path(sound.sticker).name,
+                           audio_path=str(sound.audio),
+                           audio_seconds=sound.audio_seconds)
         result = self._expression_send(message, ref)
         if getattr(result, "ok", False):
             return ""
         return (f"sticker made, but the send failed here: "
                 f"{getattr(result, 'error', '')}")
+
+    def _sound_sticker_for(self, message, path, kind, out_dir):  # type: ignore[no-untyped-def]
+        """Build a sound sticker for `/sticker sound`: returns
+        the SoundSticker, or the plain-words reason it cannot
+        be made.  A replied video keeps its own audio (5s); a
+        replied photo takes the voice note sent with the command
+        (10s) — a voice note replying to a photo, or a photo
+        reply carrying the command's own voice note.  Sound
+        stickers are a WhatsApp form: any other platform is an
+        honest refusal, never a silent sticker in its place."""
+        platform = str(getattr(message.chat, "platform", "") or "")
+        if not platform.startswith("whatsapp"):
+            return ("sound stickers are a WhatsApp thing — on "
+                    "this chat I can only make a silent one "
+                    "(/sticker without 'sound').")
+        from ...social.chat import media_convert
+
+        if kind in ("video", "animation", "gif"):
+            try:
+                return media_convert.video_to_sticker(
+                    path, out_dir=out_dir, format="webp",
+                    audio="original")
+            except media_convert.ConversionError as exc:
+                return str(exc)
+        if kind in ("voice", "audio"):
+            # A voice note on its own has no picture: it is the
+            # AUDIO for a photo the owner replied to.
+            meta = getattr(message, "meta", None) or {}
+            local = meta.get("replied_media_local") or {}
+            photo = str(local.get("path") or "")
+            photo_kind = str(local.get("kind") or "")
+            if photo and photo_kind in ("image", "photo"):
+                try:
+                    return media_convert.image_to_sticker(
+                        photo, out_dir=out_dir, audio=path)
+                except media_convert.ConversionError as exc:
+                    return str(exc)
+            return ("a sound sticker needs a picture or a video "
+                    "to put the sound on — reply to one with "
+                    "/sticker sound.")
+        # A photo (or anything else with no audio of its own):
+        # the sound has to arrive WITH the command — a voice note
+        # captioned /sticker sound, replying to the photo.
+        own_audio = ""
+        for media in getattr(message, "media", None) or []:
+            if str(getattr(media, "kind", "") or "") \
+                    in ("voice", "audio") \
+                    and str(getattr(media, "path", "") or ""):
+                own_audio = str(getattr(media, "path", "") or "")
+                break
+        if kind in ("image", "photo"):
+            if own_audio:
+                try:
+                    return media_convert.image_to_sticker(
+                        path, out_dir=out_dir, audio=own_audio)
+                except media_convert.ConversionError as exc:
+                    return str(exc)
+            return ("that photo has no sound with it — reply to "
+                    "it with a voice note captioned "
+                    "/sticker sound, or send a video and I'll "
+                    "keep its sound.")
+        return ("a sound sticker needs a picture or a video to "
+                "put the sound on — reply to one with "
+                "/sticker sound.")
 
     # ---- /sticker pack --------------------------------------------------
     def _control_sticker_pack(self, args, message=None) -> str:  # type: ignore[no-untyped-def]

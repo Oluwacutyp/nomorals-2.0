@@ -406,13 +406,21 @@ class MediaRef:
     # the platform already hosts, and on outbound refs to RE-SEND by
     # handle instead of uploading bytes again.
     file_id: str = ""
+    # Sound-sticker audio (WhatsApp): the OGG Opus file that rides
+    # with a sticker WebP, and its length in seconds.  Empty means
+    # a silent sticker — every existing caller is untouched, and
+    # adapters that do not know sound stickers simply ignore it.
+    audio_path: str = ""
+    audio_seconds: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {"path": self.path, "mime": self.mime, "kind": self.kind,
                 "name": self.name, "voice_note": self.voice_note,
                 "view_once": self.view_once,
                 "is_voice": self.is_voice, "audience": self.audience,
-                "file_id": self.file_id}
+                "file_id": self.file_id,
+                "audio_path": self.audio_path,
+                "audio_seconds": self.audio_seconds}
 
 
 @dataclass

@@ -41,9 +41,14 @@ honest message from media_edit, not a silent skip.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 import shutil
+import struct
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -57,6 +62,9 @@ __all__ = [
     "ConversionError", "sticker_to_mp4", "gif_to_mp4",
     "mp4_to_gif", "mp4_to_mp3", "mp3_to_video",
     "image_to_sticker", "video_to_sticker", "make_text_sticker",
+    "SoundSticker", "build_sound_sha256_exif",
+    "add_sound_sha256_to_webp",
+    "SOUND_STICKER_VIDEO_SECONDS", "SOUND_STICKER_PHOTO_SECONDS",
     "CONVERSIONS", "convert_media",
     "CONVERT_TIMEOUT_S", "MAX_INPUT_BYTES",
 ]
@@ -81,6 +89,226 @@ MAX_INPUT_BYTES = 200 * 1024 * 1024
 #: the pipeline.
 _MAX_ANIM_FRAMES = 900
 _MAX_ANIM_TOTAL_MS = 60_000
+
+#: Sound stickers (WhatsApp, rolling out on beta clients late
+#: 2026): the audio rides as a second upload nested on the
+#: StickerMessage, paired to the WebP by the audio's SHA-256 in
+#: the EXIF.  The limits are the test builds': 5s for a
+#: video-origin sticker, 10s for a photo-origin one; the caps
+#: are the fork's (5 MiB sticker, 16 MiB audio).
+SOUND_STICKER_VIDEO_SECONDS = 5
+SOUND_STICKER_PHOTO_SECONDS = 10
+SOUND_STICKER_MAX_STICKER_BYTES = 5 * 1024 * 1024
+SOUND_STICKER_MAX_AUDIO_BYTES = 16 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class SoundSticker:
+    """A sound sticker: the WebP (its EXIF carries sound-sha256)
+    plus the OGG Opus audio that rides with it, its length in
+    seconds, and the audio's SHA-256 hex."""
+    sticker: Path
+    audio: Path
+    audio_seconds: float
+    audio_sha256: str
+
+
+_HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+def build_sound_sha256_exif(sound_sha256_hex: str) -> bytes:
+    """The sound-sticker EXIF payload: a little-endian TIFF
+    header with a single IFD entry (tag 0x5741 'AW', type
+    undefined) whose value is ``{"sound-sha256": "<hex>"}``.
+    Layout pinned from @aunucore/baileys 2.7.0's
+    buildSoundSha256Exif (lib/Utils/messages.js): 26-byte header
+    (II, 42, IFD0 at 8, one entry, value offset 26, no next
+    IFD) then the JSON."""
+    hex_digest = str(sound_sha256_hex or "").lower()
+    if not _HEX_SHA256.match(hex_digest):
+        raise ConversionError(
+            "sound-sha256 must be a hex SHA-256 digest")
+    payload = json.dumps(
+        {"sound-sha256": hex_digest}).encode("utf-8")
+    exif = bytearray(26 + len(payload))
+    exif[0:2] = b"II"
+    struct.pack_into("<H", exif, 2, 0x2A)
+    struct.pack_into("<I", exif, 4, 8)
+    struct.pack_into("<H", exif, 8, 1)
+    struct.pack_into("<H", exif, 10, 0x5741)
+    struct.pack_into("<H", exif, 12, 7)
+    struct.pack_into("<I", exif, 14, len(payload))
+    struct.pack_into("<I", exif, 18, 26)
+    struct.pack_into("<I", exif, 22, 0)
+    exif[26:] = payload
+    return bytes(exif)
+
+
+def _webp_canvas_size(data: bytes) -> tuple[int, int] | None:
+    """Canvas size of a WebP whose first chunk is 'VP8 ' (lossy)
+    or 'VP8L' (lossless) — needed to synthesise a VP8X header
+    when the file has none (an EXIF chunk is only valid in the
+    extended container).  Layout pinned from the fork's
+    webpCanvasSize."""
+    if len(data) < 25:
+        return None
+    fourcc = data[12:16]
+    if fourcc == b"VP8L":
+        if data[20] != 0x2F:
+            return None
+        bits = int.from_bytes(data[21:25], "little")
+        return ((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1)
+    if fourcc == b"VP8 ":
+        if len(data) < 30 or data[23] != 0x9D \
+                or data[24] != 0x01 or data[25] != 0x2A:
+            return None
+        width = struct.unpack_from("<H", data, 26)[0] & 0x3FFF
+        height = struct.unpack_from("<H", data, 28)[0] & 0x3FFF
+        return (width, height)
+    return None
+
+
+#: The VP8X EXIF-profile bit (RFC 9649 §2.7: Rsv|I|L|E|X|A|R —
+#: E is bit 3).  The fork this is pinned from writes 0x20 with
+#: an "EXIF flag" comment, but 0x20 is the ICC-profile bit;
+#: Devon writes the spec bit.
+_VP8X_EXIF_FLAG = 0x08
+
+
+def add_sound_sha256_to_webp(webp: Path | str,
+                             sound_sha256_hex: str) -> Path:
+    """Write the "sound-sha256" EXIF into a WebP sticker, in
+    place.  Replaces any existing EXIF chunk, sets the VP8X
+    EXIF flag (a VP8X header is synthesised for plain VP8/VP8L
+    files), and rebuilds the RIFF size.  ConversionError for a
+    non-WebP input, a bad digest, or a WebP whose canvas size
+    cannot be determined when a VP8X header is needed.  Chunk
+    mechanics pinned from the fork's addSoundSha256ToStickerWebP
+    (the flag value corrected per RFC 9649, above)."""
+    p = _require_input(webp)
+    raw = p.read_bytes()
+    if len(raw) < 12 or raw[:4] != b"RIFF" \
+            or raw[8:12] != b"WEBP":
+        raise ConversionError(
+            "sound sticker EXIF can only be written into a "
+            "WebP image")
+    exif = build_sound_sha256_exif(sound_sha256_hex)
+    chunks: list[tuple[bytes, bytearray]] = []
+    offset = 12
+    while offset + 8 <= len(raw):
+        fourcc = raw[offset:offset + 4]
+        size = struct.unpack_from("<I", raw, offset + 4)[0]
+        if offset + 8 + size > len(raw):
+            raise ConversionError(
+                "malformed WebP: chunk overruns the file")
+        chunks.append((fourcc, bytearray(
+            raw[offset + 8:offset + 8 + size])))
+        offset += 8 + size + (size % 2)
+    kept = [(c, d) for c, d in chunks if c != b"EXIF"]
+    vp8x = next((d for c, d in kept if c == b"VP8X"), None)
+    if vp8x is not None:
+        if len(vp8x) < 10:
+            raise ConversionError(
+                "malformed WebP: VP8X chunk too short")
+        vp8x[0] |= _VP8X_EXIF_FLAG
+    else:
+        size = _webp_canvas_size(raw)
+        if size is None or size[0] < 1 or size[1] < 1:
+            raise ConversionError(
+                "cannot determine the WebP canvas size needed "
+                "to add an EXIF chunk")
+        data = bytearray(10)
+        data[0] = _VP8X_EXIF_FLAG
+        data[4:7] = (size[0] - 1).to_bytes(3, "little")
+        data[7:10] = (size[1] - 1).to_bytes(3, "little")
+        kept.insert(0, (b"VP8X", data))
+    kept.append((b"EXIF", bytearray(exif)))
+    body = bytearray(b"WEBP")
+    for fourcc, data in kept:
+        body += fourcc + struct.pack("<I", len(data)) + data
+        if len(data) % 2:
+            body += b"\x00"
+    out = b"RIFF" + struct.pack("<I", len(body)) + bytes(body)
+    p.write_bytes(out)
+    return p
+
+
+def _probe_media_seconds(path: Path) -> float:
+    """Length of an audio file in seconds, via the media-edit
+    ffprobe machinery; 0.0 when the probe cannot say (the wire
+    then omits the seconds — never an invented length)."""
+    try:
+        from ...media_edit.videos import video_probe
+
+        probe = video_probe(path)
+    except Exception:  # noqa: BLE001 - probe unavailable
+        return 0.0
+    try:
+        return float(probe.get("duration") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _extract_sound_audio(src: Path | str, *, out_dir: Path | str = "",
+                         runner: Runner | None = None,
+                         max_seconds: int,
+                         from_video: bool = False
+                         ) -> tuple[Path, float]:
+    """Audio → OGG Opus, trimmed to ``max_seconds``.  From a
+    video the track must exist first (_require_audio_track
+    refuses a silent video in plain words)."""
+    src = _require_input(src)
+    if from_video:
+        _require_audio_track(src)
+    # The "-sound" stem keeps the output from ever colliding
+    # with its own input (an .ogg source in the same out_dir
+    # would otherwise be ffmpeg's input AND output).
+    dest_dir = Path(out_dir) if out_dir else src.parent
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"{src.stem}-sound.ogg"
+    args = ["-y", "-i", str(src), "-vn", "-c:a", "libopus",
+            "-b:a", "64k", "-t", str(max_seconds), str(dest)]
+    _run(runner, args, src, dest)
+    seconds = _probe_media_seconds(dest)
+    if seconds > max_seconds:
+        seconds = float(max_seconds)
+    return dest, seconds
+
+
+def _finish_sound_sticker(sticker: Path, audio: Any, src: Path, *,
+                          out_dir: Path | str = "",
+                          runner: Runner | None = None,
+                          max_seconds: int) -> SoundSticker:
+    """The shared sound tail: extract + trim the audio, cap the
+    sizes, hash the audio, write its hash into the WebP EXIF.
+    A failed audio step discards the sticker too — no half-made
+    sound sticker is left behind."""
+    try:
+        if audio == "original":
+            audio_path, seconds = _extract_sound_audio(
+                src, out_dir=out_dir, runner=runner,
+                max_seconds=max_seconds, from_video=True)
+        else:
+            audio_path, seconds = _extract_sound_audio(
+                audio, out_dir=out_dir, runner=runner,
+                max_seconds=max_seconds)
+    except ConversionError:
+        _discard(sticker)
+        raise
+    if sticker.stat().st_size > SOUND_STICKER_MAX_STICKER_BYTES \
+            or audio_path.stat().st_size \
+            > SOUND_STICKER_MAX_AUDIO_BYTES:
+        _discard(sticker)
+        _discard(audio_path)
+        raise ConversionError(
+            "sound sticker too big — the sticker must stay "
+            "under 5 MiB and its audio under 16 MiB")
+    audio_sha256 = hashlib.sha256(
+        audio_path.read_bytes()).hexdigest()
+    add_sound_sha256_to_webp(sticker, audio_sha256)
+    return SoundSticker(sticker=sticker, audio=audio_path,
+                        audio_seconds=seconds,
+                        audio_sha256=audio_sha256)
 
 
 def _default_runner(args: list[str]) -> Any:
@@ -367,7 +595,8 @@ def mp3_to_video(src: Path | str, *, out_dir: Path | str = "",
 def video_to_sticker(src: Path | str, *,
                      out_dir: Path | str = "",
                      runner: Runner | None = None,
-                     format: str = "webm") -> Path:
+                     format: str = "webm",
+                     audio: Any = None) -> Path | SoundSticker:
     """Video/GIF → an animated sticker: ≤3s of it, 512 wide.
 
     ``format`` is the TARGET platform's animated-sticker format:
@@ -378,31 +607,61 @@ def video_to_sticker(src: Path | str, *,
     WhatsApp bridge lands as a document).  Any other value is a
     ConversionError — fail closed, never silently produce the
     wrong form.
+
+    ``audio`` makes a SOUND sticker (WebP only): "original" keeps
+    the video's own audio track, or pass an audio file.  The
+    video window grows to the sound limit (5s), the audio is
+    trimmed to it and transcoded to OGG Opus, its SHA-256 is
+    written into the WebP EXIF, and the result is a SoundSticker
+    (sticker + audio + seconds + hash).  No audio means exactly
+    today's behaviour — a Path, the 3s window, no audio anywhere.
     """
     if format not in ("webm", "webp"):
         raise ConversionError(
             f"unknown sticker format {format!r} — 'webm' or 'webp'")
+    if audio is not None and format != "webp":
+        raise ConversionError(
+            "a sound sticker needs the WebP format — a .webm "
+            "cannot carry sound on WhatsApp")
     src = _require_input(src)
+    window = "5" if audio is not None else "3"
     if format == "webp":
         dest = _out(src, ".webp", out_dir=out_dir)
-        args = ["-y", "-i", str(src), "-t", "3",
+        args = ["-y", "-i", str(src), "-t", window,
                 "-vf", "fps=30,scale=512:-2:flags=lanczos",
                 "-an", "-c:v", "libwebp", "-loop", "0",
                 "-pix_fmt", "yuva420p", str(dest)]
     else:
         dest = _out(src, ".webm", out_dir=out_dir)
-        args = ["-y", "-i", str(src), "-t", "3",
+        args = ["-y", "-i", str(src), "-t", window,
                 "-vf", "fps=30,scale=512:-2:flags=lanczos",
                 "-an", "-c:v", "libvpx-vp9", "-b:v", "400k",
                 "-pix_fmt", "yuva420p", str(dest)]
-    return _run(runner, args, src, dest)
+    sticker = _run(runner, args, src, dest)
+    if audio is None:
+        return sticker
+    return _finish_sound_sticker(
+        sticker, audio, src, out_dir=out_dir, runner=runner,
+        max_seconds=SOUND_STICKER_VIDEO_SECONDS)
 
 
 def image_to_sticker(src: Path | str, *,
-                     out_dir: Path | str = "") -> Path:
+                     out_dir: Path | str = "",
+                     audio: Any = None) -> Path | SoundSticker:
     """Any still image → a platform sticker: fitted inside
     512×512 on transparency, saved as WebP (Telegram's static
-    sticker format; WhatsApp's maker takes the same file)."""
+    sticker format; WhatsApp's maker takes the same file).
+
+    ``audio`` makes a SOUND sticker: pass an audio file (a photo
+    has no track of its own, so "original" is a ConversionError).
+    The audio is trimmed to the photo-origin limit (10s) and
+    transcoded to OGG Opus, its SHA-256 is written into the WebP
+    EXIF, and the result is a SoundSticker.  No audio means
+    exactly today's behaviour — a Path."""
+    if audio == "original":
+        raise ConversionError(
+            "a photo has no audio track of its own — send a "
+            "voice note or an audio file with it")
     src = _require_input(src)
     dest = _out(src, ".webp", out_dir=out_dir)
     try:
@@ -423,7 +682,11 @@ def image_to_sticker(src: Path | str, *,
     canvas.save(dest, "WEBP", lossless=True)
     if not dest.exists() or dest.stat().st_size == 0:
         raise ConversionError("sticker write produced no file")
-    return dest
+    if audio is None:
+        return dest
+    return _finish_sound_sticker(
+        dest, audio, src, out_dir=out_dir,
+        max_seconds=SOUND_STICKER_PHOTO_SECONDS)
 
 
 def make_text_sticker(text: str, *, out_dir: Path | str = "",

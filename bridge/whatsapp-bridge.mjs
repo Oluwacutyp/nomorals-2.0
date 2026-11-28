@@ -81,6 +81,7 @@ import makeWASocket, {
   downloadContentFromMessage,
   downloadMediaMessage,
   fetchLatestBaileysVersion,
+  generateWAMessageContent,
   generateWAMessageFromContent,
   prepareWAMessageMedia,
   proto,
@@ -93,6 +94,22 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import registerGroupCommands from './whatsapp-groups.mjs';
 import registerGroupAdminCommands from './whatsapp-groups-admin.mjs';
+import {
+  installStickerAudioPatch,
+  buildSoundStickerMessage,
+} from './whatsapp-sound-sticker.mjs';
+
+// Sound stickers need StickerMessage field 26, which the pinned
+// Baileys 6.7.24 proto does not have — the patch (see
+// whatsapp-sound-sticker.mjs) teaches the generated type to
+// carry it. Installed once at startup, before the socket
+// decodes anything; when it does not install, sound sends refuse
+// rather than going out silent (the send path checks the flag).
+const stickerAudioPatchLive = installStickerAudioPatch(proto);
+if (!stickerAudioPatchLive) {
+  console.log(new Date().toISOString(), '[bridge]',
+    'sound stickers: StickerMessage field-26 patch did not install — sound sends will refuse');
+}
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
@@ -818,9 +835,10 @@ async function quotedPayload(m) {
     // The quoted message's identity is its stanza id: the same
     // dedup as downloadInbound (media-cache discipline) — a
     // quote of an already-downloaded message serves its file.
+    const qSound = kind === 'sticker' && !!inner.audioMessage;
     const qExt = mediaExtFor(kind, inner);
     const qName = mediaCacheName(ctx.stanzaId, qExt);
-    const qHit = cachedMediaRow(qName, mime, kind);
+    const qHit = cachedMediaRow(qName, mime, kind, qSound);
     if (qHit) {
       out.quoted_media = [qHit];
       return out;
@@ -836,13 +854,16 @@ async function quotedPayload(m) {
         const name = qName || `${Date.now()}-anon${qExt}`;
         const p = path.join(MEDIA_DIR, name);
         writeMediaAtomic(p, buf);
-        out.quoted_media = [{ path: p, mime, kind }];
+        out.quoted_media = [{ path: p, mime, kind,
+          ...(qSound ? { sound: true } : {}) }];
       } else {
-        out.quoted_media = [{ path: '', mime, kind }]; // arrived, unseen
+        out.quoted_media = [{ path: '', mime, kind,
+          ...(qSound ? { sound: true } : {}) }]; // arrived, unseen
       }
     } catch (e) {
       log('quoted media download failed:', e.message);
-      out.quoted_media = [{ path: '', mime, kind }]; // arrived, unseen
+      out.quoted_media = [{ path: '', mime, kind,
+        ...(qSound ? { sound: true } : {}) }]; // arrived, unseen
     }
   }
   return out;
@@ -941,12 +962,15 @@ function mediaExtFor(kind, inner) {
     : ({ image: '.jpg', video: '.mp4', video_note: '.mp4', voice: '.ogg', audio: '.ogg', sticker: '.webp' }[kind] || '.bin');
 }
 
-function cachedMediaRow(name, mime, kind) {
+function cachedMediaRow(name, mime, kind, sound) {
   if (!name) return null;
   const p = path.join(MEDIA_DIR, name);
   try {
     const st = fs.statSync(p);
-    if (st.isFile() && st.size > 0) return { path: p, mime, kind };
+    if (st.isFile() && st.size > 0) {
+      return { path: p, mime, kind,
+        ...(sound ? { sound: true } : {}) };
+    }
   } catch { /* not cached — the download below is the answer */ }
   return null;
 }
@@ -978,25 +1002,34 @@ async function downloadInbound(m) {
     || m.message?.audioMessage || m.message?.documentMessage
     || m.message?.stickerMessage || {};
   const mime = inner.mimetype || 'application/octet-stream';
+  // A sound sticker (audio nested on the StickerMessage): the
+  // field-26 decode patch makes it visible here, so the row
+  // reports it instead of silently treating it as silent.
+  const sound = kind === 'sticker' && !!inner.audioMessage;
   const ext = mediaExtFor(kind, inner);
   const name = mediaCacheName(m.key?.id, ext);
-  const hit = cachedMediaRow(name, mime, kind);
+  const hit = cachedMediaRow(name, mime, kind, sound);
   if (hit) return hit;
   if (name && mediaInflight.has(name)) return mediaInflight.get(name);
   const job = (async () => {
     try {
       const buf = await downloadMediaMessage(m, 'buffer', {});
-      if (!buf || !buf.length) return { path: '', mime, kind };
+      if (!buf || !buf.length) {
+        return { path: '', mime, kind,
+          ...(sound ? { sound: true } : {}) };
+      }
       // No identity to dedup by: the legacy timestamped name
       // keeps the bytes reachable.  Every real WhatsApp message
       // carries an id, so this is the defensive path.
       const fname = name || `${Date.now()}-anon${ext}`;
       const p = path.join(MEDIA_DIR, fname);
       writeMediaAtomic(p, buf);
-      return { path: p, mime, kind };
+      return { path: p, mime, kind,
+        ...(sound ? { sound: true } : {}) };
     } catch (e) {
       log('media download failed:', e.message);
-      return { path: '', mime, kind };
+      return { path: '', mime, kind,
+        ...(sound ? { sound: true } : {}) };
     }
   })();
   if (name) {
@@ -1587,7 +1620,7 @@ async function cmdSend({ chat, text, reply_to, buttons, buttons_style, mentions 
   return wa.sendMessage(chat, payload, opts);
 }
 
-async function cmdSendMedia({ chat, path: p, caption, ptt, buttons, view_once, ptv }) {
+async function cmdSendMedia({ chat, path: p, caption, ptt, buttons, view_once, ptv, media_kind, audio_path, audio_seconds }) {
   if (!p || !fs.existsSync(p)) throw new Error(`media file not found: ${p}`);
   const ext = extOf(p);
   const mime = EXT_MIME[ext];
@@ -1619,6 +1652,49 @@ async function cmdSendMedia({ chat, path: p, caption, ptt, buttons, view_once, p
   }
   if (asNote && !isVideo) {
     throw new Error('a video note (ptv) needs a video file');
+  }
+  // Sound stickers: a .webp sent as kind sticker with an audio
+  // file rides as a real StickerMessage with the audio nested on
+  // field 26 (see whatsapp-sound-sticker.mjs). This rung's FIRST
+  // StickerMessage send — silent stickers here still go out as
+  // images, as they always have; that gap is not this change's.
+  // Validated up front like every other special form: a sound
+  // send that cannot be built is refused, never sent silent.
+  const audioPath = String(audio_path || '').trim();
+  if (audioPath) {
+    if (!stickerAudioPatchLive) {
+      throw new Error('sound stickers are unavailable on this bridge — the StickerMessage field-26 patch did not install');
+    }
+    if (media_kind !== 'sticker') {
+      throw new Error('sound audio only rides on a sticker');
+    }
+    if (ext !== '.webp') {
+      throw new Error('a sound sticker needs a WebP sticker to ride on');
+    }
+    if (!fs.existsSync(audioPath)) {
+      throw new Error(`sound audio file not found: ${audioPath}`);
+    }
+    if (extOf(audioPath) !== '.ogg') {
+      throw new Error('sound audio must be OGG Opus (.ogg)');
+    }
+    if (viewOnce) {
+      throw new Error('a sound sticker cannot be sent view-once');
+    }
+    const stickerMessage = await buildSoundStickerMessage({
+      generateWAMessageContent, upload: wa.waUploadToServer,
+      stickerPath: p, audioPath,
+      seconds: Number(audio_seconds) || 0,
+    });
+    const waMsg = await generateWAMessageFromContent(
+      chat, { stickerMessage }, {});
+    await wa.relayMessage(chat, waMsg.message, {
+      messageId: waMsg.key.id,
+    });
+    if (flat.length) {
+      await wa.sendMessage(chat, { text: buttonLines(flat) });
+      waMsg.buttonsForm = 'text';
+    }
+    return waMsg;
   }
   // A view-once or video-note send never takes the interactive
   // header path: the wrap would replace the very form the

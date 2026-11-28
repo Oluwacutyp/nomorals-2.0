@@ -580,7 +580,8 @@ func (b *bridge) probeMedia(msg *waE2E.Message, idStr string) (map[string]any, b
 	if mime == "" {
 		mime = "application/octet-stream"
 	}
-	return map[string]any{"path": p, "mime": mime, "kind": kind}, true
+	return withSound(map[string]any{"path": p, "mime": mime,
+		"kind": kind}, msg), true
 }
 
 // mediaLock is the per-identity download lock: one download of
@@ -657,8 +658,8 @@ func (b *bridge) downloadMediaOf(ctx context.Context, msg *waE2E.Message, idStr 
 		// media_unavailable. The error string rides along
 		// (download_error) so the miss journal names the reason.
 		logf("media download failed: %v", err)
-		return map[string]any{"path": "", "mime": mime, "kind": kind,
-			"download_error": err.Error()}
+		return withSound(map[string]any{"path": "", "mime": mime,
+			"kind": kind, "download_error": err.Error()}, msg)
 	}
 	p := filepath.Join(b.mediaDir, name)
 	// Write to a sibling temp and rename into place: a reader
@@ -669,19 +670,21 @@ func (b *bridge) downloadMediaOf(ctx context.Context, msg *waE2E.Message, idStr 
 	tmp := p + ".part"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		logf("media write failed: %v", err)
-		return map[string]any{"path": "", "mime": mime, "kind": kind,
-			"download_error": err.Error()}
+		return withSound(map[string]any{"path": "", "mime": mime,
+			"kind": kind, "download_error": err.Error()}, msg)
 	}
 	if err := os.Rename(tmp, p); err != nil {
 		os.Remove(tmp)
 		if _, statErr := os.Stat(p); statErr == nil {
-			return map[string]any{"path": p, "mime": mime, "kind": kind}
+			return withSound(map[string]any{"path": p, "mime": mime,
+				"kind": kind}, msg)
 		}
 		logf("media write failed: %v", err)
-		return map[string]any{"path": "", "mime": mime, "kind": kind,
-			"download_error": err.Error()}
+		return withSound(map[string]any{"path": "", "mime": mime,
+			"kind": kind, "download_error": err.Error()}, msg)
 	}
-	return map[string]any{"path": p, "mime": mime, "kind": kind}
+	return withSound(map[string]any{"path": p, "mime": mime,
+		"kind": kind}, msg)
 }
 
 // quotedOf resolves a message's reply quote: the quoted message
@@ -1497,6 +1500,56 @@ func stickerRefusal(kind, ext string, viewOnce bool) string {
 	return ""
 }
 
+// soundStickerRefusal is the sound form's honest gate, called
+// BEFORE any upload alongside stickerRefusal: sound audio only
+// rides on a sticker (the bridge nests it on StickerMessage
+// field 26), the sticker must be WebP, the audio must be OGG
+// Opus, and a sound sticker cannot be view-once.  No audio
+// means no sound send — the gate is silent, and the silent
+// sticker path is untouched.
+func soundStickerRefusal(kind, ext, audioPath string,
+	viewOnce bool) string {
+	if audioPath == "" {
+		return ""
+	}
+	if kind != "sticker" {
+		if kind == "" {
+			kind = "unknown"
+		}
+		return "sound audio only rides on a sticker — this is " +
+			"a " + kind + " attachment"
+	}
+	if ext != ".webp" {
+		return "a sound sticker needs a WebP sticker to ride on"
+	}
+	if strings.ToLower(filepath.Ext(audioPath)) != ".ogg" {
+		return "sound audio must be OGG Opus (.ogg) — the " +
+			"maker transcodes it"
+	}
+	if viewOnce {
+		return "a sound sticker cannot be sent view-once"
+	}
+	return ""
+}
+
+// stickerHasSound reports whether an inbound sticker carries
+// audio on StickerMessage field 26 — a sound sticker, not a
+// silent one.
+func stickerHasSound(msg *waE2E.Message) bool {
+	st := msg.GetStickerMessage()
+	return st != nil && st.GetAudioMessage() != nil
+}
+
+// withSound adds the sound flag to an inbound media row when
+// the message is a sound sticker; silent media rows are
+// byte-identical to before.
+func withSound(row map[string]any, msg *waE2E.Message) map[string]any {
+	if stickerHasSound(msg) {
+		row["sound"] = true
+	}
+	return row
+}
+
 // webpIsAnimated sniffs a WebP's bytes by walking its RIFF
 // chunks: a VP8X chunk with the animation flag (bit 0x02) or
 // an ANIM chunk means animated. Malformed input reads false
@@ -1559,6 +1612,42 @@ var extMIME = map[string]string{
 	".pdf": "application/pdf",
 }
 
+// uploadSoundAudio uploads the OGG Opus audio that rides a sound
+// sticker and shapes it as the nested AudioMessage for
+// StickerMessage field 26. The mimetype is the Opus form the
+// client expects; seconds rides only when the caller knows it
+// (0 = omitted, the client measures it). The newsletter upload
+// branch mirrors the sticker upload's own.
+func (b *bridge) uploadSoundAudio(ctx context.Context, chat types.JID,
+	audioPath string, audioSeconds float64) (*waE2E.AudioMessage, error) {
+	audioData, err := os.ReadFile(audioPath)
+	if err != nil {
+		return nil, errors.New("sound audio file not found: " +
+			audioPath)
+	}
+	var up whatsmeow.UploadResponse
+	if chat.Server == types.NewsletterServer {
+		up, err = b.cli.UploadNewsletter(ctx, audioData,
+			whatsmeow.MediaAudio)
+	} else {
+		up, err = b.cli.Upload(ctx, audioData, whatsmeow.MediaAudio)
+	}
+	if err != nil {
+		return nil, err
+	}
+	audio := &waE2E.AudioMessage{
+		URL: proto.String(up.URL), DirectPath: proto.String(up.DirectPath),
+		MediaKey: up.MediaKey,
+		Mimetype: proto.String("audio/ogg; codecs=opus"),
+		FileSHA256: up.FileSHA256, FileEncSHA256: up.FileEncSHA256,
+		FileLength: proto.Uint64(up.FileLength),
+	}
+	if audioSeconds > 0 {
+		audio.Seconds = proto.Uint32(uint32(audioSeconds))
+	}
+	return audio, nil
+}
+
 func (b *bridge) cmdSendMedia(ctx context.Context, cc *clientConn, id string, req request) {
 	chat, err := parseJID(req.str("chat"))
 	if err != nil {
@@ -1584,6 +1673,12 @@ func (b *bridge) cmdSendMedia(ctx context.Context, cc *clientConn, id string, re
 	// StickerMessage, a .webm with kind sticker is refused
 	// before any upload.
 	mediaKind := req.str("media_kind")
+	// Sound-sticker audio (the OGG Opus file that rides a
+	// sticker, nested on StickerMessage field 26): the
+	// adapter passes it alongside media_kind "sticker".
+	// Empty on every silent send.
+	audioPath := req.str("audio_path")
+	audioSeconds, _ := req.flt("audio_seconds")
 	// Special forms (parity bundle #10): view_once wraps a
 	// photo/video so the recipient gets one look (the flag form
 	// on the media message — the same shape this bridge's
@@ -1611,6 +1706,11 @@ func (b *bridge) cmdSendMedia(ctx context.Context, cc *clientConn, id string, re
 		return
 	}
 	if refusal := stickerRefusal(mediaKind, ext, viewOnce); refusal != "" {
+		b.reply(cc, id, map[string]any{"ok": false, "error": refusal})
+		return
+	}
+	if refusal := soundStickerRefusal(mediaKind, ext, audioPath,
+		viewOnce); refusal != "" {
 		b.reply(cc, id, map[string]any{"ok": false, "error": refusal})
 		return
 	}
@@ -1644,6 +1744,27 @@ func (b *bridge) cmdSendMedia(ctx context.Context, cc *clientConn, id string, re
 				FileLength: proto.Uint64(up.FileLength),
 				IsAnimated: proto.Bool(webpIsAnimated(data)),
 			}}
+			if audioPath != "" {
+				// A sound sticker: the audio is a SECOND
+				// media upload, nested on StickerMessage
+				// field 26 (the transport pinned from
+				// @aunucore/baileys 2.7.0) — the audio bytes
+				// do NOT travel inside the WebP; the hash in
+				// the WebP EXIF is only the client-side
+				// pairing link. The sticker upload above
+				// already landed; a failed audio upload is
+				// an honest refusal, never a silent sticker.
+				audioMsg, err := b.uploadSoundAudio(ctx, chat,
+					audioPath, audioSeconds)
+				if err != nil {
+					b.reply(cc, id, map[string]any{
+						"ok": false, "error": err.Error()})
+					return
+				}
+				msg.StickerMessage.Audio =
+					&waE2E.StickerMessage_AudioMessage{
+						AudioMessage: audioMsg}
+			}
 		} else {
 			msg = &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
 				URL: proto.String(up.URL), DirectPath: proto.String(up.DirectPath),
