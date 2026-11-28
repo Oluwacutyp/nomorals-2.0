@@ -3613,10 +3613,12 @@ class RuntimeGroupMixin:
         """The account dossier (/lookup): who an account is, by
         ID or @handle — Telegram ID, account-age ESTIMATE
         (labelled, from the ID range — never a made-up exact
-        date), phone only when the userbot can legitimately see
-        it (mutual contact), groups the account is in, username
-        and display-name history with dates, economy standing
-        and moderation record.
+        date), phone from the live read, the userbot's contacts,
+        Devon's /addcontact records, or Devon's own copy of the
+        Telegram user database (the leaked corpus, stocked by
+        /lookup provision telegramdb), groups the account is in,
+        username and display-name history with dates, economy
+        standing and moderation record.
 
         Every field is a verified fact with its source, an
         honestly-labelled estimate, or "not visible" — the
@@ -3634,6 +3636,8 @@ class RuntimeGroupMixin:
         surface = self._group_surface()
         sender = str(message.sender_id or message.sender or "")
         wanted = str(tail or "").strip()
+        if wanted.lower().startswith("provision"):
+            return self._control_lookup_provision(wanted, message)
         in_group = (message.chat.kind == ChatKind.GROUP)
         group_key = (self._group_key_or_none(message)
                      if in_group else None)
@@ -3784,9 +3788,11 @@ class RuntimeGroupMixin:
         # for mutual contacts and everybody-visible accounts;
         # (2) the userbot account's own contact list — numbers
         # the owner saved; (3) Devon's own record — a
-        # /addcontact journal row naming this account.  Each
-        # names its source; all three missing renders hidden,
-        # never a guessed number.
+        # /addcontact journal row naming this account; (4)
+        # Devon's own copy of the Telegram user database (the
+        # leaked corpus — /lookup provision telegramdb stocks
+        # it).  Each names its source; all four missing renders
+        # hidden, never a guessed number.
         phone = ""
         phone_source = ""
         if not is_whatsapp:
@@ -3809,6 +3815,15 @@ class RuntimeGroupMixin:
                             "added via /addcontact" + (
                                 f" on {_fmt_ts(journal_ts)}"
                                 if journal_ts else ""))
+                    else:
+                        db_phone = self._lookup_telegramdb_phone(
+                            target_id,
+                            str(live.get("username") or ""))
+                        if db_phone:
+                            phone = db_phone
+                            phone_source = (
+                                "Telegram user database "
+                                "(leaked corpus)")
         # The full dossier (phone + economy/moderation/reputation
         # detail) is for the operator, the account itself, or an
         # admin of a group the target is in.  Anyone else gets
@@ -4030,17 +4045,24 @@ class RuntimeGroupMixin:
             extra_names = [str(u) for u in
                            live.get("usernames") or []
                            if str(u) and str(u) != username]
+            if phone:
+                phone_text = f"{phone} ({phone_source})"
+            elif self._telegramdb_present():
+                phone_text = ("not visible — Telegram only shows a "
+                              "number to mutual contacts or when the "
+                              "account sets it public; no copy in "
+                              "Devon's records or the Telegram database")
+            else:
+                phone_text = ("not visible — Telegram only shows a "
+                              "number to mutual contacts or when the "
+                              "account sets it public; Devon holds no "
+                              "copy")
             rows = [("Telegram ID", target_id),
                     ("Handle", f"@{username}" if username
                      else "no username"),
                     ("Bio", bio_text),
                     ("Presence", presence),
-                    ("Phone",
-                     f"{phone} ({phone_source})" if phone
-                     else "not visible — Telegram only shows a "
-                     "number to mutual contacts or when the "
-                     "account sets it public; Devon holds no "
-                     "copy"),
+                    ("Phone", phone_text),
                     ("Flags", ", ".join(flags)
                      if flags else "none"),
                     ("Language",
@@ -4442,6 +4464,133 @@ class RuntimeGroupMixin:
                 ts = None
             return phone, ts
         return "", None
+
+    def _telegramdb_home(self):  # type: ignore[no-untyped-def]
+        """Devon's home dir for the Telegram user database copy
+        (settings.home; the module falls back to NM_HOME /
+        ~/.nomorals when it is unset)."""
+        return getattr(getattr(getattr(self, "context", None),
+                               "settings", None), "home", None)
+
+    def _telegramdb_present(self) -> bool:
+        """Whether the local Telegram user database copy is
+        stocked.  The not-visible phone line says so honestly:
+        "Devon holds no copy" is only true when it is absent."""
+        try:
+            from ...agents.osint_telegramdb import db_status
+
+            return bool(db_status(home=self._telegramdb_home())
+                        .get("present"))
+        except Exception:  # noqa: BLE001 - absent, no detail
+            return False
+
+    def _lookup_telegramdb_phone(self, target_id: str,
+                                 username: str = "") -> str | None:
+        """Route (4): the number out of Devon's own copy of the
+        Telegram user database (the leaked corpus, stocked by
+        /lookup provision telegramdb).  None when the copy is
+        absent, unreadable, or holds no row for the account —
+        the line then says not visible, never a guess."""
+        try:
+            from ...agents.osint_telegramdb import lookup_telegramdb
+
+            phone = lookup_telegramdb(
+                str(target_id), str(username or ""),
+                home=self._telegramdb_home()) or None
+            if phone and phone.isdigit():
+                # The corpus stores bare international digits;
+                # the dossier shows the E.164 form, like the
+                # other phone routes.
+                return "+" + phone
+            return phone
+        except Exception:  # noqa: BLE001 - no number, no detail
+            return None
+
+    def _control_lookup_provision(self, wanted,  # type: ignore[no-untyped-def]
+                                  message) -> str:
+        """The database behind phone route (4): /lookup provision
+        says whether Devon's copy of the Telegram user database
+        is stocked; /lookup provision telegramdb stocks it — a
+        background build (the 4.6 GB corpus takes minutes; the
+        status command says when it lands).  Operator-only: the
+        copy holds other people's numbers."""
+        try:
+            if not self._is_operator(message):
+                return ("Only the operator can stock the Telegram "
+                        "user database.")
+        except Exception:  # noqa: BLE001 - fall to the status read
+            pass
+        import threading
+
+        from ...agents.osint_telegramdb import (
+            NEED_BYTES,
+            build_db,
+            ensure_telegramdb,
+            telegramdb_path,
+        )
+
+        home = self._telegramdb_home()
+        parts = str(wanted or "").split()
+        state = getattr(self, "_telegramdb_build", None) or {}
+        if len(parts) >= 2 and parts[1].lower() == "telegramdb":
+            st = ensure_telegramdb(home=home)
+            if st["status"] == "ready":
+                return (f"Telegram user database: already stocked "
+                        f"— {st['rows']} usable rows.  /lookup can "
+                        f"uncover a number from it when the account "
+                        f"hides it.")
+            if (isinstance(state, dict)
+                    and state.get("status") == "building"):
+                return ("Telegram user database: still building — "
+                        "check again with /lookup provision.")
+            # The disk guard, up front and honest: the build
+            # refuses here rather than dying halfway in a
+            # background thread where nobody sees it.
+            try:
+                import shutil
+
+                free = shutil.disk_usage(
+                    telegramdb_path(home).parent.parent).free
+            except OSError:
+                free = None
+            if free is not None and free < NEED_BYTES:
+                return (f"Telegram user database: cannot build — "
+                        f"it needs {NEED_BYTES / 1024 ** 3:.1f} GB "
+                        f"free and this box has "
+                        f"{free / 1024 ** 3:.1f} GB free.  Clear "
+                        f"space first, then run /lookup provision "
+                        f"telegramdb again.")
+
+            def _run() -> None:
+                self._telegramdb_build = build_db(home=home)
+
+            self._telegramdb_build = {
+                "status": "building",
+                "detail": "building in the background"}
+            threading.Thread(target=_run, daemon=True).start()
+            return ("Telegram user database: building in the "
+                    "background — the public 4.6 GB corpus is "
+                    "being indexed.  /lookup provision says when "
+                    "it lands.")
+        if (isinstance(state, dict)
+                and state.get("status") == "building"):
+            return ("Telegram user database: still building — "
+                    "check again with /lookup provision.")
+        st = ensure_telegramdb(home=home)
+        if st["status"] == "ready":
+            return (f"Telegram user database: stocked — "
+                    f"{st['rows']} usable rows.  /lookup can "
+                    f"uncover a number from it when the account "
+                    f"hides it.  (Stale data, collected "
+                    f"2019–2024: absence means nothing.)")
+        if st["status"] == "failed":
+            return (f"Telegram user database: {st['detail']}  "
+                    f"Run /lookup provision telegramdb to rebuild "
+                    f"it.")
+        return ("Telegram user database: not stocked.  /lookup "
+                "provision telegramdb stocks it — it downloads "
+                "the public 4.6 GB corpus and builds a local "
+                "index (needs ~3 GB free).")
 
     def _lookup_graph_links(self, username: str) -> list[str]:
         """Public links on file for one @handle, from the OSINT

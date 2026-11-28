@@ -396,6 +396,129 @@ class _LookupRuntimeTests(unittest.TestCase):
             "example.com"]
 
 
+# ── telegramdb phone route: the leaked-corpus lookup ──────────
+
+
+class _TelegramDbPhoneTests(unittest.TestCase):
+    """Route (4) of the phone chain: the local Telegram user
+    database.  The fixture DB is built with the module's own
+    ``_write_sqlite`` — synthetic rows, test data only."""
+
+    def setUp(self):
+        from nomorals.agents.partner_runtime import PartnerRuntime
+        from nomorals.storage.db import Database
+
+        self._tmp = tempfile.TemporaryDirectory(prefix="nm-test-tdb-")
+        rt = PartnerRuntime.__new__(PartnerRuntime)
+        rt.context = SimpleNamespace(
+            db=Database(":memory:"),
+            settings=SimpleNamespace(
+                community_dir=self._tmp.name,
+                home=self._tmp.name),
+        )
+        rt._owner_chats = {"5478650254"}
+        rt._owner_sender_ids = {"5478650254"}
+        self.rt = rt
+        surface = GroupSurface(
+            GroupStore(Path(self._tmp.name) / "g.json").load())
+        surface.record_join(KEY, "7", username="ada", name="Ada",
+                            ts=NOW)
+        surface.handle_message(KEY, "7", username="ada_ng",
+                               name="Ada N.", text="hi", ts=NOW + 1)
+        surface.store.save()
+        self.surface = surface
+        self.rt._group_surface_obj = surface
+        # No live phone, no contacts: only the database can
+        # supply the number.
+        self.rt._lookup_user_full = lambda uid: {
+            "username": "ada_ng", "name": "Ada N."}
+        self.rt._group_adapter = lambda platform: None
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _dm(self, sender_id, text):
+        chat = SimpleNamespace(key=f"telegram:{sender_id}",
+                               platform="telegram", kind=ChatKind.DM,
+                               chat_id=sender_id)
+        return SimpleNamespace(chat=chat, text=text, meta={},
+                               sender="someone", sender_id=sender_id)
+
+    def _lookup(self, sender_id, tail):
+        import html
+
+        out = self.rt.handle_control(
+            f"/lookup {tail}", f"telegram:{sender_id}",
+            self._dm(sender_id, f"/lookup {tail}"))
+        return html.unescape(getattr(out, "text", out))
+
+    def _fixture_db(self, rows):
+        from nomorals.agents.osint_telegramdb import _write_sqlite
+
+        path = Path(self._tmp.name) / "osint" / "telegramdb.sqlite"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_sqlite(iter(rows), path, dataset="test-fixture")
+        return path
+
+    def test_phone_from_telegramdb_by_id(self):
+        self._fixture_db([("7", "ada_ng", "2348077776666")])
+        out = self._lookup("5478650254", "7")
+        assert "+2348077776666 (Telegram user database" in out
+
+    def test_phone_from_telegramdb_by_username_only(self):
+        # No row for the ID — the handle alone finds it.
+        self._fixture_db([("424242", "ada_ng", "2348077776667")])
+        out = self._lookup("5478650254", "7")
+        assert "+2348077776667 (Telegram user database" in out
+
+    def test_phone_hidden_when_db_absent(self):
+        out = self._lookup("5478650254", "7")
+        assert "not visible" in out.lower()
+        assert "Telegram only shows a number" in out
+
+    def test_phone_hidden_when_db_has_no_row(self):
+        self._fixture_db([("424242", "someone_else",
+                           "2348000000001")])
+        out = self._lookup("5478650254", "7")
+        assert "not visible" in out.lower()
+        assert "+2348000000001" not in out
+        assert "Telegram database" in out
+
+    def test_earlier_routes_win_over_telegramdb(self):
+        self._fixture_db([("7", "ada_ng", "2348077776666")])
+        adapter = SimpleNamespace(
+            user_contact_phone=lambda uid: "+2348011112222"
+            if str(uid) == "7" else None)
+        self.rt._group_adapter = lambda platform: (
+            adapter if platform == "telegram" else None)
+        out = self._lookup("5478650254", "7")
+        assert "+2348011112222 (in the userbot's contacts)" in out
+        assert "+2348077776666" not in out
+
+    def test_lookup_provision_status_missing(self):
+        out = self._lookup("5478650254", "provision")
+        assert "telegram" in out.lower()
+        assert "not" in out.lower() and "provision" in out.lower()
+
+    def test_lookup_provision_status_present(self):
+        self._fixture_db([("7", "ada_ng", "2348077776666")])
+        out = self._lookup("5478650254", "provision")
+        assert "1" in out  # one row stocked
+        assert "ready" in out.lower() or "stocked" in out.lower()
+
+    def test_lookup_provision_refuses_when_disk_short(self):
+        from nomorals.agents import osint_telegramdb as tdb
+
+        old = tdb.NEED_BYTES
+        tdb.NEED_BYTES = 10 ** 18
+        try:
+            out = self._lookup("5478650254", "provision telegramdb")
+        finally:
+            tdb.NEED_BYTES = old
+        assert "free" in out.lower() or "space" in out.lower()
+        assert "not" in out.lower() or "cannot" in out.lower()
+
+
 # ── user_update seam: silent fan-out, no reply ──────────────────
 
 
