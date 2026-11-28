@@ -656,6 +656,28 @@ def _user_status_fields(user: Any) -> dict[str, Any]:
     return {"status_kind": kind, "was_online": was_online}
 
 
+def _member_row(user: Any) -> dict[str, Any]:
+    """One MTProto user → the member row the roster reads
+    share (member list, name search, contact list): id,
+    display name, handle, the phone number WHEN Telegram
+    shows one (visibility is per-user privacy, so "" for
+    most members — never a Telegram id dressed up as a
+    number), the bot/deleted flags, and the last-seen
+    evidence. Shared by _members_coro and the lookup's
+    name fan-out so both read the same shape."""
+    return {
+        "id": str(getattr(user, "id", "")),
+        "name": " ".join(filter(None, [
+            getattr(user, "first_name", ""),
+            getattr(user, "last_name", "")])).strip(),
+        "username": getattr(user, "username", "") or "",
+        "phone": str(getattr(user, "phone", "") or ""),
+        "bot": bool(getattr(user, "bot", False)),
+        "deleted": bool(getattr(user, "deleted", False)),
+        **_user_status_fields(user),
+    }
+
+
 #: /privacy on the personal Telegram surface (parity G5,
 #: census bundle #8): the owner-facing category names —
 #: chatops.TG_PRIVACY_CATEGORIES carries the same keys, and a
@@ -725,6 +747,104 @@ def _tg_privacy_word(rule_names: list[str]) -> str:
                 "(a Telegram-only shape — no shared word for it)")
     return ("a custom rule list (a Telegram shape with no "
             "shared word for it)")
+
+
+def _shape_full_user(full: Any, photo_count: int | None = None
+                     ) -> dict[str, Any] | None:
+    """One Telethon GetFullUser response → the member-intel
+    dossier dict (the shape TelegramAdapter.user_full has
+    always returned). Shared with the bot-token MTProto
+    session so both spines render the same dossier from the
+    same fields. Every field is read off the MTProto objects
+    with getattr, so an older layer that lacks a field leaves
+    it absent instead of crashing the read. ``photo_count``
+    rides in from the caller (it is a second call); None when
+    the caller could not read it — never 0 dressed up as "no
+    photos". Never raises."""
+    full_user = getattr(full, "full_user", None)
+    user = getattr(full_user, "user", None)
+    if user is None:
+        users = getattr(full, "users", None) or []
+        user = users[0] if users else None
+    if user is None:
+        return None
+    first = str(getattr(user, "first_name", "") or "")
+    last = str(getattr(user, "last_name", "") or "")
+    out: dict[str, Any] = {
+        "id": str(getattr(user, "id", "") or ""),
+        "username": str(getattr(user, "username", "") or ""),
+        "name": " ".join(p for p in (first, last) if p),
+        "phone": getattr(user, "phone", None) or None,
+        "bot": bool(getattr(user, "bot", False)),
+        "premium": bool(getattr(user, "premium", False)),
+        "verified": bool(getattr(user, "verified", False)),
+        "scam": bool(getattr(user, "scam", False)),
+        "fake": bool(getattr(user, "fake", False)),
+        "restricted": bool(getattr(user, "restricted", False)),
+        "support": bool(getattr(user, "support", False)),
+        "contact": bool(getattr(user, "contact", False)),
+        "mutual_contact": bool(getattr(user, "mutual_contact",
+                                        False)),
+        "deleted": bool(getattr(user, "deleted", False)),
+        "lang_code": str(getattr(user, "lang_code", "") or ""),
+        "about": str(getattr(full_user, "about", "") or ""),
+        "common_chats_count": getattr(
+            full_user, "common_chats_count", None),
+    }
+    # Every username the account holds: the primary plus any
+    # collectible (fragment) usernames, active only. An
+    # account with none keeps just the primary field.
+    extra: list[str] = []
+    for entry in getattr(user, "usernames", None) or []:
+        handle = str(getattr(entry, "username", "") or "")
+        if handle and getattr(entry, "active", True):
+            extra.append(handle)
+    out["usernames"] = extra
+    # The profile photo: presence + id + the DC that serves
+    # it, straight off the full-user object.
+    photo = getattr(full_user, "profile_photo", None)
+    out["has_photo"] = photo is not None
+    out["photo_id"] = str(getattr(photo, "id", "") or "") \
+        if photo is not None else ""
+    out["photo_dc"] = getattr(photo, "dc_id", None) \
+        if photo is not None else None
+    # Last seen / online: the User.status object carries it —
+    # online now, a was_online stamp for offline, or
+    # Telegram's own coarse buckets (recently, last week,
+    # last month). No stamp is ever invented.
+    status = getattr(user, "status", None)
+    kind = type(status).__name__ if status is not None else ""
+    out["status_kind"] = {
+        "UserStatusOnline": "online",
+        "UserStatusOffline": "offline",
+        "UserStatusRecently": "recently",
+        "UserStatusLastWeek": "last_week",
+        "UserStatusLastMonth": "last_month",
+        "UserStatusEmpty": "",
+    }.get(kind, "")
+    was = getattr(status, "was_online", None) \
+        if status is not None else None
+    try:
+        out["last_seen_ts"] = float(was.timestamp()) \
+            if was is not None else None
+    except Exception:  # noqa: BLE001 - no stamp, no field
+        out["last_seen_ts"] = None
+    # The linked personal channel, when the account has one:
+    # the id off the full user, the title off the chats the
+    # same response already carries.
+    channel_id = getattr(full_user, "personal_channel_id", None)
+    out["personal_channel_id"] = (
+        str(channel_id) if channel_id else "")
+    title = ""
+    if channel_id:
+        for chat in getattr(full, "chats", None) or []:
+            if str(getattr(chat, "id", "") or "") == \
+                    str(channel_id):
+                title = str(getattr(chat, "title", "") or "")
+                break
+    out["personal_channel_title"] = title
+    out["photo_count"] = photo_count
+    return out
 
 
 class TelegramAdapter(ChatAdapter):
@@ -4799,27 +4919,7 @@ class TelegramAdapter(ChatAdapter):
         out: list[dict[str, Any]] = []
         async for u in self._client.iter_participants(
                 entity, limit=max(1, min(cap, limit))):
-            out.append({
-                "id": str(getattr(u, "id", "")),
-                "name": " ".join(filter(None, [
-                    getattr(u, "first_name", ""),
-                    getattr(u, "last_name", "")])).strip(),
-                "username": getattr(u, "username", "") or "",
-                # The phone number WHEN Telegram shows one:
-                # visibility is per-user privacy, so this is
-                # "" for most members — the /vcf export reads
-                # it and counts the hidden ones honestly
-                # instead of treating a Telegram id as a
-                # number (it is not one).
-                "phone": str(getattr(u, "phone", "") or ""),
-                "bot": bool(getattr(u, "bot", False)),
-                # The cleanup scan's raw material (group build,
-                # member cleanup): Telegram's own deleted flag
-                # and the account's last-seen class + exact
-                # was-online stamp when Telegram shows one.
-                "deleted": bool(getattr(u, "deleted", False)),
-                **_user_status_fields(u),
-            })
+            out.append(_member_row(u))
         return out
 
     def admin_members(self, chat: ChatRef,
@@ -5483,97 +5583,11 @@ class TelegramAdapter(ChatAdapter):
             except (TypeError, ValueError):
                 peer = str(user_id)
             full = await self._client(GetFullUserRequest(peer))
-            full_user = getattr(full, "full_user", None)
-            user = getattr(full_user, "user", None)
-            if user is None:
-                users = getattr(full, "users", None) or []
-                user = users[0] if users else None
-            if user is None:
-                return None
-            first = str(getattr(user, "first_name", "") or "")
-            last = str(getattr(user, "last_name", "") or "")
-            out: dict[str, Any] = {
-                "id": str(getattr(user, "id", "") or ""),
-                "username": str(getattr(user, "username", "") or ""),
-                "name": " ".join(p for p in (first, last) if p),
-                "phone": getattr(user, "phone", None) or None,
-                "bot": bool(getattr(user, "bot", False)),
-                "premium": bool(getattr(user, "premium", False)),
-                "verified": bool(getattr(user, "verified", False)),
-                "scam": bool(getattr(user, "scam", False)),
-                "fake": bool(getattr(user, "fake", False)),
-                "restricted": bool(getattr(user, "restricted",
-                                            False)),
-                "support": bool(getattr(user, "support", False)),
-                "contact": bool(getattr(user, "contact", False)),
-                "mutual_contact": bool(getattr(
-                    user, "mutual_contact", False)),
-                "deleted": bool(getattr(user, "deleted", False)),
-                "lang_code": str(getattr(user, "lang_code", "")
-                                 or ""),
-                "about": str(getattr(full_user, "about", "") or ""),
-                "common_chats_count": getattr(
-                    full_user, "common_chats_count", None),
-            }
-            # Every username the account holds: the primary plus
-            # any collectible (fragment) usernames, active only.
-            # An account with none keeps just the primary field.
-            extra: list[str] = []
-            for entry in getattr(user, "usernames", None) or []:
-                handle = str(getattr(entry, "username", "") or "")
-                if handle and getattr(entry, "active", True):
-                    extra.append(handle)
-            out["usernames"] = extra
-            # The profile photo: presence + id + the DC that
-            # serves it, straight off the full-user object.
-            photo = getattr(full_user, "profile_photo", None)
-            out["has_photo"] = photo is not None
-            out["photo_id"] = str(getattr(photo, "id", "") or "") \
-                if photo is not None else ""
-            out["photo_dc"] = getattr(photo, "dc_id", None) \
-                if photo is not None else None
-            # Last seen / online: the User.status object carries
-            # it — online now, a was_online stamp for offline,
-            # or Telegram's own coarse buckets (recently, last
-            # week, last month).  No stamp is ever invented.
-            status = getattr(user, "status", None)
-            kind = type(status).__name__ if status is not None \
-                else ""
-            out["status_kind"] = {
-                "UserStatusOnline": "online",
-                "UserStatusOffline": "offline",
-                "UserStatusRecently": "recently",
-                "UserStatusLastWeek": "last_week",
-                "UserStatusLastMonth": "last_month",
-                "UserStatusEmpty": "",
-            }.get(kind, "")
-            was = getattr(status, "was_online", None) \
-                if status is not None else None
-            try:
-                out["last_seen_ts"] = float(was.timestamp()) \
-                    if was is not None else None
-            except Exception:  # noqa: BLE001 - no stamp, no field
-                out["last_seen_ts"] = None
-            # The linked personal channel, when the account has
-            # one: the id off the full user, the title off the
-            # chats the same response already carries.
-            channel_id = getattr(
-                full_user, "personal_channel_id", None)
-            out["personal_channel_id"] = (
-                str(channel_id) if channel_id else "")
-            title = ""
-            if channel_id:
-                for chat in getattr(full, "chats", None) or []:
-                    if str(getattr(chat, "id", "") or "") == \
-                            str(channel_id):
-                        title = str(getattr(chat, "title", "")
-                                    or "")
-                        break
-            out["personal_channel_title"] = title
             # How many profile photos the account holds (a
             # second, cheap call — limit 1, the count rides
-            # along).  Absent when the read fails, never 0
+            # along). Absent when the read fails, never 0
             # dressed up as "no photos".
+            photo_count: int | None = None
             try:
                 from telethon.tl.functions.photos import (
                     GetUserPhotosRequest,
@@ -5582,11 +5596,10 @@ class TelegramAdapter(ChatAdapter):
                 photos = await self._client(
                     GetUserPhotosRequest(peer, offset=0, max_id=0,
                                          limit=1))
-                out["photo_count"] = int(getattr(
-                    photos, "count", 0) or 0)
+                photo_count = int(getattr(photos, "count", 0) or 0)
             except Exception:  # noqa: BLE001 - count stays absent
-                out["photo_count"] = None
-            return out
+                photo_count = None
+            return _shape_full_user(full, photo_count=photo_count)
 
         try:
             return self._run_on_loop(_do(), timeout=30.0)
@@ -5648,6 +5661,203 @@ class TelegramAdapter(ChatAdapter):
         except Exception as exc:  # noqa: BLE001 - no number, no crash
             _log.debug("telegram contact phone read failed: %s",
                        exc)
+            return None
+
+    def list_contacts(self) -> list[dict[str, Any]]:
+        """The userbot account's OWN contact list as member
+        rows — the candidate-gathering fan-out for name
+        lookups, and the contact route of the phone ladder.
+        A contact is someone the owner saved, so a name
+        match here is a real person he knows. [] when the
+        userbot is down. Read-only."""
+        if self._client is None:
+            return []
+
+        async def _do() -> list[dict[str, Any]]:
+            contacts = await self._client.get_contacts()
+            return [_member_row(entry) for entry in contacts or []]
+
+        try:
+            return self._run_on_loop(_do(), timeout=30.0)
+        except Exception as exc:  # noqa: BLE001 - no list, no crash
+            _log.debug("telegram contact list read failed: %s", exc)
+            return []
+
+    def search_group_members(self, chat: ChatRef, query: str,
+                             limit: int = 50
+                             ) -> list[dict[str, Any]]:
+        """Members of one group whose name or handle matches
+        ``query`` — Telethon's iter_participants search, the
+        name fan-out's per-group rung. [] when the userbot is
+        down or the group cannot be read. Read-only."""
+        if self._client is None:
+            return []
+
+        async def _do() -> list[dict[str, Any]]:
+            entity = await self._resolve(chat)
+            out: list[dict[str, Any]] = []
+            async for u in self._client.iter_participants(
+                    entity, search=str(query or ""),
+                    limit=max(1, int(limit))):
+                out.append(_member_row(u))
+            return out
+
+        try:
+            return self._run_on_loop(_do(), timeout=60.0)
+        except Exception as exc:  # noqa: BLE001 - no rows, no crash
+            _log.debug("telegram group member search failed: %s",
+                       exc)
+            return []
+
+    def search_usernames(self, query: str,
+                         limit: int = 10) -> list[dict[str, Any]]:
+        """contacts.search: Telegram's own username-substring
+        search — it matches HANDLE substrings only, never
+        display names, and it is user-only (a bot session
+        answers BOT_METHOD_INVALID). That is why it feeds the
+        candidate list as one rung among several, never
+        presented as a name search on its own. [] when the
+        userbot is down. Read-only."""
+        if self._client is None:
+            return []
+
+        async def _do() -> list[dict[str, Any]]:
+            from telethon.tl.functions.contacts import SearchRequest
+
+            result = await self._client(SearchRequest(
+                q=str(query or ""), limit=max(1, int(limit))))
+            out: list[dict[str, Any]] = []
+            for user in getattr(result, "users", None) or []:
+                out.append(_member_row(user))
+            return out
+
+        try:
+            return self._run_on_loop(_do(), timeout=30.0)
+        except Exception as exc:  # noqa: BLE001 - no rows, no crash
+            _log.debug("telegram username search failed: %s", exc)
+            return []
+
+    def _debounce_phone_call(self) -> None:
+        """One phone call per 3 s, across resolvePhone and
+        importContacts — Telegram floods fast on these, and a
+        lookup must never burn the account's standing."""
+        import time
+
+        now = time.monotonic()
+        last = float(getattr(self, "_last_phone_call_at", 0.0)
+                     or 0.0)
+        wait = 3.0 - (now - last)
+        if wait > 0:
+            time.sleep(wait)
+        self._last_phone_call_at = time.monotonic()
+
+    def resolve_phone(self, phone: str) -> dict[str, Any] | None:
+        """contacts.resolvePhone: the account behind one
+        number, without adding it as a contact. Debounced to
+        one call per 3 s. PHONE_NOT_OCCUPIED — no account, or
+        the account's privacy blocks the read — answers None,
+        honestly. User-only: a bot session cannot call it.
+        Read-only."""
+        if self._client is None:
+            return None
+        digits = "".join(c for c in str(phone or "") if c.isdigit())
+        if not digits:
+            return None
+
+        async def _do() -> dict[str, Any] | None:
+            from telethon.tl.functions.contacts import (
+                ResolvePhoneRequest,
+            )
+
+            result = await self._client(
+                ResolvePhoneRequest(phone=digits))
+            users = getattr(result, "users", None) or []
+            user = users[0] if users else None
+            if user is None:
+                return None
+            first = str(getattr(user, "first_name", "") or "")
+            last = str(getattr(user, "last_name", "") or "")
+            return {
+                "id": str(getattr(user, "id", "") or ""),
+                "username": str(getattr(user, "username", "")
+                                or ""),
+                "name": " ".join(p for p in (first, last) if p),
+            }
+
+        try:
+            self._debounce_phone_call()
+            return self._run_on_loop(_do(), timeout=30.0)
+        except Exception as exc:  # noqa: BLE001 - no account, no crash
+            _log.debug("telegram resolve phone failed: %s", exc)
+            return None
+
+    def import_phone_contact(self, phone: str, first_name: str = "",
+                             last_name: str = ""
+                             ) -> dict[str, Any] | None:
+        """contacts.importContacts in the Bellingcat shape: one
+        number per lookup, debounced, and the contact is
+        DELETED again right after (contacts.deleteContacts),
+        so the lookup never pollutes the owner's contact
+        list. The import answers with the account the number
+        belongs to — the caller compares its id with the
+        lookup target before trusting any number it returns.
+        Hard per-lookup cap: this method imports exactly one
+        number, never a batch. User-only. None when the
+        number has no account or the read fails."""
+        if self._client is None:
+            return None
+        digits = "".join(c for c in str(phone or "") if c.isdigit())
+        if not digits:
+            return None
+
+        async def _do() -> dict[str, Any] | None:
+            from telethon.tl.functions.contacts import (
+                DeleteContactsRequest,
+                ImportContactsRequest,
+            )
+            from telethon.tl.types import InputPhoneContact, InputUser
+
+            result = await self._client(ImportContactsRequest([
+                InputPhoneContact(client_id=0, phone=digits,
+                                  first_name=str(first_name or ""),
+                                  last_name=str(last_name or ""))]))
+            users = getattr(result, "users", None) or []
+            user = users[0] if users else None
+            # Delete-after, best-effort: the lookup leaves no
+            # contact behind. A failed delete never changes
+            # the lookup's answer.
+            try:
+                ids: list[Any] = []
+                for entry in getattr(result, "imported", None) or []:
+                    uid = getattr(entry, "user_id", None)
+                    if not uid:
+                        continue
+                    for known in users:
+                        if str(getattr(known, "id", "")) == str(uid):
+                            ids.append(InputUser(
+                                uid,
+                                getattr(known, "access_hash", 0)))
+                            break
+                if ids:
+                    await self._client(DeleteContactsRequest(ids))
+            except Exception:  # noqa: BLE001 - delete is best-effort
+                pass
+            if user is None:
+                return None
+            first = str(getattr(user, "first_name", "") or "")
+            last = str(getattr(user, "last_name", "") or "")
+            return {
+                "id": str(getattr(user, "id", "") or ""),
+                "username": str(getattr(user, "username", "")
+                                or ""),
+                "name": " ".join(p for p in (first, last) if p),
+            }
+
+        try:
+            self._debounce_phone_call()
+            return self._run_on_loop(_do(), timeout=30.0)
+        except Exception as exc:  # noqa: BLE001 - no account, no crash
+            _log.debug("telegram import phone failed: %s", exc)
             return None
 
     def common_chats(self, user_id: str
@@ -6374,6 +6584,45 @@ class TelegramBotAdapter(ChatAdapter):
             )
         # unreachable — the loop either returns or raises
         raise ValidationError(f"telegram bot api: {method} failed: rate limited")
+
+    def get_chat(self, ref: Any) -> dict[str, Any] | None:
+        """Bot API getChat: the bot's own read of one chat.
+
+        @username works for public channels and groups; a
+        USER answers only by numeric id AND only when the bot
+        has already encountered them (a shared chat, a prior
+        DM) — a stranger's id answers "chat not found", which
+        is the API's own limit, not a bug in the lookup. None
+        when the call fails. The normalized dict carries the
+        id, the kind (private / group / supergroup /
+        channel), the handle, the display name, and the bio
+        for channels — the same fields the dossier renders.
+        (The user-by-@username path is unprobed live: the
+        survey's §2.4 reading says users need an id; the
+        rung returns whatever the API answers and the dossier
+        labels the source, so an unprobed shape can only
+        under-deliver, never mislead.)"""
+        try:
+            result = self._api("getChat", chat_id=ref)
+        except Exception:  # noqa: BLE001 - a failed read is None
+            return None
+        if not isinstance(result, dict):
+            return None
+        kind = str(result.get("type", "") or "")
+        if kind == "private":
+            first = str(result.get("first_name", "") or "")
+            last = str(result.get("last_name", "") or "")
+            name = " ".join(p for p in (first, last) if p)
+        else:
+            name = str(result.get("title", "") or "")
+        return {
+            "id": str(result.get("id", "") or ""),
+            "type": kind,
+            "username": str(result.get("username", "") or ""),
+            "name": name,
+            "bio": str(result.get("bio", "") or "")
+                   or str(result.get("description", "") or ""),
+        }
 
     # ── lifecycle ───────────────────────────────────────────────────────────
     def preflight(self) -> None:

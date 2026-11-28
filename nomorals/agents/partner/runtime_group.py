@@ -3611,14 +3611,22 @@ class RuntimeGroupMixin:
 
     def _control_lookup(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         """The account dossier (/lookup): who an account is, by
-        ID or @handle — Telegram ID, account-age ESTIMATE
-        (labelled, from the ID range — never a made-up exact
-        date), phone from the live read, the userbot's contacts,
-        Devon's /addcontact records, or Devon's own copy of the
-        Telegram user database (the leaked corpus, stocked by
-        /lookup provision telegramdb), groups the account is in,
-        username and display-name history with dates, economy
-        standing and moderation record.
+        ID, @handle, or display name — Telegram ID, account-age
+        ESTIMATE (labelled, from the ID range — never a made-up
+        exact date), phone from the live read, the userbot's
+        contacts, Devon's /addcontact records, or Devon's own
+        copy of the Telegram user database (the leaked corpus,
+        stocked by /lookup provision telegramdb — a database
+        number is verified live before it is shown), groups the
+        account is in, username and display-name history with
+        dates, economy standing and moderation record. A name
+        returns the matching account, or a pick list when
+        several match — never a silent first pick. The spine is
+        the BOT ITSELF (bot-token MTProto session + Bot API +
+        public t.me page); the userbot is a bonus source only,
+        never a dependency — a lookup answers everything it
+        can with the userbot down, and the dossier's Sources
+        row names every rung that was tried.
 
         Every field is a verified fact with its source, an
         honestly-labelled estimate, or "not visible" — the
@@ -3645,6 +3653,10 @@ class RuntimeGroupMixin:
         is_whatsapp = platform in ("whatsapp", "wa")
         target_id = ""
         live: dict = {}
+        # What the lookup tried, in order, for the dossier's
+        # Sources row: every rung names itself, hit or miss,
+        # so a field never ends at a bare "not visible".
+        tried: list[str] = []
         wa_scanned = 0
         if not wanted:
             target_id = sender
@@ -3658,25 +3670,29 @@ class RuntimeGroupMixin:
             if not target_id:
                 target_id, _groups = self._lookup_scan_ledger(
                     surface, token)
+                tried.append("ledger: hit" if target_id
+                             else "ledger: no match")
             if not target_id and not is_whatsapp:
-                adapter = self._group_adapter("telegram")
-                if adapter is not None:
-                    if not token.isdigit():
-                        try:
-                            found = adapter.member_by_username(
-                                message.chat, token)
-                        except Exception:  # noqa: BLE001 - no proof
-                            found = None
-                        if found:
-                            target_id = str(found.get("id") or "")
-                            live = {"username": found.get(
-                                "username") or "",
-                                "name": found.get("name") or ""}
-                    if not target_id and token.isdigit():
-                        live = self._lookup_user_full(target_id
-                                                      or token) or {}
-                        if live.get("id"):
-                            target_id = str(live["id"])
+                # The spine, in order: the ledger's name index,
+                # the bot-token MTProto session, the Bot API
+                # getChat rung, the public t.me page rung — and
+                # the userbot LAST, as a bonus only. It never
+                # gates the dossier.
+                resolved = self._lookup_resolve_telegram(
+                    surface, token, message, group_key,
+                    had_at=wanted.startswith("@"))
+                tried.extend(resolved.get("tried") or [])
+                kind = resolved.get("kind") or "miss"
+                if kind == "candidates":
+                    return self._lookup_candidate_list(
+                        resolved.get("candidates") or [], wanted,
+                        message, surface)
+                if kind == "tme":
+                    return self._lookup_tme_dossier(
+                        resolved.get("tme") or {}, wanted, tried)
+                if kind == "id":
+                    target_id = str(resolved.get("target_id") or "")
+                    live = resolved.get("live") or {}
             if not target_id and is_whatsapp:
                 # WhatsApp has no username registry and the
                 # Telegram userbot cannot see WhatsApp accounts:
@@ -3702,9 +3718,11 @@ class RuntimeGroupMixin:
                 return (f"no record of {wanted or 'that account'} "
                         "in Devon's groups — not in the ledger"
                         f"{scanned}.")
+            tried_line = (" — tried: " + " · ".join(tried)
+                          if tried else "")
             return (f"no record of {wanted or 'that account'} in "
-                    "Devon's groups, and the userbot couldn't see "
-                    "it either.")
+                    "Devon's groups — no live route could see it"
+                    f"{tried_line}.")
         groups = surface.groups_for_member(target_id)
         member = None
         primary_key = group_key
@@ -3764,6 +3782,21 @@ class RuntimeGroupMixin:
             for key, value in fresh.items():
                 if value or key not in live:
                     live[key] = value
+        if not is_whatsapp:
+            # The live refresh tried the spine too — the Sources
+            # row names it even when the ledger answered first
+            # (a ledger hit never tries the live rungs in the
+            # resolver above).
+            if not any(t.startswith("bot session") for t in tried):
+                tried.append(
+                    "bot session"
+                    if self._lookup_bot_session() is not None
+                    else "bot session down")
+            if not any(t.startswith("userbot") for t in tried):
+                tried.append(
+                    "userbot"
+                    if self._group_adapter("telegram") is not None
+                    else "userbot down")
         username = (live.get("username")
                     or member.get("username") or "")
         name = live.get("name") or member.get("name") or ""
@@ -3791,15 +3824,30 @@ class RuntimeGroupMixin:
         # /addcontact journal row naming this account; (4)
         # Devon's own copy of the Telegram user database (the
         # leaked corpus — /lookup provision telegramdb stocks
-        # it).  Each names its source; all four missing renders
+        # it).  A number the database offers is VERIFIED
+        # against the live account when the userbot is up
+        # (importContacts must return the same id); an
+        # unverified database number is a lead, labelled as
+        # one; a number that fails verification is never
+        # shown.  Each names its source; all missing renders
         # hidden, never a guessed number.
         phone = ""
         phone_source = ""
+        # The database's outcome for the dossier: verified,
+        # unverified (no userbot to check with), rejected
+        # (the import says it belongs to someone else),
+        # absent (no copy stocked), no-row (no row for this
+        # account).
+        db_state = ""
         if not is_whatsapp:
             phone = str(live.get("phone") or "")
             if phone:
-                phone_source = ("mutual contact — visible to "
-                                "the userbot")
+                if live.get("phone_via") == "bot session":
+                    phone_source = ("mutual contact — visible to "
+                                    "the bot")
+                else:
+                    phone_source = ("mutual contact — visible to "
+                                    "the userbot")
             else:
                 contact_phone = self._lookup_contact_phone(
                     target_id)
@@ -3820,10 +3868,32 @@ class RuntimeGroupMixin:
                             target_id,
                             str(live.get("username") or ""))
                         if db_phone:
-                            phone = db_phone
-                            phone_source = (
-                                "Telegram user database "
-                                "(leaked corpus)")
+                            verified, db_source = (
+                                self._lookup_verify_db_phone(
+                                    db_phone, target_id))
+                            if verified:
+                                phone = db_phone
+                                phone_source = db_source
+                                db_state = "verified"
+                            elif verified is False:
+                                db_state = "rejected"
+                            else:
+                                phone = db_phone
+                                phone_source = db_source
+                                db_state = "unverified"
+                        else:
+                            db_state = ("absent" if not
+                                        self._telegramdb_present()
+                                        else "no-row")
+                        tried.append({
+                            "verified": "database: verified",
+                            "unverified": ("database: unverified "
+                                           "lead"),
+                            "rejected": ("database: row did not "
+                                         "verify"),
+                            "absent": "database not stocked",
+                            "no-row": "database: no row",
+                        }.get(db_state, "database"))
         # The full dossier (phone + economy/moderation/reputation
         # detail) is for the operator, the account itself, or an
         # admin of a group the target is in.  Anyone else gets
@@ -4047,16 +4117,30 @@ class RuntimeGroupMixin:
                            if str(u) and str(u) != username]
             if phone:
                 phone_text = f"{phone} ({phone_source})"
-            elif self._telegramdb_present():
-                phone_text = ("not visible — Telegram only shows a "
-                              "number to mutual contacts or when the "
-                              "account sets it public; no copy in "
-                              "Devon's records or the Telegram database")
             else:
+                db_note = ""
+                if db_state == "rejected":
+                    db_note = (" The database DID hold a number, "
+                               "but the live import says it belongs "
+                               "to another account, so it is not "
+                               "shown.")
+                elif db_state == "absent":
+                    db_note = (" Devon holds no copy of the "
+                               "database (run /lookup provision "
+                               "telegramdb).")
+                elif db_state == "no-row":
+                    window = self._lookup_telegramdb_window()
+                    db_note = (" No copy in Devon's records or the "
+                               "Telegram database" +
+                               (f" — its coverage is {window}"
+                                if window else "") + ".")
                 phone_text = ("not visible — Telegram only shows a "
                               "number to mutual contacts or when the "
-                              "account sets it public; Devon holds no "
-                              "copy")
+                              "account sets it public; no route found "
+                              "one (live read, userbot contacts, "
+                              "/addcontact record, Telegram user "
+                              f"database).{db_note} Paid lookup APIs "
+                              "stay out unless you supply a key.")
             rows = [("Telegram ID", target_id),
                     ("Handle", f"@{username}" if username
                      else "no username"),
@@ -4078,7 +4162,9 @@ class RuntimeGroupMixin:
                                        or first_seen)),
                     ("Messages", total_messages),
                     ("Last seen", _fmt_ts(member.get("last_seen"))),
-                    ("Account age", render_account_age(target_id))]
+                    ("Account age", render_account_age(target_id)),
+                    ("Sources", " · ".join(tried) if tried
+                     else "ledger")]
             if extra_names:
                 rows.insert(2, ("Also known as",
                                 ", ".join(f"@{u}"
@@ -4386,20 +4472,101 @@ class RuntimeGroupMixin:
         return None, checked
 
     def _lookup_user_full(self, target_id: str) -> dict | None:
-        """The live user read behind the dossier (userbot
-        MTProto user_full): current username/name, bot/premium
-        flags, phone only when mutual.  None when the userbot
-        is absent or cannot read the account."""
+        """The live user read behind the dossier: the
+        bot-token MTProto session FIRST (the spine), the
+        userbot as a BONUS overlay (its fields fill only
+        what the spine missed — a fresh empty field never
+        clobbers a spine value). Current username/name,
+        bot/premium flags, phone only when mutual. None when
+        no live route can read the account. The dict carries
+        "via" (which rung supplied the identity) and
+        "phone_via" (which rung supplied the phone) for the
+        dossier's source labels."""
+        live = self._lookup_bot_session_user_full(target_id) or {}
+        ub = self._lookup_userbot_user_full(target_id) or {}
+        via = "bot session" if live else "userbot"
+        phone_via = "bot session" if live.get("phone") else ""
+        for key, value in ub.items():
+            if value or key not in live:
+                live[key] = value
+        if not phone_via and live.get("phone"):
+            phone_via = "userbot"
+        if not live:
+            return None
+        live["via"] = via
+        live["phone_via"] = phone_via
+        return live
+
+    def _lookup_bot_session_user_full(self, target_id: str) -> dict:
+        """The spine's full-user read: the bot-token MTProto
+        session. {} when the session is down, unconfigured,
+        or has never encountered the account."""
+        session = self._lookup_bot_session()
+        if session is None:
+            return {}
+        try:
+            return session.user_full(str(target_id)) or {}
+        except Exception:  # noqa: BLE001 - a failed read is {}
+            return {}
+
+    def _lookup_userbot_user_full(self, target_id: str) -> dict:
+        """The BONUS full-user read: the userbot's MTProto
+        client (GetFullUser). Only what Telegram itself
+        returns; never a guess. {} when the userbot is down,
+        disconnected, or cannot read the account."""
         adapter = self._group_adapter("telegram")
         if adapter is None:
-            return None
+            return {}
         fn = getattr(adapter, "user_full", None)
         if fn is None:
-            return None
+            return {}
         try:
-            return fn(str(target_id))
-        except Exception:  # noqa: BLE001 - no proof, no detail
+            return fn(str(target_id)) or {}
+        except Exception:  # noqa: BLE001 - a failed read is {}
+            return {}
+
+    def _lookup_bot_session(self):
+        """The bot-token MTProto session (the lookup spine):
+        a Telethon client signed in as the MAIN BOT itself —
+        its BotFather token, never the owner's personal
+        account. Built once, lazily, from the existing config
+        (chat.telegram_api_id / chat.telegram_api_hash /
+        chat.telegram_bot_token); None when any of those is
+        missing — the lookup falls through to the next rung,
+        never to the owner's account."""
+        session = getattr(self, "_bot_token_session", None)
+        if session is not None:
+            return session
+        try:
+            from pathlib import Path
+
+            from ...social.chat.bot_session import BotTokenSession
+
+            settings = getattr(getattr(self, "context", None),
+                               "settings", None)
+            chat = getattr(settings, "chat", None)
+            api_id = getattr(chat, "telegram_api_id", "") or ""
+            api_hash = getattr(chat, "telegram_api_hash", "") or ""
+            bot_token = getattr(chat, "telegram_bot_token", "") or ""
+            if not api_id or not api_hash or not bot_token:
+                return None
+            resolve = getattr(settings, "resolve", None)
+            home = getattr(settings, "home", None)
+            if callable(resolve):
+                session_path = str(
+                    resolve("data/telegram-bot.session"))
+            elif home:
+                session_path = str(
+                    Path(home) / "data" / "telegram-bot.session")
+            else:
+                return None
+            session = BotTokenSession(
+                api_id=api_id, api_hash=api_hash,
+                bot_token=bot_token, session_path=session_path)
+        except Exception:  # noqa: BLE001 - no session, no spine
             return None
+        self._bot_token_session = session
+        return session
 
     def _lookup_common_chats(self, target_id: str) -> list[dict]:
         """Common groups through the userbot (MTProto
@@ -4506,6 +4673,527 @@ class RuntimeGroupMixin:
         except Exception:  # noqa: BLE001 - no number, no detail
             return None
 
+    # ── the rebuilt resolution order (owner correction
+    # 2026-11-28): the spine is the BOT ITSELF — the ledger's
+    # name index, the bot-token MTProto session, the Bot API
+    # getChat rung, the public t.me page rung — and the
+    # userbot LAST, as a bonus only. It never gates the
+    # dossier. ──────────────────────────────────────────────
+
+    @staticmethod
+    def _lookup_normalize_name(text) -> str:
+        """A name, folded for matching: lowercase, accents
+        stripped, whitespace collapsed. "José García" and
+        "JOSE GARCIA" fold to the same key."""
+        import unicodedata
+
+        folded = unicodedata.normalize(
+            "NFKD", str(text or "").lower())
+        folded = "".join(c for c in folded
+                         if not unicodedata.combining(c))
+        return " ".join(folded.split())
+
+    def _lookup_resolve_telegram(self, surface, token, message,
+                                 group_key, *, had_at=False):
+        """Resolve one Telegram token through the spine, in
+        order. Returns {"kind", "target_id", "live",
+        "candidates", "tme", "tried"}:
+        - kind "id": a target_id was found (live carries what
+          the resolving rung already knew);
+        - kind "candidates": the name search found several —
+          the caller offers the pick list;
+        - kind "tme": only the public t.me page answered — no
+          Telegram ID exists to dossier, so the caller renders
+          the t.me dossier;
+        - kind "miss": nothing answered.
+        "tried" names every rung, hit or miss, for the
+        dossier's Sources row. Never raises."""
+        tried: list[str] = []
+        bare = str(token or "").strip()
+        if not bare:
+            return {"kind": "miss", "tried": tried}
+        if bare.lstrip("+").isdigit():
+            return self._lookup_resolve_number(
+                surface, bare, message, tried)
+        if " " in bare:
+            # A name with a space is a name, never a handle.
+            candidates = self._lookup_name_candidates(
+                surface, bare, message, group_key)
+            tried.append("ledger names: "
+                         f"{len(candidates)} match"
+                         + ("es" if len(candidates) != 1 else ""))
+            if len(candidates) == 1:
+                return {"kind": "id",
+                        "target_id": candidates[0]["id"],
+                        "live": {}, "tried": tried}
+            if candidates:
+                return {"kind": "candidates",
+                        "candidates": candidates, "tried": tried}
+            return {"kind": "miss", "tried": tried}
+        if not had_at:
+            # A bare word: the ledger's name index first (it is
+            # his own record — the people he actually knows),
+            # then the live @username rungs.
+            candidates = self._lookup_name_candidates(
+                surface, bare, message, group_key)
+            tried.append("ledger names: "
+                         f"{len(candidates)} match"
+                         + ("es" if len(candidates) != 1 else ""))
+            if len(candidates) == 1:
+                return {"kind": "id",
+                        "target_id": candidates[0]["id"],
+                        "live": {}, "tried": tried}
+            if candidates:
+                return {"kind": "candidates",
+                        "candidates": candidates, "tried": tried}
+        # Live @username: the bot-token session first.
+        found = self._lookup_spine_member(bare)
+        if found is not None:
+            tried.append("bot session: hit")
+            return {"kind": "id",
+                    "target_id": str(found.get("id") or ""),
+                    "live": {"username": found.get("username")
+                             or "",
+                             "name": found.get("name") or ""},
+                    "tried": tried}
+        tried.append("bot session: no match"
+                     if self._lookup_bot_session() is not None
+                     else "bot session down")
+        # The userbot as BONUS only.
+        adapter = self._group_adapter("telegram")
+        if adapter is not None:
+            try:
+                found = adapter.member_by_username(
+                    message.chat, bare)
+            except Exception:  # noqa: BLE001 - no proof
+                found = None
+            if found:
+                tried.append("userbot: hit")
+                return {"kind": "id",
+                        "target_id": str(found.get("id") or ""),
+                        "live": {"username": found.get("username")
+                                 or "",
+                                 "name": found.get("name") or ""},
+                        "tried": tried}
+            tried.append("userbot: no match")
+        else:
+            tried.append("userbot down")
+        # Bot API getChat.
+        chat = self._lookup_botapi_chat(bare)
+        if chat and chat.get("id"):
+            tried.append("getChat: hit")
+            return {"kind": "id",
+                    "target_id": str(chat["id"]),
+                    "live": {"username": chat.get("username") or "",
+                             "name": chat.get("name") or ""},
+                    "tried": tried}
+        tried.append("getChat: no match")
+        # The public t.me page.
+        page = self._lookup_tme(bare)
+        if page:
+            tried.append("t.me: hit")
+            return {"kind": "tme", "tme": page, "tried": tried}
+        tried.append("t.me: no match")
+        if had_at:
+            # An @-handle whose live rungs all missed: one
+            # last crack — the ledger's name index on the bare
+            # word.
+            candidates = self._lookup_name_candidates(
+                surface, bare, message, group_key)
+            tried.append("ledger names: "
+                         f"{len(candidates)} match"
+                         + ("es" if len(candidates) != 1 else ""))
+            if len(candidates) == 1:
+                return {"kind": "id",
+                        "target_id": candidates[0]["id"],
+                        "live": {}, "tried": tried}
+            if candidates:
+                return {"kind": "candidates",
+                        "candidates": candidates, "tried": tried}
+        return {"kind": "miss", "tried": tried}
+
+    def _lookup_resolve_number(self, surface, bare, message, tried):
+        """A digit token: a Telegram ID or a phone number. The
+        ID read first (spine, then userbot as bonus), then —
+        only for phone-shaped numbers — resolvePhone and
+        importContacts on the userbot, the database by phone,
+        and getChat by id. Returns the same dict shape as
+        _lookup_resolve_telegram. Never raises."""
+        digits = bare.lstrip("+")
+        live = self._lookup_user_full(digits) or {}
+        if live.get("id"):
+            tried.append("live read: hit")
+            return {"kind": "id", "target_id": str(live["id"]),
+                    "live": live, "tried": tried}
+        tried.append("live read: no match")
+        if len(digits) >= 10:
+            adapter = self._group_adapter("telegram")
+            if adapter is not None:
+                for fn_name in ("resolve_phone",
+                                "import_phone_contact"):
+                    fn = getattr(adapter, fn_name, None)
+                    if fn is None:
+                        continue
+                    try:
+                        found = fn(digits)
+                    except Exception:  # noqa: BLE001 - no proof
+                        found = None
+                    if found and found.get("id"):
+                        tried.append(f"{fn_name}: hit")
+                        return {"kind": "id",
+                                "target_id": str(found["id"]),
+                                "live": {
+                                    "username": found.get(
+                                        "username") or "",
+                                    "name": found.get("name") or ""},
+                                "tried": tried}
+                tried.append("userbot phone routes: no match")
+            else:
+                tried.append("userbot down")
+            hit = self._lookup_telegramdb_by_phone(digits)
+            if hit:
+                tried.append("database by phone: hit")
+                return {"kind": "id", "target_id": hit[0],
+                        "live": {"username": hit[1]},
+                        "tried": tried}
+            tried.append("database by phone: no match")
+        chat = self._lookup_botapi_chat(digits)
+        if chat and chat.get("id"):
+            tried.append("getChat: hit")
+            return {"kind": "id",
+                    "target_id": str(chat["id"]),
+                    "live": {"username": chat.get("username") or "",
+                             "name": chat.get("name") or ""},
+                    "tried": tried}
+        tried.append("getChat: no match")
+        return {"kind": "miss", "tried": tried}
+
+    def _lookup_spine_member(self, token):
+        """The spine's @username read: the bot-token session's
+        ResolveUsername. {"id", "username", "name"} or None
+        when the name is unoccupied or the session is down.
+        Never raises."""
+        session = self._lookup_bot_session()
+        if session is None:
+            return None
+        try:
+            return session.resolve_username(token)
+        except Exception:  # noqa: BLE001 - a failed read is None
+            return None
+
+    def _lookup_botapi_chat(self, ref):
+        """The Bot API getChat rung: the bot's own read of one
+        @username or id. {} when the bot has not encountered
+        the account or the call fails. Never raises."""
+        adapter = self._group_adapter("telegram-bot")
+        if adapter is None:
+            return {}
+        fn = getattr(adapter, "get_chat", None)
+        if fn is None:
+            return {}
+        try:
+            found = fn(ref) or {}
+        except Exception:  # noqa: BLE001 - a failed read is {}
+            return {}
+        if not isinstance(found, dict):
+            return {}
+        # Normalize defensively: the Bot API shape carries
+        # first_name/last_name for users and title for chats;
+        # the dossier reads "name".
+        name = str(found.get("name") or "")
+        if not name:
+            first = str(found.get("first_name", "") or "")
+            last = str(found.get("last_name", "") or "")
+            name = " ".join(p for p in (first, last) if p)
+        if not name:
+            name = str(found.get("title", "") or "")
+        return {
+            "id": str(found.get("id", "") or ""),
+            "type": str(found.get("type", "") or ""),
+            "username": str(found.get("username", "") or ""),
+            "name": name,
+            "bio": str(found.get("bio", "") or "")
+                   or str(found.get("description", "") or ""),
+        }
+
+    def _lookup_tme(self, username):
+        """The public t.me page rung: name, verified badge,
+        bio, photo URL for a public @username. {} when the
+        page does not answer or cannot be parsed. Never
+        raises."""
+        try:
+            from ...agents.osint_tme import fetch_tme
+
+            return fetch_tme(username) or {}
+        except Exception:  # noqa: BLE001 - a dead page is {}
+            return {}
+
+    def _lookup_name_candidates(self, surface, token, message,
+                                group_key):
+        """The local name index over the ledger, plus the
+        userbot's fan-out as a bonus — every candidate Devon
+        already knows, merged by numeric ID, capped at 10. A
+        candidate matches when every word of the query appears
+        in the folded display name or handle. Each carries the
+        match note, the display name, the handle or "no
+        username", the ID, photo presence, and the groups —
+        the strongest distinguisher Devon owns. Never raises;
+        [] when nothing matches."""
+        from ...social.chat.base import ChatKind, ChatRef
+
+        query = self._lookup_normalize_name(token)
+        words = query.split()
+        if not words:
+            return []
+        by_id: dict[str, dict] = {}
+
+        def _merge(uid, username, name, *, groups, group_keys,
+                   match, photo=False, messages=0):
+            uid = str(uid or "")
+            if not uid or not uid.lstrip("-").isdigit():
+                return
+            row = by_id.get(uid)
+            if row is None:
+                row = {"id": uid, "username": username or "",
+                       "name": name or "", "groups": [],
+                       "group_keys": [], "match": match,
+                       "photo": bool(photo), "messages": 0}
+                by_id[uid] = row
+            for title in groups:
+                if title not in row["groups"]:
+                    row["groups"].append(title)
+            for key in group_keys:
+                if key not in row["group_keys"]:
+                    row["group_keys"].append(key)
+            row["messages"] = max(row["messages"], messages)
+            if match == "name" and row["match"] != "name":
+                row["match"] = match
+            if not row["username"] and username:
+                row["username"] = username
+            if not row["name"] and name:
+                row["name"] = name
+            if photo:
+                row["photo"] = True
+
+        def _match_note(name, username):
+            folded_name = self._lookup_normalize_name(name)
+            folded_user = self._lookup_normalize_name(username)
+            in_name = all(w in folded_name for w in words)
+            in_user = all(w in folded_user for w in words)
+            if in_name and in_user:
+                return "name + username"
+            if in_name:
+                return "name"
+            return "username"
+
+        def _consider(uid, username, name, *, groups, group_keys,
+                      photo=False, messages=0):
+            hay = (self._lookup_normalize_name(name) + " "
+                   + self._lookup_normalize_name(username))
+            if not all(w in hay for w in words):
+                return
+            _merge(uid, username, name, groups=groups,
+                   group_keys=group_keys,
+                   match=_match_note(name, username),
+                   photo=photo, messages=messages)
+
+        # 1. the ledger: every member of every group Devon serves
+        for key in sorted(surface.store.data.keys()):
+            entry = surface.store.group(key)
+            title = str(entry.get("title") or key)
+            for uid, member in (entry.get("members") or {}).items():
+                _consider(
+                    uid, str(member.get("username") or ""),
+                    str(member.get("name") or ""),
+                    groups=[title], group_keys=[key],
+                    photo=bool(member.get("photo_id")),
+                    messages=int(member.get("message_count") or 0))
+        # 2. the userbot fan-out (bonus only): its own contacts,
+        # a name search in each served group, and Telegram's
+        # username-substring search
+        adapter = self._group_adapter("telegram")
+        if adapter is not None:
+            try:
+                contacts = adapter.list_contacts() or []
+            except Exception:  # noqa: BLE001 - no list, no detail
+                contacts = []
+            for row in contacts:
+                if not isinstance(row, dict):
+                    continue
+                _consider(row.get("id"),
+                          str(row.get("username") or ""),
+                          str(row.get("name") or ""),
+                          groups=[], group_keys=[])
+            keys = sorted(surface.store.data.keys())[:20]
+            for key in keys:
+                platform, _, chat_id = str(key).partition(":")
+                ref = ChatRef(
+                    platform=platform or "telegram-bot",
+                    chat_id=chat_id, kind=ChatKind.GROUP)
+                try:
+                    rows = adapter.search_group_members(
+                        ref, token, limit=50) or []
+                except Exception:  # noqa: BLE001 - no rows
+                    continue
+                title = str(
+                    surface.store.group(key).get("title") or key)
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    _consider(row.get("id"),
+                              str(row.get("username") or ""),
+                              str(row.get("name") or ""),
+                              groups=[title], group_keys=[key])
+            try:
+                rows = adapter.search_usernames(token, limit=10) or []
+            except Exception:  # noqa: BLE001 - no rows, no detail
+                rows = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                _consider(row.get("id"),
+                          str(row.get("username") or ""),
+                          str(row.get("name") or ""),
+                          groups=[], group_keys=[])
+        found = sorted(
+            by_id.values(),
+            key=lambda row: (
+                0 if row["match"] == "name" else 1,
+                -len(row["groups"]),
+                -row["messages"],
+                row["name"].lower(),
+            ))
+        return found[:10]
+
+    def _lookup_candidate_list(self, candidates, wanted, message,
+                               surface):
+        """Several accounts match — a pick list, never a silent
+        first pick. Each row names the display name, the handle
+        or "no username", the ID, and the groups; each button
+        runs /lookup on that ID, so a tap or a bare-number
+        reply resolves through the same command. In a group
+        anyone may pick (like /member); in DM the list shows
+        only to the operator, the account itself, or an admin
+        of a group a candidate is in."""
+        from ...social.chat.base import ChatKind
+        from ...social.chat.tgbot_buttons import actionable
+
+        sender = str(message.sender_id or message.sender or "")
+        in_group = (message.chat.kind == ChatKind.GROUP)
+        if not in_group:
+            group_keys = [key for cand in candidates
+                          for key in cand.get("group_keys") or []]
+            admin_ok = False
+            for key in group_keys:
+                try:
+                    if self._lookup_dm_admin_ok(surface, key, sender):
+                        admin_ok = True
+                        break
+                except Exception:  # noqa: BLE001 - fall to refusal
+                    continue
+            if not (sender in self._owner_sender_ids
+                    or any(sender == cand["id"]
+                           for cand in candidates)
+                    or admin_ok):
+                return ("lookups are for group admins and the "
+                        "operator in DM — ask in a group Devon "
+                        "serves, or have an admin look them up.")
+        lines = [f'Several accounts match "{wanted}" — tap one, '
+                 "or reply with its number:"]
+        buttons: list[list[tuple[str, str]]] = []
+        for i, cand in enumerate(candidates, 1):
+            handle = (f"@{cand['username']}" if cand.get("username")
+                      else "no username")
+            groups = ", ".join((cand.get("groups") or [])[:2])
+            groups = groups or "no group on record"
+            lines.append(
+                f"{i}. {cand['name'] or handle} — {handle} — "
+                f"{cand['id']} — in {groups} "
+                f"({cand.get('match') or 'name'})")
+            buttons.append([(str(i), f"lookup {cand['id']}")])
+        return actionable("\n".join(lines), buttons)
+
+    def _lookup_tme_dossier(self, tme, wanted, tried):
+        """The dossier when only the public t.me page answered:
+        a name, a verified badge, a bio and a photo link — but
+        no Telegram ID, so the account-age estimate, the groups
+        and the economy record cannot be read for this account.
+        The card says exactly that instead of ending at "not
+        visible"."""
+        from ...social.chat.typography import Card, render_card
+
+        card = Card(f"Telegram — {tme.get('name') or wanted}")
+        rows = [
+            ("Display name", str(tme.get("name") or "")),
+            ("Verified", "yes" if tme.get("verified") else "no"),
+            ("Bio", str(tme.get("bio") or "no bio")),
+            ("Photo", str(tme.get("photo_url") or "no photo link")),
+            ("Subscribers", str(tme.get("subscribers") or "—")),
+            ("Telegram ID", "not published — t.me carries no ID, "
+             "so the account-age estimate, groups and economy "
+             "record cannot be read for this account; the bot "
+             "session or userbot would need to have met it first"),
+            ("Sources", " · ".join(tried) if tried else "t.me"),
+        ]
+        card.stats(rows)
+        return render_card(card)
+
+    def _lookup_verify_db_phone(self, db_phone, target_id):
+        """Verify a database number against the live account:
+        importContacts (one number, delete-after) must return
+        the SAME id. Returns (True, source) when confirmed,
+        (False, source) when the import says it belongs to
+        someone else, (None, source) when there is no userbot
+        to verify with. Never raises."""
+        adapter = self._group_adapter("telegram")
+        if adapter is None:
+            return None, ("Telegram user database (leaked corpus, "
+                          "unverified lead)")
+        fn = getattr(adapter, "import_phone_contact", None)
+        if fn is None:
+            return None, ("Telegram user database (leaked corpus, "
+                          "unverified lead)")
+        try:
+            found = fn(db_phone)
+        except Exception:  # noqa: BLE001 - no proof, no detail
+            return None, ("Telegram user database (leaked corpus, "
+                          "unverified lead)")
+        if not found:
+            return None, ("Telegram user database (leaked corpus, "
+                          "unverified lead)")
+        if str(found.get("id") or "") == str(target_id):
+            return True, ("Telegram user database (leaked corpus) — "
+                          "confirmed live by contact import")
+        return False, ("Telegram user database — the number belongs "
+                       "to another account, so the corpus row is "
+                       "not shown")
+
+    def _lookup_telegramdb_by_phone(self, phone):
+        """The account behind one number out of the local copy:
+        (account_id, username), or None when the copy is
+        absent or holds no row. Never raises."""
+        try:
+            from ...agents.osint_telegramdb import (
+                lookup_telegramdb_by_phone,
+            )
+
+            return lookup_telegramdb_by_phone(
+                phone, home=self._telegramdb_home())
+        except Exception:  # noqa: BLE001 - no row, no detail
+            return None
+
+    def _lookup_telegramdb_window(self) -> str:
+        """The database's measured coverage window ("" when
+        unstocked): the honest answer to "why is a 2022
+        account not in it"."""
+        try:
+            from ...agents.osint_telegramdb import coverage
+
+            cov = coverage(home=self._telegramdb_home())
+            return str(cov.get("window") or "")
+        except Exception:  # noqa: BLE001 - no window, no detail
+            return ""
+
     def _control_lookup_provision(self, wanted,  # type: ignore[no-untyped-def]
                                   message) -> str:
         """The database behind phone route (4): /lookup provision
@@ -4535,10 +5223,15 @@ class RuntimeGroupMixin:
         if len(parts) >= 2 and parts[1].lower() == "telegramdb":
             st = ensure_telegramdb(home=home)
             if st["status"] == "ready":
+                window = self._lookup_telegramdb_window()
+                window_note = (
+                    f" Its coverage is {window} — accounts created "
+                    "after that window are not in it."
+                    if window else "")
                 return (f"Telegram user database: already stocked "
                         f"— {st['rows']} usable rows.  /lookup can "
                         f"uncover a number from it when the account "
-                        f"hides it.")
+                        f"hides it.{window_note}")
             if (isinstance(state, dict)
                     and state.get("status") == "building"):
                 return ("Telegram user database: still building — "
@@ -4578,11 +5271,16 @@ class RuntimeGroupMixin:
                     "check again with /lookup provision.")
         st = ensure_telegramdb(home=home)
         if st["status"] == "ready":
+            window = self._lookup_telegramdb_window()
+            window_note = (
+                f" Its coverage is {window} — accounts created "
+                "after that window are not in it."
+                if window else
+                " (Stale data: absence means nothing.)")
             return (f"Telegram user database: stocked — "
                     f"{st['rows']} usable rows.  /lookup can "
                     f"uncover a number from it when the account "
-                    f"hides it.  (Stale data, collected "
-                    f"2019–2024: absence means nothing.)")
+                    f"hides it.{window_note}")
         if st["status"] == "failed":
             return (f"Telegram user database: {st['detail']}  "
                     f"Run /lookup provision telegramdb to rebuild "

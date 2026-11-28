@@ -174,6 +174,105 @@ def lookup_telegramdb(account_id: Any = None, username: Any = None,
     return None
 
 
+def lookup_telegramdb_by_phone(phone: Any, *, home: Any = None,
+                               db_path: Any = None,
+                               ) -> tuple[str, str] | None:
+    """The account behind one number out of the local copy.
+
+    The reverse of :func:`lookup_telegramdb`: a number input
+    resolves to (account_id, username) — the most frequent
+    pair wins when the corpus scraped the number more than
+    once. None when the copy is absent, unreadable, or holds
+    no row. Read-only; never raises. A copy built before the
+    phone index existed still answers (SQLite scans); a new
+    build carries the index.
+    """
+    path = Path(db_path) if db_path else telegramdb_path(home)
+    if not path.is_file():
+        return None
+    digits = re.sub(r"\D", "", str(phone or ""))
+    if not digits:
+        return None
+    try:
+        con = sqlite3.connect(path)
+    except sqlite3.Error:
+        return None
+    try:
+        row = con.execute(
+            "SELECT account_id, username, COUNT(*) AS c "
+            "FROM telegram_users WHERE phone = ? OR phone = ? "
+            "GROUP BY account_id, username "
+            "ORDER BY c DESC, account_id ASC LIMIT 1",
+            (digits, "+" + digits)).fetchone()
+        if row:
+            return (str(row[0]), str(row[1]))
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+    return None
+
+
+def coverage(home: Any = None, *,
+             db_path: Any = None) -> dict[str, Any]:
+    """The corpus's real coverage window, honestly stated.
+
+    The free corpus is a contact-import scrape — mostly
+    pre-2020 accounts — so a lookup for an account created
+    in 2022 will miss it no matter how well the code works.
+    This reads the stocked copy's lowest and highest
+    account IDs and maps them through the same ID-range
+    estimate the dossier uses, so the window is a measured
+    fact ("roughly Nov 2013 – Mar 2020") instead of a
+    guess. An unstocked copy reports stocked False and no
+    window at all.
+    """
+    path = Path(db_path) if db_path else telegramdb_path(home)
+    base = {"stocked": False, "path": str(path), "rows": None,
+            "min_id": None, "max_id": None, "window": ""}
+    if not path.is_file():
+        return base
+    try:
+        con = sqlite3.connect(path)
+        try:
+            got = con.execute(
+                "SELECT value FROM meta WHERE key = 'rows'"
+                ).fetchone()
+            rows = int(got[0]) if got else None
+            lo, hi = con.execute(
+                "SELECT MIN(CAST(account_id AS INTEGER)), "
+                "MAX(CAST(account_id AS INTEGER)) "
+                "FROM telegram_users").fetchone()
+        finally:
+            con.close()
+    except (sqlite3.Error, TypeError, ValueError):
+        return base
+    if not lo or not hi:
+        return {**base, "stocked": True, "rows": rows}
+    try:
+        from ..social.chat.account_age import (
+            _month_label,
+            estimate_account_age,
+        )
+
+        low = estimate_account_age(lo) or {}
+        high = estimate_account_age(hi) or {}
+        low_month = low.get("low") or low.get("high")
+        high_month = high.get("high") or high.get("low")
+        if low_month and high_month:
+            window = (f"roughly {_month_label(low_month)} – "
+                      f"{_month_label(high_month)}")
+        elif high_month:
+            window = f"up to about {_month_label(high_month)}"
+        else:
+            window = ""
+    except Exception:  # noqa: BLE001 - a window is a bonus
+        window = ""
+    return {"stocked": True, "path": str(path), "rows": rows,
+            "min_id": int(lo), "max_id": int(hi),
+            "window": window}
+
+
 def _usable(row: tuple) -> tuple | None:
     """One raw row → a stored row, or None when it is junk."""
     if len(row) != 3:
@@ -227,6 +326,8 @@ def _write_sqlite(rows: Any, path: Any, *,
             f"CREATE INDEX idx_tdb_account ON {TABLE}(account_id)")
         con.execute(
             f"CREATE INDEX idx_tdb_username ON {TABLE}(username)")
+        con.execute(
+            f"CREATE INDEX idx_tdb_phone ON {TABLE}(phone)")
         con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, "
                     "value TEXT NOT NULL)")
         con.executemany(

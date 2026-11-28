@@ -47,7 +47,7 @@ whois - domain registration data via RDAP.
 cipher - Real cryptography: AES-256 (PBKDF2) sealed blobs with an integrity tag — wrong passphrases and tampered blobs are rejected, not returned as garbage.
 wisdom - WisdomKeeper: ask the esoteric corpus (answer + provenance), browse the history timeline, or run a guided breathing / sitting session right here in chat with timed messages.
 think - explicit multi-step reasoning with the full trace shown.
-game - the social game engine — 41 games across DM, group and channel, with a shared economy, items and leaderboards.
+game - the social game engine — 45 games across DM, group and channel, with a shared economy, items and leaderboards.
 wordchain - word chain — each word must start with the last letter of the previous one; the house breaks dead ends.
 hangman - hangman — the house picks a word, you send letters one at a time; the board draws as you miss.
 numberguess - number guess — the house thinks of a number, you narrow the range.
@@ -112,7 +112,7 @@ py - run python in the sandbox; -s name keeps a session, -r resets it.
 devon - the autonomous dev & investigation agent: he plans the tools himself, runs them, digests, replies — for anything you say.
 task - queued instructions she runs and reports back on.
 mission - mission progress in chat: % complete, current step, an honest ETA, and — when stuck — the concrete stall reason.
-schedule - cron-style jobs that run in-process: at / every / daily.
+schedule - cron-style jobs that run in-process: at / every / daily; 'cron <expr>' inspects a cron expression (month names JAN-DEC work) without creating a job.
 monitor - Watches a URL or file and alerts you (with a short diff) when its content actually changes.
 immune - defensive immune system — thymus negative selection, innate scan, antibody memory, seven-rung revoke-only police, fever, drift, case files.
 impossible - Impossible Made Possible — always-on cross-domain conceive-and-solve: formulate, classify, prior art, TRIZ transfer, feasibility gate, falsifier, attempt.
