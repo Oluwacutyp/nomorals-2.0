@@ -1149,6 +1149,9 @@ EFFECTS: dict[str, tuple[Any, str]] = {
     "pitch": (lambda s, sr, **k: pitch_shift(
         s, sr, float(k.get("semitones", 0.0))),
         "resample pitch shift (semitones=)"),
+    "varispeed": (lambda s, sr, **k: _varispeed(
+        s, float(k.get("factor", 1.0))),
+        "tape varispeed — tempo AND pitch move together (factor=)"),
 }
 
 

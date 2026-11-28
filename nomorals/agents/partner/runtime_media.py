@@ -898,14 +898,21 @@ class RuntimeMediaMixin:
                 _is_pathish = ("/" in rest or "\\" in rest) and bool(
                     re.search(r"\.(mp3|wav|flac|ogg|m4a|mid|midi)$", rest, re.I))
                 chat = self._ref_from_key(chat_key) if chat_key else None
+                # Version requests (/play <song> reverb|nightcore|
+                # slowed|sped up, or /play reverb <song>): the version
+                # words come off the query — the search runs on the
+                # clean song, and the version rides into the
+                # background job. A requested version is the answer,
+                # never a fallback.
+                version, clean_rest = self._play_parse_version(rest)
                 if (chat is not None and not _is_urlish and not _is_pathish
-                        and not is_specific(rest)):
+                        and not is_specific(clean_rest)):
                     # Vague query in chat → old-school pick-list instead of
                     # auto-downloading the top guess.  Never raises.
                     try:
                         candidates = SourceResolver(
                             self.context).search_candidates(
-                                rest, limit=PICK_LIMIT)
+                                clean_rest, limit=PICK_LIMIT)
                     except Exception as e:
                         record_failure("runtime_media.RuntimeMediaMixin._control_play:579", e)
                         candidates = []
@@ -915,12 +922,12 @@ class RuntimeMediaMixin:
                             owner_key=owner_key)
                         if token:
                             return format_picklist(
-                                candidates, rest, token)
+                                candidates, clean_rest, token)
                     # No candidates (or cache hiccup) → fall through to
                     # the normal auto-resolve so the user still gets an
                     # honest tried-list instead of silence.
-                title_q, artist_q = parse_title_artist(rest)
-                search_q = search_query_for(title_q, artist_q) or rest
+                title_q, artist_q = parse_title_artist(clean_rest)
+                search_q = search_query_for(title_q, artist_q) or clean_rest
                 # Step 4 Ekiti lexicon: search-normalize Ekiti → standard
                 # Yoruba for source queries; the ORIGINAL stays in `rest`
                 # for display/TTS.  Never raises.
@@ -963,7 +970,8 @@ class RuntimeMediaMixin:
                         lambda: self._play_resolve_and_send(
                             engine, search_q, rest, title_q, artist_q,
                             chat,
-                            sweep=(not _is_urlish and not _is_pathish)),
+                            sweep=(not _is_urlish and not _is_pathish),
+                            version=version),
                         title=rest, tracker=_play_tracker,
                         claim_key=claim_key)
                 resolution = SourceResolver(self.context).resolve(search_q)
@@ -994,6 +1002,13 @@ class RuntimeMediaMixin:
                         from ...media.cookies import BOT_COOKIE_SHORT_HELP as _SHORT_HELP
                         msg = msg.replace(_FULL_HELP, _SHORT_HELP)
                     return msg
+                if version and chat is None:
+                    # CLI: no chat to send to — download the winner,
+                    # render the version, queue the render for local
+                    # playback. Never silently play the original.
+                    return self._play_cli_version(
+                        engine, version, resolution, rest,
+                        title_q, artist_q)
                 added = []
                 for r in (resolution, *resolution.extra_tracks):
                     added.append(engine._enqueue(
@@ -3208,7 +3223,8 @@ class RuntimeMediaMixin:
 
     def _play_resolve_and_send(self, engine: Any, search_q: str,
                                rest: str, title_q: str, artist_q: str,
-                               chat: Any, *, sweep: bool = True
+                               chat: Any, *, sweep: bool = True,
+                               version: str | None = None
                                ) -> tuple[str, bool]:
         """Background body for a chat /play — resolve + sweep + send.
 
@@ -3254,6 +3270,18 @@ class RuntimeMediaMixin:
         # The job was registered under the raw query; the lookups key
         # on the resolved title — relabel now that it is known.
         self._play_dl_relabel_current_job(resolution.title or rest)
+        # A Spotify link resolves ok but not downloadable — route it
+        # through the identify-and-match ladder instead of the
+        # download that hard-refuses it (DRM).
+        if (resolution.ok and str(resolution.kind) == "spotify"
+                and not resolution.downloadable):
+            return self._play_spotify_link_in_chat(
+                rest, chat, version=version)
+        # A requested version is the answer, never a fallback.
+        if version:
+            return self._play_version_send(
+                engine, version, search_q, rest, title_q, artist_q,
+                chat, resolution)
         added = []
         for r in (resolution, *resolution.extra_tracks):
             added.append(engine._enqueue(
@@ -3440,6 +3468,327 @@ class RuntimeMediaMixin:
             return (f"had the file but couldn't send it: {exc} "
                     f"(it's saved on the server at {path})"), False
 
+    def _play_download_only(self, engine: Any,
+                            item: dict[str, Any]) -> tuple[str, str]:
+        """Download one item WITHOUT sending it: ``(path, "")`` on a
+        landed, verified file, ``("", reason)`` otherwise. The
+        version render and the Spotify ladder both need the file
+        before deciding what goes out. Never raises."""
+        try:
+            dl = engine.download(item)
+        except Exception as exc:  # noqa: BLE001 - download() shouldn't raise
+            return "", f"couldn't download the audio: {exc}"
+        if not dl.get("ok"):
+            return "", (f"couldn't download the audio: "
+                       f"{dl.get('reason', 'unknown error')}")
+        path = str(dl.get("path") or "")
+        from ...media.download_orchestrator import DownloadOrchestrator
+        acc = DownloadOrchestrator().verify(
+            path, "song",
+            expected_duration=float(item.get("duration") or 0))
+        if not acc.ok:
+            return "", (f"that download wasn't the song — "
+                       f"{acc.reason}. I won't pass it off as the "
+                       "track.")
+        return path, ""
+
+    def _play_send_rendered(self, engine: Any, item: dict[str, Any],
+                            path: str, version: str, chat: Any,
+                            title: str, artist: str) -> tuple[str, bool]:
+        """Render *version* onto the landed file at *path* with the
+        DSP chain and send the render as the version — tagged and
+        captioned as the version, honestly. Returns (text, sent).
+        Never raises."""
+        spec = self._PLAY_VERSIONS[version]
+        from ...audio.edit import apply_fx
+        try:
+            rendered = apply_fx(path, spec["chain"],
+                                suffix=spec["slug"])
+        except Exception as exc:  # noqa: BLE001 - render never dies
+            rendered = {"ok": False, "reason": str(exc)}
+        if not rendered.get("ok"):
+            return (f"got the track but couldn't render the "
+                    f"{spec['label']} version: "
+                    f"{rendered.get('reason', 'render failed')}"), False
+        version_title = f"{title} ({spec['label']} version)"
+        rendered_item = engine._enqueue(
+            str(rendered["output"]), "file", version_title,
+            artist=artist, duration=0.0)
+        return self._play_send_in_chat_result(
+            engine, rendered_item, chat,
+            note=(f"{spec['label']} version — rendered with Devon's "
+                  f"{spec['label']} chain"))
+
+    def _play_cli_version(self, engine: Any, version: str,
+                          resolution: Any, rest: str,
+                          title_q: str, artist_q: str) -> str:
+        """CLI /play <song> <version>: download the winner, render
+        the version, queue the render for local playback. Never
+        silently plays the original. Returns the queue receipt."""
+        spec = self._PLAY_VERSIONS[version]
+        item = {"kind": str(resolution.kind),
+                "path": str(resolution.path_or_url),
+                "title": str(resolution.title or rest),
+                "artist": str(resolution.artist or ""),
+                "duration": float(resolution.duration or 0.0)}
+        path, why = self._play_download_only(engine, item)
+        if not path:
+            return (f"couldn't fetch {rest[:80]!r} to render the "
+                    f"{spec['label']} version from —\n{why}")
+        from ...audio.edit import apply_fx
+        try:
+            rendered = apply_fx(path, spec["chain"],
+                                suffix=spec["slug"])
+        except Exception as exc:  # noqa: BLE001 - render never dies
+            rendered = {"ok": False, "reason": str(exc)}
+        if not rendered.get("ok"):
+            return (f"got the track but couldn't render the "
+                    f"{spec['label']} version: "
+                    f"{rendered.get('reason', 'render failed')}")
+        title = title_q or item["title"]
+        artist = artist_q or item["artist"]
+        version_title = f"{title} ({spec['label']} version)"
+        engine._enqueue(
+            str(rendered["output"]), "file", version_title,
+            artist=artist, duration=0.0)
+        queue_len = len(engine.queue())
+        out = (f"queued 1 (queue {queue_len}):\n"
+               f"  - {version_title}"
+               + (f" — {artist}" if artist else "")
+               + f"\nrendered with Devon's {spec['label']} chain")
+        self._play_log_tried(resolution.attempts)
+        return out
+
+    def _play_version_send(self, engine: Any, version: str,
+                           search_q: str, rest: str, title_q: str,
+                           artist_q: str, chat: Any,
+                           resolution: Any) -> tuple[str, bool]:
+        """A requested /play version, in order: FIRST pull the
+        version from the source (a version upload), ELSE render the
+        effect onto the fetched full track with the DSP chain. The
+        version is the answer, never a demoted fallback — the
+        edit-demotion sort below never sees this path. Returns
+        (text, sent). Never raises."""
+        from ...media.picklist import is_confident_match
+        from ...media.resolver import SourceResolver
+
+        spec = self._PLAY_VERSIONS[version]
+        # ── 1. source-first: the version as uploaded ─────────────
+        try:
+            cands, _detailed = SourceResolver(
+                self.context).search_candidates_detailed(
+                    f"{search_q} {spec['search']}")
+        except Exception as e:  # noqa: BLE001 - a dead sweep is no version
+            record_failure(
+                "runtime_media.RuntimeMediaMixin._play_version_send", e)
+            cands = []
+        for cand in (cands or []):
+            if not cand.downloadable or bool(
+                    getattr(cand, "preview_only", False)):
+                continue
+            if not self._play_version_marker_match(
+                    version, str(cand.title or "")):
+                continue
+            if not is_confident_match(
+                    str(cand.title or ""), str(cand.artist or ""),
+                    title_q, artist_q):
+                continue
+            added = engine._enqueue(
+                cand.path_or_url, cand.kind,
+                str(cand.title or cand.path_or_url),
+                artist=str(cand.artist or artist_q or ""),
+                duration=float(cand.duration or 0.0))
+            source = str(cand.source_name or cand.kind or "the source")
+            return self._play_send_in_chat_result(
+                engine, added, chat,
+                note=(f"{spec['label']} version — pulled from "
+                      f"{source}"))
+        # ── 2. DSP fallback: render onto the fetched original ────
+        originals: list[dict[str, Any]] = [{
+            "kind": str(resolution.kind),
+            "path": str(resolution.path_or_url),
+            "title": str(resolution.title or rest),
+            "artist": str(resolution.artist or ""),
+            "duration": float(resolution.duration or 0.0)}]
+        try:
+            sweep, _det = SourceResolver(
+                self.context).search_candidates_detailed(search_q)
+        except Exception as e:  # noqa: BLE001 - the winner alone then
+            record_failure(
+                "runtime_media.RuntimeMediaMixin._play_version_send.sweep",
+                e)
+            sweep = []
+        seen_paths = {originals[0]["path"]}
+        for cand in (sweep or []):
+            if not cand.downloadable or bool(
+                    getattr(cand, "preview_only", False)):
+                continue
+            if str(cand.path_or_url) in seen_paths:
+                continue
+            seen_paths.add(str(cand.path_or_url))
+            originals.append({
+                "kind": str(cand.kind), "path": str(cand.path_or_url),
+                "title": str(cand.title or cand.path_or_url),
+                "artist": str(cand.artist or ""),
+                "duration": float(cand.duration or 0.0)})
+        req_title = title_q or originals[0]["title"]
+        req_artist = artist_q or originals[0]["artist"]
+        last_why = ""
+        for orig in originals:
+            path, why = self._play_download_only(engine, orig)
+            if not path:
+                last_why = why
+                continue
+            return self._play_send_rendered(
+                engine, orig, path, version, chat,
+                req_title, req_artist)
+        return (f"couldn't fetch the original to render the "
+                f"{spec['label']} version from"
+                + (f" — {last_why}" if last_why else "")), False
+
+    def _play_spotify_track_in_chat(self, track: Any, meta: Any,
+                                    chat: Any, *,
+                                    version: str | None = None
+                                    ) -> tuple[str, bool]:
+        """One Spotify-identified track, matched and delivered in
+        chat — the background-safe half of
+        :meth:`_spotify_match_and_deliver` (no nested background
+        job: the caller already runs inside one). With a version
+        request the matched full track is rendered, not sent raw.
+        Returns (text, sent). Never raises."""
+        from ...media.playback import PlaybackEngine
+
+        hint = float(getattr(track, "duration_s", 0.0) or 0.0)
+        item, attempts, label = self._spotify_match(
+            track.query, hint)
+        name = (getattr(track, "title", "")
+                or getattr(meta, "name", "") or track.query)
+        artist = (getattr(track, "artist", "")
+                  or getattr(meta, "artist", "") or "")
+        head = f"🎧 “{name}”" + (f" — {artist}" if artist else "")
+        if item is None:
+            self._play_log_tried(attempts)
+            return (f"{head}\nfound it on Spotify, but no full-track "
+                    "source has it — the only audio out there is "
+                    "previews/metadata, and I won't pass a 30s preview "
+                    "off as the song."), False
+        engine = PlaybackEngine(self.context)
+        if version:
+            return self._play_render_spotify(
+                engine, item, version, chat, name, artist)
+        added = engine._enqueue(
+            item["path"], item["kind"], item["title"],
+            artist=item["artist"], duration=item["duration"])
+        return self._play_send_in_chat_result(
+            engine, added, chat,
+            note=(f"matched via {label} — Spotify itself "
+                  "serves only previews"))
+
+    def _play_render_spotify(self, engine: Any, item: dict,
+                             version: str, chat: Any,
+                             name: str, artist: str) -> tuple[str, bool]:
+        """Render a version onto a Spotify-matched full track and
+        send the render. Returns (text, sent). Never raises."""
+        path, why = self._play_download_only(engine, item)
+        if not path:
+            return why, False
+        return self._play_send_rendered(
+            engine, item, path, version, chat, name, artist)
+
+    def _play_spotify_link_in_chat(self, url: str, chat: Any, *,
+                                   version: str | None = None
+                                   ) -> tuple[str, bool]:
+        """A Spotify link in chat: identify it on Spotify (keyless,
+        from Spotify's public pages), then fetch the FULL track
+        through the /play ladder and label where it actually came
+        from — the same ladder /spotify uses, never the DRM refusal.
+        Returns (text, sent). Never raises."""
+        from ...media import spotify_meta as sm
+
+        ref = sm.parse_spotify_ref(url)
+        if ref is None and "spoti.fi" in url:
+            short = self._first_url(url)
+            if short:
+                from ...media.downloader import expand_short_url
+                ref = sm.parse_spotify_ref(expand_short_url(short))
+        if ref is None:
+            return (f"couldn't identify that Spotify link — it may be "
+                    "dead, region-locked, or Spotify changed its "
+                    f"pages.\n{url[:80]}"), False
+        kind, sid = ref
+        meta = sm.fetch_spotify_meta(kind, sid)
+        if meta is None:
+            return (f"couldn't identify that Spotify link — it may be "
+                    "dead, region-locked, or Spotify changed its "
+                    f"pages.\n{url[:80]}"), False
+        if kind in ("track", "episode"):
+            track = meta.tracks[0] if meta.tracks else sm.SpotifyTrack(
+                title=meta.name, artist=meta.artist,
+                duration_s=meta.duration_s)
+            return self._play_spotify_track_in_chat(
+                track, meta, chat, version=version)
+        if not meta.tracks:
+            note = meta.note or "couldn't list its tracks"
+            return (f"🎧 Spotify {kind} “{meta.name}” — {note}. Paste a "
+                    "single track link and I'll fetch that one in "
+                    "full."), False
+        # Collection: match track by track (capped), send each.
+        from ...media.playback import PlaybackEngine
+
+        cap = self._SPOTIFY_COLLECTION_CAP
+        tracks = list(meta.tracks or [])
+        shown = tracks[:cap]
+        engine = PlaybackEngine(self.context)
+        winners: list[tuple[Any, dict, str]] = []
+        misses: list[Any] = []
+        for track in shown:
+            item, _attempts, label = self._spotify_match(
+                track.query, track.duration_s)
+            if item is None:
+                misses.append(track)
+            else:
+                winners.append((track, item, label))
+        head = (f"🎧 Spotify {meta.kind} “{meta.name}”"
+                + (f" — {meta.artist}" if meta.artist else "")
+                + f" · {len(tracks)} tracks")
+        if len(tracks) > cap:
+            head += f" (fetching the first {cap} in full)"
+        lines = [head,
+                 f"matched {len(winners)} of {len(shown)} in full:"]
+        sent = 0
+        for track, item, label in winners:
+            name = track.title or meta.name
+            artist = track.artist or meta.artist or ""
+            if version:
+                text, ok = self._play_render_spotify(
+                    engine, item, version, chat, name, artist)
+            else:
+                added = engine._enqueue(
+                    item["path"], item["kind"], item["title"],
+                    artist=item["artist"], duration=item["duration"])
+                text, ok = self._play_send_in_chat_result(
+                    engine, added, chat,
+                    note=(f"matched via {label} — Spotify itself "
+                          "serves only previews"))
+            if ok:
+                sent += 1
+                lines.append(f"  ✓ “{name}”"
+                             + (f" — {artist}" if artist else "")
+                             + f" · via {label}"
+                             + (f" · {version} version, rendered"
+                                if version else ""))
+            else:
+                lines.append(f"  ✗ “{name}”"
+                             + (f" — {artist}" if artist else "")
+                             + f" — {text.strip()}")
+        if misses:
+            lines.append("no full-track match (previews/metadata only):")
+            for track in misses:
+                lines.append(f"  ✗ “{track.title}”"
+                             + (f" — {track.artist}"
+                                if track.artist else ""))
+        return "\n".join(lines), sent > 0
+
     # ── honest artifact identity (Law 6) ────────────────────────────
     #
     # A delivered file must carry the track's real identity in its
@@ -3457,6 +3806,127 @@ class RuntimeMediaMixin:
         "mashup", "reverb", "slowed", "spedup", "edit", "flip",
         "remake", "parody", "sped", "daycore",
     })
+
+    #: /play version requests — a version is a real variant of the
+    #: recording, never a fallback. FIRST pull the version from the
+    #: source (a "song reverb version" upload), ELSE render it onto
+    #: the fetched full track with the DSP chain. The definitions
+    #: are honest, in code: nightcore is tempo-up AND pitch-up
+    #: (tape varispeed ×1.25); slowed is tempo-down (varispeed ×0.8,
+    #: pitch falls with it); sped up is the same varispeed family
+    #: at ×1.25 — nightcore and sped up differ only in which
+    #: uploads the source search looks for. ``chain`` is an
+    #: :func:`nomorals.audio.edit.apply_fx` spec; ``search`` is
+    #: what the source-first search appends to the song query.
+    _PLAY_VERSIONS = {
+        "reverb": {"label": "reverb", "slug": "reverb",
+                   "chain": "reverb wet=0.35, normalize",
+                   "search": "reverb version"},
+        "nightcore": {"label": "nightcore", "slug": "nightcore",
+                      "chain": "varispeed factor=1.25, normalize",
+                      "search": "nightcore"},
+        "slowed": {"label": "slowed", "slug": "slowed",
+                   "chain": "varispeed factor=0.8, normalize",
+                   "search": "slowed"},
+        "sped up": {"label": "sped up", "slug": "spedup",
+                    "chain": "varispeed factor=1.25, normalize",
+                    "search": "sped up"},
+        "slowed + reverb": {"label": "slowed + reverb",
+                            "slug": "slowedreverb",
+                            "chain": ("varispeed factor=0.8, "
+                                      "reverb wet=0.35, normalize"),
+                            "search": "slowed reverb version"},
+    }
+
+    #: Version phrases as token tuples — longest first, so a combined
+    #: "slowed reverb" is never read as plain "slowed".
+    _PLAY_VERSION_PHRASES = (
+        (("slowed", "reverb"), "slowed + reverb"),
+        (("reverb", "slowed"), "slowed + reverb"),
+        (("reverb",), "reverb"),
+        (("nightcore",), "nightcore"),
+        (("slowed",), "slowed"),
+        (("sped", "up"), "sped up"),
+    )
+
+    @classmethod
+    def _play_parse_version(cls, rest: str):
+        """Split a /play version request off the query.
+
+        ``/play <song> reverb`` and ``/play reverb <song>`` both
+        parse; a trailing "version" is filler ("/play <song> reverb
+        version"). Returns ``(version_key | None, clean_query)`` —
+        the clean query keeps the user's own casing for display.
+        A bare version word with no song left is not a request.
+        Never raises.
+        """
+        try:
+            text = (rest or "").strip()
+            if not text:
+                return None, text
+            words = text.split()
+            # Tokenise for matching, tracking which word each token
+            # came from: "+" is a separator, "spedup" / "speed up"
+            # are the "sped up" phrase.
+            toks: list[str] = []
+            owners: list[int] = []
+            for wi, word in enumerate(words):
+                low = word.lower().strip("+")
+                if not low:
+                    continue
+                if low == "spedup":
+                    toks.extend(["sped", "up"])
+                    owners.extend([wi, wi])
+                elif low == "speed":
+                    toks.append("sped")
+                    owners.append(wi)
+                else:
+                    toks.append(low)
+                    owners.append(wi)
+            # A trailing "version" is filler, not the request.
+            if toks and toks[-1] == "version":
+                toks = toks[:-1]
+                owners = owners[:-1]
+            if not toks:
+                return None, text
+
+            def _clean(lo: int, hi: int) -> str:
+                """The words OUTSIDE toks[lo:hi], in order — a word
+                that contributed no token (a "+" separator) never
+                survives into the query either."""
+                drop = set(owners[lo:hi])
+                keep = [w for wi, w in enumerate(words)
+                        if wi in set(owners) and wi not in drop]
+                return " ".join(keep).strip()
+
+            for phrase, key in cls._PLAY_VERSION_PHRASES:
+                n = len(phrase)
+                if len(toks) > n and tuple(toks[:n]) == phrase:
+                    clean = _clean(0, n)
+                    if clean:
+                        return key, clean
+                if len(toks) > n and tuple(toks[-n:]) == phrase:
+                    clean = _clean(len(toks) - n, len(toks))
+                    if clean:
+                        return key, clean
+            return None, text
+        except Exception:  # noqa: BLE001 - unparsable input is plain /play
+            return None, (rest or "")
+
+    @staticmethod
+    def _play_version_marker_match(version: str, title: str) -> bool:
+        """Does *title* carry the requested version's marker? The
+        combined version needs BOTH markers; "sped up" is a
+        two-token marker. Never raises."""
+        try:
+            tokens = re.findall(r"[a-z0-9]+", str(title or "").lower())
+            if version == "slowed + reverb":
+                return "slowed" in tokens and "reverb" in tokens
+            if version == "sped up":
+                return "sped" in tokens and "up" in tokens
+            return version in tokens
+        except Exception:  # noqa: BLE001 - no match on garbage
+            return False
 
     @classmethod
     def _edit_marker_of(cls, title: str) -> str:

@@ -4798,8 +4798,11 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                      "survives restarts); otherwise the queue is kept and it "
                      "tells you what to install. In chat, tracks download "
                      "and send as files. Vague queries get a pick-list — "
-                     "tap a number (Telegram) or reply with it (WhatsApp).",
-              "usage": "/play <song title> | /play <title> by <artist> | /play <url> | /play pick <token> <n> | status | queue | pause | resume | stop | next | prev | seek <s> | volume <n> | remove <n> | clear",
+                     "tap a number (Telegram) or reply with it (WhatsApp). "
+                     "Ask for a version — /play <song> reverb | nightcore | "
+                     "slowed | sped up — and she pulls that version from "
+                     "the source, or renders it onto the track herself.",
+              "usage": "/play <song title> | /play <title> by <artist> | /play <url> | /play <song> reverb | nightcore | slowed | sped up | /play pick <token> <n> | status | queue | pause | resume | stop | next | prev | seek <s> | volume <n> | remove <n> | clear",
               "example": "/play lifestyle (YA MAN) by ayo maff",
               "related": "/music (make the thing to play) · nm play on the console"},
     "anime": {"what": "anime lookup: the record for a title — format, status, score (AniList, cross-checked against MyAnimeList), episodes, studio, genres, cover art — from the AniList record with Jikan/MyAnimeList as the second seed. Nothing is invented: a title that isn't found says so, naming the sources tried.",

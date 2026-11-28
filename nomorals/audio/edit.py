@@ -949,7 +949,7 @@ def apply_fx(audio: str | os.PathLike[str], chain_spec: str, *,
     style preset: ``"preset=lofi"``. Known effects: denoise, dehum,
     highpass, lowpass, telephone, bitcrush, gain, normalize, autolevel,
     compress, limit, trim, fade, reverb, echo, delay, chorus, phaser,
-    tremolo, vibrato, distortion, eq, pitch.
+    tremolo, vibrato, distortion, eq, pitch, varispeed.
 
     Returns ``{"ok", "output", "chain", "skipped"}`` — or ``{"ok":
     False, "reason"}``. Never raises, never fake audio.
@@ -1001,7 +1001,7 @@ EFFECTS_NAMES = (
     "denoise", "dehum", "highpass", "lowpass", "telephone", "bitcrush",
     "gain", "normalize", "autolevel", "compress", "limit", "trim",
     "fade", "reverb", "echo", "delay", "chorus", "phaser", "tremolo",
-    "vibrato", "distortion", "eq", "pitch",
+    "vibrato", "distortion", "eq", "pitch", "varispeed",
 )
 
 
