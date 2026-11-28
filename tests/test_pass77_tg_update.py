@@ -374,8 +374,11 @@ class TestRuntimeDispatch(unittest.TestCase):
         class FakeUpdater:
             # quiesce: the runtime wires its bridge quiesce into the
             # updater (update-hardening) — the fake takes the real
-            # constructor's shape.
-            def __init__(self, repo, snapshots, quiesce=None):
+            # constructor's shape. Same for media_cache_sweeper
+            # (disk discipline, 2026-11-27): the runtime wires the
+            # personal service's cache sweep in.
+            def __init__(self, repo, snapshots, quiesce=None,
+                         media_cache_sweeper=None):
                 pass
 
             def run(self, pull=True):
@@ -440,8 +443,11 @@ class TestRuntimeDispatch(unittest.TestCase):
         class FakeUpdater:
             # quiesce: the runtime wires its bridge quiesce into the
             # updater (update-hardening) — the fake takes the real
-            # constructor's shape.
-            def __init__(self, repo, snapshots, quiesce=None):
+            # constructor's shape. Same for media_cache_sweeper
+            # (disk discipline, 2026-11-27): the runtime wires the
+            # personal service's cache sweep in.
+            def __init__(self, repo, snapshots, quiesce=None,
+                         media_cache_sweeper=None):
                 pass
 
             def run(self, pull=True):

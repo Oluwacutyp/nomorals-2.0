@@ -495,6 +495,7 @@ class UpdateManager:
         verifier: Any | None = None,
         pre_update_gates: Any | None = None,
         quiesce: QuiesceFn | None = None,
+        media_cache_sweeper: Any | None = None,
     ) -> None:
         self.repo_dir = Path(repo_dir)
         self.snapshots = snapshots
@@ -507,6 +508,23 @@ class UpdateManager:
         # own and the quiesce step records exactly that — it never
         # pretends a stop happened.
         self._quiesce = quiesce
+        # Media-cache sweep (disk discipline, 2026-11-27): the
+        # callable that sweeps the WhatsApp download caches to
+        # their caps before the disk preflight measures. Same
+        # idiom as quiesce above: the chat runtime wires its
+        # personal service's ``cycle_media_cache`` in; a
+        # construction without one (the console update, tests)
+        # sweeps nothing and the self-clear step records exactly
+        # that — it never pretends a sweep happened. The snapshot
+        # prune needs no such seam: the manager already owns its
+        # snapshot store.
+        self._media_cache_sweeper = media_cache_sweeper
+        #: What the self-clear step (step 0.55) freed, in plain
+        #: words — the disk preflight names it when it still has
+        #: to refuse, so the refusal never claims nothing was
+        #: cleared. "" when the step has not run (a direct
+        #: _preflight_disk call, or a run that refused earlier).
+        self._disk_clear_detail = ""
         # Verify-then-install (Wave 8): after a pull moves HEAD, the
         # landed state is verified before the update proceeds. The
         # default follows the health-gate idiom above: the production
@@ -613,6 +631,115 @@ class UpdateManager:
         finally:
             os.close(fd)
 
+    def _prune_pre_update_snapshots(self) -> tuple[list[str], str]:
+        """Prune the pre-update snapshot pile to its bound.
+
+        The one retention rule, shared by the self-clear (step
+        0.55) and the post-snapshot retention (step 1): keep the
+        newest 3 pre-update snapshots plus the snapshot a pending
+        deferred-restore marker names (a rollback anchor, not
+        clutter). Returns (pruned ids, "") on success, ([], the
+        error text) when the prune itself could not run — a
+        pruning failure never fails the update that triggered it;
+        the caller journals it. ``prune_pre_update`` never raises
+        on a single deletion (it logs and keeps going); only the
+        pending-restore read or the call itself can raise here.
+        """
+        try:
+            protect: list[str] = []
+            pending = self._read_pending_restore()
+            if pending and pending.get("snapshot"):
+                protect.append(str(pending["snapshot"]))
+            pruned = self.snapshots.prune_pre_update(protect=protect)
+            return list(pruned), ""
+        except Exception as exc:  # noqa: BLE001 - never fails the update
+            _log.warning("pre-update snapshot prune could not run: %s",
+                         exc, exc_info=True)
+            return [], f"{type(exc).__name__}: {exc}"
+
+    def _self_clear_disk(self, run_id: str) -> str:
+        """Clear what the update itself owns, BEFORE the disk
+        preflight measures (disk discipline, 2026-11-27).
+
+        The ordering the 2026-11-27 live failure exposed: the
+        snapshot prune ran only AFTER a new snapshot landed in
+        step 1, which is AFTER the step 0.6 preflight refuses —
+        so a refused update never reached its own clear, and the
+        pile only ever shrank on updates that already had room.
+        The clear runs here instead, while nothing has been
+        pulled, snapshotted or stopped: (1) prune pre-update
+        snapshots to the newest 3 + the protected rollback
+        anchor; (2) when a media-cache sweeper is wired, sweep
+        each WhatsApp account's download cache to its cap,
+        oldest first. Nothing else is ever deleted — never the
+        fonts area, never live data, never the newest 3 or the
+        protected anchor, never a file the media vault points
+        at (the sweep's own rule). A failure in either half
+        journals here and never fails the update; the step
+        records ok=True with the failure named in its detail,
+        because the clear is best-effort and the preflight —
+        not this step — is the gate. Returns the plain-words
+        detail, which the preflight names when it still refuses.
+        """
+        pruned, prune_err = self._prune_pre_update_snapshots()
+        if prune_err:
+            snap_part = f"snapshot prune failed ({prune_err})"
+        elif pruned:
+            snap_part = (
+                f"pruned {len(pruned)} old pre-update snapshot"
+                f"{'s' if len(pruned) != 1 else ''}")
+        else:
+            snap_part = "no old pre-update snapshots to prune"
+        files = 0
+        freed = 0
+        sweep_err = ""
+        if self._media_cache_sweeper is None:
+            media_part = "media cache not swept (no sweeper wired)"
+        else:
+            try:
+                rows = self._media_cache_sweeper()
+                if rows is None:
+                    rows = []
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    try:
+                        files += int(row.get("files_evicted", 0) or 0)
+                        freed += int(row.get("bytes_freed", 0) or 0)
+                    except (TypeError, ValueError):
+                        continue
+                if files:
+                    media_part = (
+                        f"swept {files} media file"
+                        f"{'s' if files != 1 else ''} "
+                        f"({diskspace.human_bytes(freed)} freed)")
+                else:
+                    media_part = "no media files over the cap"
+            except Exception as exc:  # noqa: BLE001 - never fails update
+                sweep_err = f"{type(exc).__name__}: {exc}"
+                media_part = f"media sweep failed ({sweep_err})"
+                _log.warning("media-cache sweep could not run: %s",
+                             exc, exc_info=True)
+        if not pruned and not files and not prune_err and not sweep_err:
+            detail = f"nothing to clear: {snap_part}; {media_part}"
+        else:
+            detail = f"{snap_part}; {media_part}"
+        self._disk_clear_detail = detail
+        entry: dict[str, Any] = {
+            "run_id": run_id, "event": "disk_clear",
+            "ts": time.time(), "detail": detail,
+            "pruned": pruned, "swept_files": files,
+            "swept_bytes": freed}
+        if prune_err:
+            entry["prune_error"] = prune_err
+        if sweep_err:
+            entry["sweep_error"] = sweep_err
+        self._journal(entry)
+        # _run records the report step from the returned detail;
+        # the step is best-effort, so it always records ok=True
+        # with any failure named in the detail.
+        return detail
+
     def _run(self, *, pull: bool = True) -> UpdateReport:
         started = time.time()
         report = UpdateReport()
@@ -665,6 +792,20 @@ class UpdateManager:
             if detail:
                 report.record("working_tree", True, detail)
 
+        # Step 0.55: self-clear — free what the update itself
+        # owns BEFORE the disk preflight measures (disk
+        # discipline, 2026-11-27). The prune used to run only
+        # after a new snapshot landed in step 1, which is after
+        # the preflight refuses — so a refused update never
+        # reached its own clear and the pile only shrank on
+        # updates that already had room. The clear runs here,
+        # while nothing has been pulled, snapshotted or stopped,
+        # and the preflight below measures what is left after
+        # it. It never refuses: a clear failure journals and the
+        # update proceeds to the measure anyway.
+        clear_detail = self._self_clear_disk(run_id)
+        report.record("disk_clear", True, clear_detail)
+
         # Step 0.6: disk preflight — an update first takes a full
         # pre-update snapshot (database + WAL + the blob store,
         # copied wholesale) and then rewrites the tree. On a disk
@@ -672,9 +813,12 @@ class UpdateManager:
         # to discover the problem by failing (2026-11-08 EC2:
         # "database or disk is full" at the snapshot step, after
         # snapshots had piled up unbounded for weeks). Measure
-        # FIRST and refuse here — before the snapshot, before the
-        # pull, and before the quiesce: a refused update changes
-        # nothing on disk and stops nothing that is running.
+        # AFTER the self-clear above and refuse here — before the
+        # snapshot, before the pull, and before the quiesce. A
+        # refused update pulls nothing, snapshots nothing and
+        # stops nothing that is running; the only disk change it
+        # has made is the self-clear itself, which the refusal
+        # names.
         d_ok, d_detail = self._preflight_disk()
         report.record("disk_space", d_ok, d_detail)
         self._journal({"run_id": run_id, "event": "step",
@@ -765,23 +909,19 @@ class UpdateManager:
             # pre-update snapshots is bounded the moment a new one
             # lands — newest 3, plus the snapshot a pending
             # deferred restore names (a rollback anchor, not
-            # clutter). Pruning failures journal here and never
-            # fail the update.
-            try:
-                protect: list[str] = []
-                pending = self._read_pending_restore()
-                if pending and pending.get("snapshot"):
-                    protect.append(str(pending["snapshot"]))
-                pruned = self.snapshots.prune_pre_update(
-                    protect=protect)
-                if pruned:
-                    self._journal({"run_id": run_id, "event": "retention",
-                                   "ts": time.time(), "pruned": pruned})
-            except Exception as exc:  # noqa: BLE001 - never fails the update
+            # clutter). The rule lives in
+            # _prune_pre_update_snapshots (shared with the step
+            # 0.55 self-clear); pruning failures journal here and
+            # never fail the update.
+            pruned, prune_err = self._prune_pre_update_snapshots()
+            if pruned:
+                self._journal({"run_id": run_id, "event": "retention",
+                               "ts": time.time(), "pruned": pruned})
+            if prune_err:
                 self._journal({"run_id": run_id,
                                "event": "retention_failed",
                                "ts": time.time(),
-                               "error": f"{type(exc).__name__}: {exc}"})
+                               "error": prune_err})
         except Exception as exc:  # noqa: BLE001 - snapshot failure aborts
             report.record("snapshot", False, f"{type(exc).__name__}: {exc}")
             report.error = f"could not take pre-update snapshot: {exc}"
@@ -1881,7 +2021,10 @@ class UpdateManager:
         take — database + WAL + the blob store it copies — plus an
         equal headroom for the pull/checkout churn. A MEASURED
         shortage refuses here, with both numbers, before anything
-        on disk changes. A measurement FAILURE never bricks an
+        is pulled, snapshotted or stopped. The self-clear (step
+        0.55) has already run by then and is the only disk change
+        a refused update makes; the refusal names what it freed.
+        A measurement FAILURE never bricks an
         update: it is named in the step detail and the update
         proceeds — the snapshot step still fails honestly if the
         disk truly is full."""
@@ -1906,13 +2049,17 @@ class UpdateManager:
         # 2026-11-08).
         area = diskspace.largest_area_note(rep)
         if rep["low"]:
+            clear = (self._disk_clear_detail
+                     or "nothing — the self-clear step did not run "
+                        "before this check")
             return False, (
                 f"not enough free disk to update safely — free {free}, "
                 f"this update needs ~{need} (pre-update snapshot ~{snap} "
-                "plus equal headroom for the pull). Nothing was "
-                "changed. Free space on the install volume and retry — "
-                "pre-update snapshots are pruned automatically now, "
-                "but a pile already on disk may need one manual clear."
+                "plus equal headroom for the pull). Before measuring, "
+                f"the update cleared what it owns: {clear}. The pull, "
+                "the snapshot and the quiesce did not run. Free space "
+                "on the install volume and retry — what is left is a "
+                "pile this update never clears by itself."
                 + (f" Biggest consumer on disk: {area}." if area
                    else ""))
         return True, (f"free {free} · needs ~{need}"

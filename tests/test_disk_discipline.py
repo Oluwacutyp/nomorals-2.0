@@ -22,6 +22,15 @@ The three repairs, each pinned at its real seam:
 3. Surfacing: /doctor (chat + nm doctor) carries a disk line,
    and the housekeeping beat journals one ``disk_low`` row per
    crossing per day into the personal journal.
+4. Self-clear (2026-11-27): the prune ran only AFTER a new
+   snapshot landed, which is AFTER the preflight refuses — so
+   a refused update never reached its own clear and the pile
+   only shrank on updates that already had room. The clear
+   (snapshot prune + the media-cache sweep, when a sweeper is
+   wired) now runs BEFORE the preflight measures, and a
+   refusal names what it freed instead of claiming nothing
+   changed. The clear never refuses: a failure journals and
+   the update proceeds to the measure anyway.
 
 Everything runs against temp dirs and patched ``free_bytes`` —
 never the real disk's free space, never a live install.
@@ -67,14 +76,19 @@ def _snapshots(tmp: str):
     return SnapshotManager(home, db)
 
 
-def _scripted(tmp: str, snapshots):
+def _scripted(tmp: str, snapshots, sweeper=None):
     """An UpdateManager with a REAL snapshot manager and scripted
     git/migrate seams (the updater-hardening idiom); the pull
-    lands SHA_B. Returns (manager, pull_calls)."""
+    lands SHA_B. Returns (manager, pull_calls). ``sweeper`` is
+    the optional media-cache sweeper the chat runtime wires in."""
     from nomorals.os.update import UpdateManager
 
+    kwargs: dict = {}
+    if sweeper is not None:
+        kwargs["media_cache_sweeper"] = sweeper
     mgr = UpdateManager(tmp, snapshots,
-                        health_checks=[lambda: (True, "fine")])
+                        health_checks=[lambda: (True, "fine")],
+                        **kwargs)
     state = {"head": SHA_A}
     pull_calls: list[str] = []
     mgr._preflight_pull = lambda: (True, "")
@@ -195,7 +209,12 @@ class TestDiskReport(unittest.TestCase):
 # ── Fix 2: the update preflight ──────────────────────────────────────
 
 class TestUpdateDiskPreflight(unittest.TestCase):
-    def test_refuses_early_with_numbers_and_changes_nothing(self):
+    def test_refuses_early_with_numbers_after_self_clear(self):
+        # The 2026-11-27 correction: a refused update used to
+        # claim "nothing was changed" while its own clear never
+        # ran. The self-clear now runs first (here it finds
+        # nothing — empty pile, no sweeper wired) and the refusal
+        # names it; the pull, snapshot and quiesce still never run.
         from nomorals.core import diskspace
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -207,9 +226,15 @@ class TestUpdateDiskPreflight(unittest.TestCase):
             self.assertIn("not enough free disk", report.error)
             self.assertIn("free 1B", report.error)
             self.assertIn("needs ~", report.error)
+            self.assertNotIn("Nothing was changed", report.error)
+            self.assertIn("cleared what it owns", report.error)
             step = _step(report, "disk_space")
             self.assertIsNotNone(step)
             self.assertFalse(step["ok"])
+            clear = _step(report, "disk_clear")
+            self.assertIsNotNone(clear)
+            self.assertTrue(clear["ok"])
+            self.assertIn("nothing to clear", clear["detail"])
             # Refused BEFORE the snapshot, the pull, the quiesce:
             self.assertEqual(pull_calls, [])
             self.assertEqual(mgr.snapshots.list(), [])
@@ -311,6 +336,140 @@ class TestUpdateRetention(unittest.TestCase):
             journal = Path(mgr.journal_path).read_text(
                 encoding="utf-8")
             self.assertIn('"retention_failed"', journal)
+
+
+# ── Fix 4: the self-clear before the measure ─────────────────────────
+
+class TestUpdateSelfClear(unittest.TestCase):
+    def _free_after_clear(self, tmp: str, base_free: int):
+        """free_bytes that grows as the snapshot pile shrinks —
+        the real shape: deleting a snapshot frees its bytes."""
+        from nomorals.core import diskspace
+
+        home = Path(tmp)
+        initial = diskspace.snapshot_store_stats(home)[1]
+
+        def _free(_path, _initial=initial, _base=base_free):
+            current = diskspace.snapshot_store_stats(home)[1]
+            return _base + (_initial - current)
+
+        return _free
+
+    def test_clear_frees_the_pile_then_the_update_proceeds(self):
+        # Failing-first: on the old order the preflight refuses
+        # (free is need-1 and nothing frees it before the
+        # measure); with the fix the clear prunes the pile and
+        # the freed bytes carry the update through.
+        from nomorals.core import diskspace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshots = _snapshots(tmp)
+            for _ in range(5):
+                snapshots.create(label="pre-update")
+            need = diskspace.update_need_bytes(snapshots.db_path)
+            mgr, pull_calls = _scripted(tmp, snapshots)
+            free_fn = self._free_after_clear(tmp, need - 1)
+            with mock.patch.object(diskspace, "free_bytes",
+                                   side_effect=free_fn):
+                report = mgr.run()
+            self.assertTrue(report.ok, report.error)
+            self.assertEqual(pull_calls, ["pull"])
+            clear = _step(report, "disk_clear")
+            self.assertIsNotNone(clear)
+            self.assertIn("pruned 2 old pre-update snapshots",
+                          clear["detail"])
+            remaining = [s.id for s in snapshots.list()
+                         if s.label == "pre-update"]
+            self.assertEqual(len(remaining), 3)
+            self.assertIn(report.pre_update_snapshot, remaining)
+
+    def test_sweeper_runs_before_the_measure_and_is_named(self):
+        from nomorals.core import diskspace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            order: list[str] = []
+
+            def sweeper():
+                order.append("sweep")
+                return [{"files_evicted": 2, "bytes_freed": 12345,
+                         "bytes_remaining": 0, "cap_bytes": 99999}]
+
+            mgr, _ = _scripted(tmp, _snapshots(tmp), sweeper=sweeper)
+            real_report = diskspace.disk_report
+
+            def _measured(*args, **kwargs):
+                order.append("measure")
+                return real_report(*args, **kwargs)
+
+            with mock.patch.object(diskspace, "free_bytes",
+                                   return_value=10 ** 15), \
+                    mock.patch.object(diskspace, "disk_report",
+                                      side_effect=_measured):
+                report = mgr.run()
+            self.assertTrue(report.ok, report.error)
+            self.assertLess(order.index("sweep"),
+                            order.index("measure"))
+            clear = _step(report, "disk_clear")
+            self.assertIsNotNone(clear)
+            self.assertIn("swept 2 media files", clear["detail"])
+            self.assertIn("12.1KB freed", clear["detail"])
+
+    def test_sweeper_failure_never_fails_the_update(self):
+        from nomorals.core import diskspace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            def boom():
+                raise OSError("vault locked")
+
+            mgr, _ = _scripted(tmp, _snapshots(tmp), sweeper=boom)
+            with mock.patch.object(diskspace, "free_bytes",
+                                   return_value=10 ** 15):
+                report = mgr.run()
+            self.assertTrue(report.ok, report.error)
+            clear = _step(report, "disk_clear")
+            self.assertIsNotNone(clear)
+            self.assertIn("media sweep failed", clear["detail"])
+            journal = Path(mgr.journal_path).read_text(
+                encoding="utf-8")
+            self.assertIn('"disk_clear"', journal)
+            self.assertIn("sweep_error", journal)
+
+    def test_no_sweeper_wired_says_so_and_prunes_only(self):
+        from nomorals.core import diskspace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshots = _snapshots(tmp)
+            for _ in range(4):
+                snapshots.create(label="pre-update")
+            mgr, _ = _scripted(tmp, snapshots)
+            with mock.patch.object(diskspace, "free_bytes",
+                                   return_value=10 ** 15):
+                report = mgr.run()
+            self.assertTrue(report.ok, report.error)
+            clear = _step(report, "disk_clear")
+            self.assertIsNotNone(clear)
+            self.assertIn("pruned 1 old pre-update snapshot",
+                          clear["detail"])
+            self.assertIn("no sweeper wired", clear["detail"])
+
+    def test_refusal_names_what_the_clear_freed(self):
+        # Even when the clear is not enough, the refusal names
+        # it — the pile was pruned and the error says so.
+        from nomorals.core import diskspace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshots = _snapshots(tmp)
+            for _ in range(5):
+                snapshots.create(label="pre-update")
+            mgr, _ = _scripted(tmp, snapshots)
+            with mock.patch.object(diskspace, "free_bytes",
+                                   return_value=1):
+                report = mgr.run()
+            self.assertFalse(report.ok)
+            self.assertNotIn("Nothing was changed", report.error)
+            self.assertIn("pruned 2 old pre-update snapshots",
+                          report.error)
+            self.assertIsNone(_step(report, "snapshot"))
 
 
 # ── Fix 3a: the doctor disk line ─────────────────────────────────────

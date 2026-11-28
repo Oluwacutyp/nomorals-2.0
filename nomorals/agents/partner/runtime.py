@@ -11366,9 +11366,30 @@ class PartnerRuntime(
                     home=settings.home_path, db_path=settings.db_path,
                     blob_dir=getattr(settings, "blob_dir", None),
                     document_store=_doc_store, document_note=_doc_note)
+                # Media-cache sweep (disk discipline, 2026-11-27):
+                # the update's self-clear runs the personal
+                # service's cache sweep before the disk preflight
+                # measures, so a blocked update can free its own
+                # cache pile instead of refusing on it. Same idiom
+                # as the quiesce above — a bundle that cannot be
+                # built leaves the sweeper unwired and the update
+                # still prunes its snapshots; the step records
+                # exactly that.
+                media_sweeper = None
+                try:
+                    _svc = self._pairing_personal()
+                    _personal = (_svc.get("personal")
+                                 if isinstance(_svc, dict) else None)
+                    _sweep = getattr(_personal, "cycle_media_cache",
+                                     None)
+                    if callable(_sweep):
+                        media_sweeper = _sweep
+                except Exception:  # noqa: BLE001 - no sweeper, prune only
+                    media_sweeper = None
                 updater = UpdateManager(
                     repo_root, snapshots,
-                    quiesce=self._quiesce_bridges_for_update)
+                    quiesce=self._quiesce_bridges_for_update,
+                    media_cache_sweeper=media_sweeper)
                 controller = ChatUpdateController(
                     mission_store=MissionStore(self.context.db),
                     update_runner=lambda pull: updater.run(pull=pull))
